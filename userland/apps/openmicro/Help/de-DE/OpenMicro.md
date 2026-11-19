@@ -53,13 +53,13 @@ eingebaut. An der Eingabe des Rechners bearbeitet `*VIM` mit dem Namen einer
 Datei diese Datei, und BREAK in VIM behält den Text, den der Editor enthält.
 VIM bearbeitet Text, etwa die `!BOOT`-Dateien, die `*BUILD` anlegt, und
 BASIC-Programme, die er als Text auflistet und tokenisiert wieder sichert, und
-färbt beides ein, soweit die Farben des Bildschirmmodus es zulassen; `:dis` mit
-dem Namen einer Datei blättert durch den Maschinencode eines Programms. In VIM
-listet `:help` seine Befehle und die Bildschirmmodi samt dem jeweils
-verbleibenden Platz auf, `:mode` mit einer Zahl wechselt den Modus, und `:q`
-kehrt zu BASIC zurück. Wo eine Bank Seiten-RAM kein ROM enthält, legt VIM dort
-ab, was es kopiert oder löscht, in der höchsten solchen Bank, sodass es nichts
-vom Speicher des Textes belegt.
+färbt beides ein, soweit die Farben des Bildschirmmodus es zulassen. In VIM
+listet `:help` seine Befehle und die Bildschirmmodi samt dem jeweils im
+Hauptspeicher verbleibenden Platz auf, `:mode` mit einer Zahl wechselt den
+Modus, und `:q` kehrt zu BASIC zurück. Ist der Hauptspeicher voll, nutzt VIM
+zusätzlich bis zu zwei Bänke Seiten-RAM, die kein ROM enthalten, sodass sich
+auch eine Datei bearbeiten lässt, die größer als der Hauptspeicher ist; das
+Lesen und Schreiben einer solchen Datei dauert länger.
 
 Das Schließen des Fensters eines Rechners versetzt den Rechner in den
 Ruhezustand: wieder gestartet, macht er dort weiter, wo er stehen blieb.

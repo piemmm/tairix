@@ -12,6 +12,7 @@ use tairix_openbasic::{lineref, program};
 use super::buffer::LINE_BUF;
 use super::ops::{cmp16, inc16, mov16, set16, sub16};
 use super::syntax::state;
+use super::vmem::BANK_PAGES;
 use super::ws::{page, zp as z};
 use crate::rom::asm::{abs, byte, imm, sym, zp, Acc, Asm, Label, RTS};
 use crate::rom::far;
@@ -61,15 +62,15 @@ fn listing(a: &mut Asm) {
     a.jsr("kw_groups");
     let line = a.here_local();
     a.ldy(imm(1));
-    a.lda(zp(z::BASIC_IN).ind_y());
+    a.jsr("rdin");
     a.cmp(imm(END));
     crate::rom::far(a, Asm::bne, "decoded");
     a.sta(zp(z::N1 + 1));
     a.iny();
-    a.lda(zp(z::BASIC_IN).ind_y());
+    a.jsr("rdin");
     a.sta(zp(z::N1));
     a.iny();
-    a.lda(zp(z::BASIC_IN).ind_y());
+    a.jsr("rdin");
     a.sta(zp(z::BASIC_LEN));
     a.lda(imm(0));
     a.sta(zp(z::BASIC_COL));
@@ -86,7 +87,7 @@ fn listing(a: &mut Asm) {
     a.bcc(more);
     a.jmp(line_done);
     a.bind(more);
-    a.lda(zp(z::BASIC_IN).ind_y());
+    a.jsr("rdin");
     a.inc(zp(z::BASIC_AT));
     // As stored, the rest of the line or a string's inside.
     let copy = a.local();
@@ -133,21 +134,25 @@ fn listed_reference(a: &mut Asm, body: Label) -> Label {
     let not_reference = a.local();
     a.bne(not_reference);
     a.ldy(zp(z::BASIC_AT));
-    a.lda(zp(z::BASIC_IN).ind_y());
+    a.jsr("rdin");
     a.sta(zp(z::T1));
     a.asl(Acc);
     a.asl(Acc);
     a.and(imm(lineref::TOP_BITS));
+    a.sta(zp(z::N1));
     a.iny();
-    a.eor(zp(z::BASIC_IN).ind_y());
+    a.jsr("rdin");
+    a.eor(zp(z::N1));
     a.sta(zp(z::N1));
     a.lda(zp(z::T1));
     for _ in 0..4 {
         a.asl(Acc);
     }
     a.and(imm(lineref::TOP_BITS));
+    a.sta(zp(z::N1 + 1));
     a.iny();
-    a.eor(zp(z::BASIC_IN).ind_y());
+    a.jsr("rdin");
+    a.eor(zp(z::N1 + 1));
     a.sta(zp(z::N1 + 1));
     a.lda(zp(z::BASIC_AT));
     a.clc();
@@ -254,6 +259,7 @@ fn list_output(a: &mut Asm) {
     a.here("list_out");
     a.sty(zp(z::T4));
     a.pha();
+    let check = a.here_local();
     a.lda(zp(z::BASIC_OUT + 1));
     a.cmp(zp(z::BASIC_IN + 1));
     let fits = a.local();
@@ -265,9 +271,7 @@ fn list_output(a: &mut Asm) {
     a.bcs(over);
     a.bind(fits);
     a.pla();
-    a.ldy(imm(0));
-    a.sta(zp(z::BASIC_OUT).ind_y());
-    inc16(a, z::BASIC_OUT);
+    a.jsr("wrout");
     a.ldy(zp(z::T4));
     a.cmp(imm(CR));
     a.beq(RTS);
@@ -275,8 +279,41 @@ fn list_output(a: &mut Asm) {
     a.bne(RTS);
     a.jsr("say_too_long");
     a.jmp("decode_failed");
+    // Caught up: a bank taken on and what is still to be read moved up into
+    // it, out of the way, the keyword being listed kept.
     a.bind(over);
+    a.txa();
+    a.pha();
+    for v in [z::N1, z::N1 + 1, z::P3, z::P3 + 1] {
+        a.lda(zp(v));
+        a.pha();
+    }
+    a.jsr("grow");
+    let refused = a.local();
+    a.bcs(refused);
+    mov16(a, z::P1, z::BASIC_IN);
+    mov16(a, z::P2, z::BASIC_IN);
+    a.lda(zp(z::P2 + 1));
+    a.clc();
+    a.adc(imm(BANK_PAGES));
+    a.sta(zp(z::P2 + 1));
+    sub16(a, z::N1, z::GEND, z::P2);
+    a.jsr("memmove");
+    a.lda(zp(z::BASIC_IN + 1));
+    a.clc();
+    a.adc(imm(BANK_PAGES));
+    a.sta(zp(z::BASIC_IN + 1));
+    for v in [z::P3 + 1, z::P3, z::N1 + 1, z::N1] {
+        a.pla();
+        a.sta(zp(v));
+    }
     a.pla();
+    a.tax();
+    a.jmp(check);
+    a.bind(refused);
+    for _ in 0..6 {
+        a.pla();
+    }
     a.jsr("say_too_big");
     a.jmp("decode_failed");
 }

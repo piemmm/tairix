@@ -51,13 +51,13 @@ ranura 13. En el indicador de la máquina, `*VIM` seguido del nombre de un
 archivo edita ese archivo, y BREAK en VIM conserva el texto que contiene. VIM
 edita texto, como los archivos `!BOOT` que crea `*BUILD`, y programas en BASIC,
 que lista como texto y vuelve a guardar tokenizados, coloreando cada uno según
-lo permitan los colores del modo de pantalla; `:dis` seguido del nombre de un
-archivo recorre página a página el código máquina de un programa. En VIM,
-`:help` enumera sus órdenes y los modos de pantalla con el espacio que deja
-cada uno, `:mode` seguido de un número cambia el modo, y `:q` vuelve a BASIC.
-Donde un banco de RAM lateral no contiene ninguna ROM, VIM guarda allí lo que
-copia o borra, en el banco más alto de esos, de modo que no ocupa nada de la
-memoria que tiene el texto.
+lo permitan los colores del modo de pantalla. En VIM, `:help` enumera sus
+órdenes y los modos de pantalla con el espacio que deja cada uno en la memoria
+principal, `:mode` seguido de un número cambia el modo, y `:q` vuelve a BASIC.
+Una vez llena la memoria principal, VIM continúa en bancos de RAM lateral que
+no contienen ninguna ROM, hasta un máximo de dos, de modo que puede editar un
+archivo mayor que la memoria principal; un archivo así tarda más en leerse y
+escribirse.
 
 Cerrar la ventana de una máquina la suspende: al arrancarla de nuevo, sigue
 donde se detuvo. Apagar, en su menú, saca sus soportes y la apaga, y conserva

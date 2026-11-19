@@ -349,18 +349,22 @@ its own code, is loaded and not entered; and a save can take a revolution
 less.
 
 For the Electron the same source builds the Electron OS 1.00 interface over
-the ULA: the paged ROM window and its keyboard, the single sound channel the
-four SOUND channels address, the screen without cursor hardware, FUNC with a
-digit for the soft keys and with a letter for the keyword its keycap carries,
-the cassette at 1200 baud, and the expansions' service calls for the printer,
-RS423 and the ADC. It announces itself as `OpenMOS Electron`. Where it differs
-on purpose: Electron OS 1.00's private addresses are not reproduced, so the
-Guide's recipe for disabling the Plus 1 does not apply, and the firm keys the
-Guide gives no keyword expand to nothing.
+the ULA: the paged ROM window and its keyboard, four SOUND queues on its one
+sound channel, a SOUND for another channel flushing the one last sounded, the
+screen without cursor hardware, FUNC with a digit for the soft keys and with a
+letter for the keyword its keycap carries, the cassette at 1200 baud, and the
+expansions' service calls for the printer, RS423 and the ADC, with page 2 laid
+out where Electron OS 1.00 keeps it. It announces itself as `OpenMOS
+Electron`. Where it differs on purpose: Electron OS 1.00's private addresses
+are not reproduced, so the Guide's recipe for disabling the Plus 1 does not
+apply; the firm keys the Guide gives no keyword expand to nothing; its key
+scan keeps its state elsewhere than `&2C0–&2C2`; and 31 pitches set the ULA's
+counter a step to three from the original's own table.
 
 `tairix_openmicro::rom::plus1::build` assembles the Plus 1's service ROM for
 slot 12, to the interface the Electron Advanced User Guide gives the Plus 1:
-counted into the 100 Hz poll at each reset, it feeds the parallel printer and
+counted into the 100 Hz poll at each reset, it feeds the parallel printer, once
+`*FX5,1` chooses it, since the Electron starts with no printer chosen, and
 runs the ADC a conversion a poll, each reading raising event 3; it claims no
 workspace, and `*FX163,128,1` turns both ports off and `*FX163,128,0` on. Its
 title is `OpenMOS Plus 1`.
@@ -371,34 +375,36 @@ is a language with a service entry: `*VIM name` from any language edits a
 file, `:q` returns to that language, `*VIM` alone starts with an empty
 text, and BREAK keeps the text, which leaving gives up to the language
 returned to. Its workspace is a language's — zero page
-&00–&6F, leaving &70–&8F to the user, and pages &04–&07 — and its text and
-undo record lie between OSHWM and HIMEM, the text a gap buffer. What it
-yanks or deletes goes to the highest bank of sideways RAM that is free — no
-ROM the MOS found at the last BREAK, no ROM image's copyright since, and a
-write holds — which it marks so that no BREAK takes the bank for a ROM, and
-where none is free, against HIMEM. The text itself never lies in sideways
-RAM, since a text held across banks paged into the window the editor runs
-from would need a text model the ROM has no room for. While it runs the cursor keys give codes, ESCAPE is a key and the
-locks are off, all three put back as they were when it leaves. It edits text
+&00–&6F, leaving &70–&8F to the user, and pages &04–&07 — and its text, undo
+record and register lie in that order from OSHWM, the text a gap buffer.
+Once main memory is full they run on into free banks of sideways RAM — no ROM
+the MOS found at the last BREAK, no ROM image's copyright since, and a write
+holds — at most two, which every mode's addresses reach, each marked so that
+no BREAK takes it for a ROM; a text with room below HIMEM takes none, and the
+Electron gives none. If another program takes a bank the text holds while the
+editor runs an OS command, the text is lost with it, and the editor says so.
+While it runs the cursor keys give codes, ESCAPE is a key and the locks are
+off, all three put back as they were when it leaves. It edits text
 whose lines end in CR, as `*BUILD` writes them, or in LF, CR LF or LF CR as
 `*SPOOL` writes them, each written back as found, and BASIC II programs,
 listed into the text on loading and tokenised by BASIC II's rules on saving,
 byte for byte as BASIC II tokenises the same lines typed at its prompt. A
-file is built in the free memory and saved in one OSFILE call; one that
-outgrows the free memory, a tokenised program or paired line ends, is
-written to the file in parts with OSGBPB as it is built, the line in
-progress kept back, and then given its addresses by OSFILE 1. It colours keywords, strings, numbers,
+file main memory holds is read and written by one OSFILE call. One past HIMEM
+is read and written a part at a time with OSGBPB, as is a program or a text
+with paired line ends that outgrows the free memory as it is built, the line
+in progress kept back and the file then given its addresses by OSFILE 1; the
+DFS spends a revolution of the disc on each sector OSGBPB moves, so this
+takes about five times as long. It colours keywords, strings, numbers,
 line numbers, comments and star commands as the mode allows — teletext
 codes, each taking a cell, in MODE 7, sixteen colours in MODE 2 and four in
-MODES 1 and 5 — and `:mode` takes a mode whose screen leaves the text room.
+MODES 1 and 5 — and `:mode` takes a mode whose screen leaves the text room,
+taking on a bank of sideways RAM where main memory alone would not.
 Normal mode has vi's motions, counts, operators, undo and repeat; the
 command line has `:w`, `:q`, `:e`, `:r`, line ranges, `:d` and `:s`, the
 options, OS commands and a paged `:help` giving each mode's size, colours
-and room in the machine as it stands; and `:dis` pages through a file of
-6502 code at its load address in the BBC assembler's syntax, its tables
-generated from the CPU's own. A line holds at most 255 characters, and a
-file with a longer one is refused. It reaches the machine only through MOS
-1.20's documented interface, and is checked beside the original MOS 1.20,
+and the room it leaves in main memory. A line holds at most 255 characters,
+and a file with a longer one is refused. It reaches the machine only through
+MOS 1.20's documented interface, and is checked beside the original MOS 1.20,
 BASIC II and DFS 1.20, observed only as opaque programs, as beside this
 tree's.
 

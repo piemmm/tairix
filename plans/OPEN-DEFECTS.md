@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 530 open, 1473 closed, 2003 total.
+**closed**, and a partial fix stays **open**. 532 open, 1474 closed, 2006 total.
 
-### Open (530)
+### Open (532)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -558,8 +558,10 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D1983 | the RISC OS kernel's dynamic areas follow the PRMs where observation is wanting: `Service_MemoryMoved` issued with interrupts as they stand, `OS_DynamicArea 1`'s order of handler call and removal, reason 2's bit 7, a pool's rounding, and where the active object's boundary lies | needs scenarios recorded on genuine RISC OS 5 by `cargo xtask riscos --reference` |
 | D1984 | `cargo xtask pcemu-vectors` pins each suite's revision, its `*.MOO.gz` files and the licence it copies, but not each suite's `metadata.json`, whose classifications decide what is kept, nor the 8086 and V20 suites' own `LICENSE` bytes beyond requiring them to be the MIT text: no digest of either was ever recorded | needs a fresh import at the pinned revisions to record the digests, then pinning them |
 | D2019 | OpenMicro's MOS can leave *Escape From Jail*'s split screen, timed by its interrupts, with the text band a character row lower after a RETURN pressed during its load: 6 of 40 press phases (HEAD 24) and none of 200 on MOS 1.20, with screen memory identical, so the display's timing differs — most likely its interrupts held off by the key's scans, which take longer than MOS 1.20's (a held key's 12% of the machine to its 8%) | needs a faster scan; the Model B MOS has 1 byte free |
+| D2020 | OpenMicro's MOS and Electron OS count a ROM image fitted in two slots twice, where MOS 1.20 and Electron OS 1.00 count it once, in the higher slot, calling two images the same where their first &400 bytes and as many more as the higher slot's number agree (observed with copies in 13 and 12 or 5 on the Model B, 1 and 0 on the Electron); so the Electron's table holds BASIC as ROMs 10 and 11 where the original's holds it as 11 alone | needs about 100 bytes; the Model B MOS has under ten free |
+| D2022 | OpenMicro's Model B MOS flushes a buffer back to its last slot and marks every busy flag &FF, where MOS 1.20 empties it where it stands, marks a flushed sound queue &80, clears a sound queue's flag as SOUND or the bell fills it and starts with the four clear, so page 2's offsets and sound flags (&2CF–&2E9) differ after a flush, as Electron OS 1.00's and the Electron's do not | needs about 20 bytes, for the reset's fill of the offsets the flush no longer sets; the Model B MOS has one free |
 
-### Closed (1473)
+### Closed (1474)
 
 | ID | Subject |
 |---|---|
@@ -2036,6 +2038,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D2016 | OpenMicro's DFS passed service call &0A on after giving its absolute workspace up, where DFS 1.20 claims it, and returned Y 2 from service call &12, which DFS 1.20 leaves as given — closed: both answered as DFS 1.20 answers them (`service_calls_return_x_0_when_claimed_and_ff_when_not`) |
 | D2017 | OpenMicro's MOS kept its own key slots: &EC never held a key's bare number, the tick finding a key typed it, a tick sooner than MOS 1.20 types a first key and two sooner than a second, and &2CA was its own, so *Citadel 2*, which polls &EC for SPACE's &62, never started — closed: &EC, &ED, &E7 and &2CA follow MOS 1.20's model, a key interrupt finding its key at once, a tick confirming it, the next typing it (`a_key_shows_its_bare_number_when_found_and_when_let_go`, `a_poll_for_space_s_bare_number_ends_once_it_is_pressed`, `a_key_is_typed_a_tick_after_it_is_confirmed`, `a_second_key_makes_the_first_the_first_key_until_it_is_let_go`, `with_auto_repeat_off_a_held_key_is_typed_once`) |
 | D2018 | OpenMicro's OS read SHIFT for the boot with a key test, offering the boot with Y &80 where MOS 1.20 and Electron OS 1.00 offer Y 8, and recorded neither SHIFT nor CTRL in the keyboard status at BREAK, where both originals record them until the next scan (&28 and &60 on the Model B, &40 and &80 on the Electron) — closed: the boot records them through the tick's status routine and reads SHIFT from there (`break_records_shift_and_ctrl_in_the_status_the_boot_reads`, Model B and Electron) |
+| D2021 | OpenMicro's Electron OS kept page 2 from &291 up where the Model B MOS does, a byte above Electron OS 1.00's, played its four SOUND channels from one queue where the original keeps four and flushes the channel last addressed when SOUND or the bell addresses another, reset a flushed buffer to its last slot where the original empties it where it stands, kept no mode in &2F4 and no zero in &2BF at BREAK, and set its ULA counter an octave low, the Advanced User Guide's 1 MHz / 16 (S + 1) being twice the 1 MHz / 32 (S + 1) the ULA sounds and its revised issues give — closed: page 2 is laid out as observed (`page2::ELECTRON`), the four queues share the one generator, noise is drawn as the original draws it, and a flush, a reset, MODE and the cassette leave page 2 as the original does but for its key scan's own bytes (&2C0–&2C2) and BASIC's second slot (D2020); the Model B's flush is D2022 (`a_reset_leaves_page_2_as_electron_os_1_00_does`, `a_flush_empties_a_buffer_where_it_stands`, `a_sound_for_another_channel_flushes_the_one_last_addressed`, `a_pitch_sets_the_counter_electron_os_1_00_sets`, `noise_is_a_fixed_tone_or_drawn_in_its_kinds_range`, `random_noise_is_drawn_at_each_pass_while_osrdch_waits`, `mode_records_its_bits_in_the_ula_field`, `the_wave_is_the_counters_frequency_and_silent_unless_given_sound`) |
 
 ## Scope
 

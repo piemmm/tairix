@@ -15,9 +15,9 @@ use crate::cpu::STACK_PAGE;
 use crate::machine::electron::plus1::{self as port, command, status};
 use crate::machine::{FIRE_BUTTONS, ROM_SIZE, SIDEWAYS_BASE};
 use crate::rom::asm::{abs, imm, zp, Acc, Asm, AsmError, Image, RTS, V_SET};
+use crate::rom::os::page2::{ADC_CHANNELS, ELECTRON as PAGE2};
 use crate::rom::os::{
-    buffer, entry, event, osbyte, page2, page_d, printer, service, var, vector, zp as os, CR,
-    PRINTER_BUSY,
+    buffer, entry, event, osbyte, page_d, printer, service, var, vector, zp as os, CR,
 };
 
 /// The ROM's version byte.
@@ -183,13 +183,13 @@ fn calls(a: &mut Asm) {
     a.here("fx17");
     a.ldx(zp(os::CALL_X));
     a.beq("osbyte_claimed");
-    a.cpx(imm(page2::ADC_CHANNELS + 1));
+    a.cpx(imm(ADC_CHANNELS + 1));
     a.bcs("osbyte_claimed");
     a.php();
     a.sei();
     a.stx(abs(var::ADC_CHANNEL));
     a.lda(imm(0));
-    a.sta(abs(page2::ADC_LAST));
+    a.sta(abs(PAGE2.adc_last));
     a.jsr("adc_start");
     a.plp();
     a.jmp("osbyte_claimed");
@@ -206,7 +206,7 @@ fn calls(a: &mut Asm) {
     }
     a.and(imm(FIRE_BUTTONS));
     a.sta(zp(os::CALL_X));
-    a.lda(abs(page2::ADC_LAST));
+    a.lda(abs(PAGE2.adc_last));
     a.sta(zp(os::CALL_Y));
     a.jmp("osbyte_claimed");
 }
@@ -287,10 +287,10 @@ fn switching(a: &mut Asm) {
 fn adc(a: &mut Asm) {
     // X = A, but at most the last channel; Z set for none.
     a.here("adc_clamp");
-    a.cmp(imm(page2::ADC_CHANNELS + 1));
+    a.cmp(imm(ADC_CHANNELS + 1));
     let within = a.local();
     a.bcc(within);
-    a.lda(imm(page2::ADC_CHANNELS));
+    a.lda(imm(ADC_CHANNELS));
     a.bind(within);
     a.tax();
     a.rts();
@@ -315,14 +315,14 @@ fn adc(a: &mut Asm) {
     a.bit(abs(port::STATUS));
     a.bvs(RTS);
     a.lda(abs(port::ADC));
-    a.sta(abs(page2::ADC_HIGH - 1).x());
+    a.sta(abs(PAGE2.adc_high - 1).x());
     a.lda(imm(0));
-    a.sta(abs(page2::ADC_LOW - 1).x());
-    a.stx(abs(page2::ADC_LAST));
+    a.sta(abs(PAGE2.adc_low - 1).x());
+    a.stx(abs(PAGE2.adc_last));
     a.txa();
     a.ldy(imm(event::CONVERTED));
     a.jsr(entry::OSEVEN);
-    a.ldx(abs(page2::ADC_LAST));
+    a.ldx(abs(PAGE2.adc_last));
     a.dex();
     let next = a.local();
     a.bne(next);
@@ -341,7 +341,7 @@ fn printer_driver(a: &mut Asm) {
     a.lda(abs(var::PRINTER));
     a.cmp(imm(printer::PARALLEL));
     a.bne(RTS);
-    a.bit(abs(PRINTER_BUSY));
+    a.bit(abs(PAGE2.printer_busy()));
     a.bmi(RTS);
     a.fall_into("printer_send");
 

@@ -102,8 +102,6 @@ pub mod vector {
 pub const ERROR_POINTER: u16 = 0xFD;
 /// Bit 7 set while an Escape is pending.
 pub const ESCAPE_FLAG: u16 = 0xFF;
-/// Each sideways ROM's type byte, or zero where no ROM was found there.
-pub const ROM_TYPES: u16 = 0x02A1;
 
 /// The MOS's zero page a sideways ROM reads.
 pub mod zp {
@@ -276,12 +274,17 @@ pub mod osbyte {
     pub const HIMEM_MODE: u8 = 0x85;
     /// The text cursor's position.
     pub const CURSOR_POSITION: u8 = 0x86;
+    /// The character at the text cursor in X and the screen mode in Y.
+    pub const CHARACTER_AND_MODE: u8 = 0x87;
     /// Enter the language in ROM X.
     pub const ENTER_LANGUAGE: u8 = 0x8E;
     /// Issue service call X.
     pub const SERVICE: u8 = 0x8F;
     /// Kept for applications; X 128 is the Plus 1's.
     pub const APPLICATION: u8 = 0xA3;
+    /// The ROM type table's address, read with X 0 and Y &FF: X its low
+    /// byte and Y its high. Electron OS 1.00 keeps the table at &2A0.
+    pub const ROM_TABLE: u8 = 0xAA;
     /// What ESCAPE does: X 0 an escape condition, 1 a key giving &1B.
     pub const ESCAPE_KEY: u8 = 0xE5;
     /// The current language's ROM, read with X 0 and Y &FF.
@@ -309,18 +312,115 @@ pub mod var {
     pub const PRINTER: u16 = of(0xF5);
 }
 
-/// Page two's ADC readings and buffer flags.
+/// Page two past the OSBYTE variables, where each machine's OS keeps it.
 pub mod page2 {
+    use super::{buffer, var};
+
     /// The ADC channels ADVAL reads, numbered from 1.
     pub const ADC_CHANNELS: u8 = crate::rom::asm::byte(crate::machine::ANALOGUE_CHANNELS);
-    /// The ADC channels' readings, low bytes, channel 1 first.
-    pub const ADC_LOW: u16 = 0x02B6;
-    /// The ADC channels' readings, high bytes.
-    pub const ADC_HIGH: u16 = ADC_LOW + ADC_CHANNELS as u16;
-    /// The channel last converted, or 0 since a conversion was forced.
-    pub const ADC_LAST: u16 = ADC_HIGH + ADC_CHANNELS as u16;
-    /// Each buffer's busy flag.
-    pub const BUFFER_BUSY: u16 = 0x02CF;
+
+    /// One OS's places for what both machines keep.
+    pub struct Layout {
+        /// The two five-byte TIME clocks, most significant byte first.
+        pub clocks: u16,
+        /// The interval timer.
+        pub interval: u16,
+        /// Each sideways ROM's type byte, or zero where no ROM was found
+        /// there.
+        pub rom_types: u16,
+        /// INKEY's countdown.
+        pub inkey_count: u16,
+        /// OSWORD 0's maximum line length, lowest and highest characters.
+        pub line_limits: u16,
+        /// Each event's enable flag.
+        pub events: u16,
+        /// The soft key being expanded: its offset.
+        pub soft_key_pointer: u16,
+        /// The count auto-repeat reloads next: the delay until the key held
+        /// is first typed, then the period.
+        pub first_repeat: u16,
+        /// Each buffer's busy flag.
+        pub buffer_busy: u16,
+        /// Each buffer's start offset.
+        pub buffer_start: u16,
+        /// Each buffer's end offset.
+        pub buffer_end: u16,
+        /// The OSFILE block *LOAD, *SAVE and the like build.
+        pub osfile_block: u16,
+        /// The ADC channels' readings, low bytes, channel 1 first.
+        pub adc_low: u16,
+        /// Their high bytes.
+        pub adc_high: u16,
+        /// The channel last converted, or 0 since a conversion was forced.
+        pub adc_last: u16,
+    }
+
+    impl Layout {
+        /// The printer's buffer busy flag: bit 7 set while its driver is
+        /// dormant.
+        #[must_use]
+        pub const fn printer_busy(&self) -> u16 {
+            self.buffer_busy + buffer::PRINTER as u16
+        }
+    }
+
+    /// MOS 1.20's.
+    pub const MODEL_B: Layout = Layout {
+        clocks: 0x0292,
+        interval: 0x029C,
+        rom_types: 0x02A1,
+        inkey_count: 0x02B1,
+        line_limits: 0x02B3,
+        adc_low: 0x02B6,
+        adc_high: 0x02BA,
+        adc_last: 0x02BE,
+        events: 0x02BF,
+        soft_key_pointer: 0x02C9,
+        first_repeat: 0x02CA,
+        buffer_busy: 0x02CF,
+        buffer_start: 0x02D8,
+        buffer_end: 0x02E1,
+        osfile_block: 0x02EE,
+    };
+
+    /// Electron OS 1.00's, as it is observed to keep it: a byte lower from
+    /// the clocks on, as it has one *TV byte to MOS 1.20's two; no ADC
+    /// readings, soft key pointer or sound semaphore among the rest; and the
+    /// readings at the page's end.
+    pub const ELECTRON: Layout = Layout {
+        clocks: 0x0291,
+        interval: 0x029B,
+        rom_types: 0x02A0,
+        inkey_count: 0x02B0,
+        line_limits: 0x02B2,
+        events: 0x02B5,
+        soft_key_pointer: var::of(0xE9),
+        first_repeat: 0x02BF,
+        buffer_busy: 0x02C3,
+        buffer_start: 0x02CC,
+        buffer_end: 0x02D5,
+        osfile_block: 0x02E2,
+        adc_last: 0x02F7,
+        adc_low: 0x02F8,
+        adc_high: 0x02FC,
+    };
+
+    const fn consistent(layout: &Layout) -> bool {
+        let buffers = buffer::COUNT as u16;
+        layout.interval == layout.clocks + 10
+            && layout.rom_types == layout.interval + 5
+            && layout.inkey_count == layout.rom_types + 16
+            && layout.line_limits == layout.inkey_count + 2
+            && layout.adc_high == layout.adc_low + ADC_CHANNELS as u16
+            && layout.buffer_start == layout.buffer_busy + buffers
+            && layout.buffer_end == layout.buffer_start + buffers
+    }
+    const _: () = assert!(consistent(&MODEL_B) && consistent(&ELECTRON));
+    const _: () = assert!(MODEL_B.adc_last == MODEL_B.adc_high + ADC_CHANNELS as u16);
+    const _: () = assert!(MODEL_B.events == MODEL_B.adc_last + 1);
+    const _: () = assert!(ELECTRON.events == ELECTRON.line_limits + 3);
+    const _: () = assert!(ELECTRON.adc_low == ELECTRON.adc_last + 1);
+    const _: () = assert!(ELECTRON.adc_high + ADC_CHANNELS as u16 == 0x0300);
 }
 
 /// The buffers, by number.
@@ -338,9 +438,6 @@ pub mod buffer {
     /// The buffers there are.
     pub const COUNT: u8 = 9;
 }
-
-/// The printer's buffer busy flag: bit 7 set while its driver is dormant.
-pub const PRINTER_BUSY: u16 = page2::BUFFER_BUSY + buffer::PRINTER as u16;
 
 /// OSBYTE 5's printer types.
 pub mod printer {

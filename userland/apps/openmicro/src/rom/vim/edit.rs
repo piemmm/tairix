@@ -184,7 +184,7 @@ fn replacing(a: &mut Asm) {
     a.bind(set);
     a.lda(zp(z::T3));
     a.bind(store);
-    a.sta(zp(z::P0).ind_y());
+    a.jsr("wr0");
     inc16(a, z::N0);
     dec16(a, z::HOLD);
     zero16(a, z::HOLD);
@@ -462,8 +462,8 @@ fn putting(a: &mut Asm) {
     a.sta(zp(z::T2));
     a.lda(imm(0));
     a.sta(zp(z::T3));
-    a.lda(abs(page::REG_LEN));
-    a.ora(abs(page::REG_LEN + 1));
+    sub16(a, z::N1, z::LIMIT, z::REG);
+    zero16(a, z::N1);
     far(a, Asm::bne, "fail");
     a.lda(zp(z::LINEWISE));
     let charwise = a.local();
@@ -531,9 +531,8 @@ fn putting(a: &mut Asm) {
     a.jsr("count1");
     a.jsr("hold_n1");
     let again = a.here_local();
-    a.jsr("reg_source");
     add16(a, z::N0, z::UPOS, z::UINS);
-    a.jsr("ins_from");
+    a.jsr("ins_reg");
     add16(a, z::UINS, z::UINS, z::N1);
     dec16(a, z::HOLD);
     zero16(a, z::HOLD);

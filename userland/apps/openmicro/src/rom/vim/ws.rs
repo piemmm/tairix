@@ -88,9 +88,9 @@ pub mod zp {
     /// The run the lexer last found: its class and its length.
     pub const RCLASS: u16 = 0x45;
     pub const RLEN: u16 = 0x46;
-    /// The column the walk stops at, and its screen column there.
-    pub const WSTOP: u16 = 0x47;
-    pub const WAT: u16 = 0x48;
+    /// The address a text access reaches, a bank's own where it lies in
+    /// sideways RAM.
+    pub const VP: u16 = 0x47;
     /// The repeat buffer's length, its replay's place, and whether a change
     /// is being recorded into it.
     pub const DOT_LEN: u16 = 0x49;
@@ -143,10 +143,13 @@ pub mod zp {
     pub const BASIC_AT: u16 = 0x6C;
     pub const BASIC_LEN: u16 = 0x6D;
     pub const BASIC_COL: u16 = 0x6E;
+    /// The page HIMEM starts, where the text's memory runs on into sideways
+    /// RAM.
+    pub const MAIN_TOP: u16 = 0x6F;
     /// The highest zero page byte the editor uses, short of the user's
     /// &70 to &8F.
     pub const END: u16 = 0x6F;
-    const _: () = assert!(BASIC_COL <= END && END < 0x70);
+    const _: () = assert!(BASIC_COL < MAIN_TOP && MAIN_TOP <= END && END < 0x70);
 }
 
 /// The bits of [`zp::FILE`].
@@ -243,7 +246,7 @@ pub mod page {
     pub const DOT: u16 = 0x0580;
     /// The most it holds.
     pub const DOT_LEN: u8 = 0x7F;
-    /// A line being converted, and the disassembler's line.
+    /// A line being converted.
     pub const CONVERT: u16 = 0x0600;
     /// OSFILE's control block.
     pub const BLOCK: u16 = 0x0700;
@@ -254,45 +257,46 @@ pub mod page {
     pub const LEAVE_FOR: u16 = 0x071A;
     /// Set by `*VIM` before the language is entered: a name was given.
     pub const START: u16 = 0x071B;
-    /// The file the editor has open, the disassembler's or one being
-    /// written; 0 for none. An error closes it.
+    /// The file the editor has open, one being written; 0 for none. An
+    /// error closes it.
     pub const HANDLE: u16 = 0x071C;
-    /// The disassembler: its file's address and length, the offset of its
-    /// view's top, how many views back it holds and where the next is
-    /// kept, the size of the top instruction, where the next screen
-    /// starts, and the views back: their tops' low bytes, then their high
-    /// bytes.
-    pub const DIS_BASE: u16 = 0x071D;
-    pub const DIS_LEN: u16 = 0x071F;
-    pub const DIS_TOP: u16 = 0x0721;
-    pub const DIS_DEPTH: u16 = 0x0723;
-    pub const DIS_AT: u16 = 0x0727;
-    pub const DIS_FIRST: u16 = 0x0728;
-    pub const DIS_NEXT: u16 = 0x0729;
-    pub const DIS_BACK: u16 = 0x0740;
-    /// The bytes the views back take.
-    pub const DIS_BACK_LEN: u8 = 0x40;
-    /// The digits of a number being printed.
-    pub const DIGITS: u16 = 0x0730;
+    /// The column the line walk stops at, and its screen column there.
+    pub const WSTOP: u16 = 0x071D;
+    pub const WAT: u16 = 0x071E;
+    /// What a text access keeps of X and Y, and the byte it writes.
+    pub const VX: u16 = 0x071F;
+    pub const VY: u16 = 0x0720;
+    pub const VA: u16 = 0x0721;
+    /// What `wrout` keeps of X.
+    pub const VW: u16 = 0x0722;
     /// The count the last change was made with.
-    pub const DOT_COUNT: u16 = 0x0724;
+    pub const DOT_COUNT: u16 = 0x0723;
     /// The keyboard's status byte as the editor found it.
-    pub const KEYBOARD: u16 = 0x0726;
-    /// The bank the register is held in: a sideways RAM bank the editor
-    /// claimed, or its own where none was found and the register lies below
-    /// HIMEM.
-    pub const REG_BANK: u16 = 0x072B;
-    /// The register's length.
-    pub const REG_LEN: u16 = 0x072C;
-    /// The bank `ins_from` copies from.
-    pub const SRC_BANK: u16 = 0x072E;
+    pub const KEYBOARD: u16 = 0x0725;
+    /// How many banks of sideways RAM the text runs on into, and the banks
+    /// in their order.
+    pub const SEGMENTS: u16 = 0x0726;
+    pub const BANKS: u16 = 0x0727;
+    /// The most it holds: what sixteen-bit addresses reach past the highest
+    /// HIMEM, where the sideways area starts, so every mode reaches them.
+    pub const MOST_BANKS: u8 =
+        (0xFF - crate::machine::SIDEWAYS_BASE.to_be_bytes()[0]) / super::super::vmem::BANK_PAGES;
+    /// A move's part: how many bytes, 0 for 256, and the banks it is read
+    /// from and written to.
+    pub const XC: u16 = 0x0729;
+    pub const SB: u16 = 0x072A;
+    pub const DB: u16 = 0x072B;
+    /// The digits of a number being printed, and the most there are.
+    pub const DIGITS: u16 = 0x072C;
+    pub const DIGITS_LEN: u8 = 5;
     /// The routines that page sideways RAM in, which run from here since a
     /// bank paged in at &8000 pages the editor out, up to [`MARK`].
-    pub const RAM_CODE: u16 = 0x0780;
+    pub const RAM_CODE: u16 = 0x0731;
     /// The mark that the text survived: [`super::SURVIVED`].
     pub const MARK: u16 = 0x07FE;
-    const _: () = assert!(DIS_NEXT + 2 <= REG_BANK && SRC_BANK < DIGITS);
-    const _: () = assert!(DIS_BACK + DIS_BACK_LEN as u16 <= RAM_CODE);
+    const _: () = assert!(HANDLE + 1 == WSTOP && VW + 1 == DOT_COUNT && DOT_COUNT + 2 == KEYBOARD);
+    const _: () = assert!(KEYBOARD + 1 == SEGMENTS && BANKS + MOST_BANKS as u16 == XC);
+    const _: () = assert!(DB + 1 == DIGITS && DIGITS + DIGITS_LEN as u16 == RAM_CODE);
 }
 
 /// What [`page::MARK`] holds while the editor's text is in memory.

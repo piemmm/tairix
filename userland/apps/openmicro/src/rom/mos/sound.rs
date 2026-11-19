@@ -17,12 +17,15 @@
 //! queue until S other channels have one with the same S, and all start
 //! together.
 //!
-//! The Electron has one channel, its ULA's counter, and one queue, which
-//! SOUND's four channels all address: a note's amplitude only sounds it or
-//! not, an envelope's pitch still steps, and a note for channel 0 is noise,
-//! a pitch the tick steps at random. S has nothing to synchronise with, so
-//! its bits carry that mark instead. With the external sound flag set, BEL
-//! and a flush are service calls &16 and &17 instead.
+//! The Electron keeps the four queues but has one generator, its ULA's
+//! counter, so a SOUND or bell for a channel other than the one last
+//! addressed first flushes that one's queue, as Electron OS 1.00 does: one
+//! channel plays at a time. A note's amplitude only sounds it or not, an
+//! envelope's pitch still steps, and S has nothing to synchronise with.
+//! Channel 0's notes are noise, by their pitch's low three bits: a fixed
+//! tone for 0–3, and for 4–7 a counter drawn at random each tick and, while
+//! OSRDCH waits, at each pass. With the external sound flag set, BEL and a
+//! flush are service calls &16 and &17 instead.
 
 use super::buffers::number;
 use super::ws::{buffer, os, page2, var};
@@ -31,7 +34,7 @@ use super::{latch, svia};
 use crate::machine::bbc::latch as machine_latch;
 use crate::machine::electron::{control, sheila as ula};
 use crate::machine::via::reg;
-use crate::rom::asm::{abs, imm, lo, zp, Acc, Asm, RTS};
+use crate::rom::asm::{abs, byte, imm, lo, zp, Acc, Asm, RTS};
 use crate::rom::os::service;
 
 /// Each channel's state, four bytes a field, indexed by channel.
@@ -57,10 +60,11 @@ mod field {
     /// What the chip was last given: the attenuation, and the pitch.
     pub const ATTENUATION: u16 = at(8);
     pub const CHIP_PITCH: u16 = at(9);
-    /// The S of the note waiting at the head of the queue, or 0; on the
-    /// Electron, whether the note is noise.
+    /// The S of the note waiting at the head of the queue, or 0.
     pub const WAITING: u16 = at(10);
-    pub const NOISE: u16 = WAITING;
+    /// On the Electron, which has no S to wait on: the counter `CHIP_PITCH`
+    /// gives.
+    pub const COUNTER: u16 = WAITING;
     /// Centiseconds left in the current twentieth of a second.
     pub const TICKS: u16 = at(11);
     /// The note's own pitch, which repeating pitch sections start again from.
@@ -96,8 +100,14 @@ mod tick {
     /// The S whose notes the synchronising pass starts, apart from `COUNT`,
     /// which starting an envelope's note overwrites.
     pub const STARTING: u16 = at(10);
+    /// On the Electron, which synchronises nothing: the channel SOUND or the
+    /// bell last addressed.
+    pub const ADDRESSED: u16 = STARTING;
+    /// On the Electron: the kind of channel 0's noise while noise drawn at
+    /// random sounds, 0 otherwise.
+    pub const NOISE_KIND: u16 = at(11);
     /// The last byte.
-    pub const END: u16 = STARTING;
+    pub const END: u16 = NOISE_KIND;
 }
 
 // The sound workspace is &800–&83F.
@@ -169,6 +179,9 @@ const SEMITONES: [(u16, u8); 12] = [
     (534, 7),
 ];
 
+// The Electron's counter takes a quarter of the longest period.
+const _: () = assert!(SEMITONES[0].0 / 4 <= 0x100);
+
 /// The SN76489's command bytes.
 mod chip {
     pub const LATCH: u8 = 0x80;
@@ -187,12 +200,37 @@ mod chip {
 const WRITE_ENABLE_LOW: u8 = latch(machine_latch::SOUND_WE, false);
 const WRITE_ENABLE_HIGH: u8 = latch(machine_latch::SOUND_WE, true);
 
-/// The Electron's mark of a noise note, in S's place.
-const NOISE_NOTE: u8 = 0x01;
-/// The pitches noise steps through: these bits of the shift register, above
-/// the lowest the counter can sound.
-const NOISE_PITCHES: u8 = 0x3F;
-const NOISE_LOWEST: u8 = 96;
+/// On the Electron, whose one generator is the first channel's: whether it
+/// sounds, 0, or is `SILENT`.
+const GENERATOR: u16 = field::ATTENUATION;
+/// The bits of a noise note's pitch that give its kind.
+const NOISE_KIND_BITS: u8 = 0x07;
+/// The first of the kinds drawn at random.
+const RANDOM_NOISE: u8 = 4;
+/// The counter of the SN76489's periodic noise at shift rate `rate`, its
+/// 4 MHz / 512 · 2^rate over the pattern's 15 shifts, on the counter's
+/// 1 MHz / 32 (S + 1).
+const fn periodic_noise(rate: u32) -> u8 {
+    byte(((15 * 512 / (4 * 32)) << rate) - 1)
+}
+/// Each kind of noise's counter: the byte drawn, masked, with the bits set in
+/// it. Kinds 0–3 draw nothing, sounding the three rates, and for 3, which
+/// follows tone channel 1 on the Model B, the middle one; kinds 4–7 draw
+/// from the ranges Electron OS 1.00 draws from.
+const NOISE_MASKS: [u8; 8] = [0, 0, 0, 0, 0x3F, 0x7F, 0x3F, 0x7F];
+const NOISE_BITS: [u8; 8] = [
+    periodic_noise(0),
+    periodic_noise(1),
+    periodic_noise(2),
+    periodic_noise(1),
+    0x40,
+    0x80,
+    0xC0,
+    0x80,
+];
+// The kinds drawn at random are those with a mask.
+const _: () =
+    assert!(NOISE_MASKS[RANDOM_NOISE as usize - 1] == 0 && NOISE_MASKS[RANDOM_NOISE as usize] != 0);
 
 pub fn emit(a: &mut Asm, model: Model) {
     commands(a, model);
@@ -204,7 +242,10 @@ pub fn emit(a: &mut Asm, model: Model) {
     stepping(a);
     match model {
         Model::ModelB => output(a),
-        Model::Electron => electron_output(a),
+        Model::Electron => {
+            electron_output(a);
+            noise_tables(a);
+        }
     }
     sound_period(a, model);
     if model == Model::ModelB {
@@ -225,6 +266,11 @@ fn commands(a: &mut Asm, model: Model) {
     a.here("sound_command");
     a.ldy(imm(0));
     a.lda(zp(os::CALL_X).ind_y());
+    if model == Model::Electron {
+        a.jsr("sound_address");
+        a.ldy(imm(0));
+        a.lda(zp(os::CALL_X).ind_y());
+    }
     a.and(imm(0xF0));
     a.beq("sound_no_flush");
     a.jsr("sound_buffer");
@@ -251,25 +297,12 @@ fn commands(a: &mut Asm, model: Model) {
         a.asl(Acc);
     }
     a.sta(zp(os::TEMP));
-    if model == Model::Electron {
-        // Channel 0's note is noise.
-        a.ldy(imm(0));
-        a.lda(zp(os::CALL_X).ind_y());
-        a.and(imm(3));
-        a.bne("sound_command_tone");
-        a.lda(imm(NOISE_NOTE));
-        a.ora(zp(os::TEMP));
-        a.sta(zp(os::TEMP));
-        a.here("sound_command_tone");
-    }
     a.ldy(imm(1));
     a.lda(zp(os::CALL_X).ind_y());
     a.pha();
-    if model == Model::ModelB {
-        a.and(imm(note::SYNC));
-        a.ora(zp(os::TEMP));
-        a.sta(zp(os::TEMP));
-    }
+    a.and(imm(note::SYNC));
+    a.ora(zp(os::TEMP));
+    a.sta(zp(os::TEMP));
     a.pla();
     a.and(imm(0x10));
     a.lsr(Acc);
@@ -316,6 +349,102 @@ fn commands(a: &mut Asm, model: Model) {
     a.bne("envelope_copy");
     a.rts();
     bell(a, model);
+    flushing(a, model);
+    init(a, model);
+}
+
+/// The sound's state at a reset.
+fn init(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
+    // Every channel idle and silent, its period pitch 0's, the noise's
+    // control 0; on the Electron each busy flag clear and channel 0 the one
+    // addressed.
+    a.here("sound_init");
+    a.ldx(imm(lo(tick::END - buffer::SOUND_WORKSPACE)));
+    a.lda(imm(0));
+    a.here("sound_init_clear");
+    a.sta(abs(buffer::SOUND_WORKSPACE).x());
+    a.dex();
+    a.bpl("sound_init_clear");
+    a.ldx(imm(3));
+    a.here("sound_init_channel");
+    a.lda(imm(0xFF));
+    a.sta(abs(field::ATTENUATION).x());
+    a.sta(abs(field::CHIP_PITCH).x());
+    if model == Model::Electron {
+        // The counter the cached pitch gives, so the cache holds from the
+        // first note.
+        a.jsr("sound_period");
+        a.sta(abs(field::COUNTER).x());
+        a.lda(imm(0));
+        a.sta(abs(p2.buffer_busy + u16::from(number::SOUND)).x());
+    }
+    a.jsr("sound_output");
+    a.dex();
+    a.bpl("sound_init_channel");
+    if model == Model::Electron {
+        // Any seed but zero keeps the shift register turning.
+        a.lda(imm(1));
+        a.sta(abs(tick::NOISE_SEED));
+    }
+    a.rts();
+}
+
+/// A sound queue flushed, and on the Electron a channel addressed.
+fn flushing(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
+    // A sound queue flushed: its note stops, the chip silenced at the next
+    // tick. X is kept.
+    a.here("sound_purge");
+    a.txa();
+    a.pha();
+    if model == Model::Electron {
+        // A flushed queue's busy flag, as Electron OS 1.00 leaves it.
+        a.lda(imm(FLUSHED));
+        a.sta(abs(p2.buffer_busy).x());
+        a.lda(abs(var::EXTERNAL_SOUND));
+        a.beq("sound_purge_own");
+        a.lda(imm(service::SOUND_FLUSH));
+        a.jsr("service_call");
+        a.pla();
+        a.tax();
+        a.rts();
+        a.here("sound_purge_own");
+        a.txa();
+    }
+    a.and(imm(3));
+    a.tax();
+    a.lda(imm(phase::IDLE));
+    a.sta(abs(field::PHASE).x());
+    a.sta(abs(field::LEVEL).x());
+    if model == Model::ModelB {
+        a.sta(abs(field::WAITING).x());
+    }
+    // A note sounding stops with its queue.
+    a.jsr("sound_output");
+    a.pla();
+    a.tax();
+    a.rts();
+
+    if model == Model::Electron {
+        // A, a channel addressed: the channel last addressed flushed if it
+        // is another, and this one's busy flag cleared. A and Y are lost.
+        a.here("sound_address");
+        a.and(imm(3));
+        a.cmp(abs(tick::ADDRESSED));
+        a.beq("sound_addressed");
+        a.pha();
+        a.lda(abs(tick::ADDRESSED));
+        a.jsr("sound_channel_buffer");
+        a.jsr("buffer_flush");
+        a.pla();
+        a.sta(abs(tick::ADDRESSED));
+        a.here("sound_addressed");
+        a.jsr("sound_channel_buffer");
+        a.lda(imm(0));
+        a.sta(abs(p2.buffer_busy).x());
+        a.rts();
+    }
 }
 
 /// VDU 7: OSBYTE 211–214's note, dropped if its queue has no room.
@@ -332,6 +461,10 @@ fn bell(a: &mut Asm, model: Model) {
     // take the room between.
     a.php();
     a.sei();
+    if model == Model::Electron {
+        a.lda(abs(var::BELL_CHANNEL));
+        a.jsr("sound_address");
+    }
     a.jsr("bell_buffer");
     a.sec();
     a.jsr("buffer_count");
@@ -348,81 +481,23 @@ fn bell(a: &mut Asm, model: Model) {
     a.here("bell_buffer");
     a.lda(abs(var::BELL_CHANNEL));
     a.jmp("sound_channel_buffer");
-
-    // A sound queue flushed: its note stops, the chip silenced at the next
-    // tick. X is kept.
-    a.here("sound_purge");
-    a.txa();
-    a.pha();
-    if model == Model::Electron {
-        a.lda(abs(var::EXTERNAL_SOUND));
-        a.beq("sound_purge_own");
-        a.lda(imm(service::SOUND_FLUSH));
-        a.jsr("service_call");
-        a.pla();
-        a.tax();
-        a.rts();
-        a.here("sound_purge_own");
-        a.txa();
-    }
-    a.and(imm(3));
-    a.tax();
-    a.lda(imm(phase::IDLE));
-    a.sta(abs(field::PHASE).x());
-    a.sta(abs(field::LEVEL).x());
-    a.sta(abs(field::WAITING).x());
-    // A note sounding stops with its queue.
-    a.jsr("sound_output");
-    a.pla();
-    a.tax();
-    a.rts();
-
-    // Every channel idle and silent, its period pitch 0's, the noise's
-    // control 0.
-    a.here("sound_init");
-    a.ldx(imm(lo(4 * field::COUNT - 1)));
-    a.lda(imm(0));
-    a.here("sound_init_clear");
-    a.sta(abs(buffer::SOUND_WORKSPACE).x());
-    a.dex();
-    a.bpl("sound_init_clear");
-    a.ldx(imm(channels(model) - 1));
-    a.here("sound_init_channel");
-    a.lda(imm(0xFF));
-    a.sta(abs(field::ATTENUATION).x());
-    a.sta(abs(field::CHIP_PITCH).x());
-    a.jsr("sound_output");
-    a.dex();
-    a.bpl("sound_init_channel");
-    if model == Model::Electron {
-        // Any seed but zero keeps the shift register turning.
-        a.lda(imm(1));
-        a.sta(abs(tick::NOISE_SEED));
-    }
-    a.rts();
 }
 
-/// The channels the tick plays: the SN76489's four, the Electron's one.
-const fn channels(model: Model) -> u8 {
-    match model {
-        Model::ModelB => 4,
-        Model::Electron => 1,
-    }
-}
+/// A flushed sound queue's busy flag on the Electron.
+const FLUSHED: u8 = 0x80;
 
 /// The centisecond tick, from the 100 Hz interrupt.
 fn tick_routine(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     a.here("sound_tick");
+    a.ldx(imm(3));
+    a.here("sound_tick_next");
+    a.jsr("sound_channel");
+    a.dex();
+    a.bpl("sound_tick_next");
     match model {
-        Model::ModelB => {
-            a.ldx(imm(3));
-            a.here("sound_tick_next");
-            a.jsr("sound_channel");
-            a.dex();
-            a.bpl("sound_tick_next");
-            a.jmp("sound_synchronise");
-        }
-        Model::Electron => a.ldx(imm(0)),
+        Model::ModelB => a.jmp("sound_synchronise"),
+        Model::Electron => a.rts(),
     }
 
     a.here("sound_channel");
@@ -434,8 +509,8 @@ fn tick_routine(a: &mut Asm, model: Model) {
     a.bne("sound_channel_playing");
     // A silent channel waits on its queue alone, examined only once a note
     // is in it.
-    a.lda(abs(page2::BUFFER_START + u16::from(number::SOUND)).x());
-    a.cmp(abs(page2::BUFFER_END + u16::from(number::SOUND)).x());
+    a.lda(abs(p2.buffer_start + u16::from(number::SOUND)).x());
+    a.cmp(abs(p2.buffer_end + u16::from(number::SOUND)).x());
     a.beq(RTS);
     a.jsr("sound_next");
     a.jmp("sound_output");
@@ -582,11 +657,6 @@ fn starting(a: &mut Asm, model: Model) {
     }
     a.lda(abs(tick::NOTE_DURATION));
     a.sta(abs(field::DURATION).x());
-    if model == Model::Electron {
-        a.lda(abs(tick::CONTROL));
-        a.and(imm(NOISE_NOTE));
-        a.sta(abs(field::NOISE).x());
-    }
     // From silence the first twentieth is a centisecond short.
     let playing = a.local();
     a.lda(abs(field::PHASE).x());
@@ -789,12 +859,17 @@ fn output(a: &mut Asm) {
     a.jmp("sound_write");
 }
 
-/// The Electron's channel: the counter given to sound while the note sounds
-/// at any level and taken back when it is silent, but while the cassette
-/// has the counter; its pitch onto the counter as it changes, a noise
-/// note's each tick.
+/// The Electron's generator, driven by the channel last addressed alone:
+/// the counter given to sound while the note sounds at any level and taken
+/// back when it is silent, and while a note plays written each tick, as
+/// Electron OS 1.00 writes it, but while the cassette has it: a tone's from
+/// its pitch, channel 0's from its kind of noise.
 fn electron_output(a: &mut Asm) {
     a.here("sound_output");
+    a.cpx(abs(tick::ADDRESSED));
+    a.bne(RTS);
+    a.lda(imm(0));
+    a.sta(abs(tick::NOISE_KIND));
     a.lda(imm(SILENT));
     a.ldy(abs(field::PHASE).x());
     a.beq("sound_output_volume");
@@ -804,11 +879,11 @@ fn electron_output(a: &mut Asm) {
     a.beq("sound_output_volume");
     a.lda(imm(0));
     a.here("sound_output_volume");
-    a.cmp(abs(field::ATTENUATION).x());
-    a.beq("sound_output_pitch");
-    a.sta(abs(field::ATTENUATION).x());
+    a.cmp(abs(GENERATOR));
+    a.beq("sound_output_counter");
+    a.sta(abs(GENERATOR));
     a.bit(zp(os::CFS_CRITICAL));
-    a.bmi("sound_output_pitch");
+    a.bmi(RTS);
     a.cmp(imm(SILENT));
     a.lda(imm(control::SOUND));
     a.bcc("sound_output_comms");
@@ -818,32 +893,85 @@ fn electron_output(a: &mut Asm) {
     a.ldx(imm(!control::COMMS));
     a.jsr("ula_control");
     a.ldx(zp(os::SCRATCH));
+    a.jmp("sound_output_counter");
     a.here("sound_output_pitch");
-    a.lda(abs(field::NOISE).x());
-    a.beq("sound_output_tone");
+    a.cpx(abs(tick::ADDRESSED));
+    a.bne(RTS);
+    a.here("sound_output_counter");
+    a.bit(zp(os::CFS_CRITICAL));
+    a.bmi(RTS);
+    a.lda(abs(field::PHASE).x());
+    a.beq(RTS);
+    a.txa();
+    a.bne("sound_output_tone");
+    a.lda(abs(field::PITCH));
+    a.and(imm(NOISE_KIND_BITS));
+    a.tay();
+    a.cpy(imm(RANDOM_NOISE));
+    a.bcc("sound_noise");
+    // Noise drawn at random while it sounds is drawn at OSRDCH's waits too.
+    a.lda(abs(GENERATOR));
+    a.bne("sound_noise");
+    a.sty(abs(tick::NOISE_KIND));
+    // Y, a kind of noise: its counter, drawn from the shift register. X is
+    // kept.
+    a.here("sound_noise");
     a.lda(abs(tick::NOISE_SEED));
     a.asl(Acc);
-    a.bcc("sound_output_noise");
+    a.bcc("sound_noise_drawn");
     a.eor(imm(0x1D));
-    a.here("sound_output_noise");
+    a.here("sound_noise_drawn");
     a.sta(abs(tick::NOISE_SEED));
-    a.and(imm(NOISE_PITCHES));
-    a.clc();
-    a.adc(imm(NOISE_LOWEST));
-    a.jmp("sound_period");
+    a.and(abs("noise_mask").y());
+    a.ora(abs("noise_bits").y());
+    a.sta(abs(ula::COUNTER));
+    a.rts();
     a.here("sound_output_tone");
     a.lda(abs(field::PITCH).x());
     a.cmp(abs(field::CHIP_PITCH).x());
-    a.beq(RTS);
+    a.beq("sound_output_cached");
     a.sta(abs(field::CHIP_PITCH).x());
-    a.fall_into("sound_period");
+    a.jsr("sound_period");
+    a.sta(abs(field::COUNTER).x());
+    a.here("sound_output_cached");
+    a.lda(abs(field::COUNTER).x());
+    a.sta(abs(ula::COUNTER));
+    a.rts();
+
+    // While OSRDCH waits: a fresh counter for noise drawn at random.
+    a.here("sound_noise_wait");
+    a.php();
+    a.sei();
+    a.ldy(abs(tick::NOISE_KIND));
+    a.beq("sound_noise_waited");
+    a.bit(zp(os::CFS_CRITICAL));
+    a.bmi("sound_noise_waited");
+    a.jsr("sound_noise");
+    a.here("sound_noise_waited");
+    a.plp();
+    a.rts();
+}
+
+fn noise_tables(a: &mut Asm) {
+    a.later(|a| {
+        a.here("noise_mask");
+        for mask in NOISE_MASKS {
+            a.byte(mask);
+        }
+    });
+    a.later(|a| {
+        a.here("noise_bits");
+        for bits in NOISE_BITS {
+            a.byte(bits);
+        }
+    });
 }
 
 /// The period of pitch A on channel X: the semitone's, less the quarter
 /// semitones, halved for each octave, then on the Model B detuned by the
 /// channel so channels sounding one pitch do not cancel. The Electron's
-/// counter divides a clock a quarter of the SN76489's, so it is set to half
-/// the period, less one, the lowest pitches held at its longest.
+/// counter sounds 1 MHz / 32 (S + 1) where the SN76489 sounds 4 MHz / 32 N,
+/// so its counter, returned in A, is a quarter of the period, less one.
 fn sound_period(a: &mut Asm, model: Model) {
     a.here("sound_period");
     a.ldy(imm(0));
@@ -880,6 +1008,7 @@ fn sound_period(a: &mut Asm, model: Model) {
     a.ldy(abs(tick::OCTAVE));
     if model == Model::Electron {
         a.iny();
+        a.iny();
     }
     a.beq("sound_period_detune");
     a.here("sound_period_halve");
@@ -889,17 +1018,9 @@ fn sound_period(a: &mut Asm, model: Model) {
     a.bne("sound_period_halve");
     a.here("sound_period_detune");
     if model == Model::Electron {
-        a.lda(abs(tick::PERIOD_HIGH));
-        a.bne("sound_period_longest");
-        a.lda(abs(tick::PERIOD_LOW));
-        a.beq("sound_period_counter");
-        a.sec();
-        a.sbc(imm(1));
-        a.bcs("sound_period_counter");
-        a.here("sound_period_longest");
-        a.lda(imm(0xFF));
-        a.here("sound_period_counter");
-        a.sta(abs(ula::COUNTER));
+        a.ldy(abs(tick::PERIOD_LOW));
+        a.dey();
+        a.tya();
         a.rts();
         return;
     }

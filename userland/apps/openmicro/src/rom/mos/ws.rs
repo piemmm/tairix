@@ -187,6 +187,8 @@ pub mod var {
     pub const LANGUAGE: u16 = of(0xFC);
     /// The last BREAK: 0 soft, 1 power-on, 2 hard.
     pub const LAST_BREAK: u16 = of(0xFD);
+    /// The RAM fitted: &80, 32 KiB, on the Model B; 0 on the Electron.
+    pub const RAM: u16 = of(0xFE);
     /// The keyboard links' startup options.
     pub const STARTUP_OPTIONS: u16 = of(0xFF);
 
@@ -208,36 +210,39 @@ pub mod var {
     pub const FIRM_LENGTH: u16 = of(0xCD);
 }
 
-/// The rest of page two.
+/// The rest of page two: the places both machines' OSes keep, each by its
+/// [`page2::layout`], then each machine's own.
 pub mod page2 {
-    pub use crate::rom::os::page2::{ADC_CHANNELS, ADC_HIGH, ADC_LAST, ADC_LOW, BUFFER_BUSY};
+    pub use crate::rom::os::page2::{Layout, ADC_CHANNELS, ELECTRON, MODEL_B};
 
-    /// *TV's vertical shift.
+    use super::super::Model;
+
+    /// `model`'s places.
+    #[must_use]
+    pub const fn layout(model: Model) -> &'static Layout {
+        match model {
+            Model::ModelB => &MODEL_B,
+            Model::Electron => &ELECTRON,
+        }
+    }
+
+    /// On the Model B: *TV's vertical shift and interlace setting.
     pub const TV_SHIFT: u16 = 0x0290;
-    /// *TV's interlace setting.
     pub const TV_INTERLACE: u16 = 0x0291;
-    /// The two five-byte TIME clocks, most significant byte first.
-    pub const CLOCKS: u16 = 0x0292;
-    /// The interval timer.
-    pub const INTERVAL: u16 = 0x029C;
-    pub use crate::rom::os::ROM_TYPES;
-    /// INKEY's countdown.
-    pub const INKEY_COUNT: u16 = 0x02B1;
-    /// OSWORD 0's maximum line length, lowest and highest characters.
-    pub const LINE_LIMITS: u16 = 0x02B3;
-    /// Each event's enable count.
-    pub const EVENTS: u16 = 0x02BF;
-    /// The soft key being expanded: its offset.
-    pub const SOFT_KEY_POINTER: u16 = 0x02C9;
-    /// The count auto-repeat reloads next: the delay until the key held is
-    /// first typed, then the period.
-    pub const FIRST_REPEAT: u16 = 0x02CA;
-    /// Each buffer's start offset.
-    pub const BUFFER_START: u16 = 0x02D8;
-    /// Each buffer's end offset.
-    pub const BUFFER_END: u16 = 0x02E1;
-    /// The OSFILE block *LOAD, *SAVE and the like build.
-    pub const OSFILE_BLOCK: u16 = 0x02EE;
+    /// On the Electron: page 2 from its buffers' busy flags up, which every
+    /// reset sets to &FF, as Electron OS 1.00's does, before setting these
+    /// two and its buffers' flags as a flush leaves them.
+    pub const ELECTRON_FILLED: u16 = ELECTRON.buffer_busy;
+    const _: () = assert!(
+        ELECTRON.buffer_busy < ELECTRON.buffer_start
+            && ELECTRON.buffer_start < ELECTRON.buffer_end
+            && ELECTRON_FILLED < ULA_FIELD
+            && ELECTRON_FILLED < ELECTRON.adc_last
+    );
+    /// On the Electron: the `&FE07` field the OS last set, as Electron OS
+    /// 1.00 records it: a mode's bits as MODE sets them, or the motor and
+    /// counter's use as a cassette read or a block's writing starts.
+    pub const ULA_FIELD: u16 = 0x02F4;
 }
 
 /// The VDU variables OSBYTE &A0 reads, `&0300–&037F`.
@@ -334,8 +339,8 @@ pub mod vdu {
     /// The palette: each logical colour's physical one.
     pub const PALETTE: u16 = 0x036F;
     /// On the Electron: the cursor it draws itself, where the Model B keeps
-    /// *TV's shift.
-    pub const CURSOR_STATE: u16 = super::page2::TV_SHIFT;
+    /// the teletext cursor's character.
+    pub const CURSOR_STATE: u16 = TELETEXT_CURSOR;
 }
 
 /// The cassette and ROM filing systems' workspace, `&0380–&03DF`.

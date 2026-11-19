@@ -52,13 +52,13 @@ ranhura 13. Na linha de comandos da máquina, `*VIM` seguido do nome de um
 ficheiro edita esse ficheiro, e BREAK no VIM mantém o texto que este contém. O
 VIM edita texto, como os ficheiros `!BOOT` que `*BUILD` cria, e programas em
 BASIC, que lista como texto e volta a guardar tokenizados, colorindo cada um
-conforme o permitem as cores do modo de ecrã; `:dis` seguido do nome de um
-ficheiro percorre página a página o código máquina de um programa. No VIM,
-`:help` lista os seus comandos e os modos de ecrã com o espaço que cada um
-deixa, `:mode` seguido de um número muda o modo, e `:q` regressa ao BASIC. Onde
-um banco de RAM lateral não contém nenhuma ROM, o VIM guarda aí o que copia ou
-apaga, no banco mais alto desses, pelo que não ocupa nada da memória que o texto
-tem.
+conforme o permitem as cores do modo de ecrã. No VIM, `:help` lista os seus
+comandos e os modos de ecrã com o espaço que cada um deixa na memória
+principal, `:mode` seguido de um número muda o modo, e `:q` regressa ao BASIC.
+Quando a memória principal fica cheia, o VIM continua em bancos de RAM lateral
+que não contêm nenhuma ROM, até dois, pelo que pode editar um ficheiro maior
+do que a memória principal; um ficheiro assim demora mais tempo a ler e a
+escrever.
 
 Fechar a janela de uma máquina suspende-a: iniciada de novo, retoma onde
 parou. Encerrar, no seu menu, retira os seus suportes e desliga-a, guardando

@@ -1,33 +1,31 @@
-//! The text: a gap buffer from OSHWM, with the undo record and, unless
-//! sideways RAM holds it, the register against HIMEM, and the walks across
-//! it.
+//! The text: a gap buffer at the start of the text's memory, then the undo
+//! record and the register against its end ([`super::vmem`]), and the walks
+//! across it.
 //!
 //! A place in the text is its offset from the start, whatever side of the
 //! gap it lies on; [`phys`] turns one into an address. The gap moves only
 //! when an edit needs it where the edit is.
 
 use super::ops::{add16, cmp16, dec16, inc16, mov16, sub16, zero16};
-use super::paging::Ram;
 use super::ws::{page, zp as z};
-use crate::rom::asm::{abs, imm, zp, Asm, RTS};
+use crate::rom::asm::{abs, imm, lo, zp, Asm, RTS};
 use crate::rom::far;
-use crate::rom::os::{zp as os, CR};
+use crate::rom::os::CR;
 
 /// The line [`fetch_line`] copies a line into, ending in CR.
 pub(super) const LINE_BUF: u16 = page::CONVERT;
 
-pub(super) fn emit(a: &mut Asm, ram: &Ram) {
+pub(super) fn emit(a: &mut Asm) {
     reset(a);
     places(a);
     phys(a);
     steps(a);
     fetch_line(a);
     lines(a);
-    memmove(a, ram);
     gap(a);
     regions(a);
-    edits(a, ram);
-    register_edits(a, ram);
+    edits(a);
+    register_edits(a);
 }
 
 /// `buf_reset` empties the text, the undo record and the register;
@@ -37,8 +35,6 @@ fn reset(a: &mut Asm) {
     mov16(a, z::REG, z::LIMIT);
     a.lda(imm(0));
     a.sta(zp(z::LINEWISE));
-    a.sta(abs(page::REG_LEN));
-    a.sta(abs(page::REG_LEN + 1));
     a.here("buf_empty");
     mov16(a, z::GAP, z::BUF);
     mov16(a, z::TEND, z::REG);
@@ -112,9 +108,7 @@ fn phys(a: &mut Asm) {
 
     a.here("getc");
     a.jsr("phys");
-    a.ldy(imm(0));
-    a.lda(zp(z::P0).ind_y());
-    a.rts();
+    a.jmp("rd0");
 }
 
 /// `fwd` steps P0 to the next byte's address, over the gap; `back` to the
@@ -156,8 +150,7 @@ fn fetch_line(a: &mut Asm) {
     a.bcs(end);
     a.jsr("phys");
     let next = a.here_local();
-    a.ldy(imm(0));
-    a.lda(zp(z::P0).ind_y());
+    a.jsr("rd0");
     a.cmp(imm(CR));
     a.beq(end);
     a.sta(abs(LINE_BUF).x());
@@ -187,8 +180,7 @@ fn lines(a: &mut Asm) {
     a.jsr("phys");
     let step = a.here_local();
     a.jsr("back");
-    a.ldy(imm(0));
-    a.lda(zp(z::P0).ind_y());
+    a.jsr("rd0");
     a.cmp(imm(CR));
     a.beq(RTS);
     dec16(a, z::N0);
@@ -202,8 +194,7 @@ fn lines(a: &mut Asm) {
     a.bcs(RTS);
     a.jsr("phys");
     let scan = a.here_local();
-    a.ldy(imm(0));
-    a.lda(zp(z::P0).ind_y());
+    a.jsr("rd0");
     a.cmp(imm(CR));
     a.beq(RTS);
     inc16(a, z::N0);
@@ -242,8 +233,7 @@ fn lines(a: &mut Asm) {
     a.bcs(RTS);
     a.jsr("phys");
     let count = a.here_local();
-    a.ldy(imm(0));
-    a.lda(zp(z::P0).ind_y());
+    a.jsr("rd0");
     a.cmp(imm(CR));
     let other = a.local();
     a.bne(other);
@@ -256,54 +246,9 @@ fn lines(a: &mut Asm) {
     a.rts();
 }
 
-/// `memmove`: N1 bytes from P1 to P2, overlapping either way.
-fn memmove(a: &mut Asm, ram: &Ram) {
-    a.here("memmove");
-    cmp16(a, z::P2, z::P1);
-    let down = a.local();
-    a.bcs(down);
-    a.jmp(abs(ram.copy));
-
-    // Down the addresses: the part page past the whole pages first, then
-    // each page below it.
-    a.bind(down);
-    a.clc();
-    a.lda(zp(z::P1 + 1));
-    a.adc(zp(z::N1 + 1));
-    a.sta(zp(z::P1 + 1));
-    a.clc();
-    a.lda(zp(z::P2 + 1));
-    a.adc(zp(z::N1 + 1));
-    a.sta(zp(z::P2 + 1));
-    a.ldy(zp(z::N1));
-    let pages = a.local();
-    a.beq(pages);
-    let byte_down = a.here_local();
-    a.dey();
-    a.lda(zp(z::P1).ind_y());
-    a.sta(zp(z::P2).ind_y());
-    a.tya();
-    a.bne(byte_down);
-    a.bind(pages);
-    a.ldx(zp(z::N1 + 1));
-    a.beq(RTS);
-    let page_down = a.here_local();
-    a.dec(zp(z::P1 + 1));
-    a.dec(zp(z::P2 + 1));
-    a.ldy(imm(0));
-    let in_page = a.here_local();
-    a.dey();
-    a.lda(zp(z::P1).ind_y());
-    a.sta(zp(z::P2).ind_y());
-    a.tya();
-    a.bne(in_page);
-    a.dex();
-    a.bne(page_down);
-    a.rts();
-}
-
 /// `move_gap`: the gap moved to N0, N1 kept. `gap_room`: carry set where
-/// the gap holds fewer than N1 bytes.
+/// the gap cannot be made to hold N1 bytes, a bank of sideways RAM taken on
+/// at a time while it is short; N0, N1, N2 and P3 kept.
 fn gap(a: &mut Asm) {
     a.here("move_gap");
     a.lda(zp(z::N1));
@@ -356,7 +301,8 @@ fn gap(a: &mut Asm) {
     cmp16(a, z::P0, z::N1);
     let room = a.local();
     a.bcs(room);
-    a.sec();
+    a.jsr("grow");
+    a.bcc("gap_room");
     a.rts();
     a.bind(room);
     a.clc();
@@ -368,11 +314,14 @@ fn gap(a: &mut Asm) {
 /// room, nothing changed.
 fn regions(a: &mut Asm) {
     // `block_down`: the bytes from GEND to P3 moved N2 down into the gap,
-    // GEND and TEND with them.
+    // GEND and TEND with them. P3 is held from LIMIT while the room is
+    // made, which moves everything past the gap.
     a.here("block_down");
     a.jsr("n1_n2");
+    sub16(a, z::P3, z::LIMIT, z::P3);
     a.jsr("gap_room");
     a.bcs(RTS);
+    sub16(a, z::P3, z::LIMIT, z::P3);
     a.jsr("p1_gend");
     sub16(a, z::P2, z::GEND, z::N2);
     sub16(a, z::N1, z::P3, z::GEND);
@@ -429,7 +378,7 @@ fn regions(a: &mut Asm) {
 
 /// The edits: each keeps TOP valid, starting the screen from the text's
 /// start where an edit falls before it.
-fn edits(a: &mut Asm, ram: &Ram) {
+fn edits(a: &mut Asm) {
     // `edit_at`: an edit at N0 is about to be made.
     a.here("edit_at");
     cmp16(a, z::N0, z::TOP);
@@ -443,7 +392,7 @@ fn edits(a: &mut Asm, ram: &Ram) {
     a.rts();
 
     // `ins_char`: A put in at the cursor, the cursor past it; carry set
-    // where the text is full.
+    // where the text is full and no bank can be taken on.
     a.here("ins_char");
     a.pha();
     a.jsr("n0_cur");
@@ -456,13 +405,15 @@ fn edits(a: &mut Asm, ram: &Ram) {
     a.lda(zp(z::GAP + 1));
     a.cmp(zp(z::GEND + 1));
     a.bne(room);
+    a.jsr("grow");
+    a.bcc(room);
     a.pla();
-    a.sec();
     a.rts();
     a.bind(room);
     a.pla();
+    a.ldx(imm(lo(z::GAP)));
     a.ldy(imm(0));
-    a.sta(zp(z::GAP).ind_y());
+    a.jsr("wrp");
     inc16(a, z::GAP);
     inc16(a, z::GOFF);
     inc16(a, z::LEN);
@@ -470,26 +421,40 @@ fn edits(a: &mut Asm, ram: &Ram) {
     a.clc();
     a.rts();
 
-    // `ins_bytes`: N1 bytes from P3, which lies past the text, put in at
-    // N0, the command abandoned where the gap cannot hold them. `ins_from`:
-    // the same from the bank in SRC_BANK.
+    // `ins_bytes`: N1 bytes from P3, outside the text's memory, put in at
+    // N0. `ins_reg`: the register put in at N0, N1 its length, found once
+    // the room is made, which moves it. Either abandons the command where
+    // the gap cannot hold them.
+    a.here("ins_reg");
+    sub16(a, z::N1, z::LIMIT, z::REG);
+    a.jsr("ins_room");
+    mov16(a, z::P3, z::REG);
+    let copy = a.local();
+    a.jmp(copy);
     a.here("ins_bytes");
-    a.lda(zp(os::ROM));
-    a.sta(abs(page::SRC_BANK));
-    a.here("ins_from");
-    a.jsr("edit_at");
-    a.jsr("move_gap");
-    mov16(a, z::N2, z::N1);
-    a.jsr("gap_room");
-    far(a, Asm::bcc, "no_room");
+    a.lda(zp(z::P3));
+    a.pha();
+    a.lda(zp(z::P3 + 1));
+    a.pha();
+    a.jsr("ins_room");
+    a.pla();
+    a.sta(zp(z::P3 + 1));
+    a.pla();
+    a.sta(zp(z::P3));
+    a.bind(copy);
     mov16(a, z::P1, z::P3);
     a.jsr("p2_gap");
-    a.jsr("n1_n2");
-    a.ldx(abs(page::SRC_BANK));
-    a.jsr(ram.bank_copy);
-    add16(a, z::GAP, z::GAP, z::N2);
-    add16(a, z::GOFF, z::GOFF, z::N2);
-    add16(a, z::LEN, z::LEN, z::N2);
+    a.jsr("memmove");
+    add16(a, z::GAP, z::GAP, z::N1);
+    add16(a, z::GOFF, z::GOFF, z::N1);
+    add16(a, z::LEN, z::LEN, z::N1);
+    a.rts();
+
+    a.here("ins_room");
+    a.jsr("edit_at");
+    a.jsr("move_gap");
+    a.jsr("gap_room");
+    far(a, Asm::bcc, "no_room");
     a.rts();
 
     // `del_range`: the N1 bytes from N0 taken out, carry clear.
@@ -503,7 +468,7 @@ fn edits(a: &mut Asm, ram: &Ram) {
 }
 
 /// The register and the undo record filled from the text, and a cut.
-fn register_edits(a: &mut Asm, ram: &Ram) {
+fn register_edits(a: &mut Asm) {
     // `yank`: the N1 bytes from N0 into the register, A whether they are
     // whole lines; the gap left at N0. The command is abandoned where there
     // is no room.
@@ -520,34 +485,29 @@ fn register_edits(a: &mut Asm, ram: &Ram) {
     let given = a.local();
     a.beq(given);
     dec16(a, z::P0);
-    a.ldy(imm(0));
-    a.lda(zp(z::P0).ind_y());
+    a.jsr("rd0");
     a.cmp(imm(CR));
     a.beq(sized);
     a.bind(given);
     inc16(a, z::N1);
     a.bind(sized);
-    a.jsr("reg_room");
+    a.jsr("resize_reg");
     far(a, Asm::bcc, "no_room");
     a.lda(zp(z::T4));
     a.sta(zp(z::LINEWISE));
-    a.lda(zp(z::N1));
-    a.sta(abs(page::REG_LEN));
-    a.lda(zp(z::N1 + 1));
-    a.sta(abs(page::REG_LEN + 1));
-    a.jsr("reg_source");
-    mov16(a, z::P2, z::P3);
     a.jsr("p1_gend");
+    mov16(a, z::P2, z::REG);
     mov16(a, z::N1, z::N0);
-    a.jsr(ram.bank_copy);
+    a.jsr("memmove");
     // Lengths differ by the CR alone.
-    a.lda(abs(page::REG_LEN));
+    a.lda(zp(z::LIMIT));
+    a.sec();
+    a.sbc(zp(z::REG));
     a.cmp(zp(z::N0));
-    let whole = a.local();
-    a.beq(whole);
-    a.jmp("reg_cr");
-    a.bind(whole);
-    a.rts();
+    a.beq(RTS);
+    add16(a, z::P0, z::REG, z::N0);
+    a.lda(imm(CR));
+    a.jmp("wr0");
 
     // `keep_undo`: the N1 bytes at the gap's end, the text after N0, made
     // the undo record.
@@ -561,6 +521,29 @@ fn register_edits(a: &mut Asm, ram: &Ram) {
     a.jsr("memmove");
     a.clc();
     a.rts();
+
+    // `cut_room`: the command abandoned where the text's memory cannot take
+    // N1 bytes into the undo record and the register too, a CR more for
+    // whole lines (A non-zero), a bank taken on at a time while it is
+    // short; N0 and N1 kept.
+    a.here("cut_room");
+    a.cmp(imm(1));
+    a.lda(zp(z::N1));
+    a.adc(imm(0));
+    a.sta(zp(z::N2));
+    a.lda(zp(z::N1 + 1));
+    a.adc(imm(0));
+    a.sta(zp(z::N2 + 1));
+    add16(a, z::N2, z::N2, z::N1);
+    far(a, Asm::bcc, "no_room");
+    let check = a.here_local();
+    sub16(a, z::P0, z::LIMIT, z::BUF);
+    sub16(a, z::P0, z::P0, z::LEN);
+    cmp16(a, z::P0, z::N2);
+    a.bcs(RTS);
+    a.jsr("grow");
+    a.bcc(check);
+    a.jmp("no_room");
 
     // `cut`: the N1 bytes from N0 into the register, A whether whole lines,
     // and into the undo record, then taken out, a change made at N0. Where

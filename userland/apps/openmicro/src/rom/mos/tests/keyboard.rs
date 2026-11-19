@@ -280,7 +280,7 @@ fn a_poll_for_space_s_bare_number_ends_once_it_is_pressed() {
 #[test]
 fn a_key_is_typed_a_tick_after_it_is_confirmed() {
     let mut machine = idle();
-    let typed = machine.peek(page2::BUFFER_END);
+    let typed = machine.peek(page2::MODEL_B.buffer_end);
     machine.set_key(Key::A, true);
     let last = values(&mut machine, os::KEY_LAST, 5);
     let confirmed = last
@@ -292,7 +292,7 @@ fn a_key_is_typed_a_tick_after_it_is_confirmed() {
     machine.set_key(Key::A, false);
     let mut machine_again = idle();
     machine_again.set_key(Key::A, true);
-    let buffer = values(&mut machine_again, page2::BUFFER_END, 5);
+    let buffer = values(&mut machine_again, page2::MODEL_B.buffer_end, 5);
     let first = buffer
         .iter()
         .find(|&&(_, value)| value != typed)

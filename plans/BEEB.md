@@ -281,7 +281,9 @@ outside it runs at 2 MHz; a mode written applies once the current line ends.
   receive full), written for the next to send (clearing transmit empty).
 - `&FE05` write: the ROM number (bits 0–3) under the paging rule; bits 4, 5,
   6 clear display end, RTC and high tone; bit 7 the NMI release.
-- `&FE06` write: the counter, a sound of 1 MHz / (16 (S + 1)) in sound mode.
+- `&FE06` write: the counter, a sound of 1 MHz / (32 (S + 1)) in sound mode;
+  the Guide's first issues give 16 for 32, which its revised issues and
+  Electron OS 1.00's pitches correct.
 - `&FE07` write: bits 1–2 the counter's use (cassette input, sound,
   cassette output, none), bits 3–5 the mode (7 is mode 4), bit 6 the motor
   relay, bit 7 the CAPS LOCK light.
@@ -589,8 +591,10 @@ same source: every part the two machines' interfaces share is one routine,
 and only the hardware's own parts differ — reset and the start-up options,
 the interrupt service, the screen's mode, start and palette, the cursor, the
 keyboard scan, the sound output and the cassette. Its interface is Electron
-OS 1.00's as the Electron Advanced User Guide documents it, with its
-workspace, which is MOS 1.20's but where the Guide says otherwise:
+OS 1.00's as the Electron Advanced User Guide documents it. Page 2 is laid out
+as Electron OS 1.00 is observed to keep it (`page2::ELECTRON`), a byte below
+the Model B's from the clocks up; the rest of its workspace is MOS 1.20's but
+where the Guide says otherwise:
 
 - OSBYTE 0 and OSBYTE &81 with X 0 and Y &FF identify the Electron's OS (X 0
   and X 1). The start-up option byte defaults to &FF; MODE 7 is MODE 6, the
@@ -623,11 +627,21 @@ workspace, which is MOS 1.20's but where the Guide says otherwise:
 - The screen: no cursor hardware, so the OS draws and flashes its own; VDU
   19 writes the ULA's palette from its table of entries; hardware scroll
   moves `&FE02`/`&FE03`.
-- Sound: one channel and one queue, which channels 0–3 all address; a note's
-  amplitude is not varied, an envelope's pitch is, and noise is a pitch the
-  queue steps through; flushing any sound buffer flushes it. With the
+- Sound: four queues on one generator, the counter: a SOUND or bell for a
+  channel other than the one last addressed first flushes that one, so one
+  channel plays at a time. The counter is a quarter of the SN76489's period
+  less one, written each tick a note plays; a note's amplitude is not
+  varied, an envelope's pitch is, and S synchronises nothing. Channel 0 is
+  noise by its pitch's low three bits: 0–3 a fixed tone, 4–7 a counter drawn
+  in a range each tick and at each pass while OSRDCH waits. With the
   external sound flag (OSBYTE &DB) set, BEL and a flush are service calls
   &16 and &17 instead.
+- A flush empties a buffer where it stands and marks a flushed sound queue
+  &80, SOUND and the bell clearing their queue's. Every reset fills page 2
+  from the buffers' flags up with &FF but for `&2F4`, the `&FE07` field the
+  OS last set (a mode's bits, or the motor and counter's use as a cassette
+  read or a block's writing starts), and the last ADC channel; it clears
+  the first repeat's count, and starts with no printer chosen.
 - RS423, the printer and the ADC are the expansions': a byte for one is a
   service call (&13, &14), and an unclaimed RS423 byte is purged.
 - It announces itself as `OpenMOS Electron`.
@@ -636,7 +650,11 @@ Where it differs on purpose: Electron OS 1.00's private addresses are not
 reproduced, so the Guide's recipe for disabling the Plus 1, which writes one
 of them into FILEV, does not apply here; the firm keys `:`, `;` and `-` expand
 to nothing, as the Guide documents no keyword for them; and the arrangement
-of the four keys besides ← whose characters the Guide does not give.
+of the four keys besides ← whose characters the Guide does not give. Its key
+scan keeps its state elsewhere, so `&2C0–&2C2` hold only what a reset leaves;
+the counters come from the Model B's scale, 31 of the 256 pitches a step to
+three from Electron OS 1.00's own table; and OSRDCH's wait draws noise about
+two thirds as often, both draws far faster than the wave takes a counter.
 
 **BASIC.** The whole BBC BASIC II language: every keyword, the tokenised
 program format, the line editor and its commands, the five-byte floating

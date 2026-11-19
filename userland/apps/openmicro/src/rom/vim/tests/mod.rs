@@ -13,7 +13,8 @@ use tairix_openbasic::tokenise::{tokenise, Start};
 use tairix_openbasic::Dialect;
 
 use super::build;
-use super::paging::{REGISTER, UNSIGNED};
+use super::paging::UNSIGNED;
+use super::vmem::{BANK_FIRST, BANK_PAGES};
 use super::ws::{page, zp};
 use crate::firmware::{BASIC_IMAGE, DFS_IMAGE, MOS_IMAGE};
 use crate::machine::bbc::fdc::PhysicalDrive;
@@ -21,7 +22,7 @@ use crate::machine::bbc::keyboard::Key;
 use crate::machine::bbc::Machine;
 use crate::media::disc::Disc;
 use crate::rom::mos::ws::{var, vdu};
-use crate::rom::os::ROM_TYPES;
+use crate::rom::os::page2;
 use crate::scenario::{mode7_text, press, press_with, type_text, wait};
 
 /// The slots the ROMs are fitted in: BASIC above the DFS above the editor.
@@ -412,10 +413,12 @@ fn sideways_ram() -> Vec<usize> {
     crate::front::library::SIDEWAYS_RAM_SLOTS.collect()
 }
 
-/// The register's bank and its length, as the editor keeps them.
-fn register(machine: &Machine) -> (u8, u16) {
-    let len = u16::from_le_bytes([machine.peek(page::REG_LEN), machine.peek(page::REG_LEN + 1)]);
-    (machine.peek(page::REG_BANK), len)
+/// The banks the text's memory runs on into, in order.
+fn held_banks(machine: &Machine) -> Vec<u8> {
+    let held = machine.peek(page::SEGMENTS);
+    (0..u16::from(held))
+        .map(|at| machine.peek(page::BANKS + at))
+        .collect()
 }
 
 /// The zero page word at `at`.
@@ -423,8 +426,37 @@ fn word(machine: &Machine, at: u16) -> u16 {
     u16::from_le_bytes([machine.peek(at), machine.peek(at + 1)])
 }
 
+/// `len` bytes of the text's memory from `at`, through main memory to
+/// HIMEM and then the banks it holds, as the editor maps them.
+fn memory(machine: &mut Machine, at: u16, len: usize) -> Vec<u8> {
+    let top = machine.peek(zp::MAIN_TOP);
+    let banks = held_banks(machine);
+    (0..len)
+        .map(|n| {
+            let address = at + u16::try_from(n).expect("within 64K");
+            let [low, high] = address.to_le_bytes();
+            if high < top {
+                return machine.peek(address);
+            }
+            let past = high - top;
+            let bank = banks[usize::from(past / BANK_PAGES)];
+            let page = BANK_FIRST + past % BANK_PAGES - 0x80;
+            machine
+                .sideways_ram(usize::from(bank))
+                .expect("a held bank")[usize::from(page) << 8 | usize::from(low)]
+        })
+        .collect()
+}
+
+/// The register's bytes.
+fn register(machine: &mut Machine) -> Vec<u8> {
+    let from = word(machine, zp::REG);
+    let len = word(machine, zp::LIMIT) - from;
+    memory(machine, from, usize::from(len))
+}
+
 #[test]
-fn the_register_is_held_in_the_highest_free_sideways_bank() {
+fn a_text_with_room_in_main_memory_takes_no_sideways_ram() {
     let file = File {
         name: "T",
         load: 0,
@@ -435,16 +467,11 @@ fn the_register_is_held_in_the_highest_free_sideways_bank() {
     start(&mut machine, " T");
     keys(&mut machine, "2yy");
     wait(&mut machine, 10);
-    assert_eq!(register(&machine), (7, 11));
-    assert_eq!(
-        word(&machine, zp::REG),
-        word(&machine, zp::LIMIT),
-        "none below HIMEM"
-    );
+    assert!(held_banks(&machine).is_empty());
+    assert_eq!(register(&mut machine), b"alpha\rbeta\r");
+    assert!(word(&machine, zp::LIMIT) <= 0x7C00, "below HIMEM");
     let bank = machine.sideways_ram(7).expect("RAM in slot 7");
-    assert_eq!(bank[7], UNSIGNED, "the bank marked as no ROM");
-    let at = usize::from(REGISTER - 0x8000);
-    assert_eq!(&bank[at..at + 11], b"alpha\rbeta\r");
+    assert_ne!(bank[7], UNSIGNED, "no bank claimed");
     keys(&mut machine, "Gp:w\r");
     status_shows(&mut machine, "written");
     assert_eq!(
@@ -464,48 +491,57 @@ fn without_sideways_ram_the_register_lies_below_himem() {
     start(&mut machine, " T");
     keys(&mut machine, "yy");
     wait(&mut machine, 10);
-    assert_eq!(register(&machine), (13, 6));
-    assert_eq!(word(&machine, zp::LIMIT) - word(&machine, zp::REG), 6);
+    assert!(held_banks(&machine).is_empty());
+    assert_eq!(register(&mut machine), b"alpha\r");
 }
 
-/// A thousand lines yanked from a text that leaves less room than that.
-fn yank_past_the_room(ram: &[usize]) -> Machine {
-    let text = numbered(2000);
-    let mut machine = beeb_fitted(
+/// A machine whose disc holds `T`, 2000 numbered lines, with sideways RAM
+/// in the slots `ram` names, not yet started.
+fn long_text(ram: &[usize]) -> Machine {
+    beeb_fitted(
         &[File {
             name: "T",
             load: 0,
             exec: 0,
-            data: &text,
+            data: &numbered(2000),
         }],
         false,
         &[],
         ram,
-    );
+    )
+}
+
+/// `T` edited, keys typed once it has loaded.
+fn edit_long_text(mut machine: Machine, typed: &str) -> Machine {
     start(&mut machine, " T");
     status_shows(&mut machine, "2000 lines");
-    keys(&mut machine, "1000yy");
+    keys(&mut machine, typed);
     machine
 }
 
+/// A thousand lines yanked from a text that leaves less room than that.
+fn yank_past_the_room(ram: &[usize]) -> Machine {
+    edit_long_text(long_text(ram), "1000yy")
+}
+
+/// The numbers show once the keys before them are done.
+fn numbers_shown(machine: &mut Machine) {
+    keys(machine, ":set nu\r");
+    until(machine, 20, |screen| {
+        screen[0].trim_start().starts_with("1 line 1")
+    });
+}
+
 #[test]
-fn a_yank_memory_has_no_room_for_is_held_in_sideways_ram() {
-    let wanted = numbered(1000);
+fn a_yank_memory_has_no_room_for_takes_on_a_bank_of_sideways_ram() {
     let mut machine = yank_past_the_room(&[]);
     status_shows(&mut machine, "No room");
     let mut machine = yank_past_the_room(&sideways_ram());
-    // Keys are taken in turn, so the numbers show once the yank is done.
-    keys(&mut machine, ":set nu\r");
-    until(&mut machine, 20, |screen| {
-        screen[0].trim_start().starts_with("1 line 1")
-    });
-    assert_eq!(
-        register(&machine),
-        (7, u16::try_from(wanted.len()).expect("short"))
-    );
+    numbers_shown(&mut machine);
+    assert_eq!(held_banks(&machine), [7], "the highest free bank");
+    assert_eq!(register(&mut machine), numbered(1000));
     let bank = machine.sideways_ram(7).expect("RAM in slot 7");
-    let at = usize::from(REGISTER - 0x8000);
-    assert_eq!(&bank[at..at + wanted.len()], &wanted[..]);
+    assert_eq!(bank[7], UNSIGNED, "the bank marked as no ROM");
 }
 
 /// Text of 2000 lines with line 1 yanked and line 2's first character
@@ -514,29 +550,18 @@ fn a_yank_memory_has_no_room_for_is_held_in_sideways_ram() {
 /// the room was found first, the register took the lines and then the undo
 /// record had no room, so the refused delete left them in the register.
 fn delete_past_the_room(ram: &[usize]) -> Machine {
-    let text = numbered(2000);
-    let mut machine = beeb_fitted(
-        &[File {
-            name: "T",
-            load: 0,
-            exec: 0,
-            data: &text,
-        }],
-        false,
-        &[],
-        ram,
-    );
-    start(&mut machine, " T");
-    status_shows(&mut machine, "2000 lines");
-    keys(&mut machine, "jxkyy600dd");
-    machine
+    edit_long_text(long_text(ram), "jxkyy600dd")
 }
 
 #[test]
 fn a_delete_refused_for_want_of_room_changes_nothing() {
     let mut machine = delete_past_the_room(&[]);
     status_shows(&mut machine, "No room");
-    assert_eq!(register(&machine), (13, 7), "the register as it was");
+    assert_eq!(
+        register(&mut machine),
+        b"line 1\r",
+        "the register as it was"
+    );
     // The undo record still holds the `x`, and the register line 1.
     keys(&mut machine, "up:w\r");
     status_shows(&mut machine, "written");
@@ -558,80 +583,53 @@ fn with_sideways_ram_a_delete_memory_alone_cannot_hold_is_made() {
         &text[deleted..]
     );
     // Less the character `x` took from line 2.
-    assert_eq!(
-        register(&machine),
-        (7, u16::try_from(deleted - 1).expect("short"))
-    );
+    let mut wanted = numbered(600);
+    wanted.remove(b"line 1\r".len());
+    assert_eq!(register(&mut machine), wanted);
+    assert_eq!(held_banks(&machine), [7]);
 }
 
 #[test]
 fn a_free_bank_holding_a_rom_image_is_left_as_it_is() {
-    let mut machine = beeb_fitted(
-        &[File {
-            name: "T",
-            load: 0,
-            exec: 0,
-            data: b"alpha\r",
-        }],
-        false,
-        &[],
-        &[6, 7],
-    );
+    let mut machine = long_text(&[6, 7]);
     // Loaded since the MOS looked, so not one it found.
     machine
         .sideways_ram(7)
         .expect("RAM in slot 7")
         .copy_from_slice(BASIC_IMAGE);
-    start(&mut machine, " T");
-    keys(&mut machine, "yy");
-    wait(&mut machine, 10);
-    assert_eq!(register(&machine), (6, 6));
+    let mut machine = edit_long_text(machine, "1000yy");
+    numbers_shown(&mut machine);
+    assert_eq!(held_banks(&machine), [6]);
     assert_eq!(machine.sideways_ram(7).expect("RAM in slot 7"), BASIC_IMAGE);
 }
 
 #[test]
-fn break_keeps_a_register_in_sideways_ram_and_registers_no_rom() {
-    let mut machine = beeb_fitted(
-        &[File {
-            name: "T",
-            load: 0,
-            exec: 0,
-            data: b"alpha\rbeta\r",
-        }],
-        false,
-        &[],
-        &sideways_ram(),
-    );
-    start(&mut machine, " T");
-    keys(&mut machine, "yy");
+fn break_keeps_a_text_in_sideways_ram_and_registers_no_rom() {
+    let mut machine = yank_past_the_room(&sideways_ram());
+    numbers_shown(&mut machine);
     crate::scenario::press_break(&mut machine, &[]);
     status_shows(&mut machine, "Text kept");
-    assert_eq!(machine.peek(ROM_TYPES + 7), 0, "the claimed bank is no ROM");
-    keys(&mut machine, "GP:w\r");
-    status_shows(&mut machine, "written");
     assert_eq!(
-        file_on_disc(&mut machine, "T").expect("written").2,
-        b"alpha\ralpha\rbeta\r"
+        machine.peek(page2::MODEL_B.rom_types + 7),
+        0,
+        "the claimed bank is no ROM"
     );
+    assert_eq!(held_banks(&machine), [7]);
+    keys(&mut machine, "Gp:w\r");
+    // Past HIMEM, the text is written a part at a time, at a revolution of
+    // the disc a sector.
+    until(&mut machine, 90, |screen| {
+        screen[STATUS_ROW].contains("written")
+    });
+    let wanted = [numbered(2000), numbered(1000)].concat();
+    assert_eq!(file_on_disc(&mut machine, "T").expect("written").2, wanted);
 }
 
 #[test]
-fn a_register_bank_another_program_took_is_given_up() {
-    let mut machine = beeb_fitted(
-        &[File {
-            name: "T",
-            load: 0,
-            exec: 0,
-            data: b"alpha\r",
-        }],
-        false,
-        &[],
-        &[6, 7],
-    );
-    start(&mut machine, " T");
-    keys(&mut machine, "yy");
-    wait(&mut machine, 10);
-    assert_eq!(register(&machine).0, 7);
+fn a_bank_another_program_took_loses_the_text_and_says_so() {
+    let mut machine = yank_past_the_room(&[6, 7]);
+    numbers_shown(&mut machine);
+    assert_eq!(held_banks(&machine), [7]);
     machine
         .sideways_ram(7)
         .expect("RAM in slot 7")
@@ -641,9 +639,334 @@ fn a_register_bank_another_program_took_is_given_up() {
         screen.iter().any(|row| row.contains("Press a key"))
     });
     keys(&mut machine, " ");
-    until(&mut machine, 5, |screen| screen[0] == "alpha");
-    assert_eq!(register(&machine), (6, 0), "the register emptied");
+    status_shows(&mut machine, "Text lost");
+    assert!(held_banks(&machine).is_empty());
+    assert_eq!(word(&machine, zp::LEN), 0, "the text emptied");
+    assert!(register(&mut machine).is_empty(), "the register emptied");
     assert_eq!(machine.sideways_ram(7).expect("RAM in slot 7"), BASIC_IMAGE);
+    // No name is left to write the empty text over the file.
+    keys(&mut machine, ":w\r");
+    status_shows(&mut machine, "No file name");
+}
+
+/// `text` typed at the editor on an Electron, whose CAPS LOCK it turns off.
+fn electron_keys(machine: &mut crate::machine::electron::Machine, text: &str) {
+    use crate::machine::electron::keyboard::Key as ElectronKey;
+    use crate::rom::harness;
+    for ch in text.chars() {
+        let keys: Vec<ElectronKey> = match ch {
+            '\u{1b}' => alloc::vec![ElectronKey::ESCAPE],
+            'a'..='z' => {
+                let (key, _) = ElectronKey::typing(ch.to_ascii_uppercase()).expect("a letter");
+                alloc::vec![key]
+            }
+            'A'..='Z' => {
+                let (key, _) = ElectronKey::typing(ch).expect("a letter");
+                alloc::vec![ElectronKey::SHIFT, key]
+            }
+            _ => {
+                harness::type_text(machine, ch.encode_utf8(&mut [0; 4]));
+                continue;
+            }
+        };
+        harness::press(machine, &keys);
+    }
+}
+
+/// An Electron with the Plus 1 and the editor in a cartridge slot, started
+/// with `*VIM` at BASIC's prompt, and its OS's image.
+fn electron_editing() -> (crate::machine::electron::Machine, Vec<u8>) {
+    use crate::rom::harness;
+    let (mut machine, os) = harness::electron_with_plus1();
+    let vim = build().expect("VIM assembles");
+    machine
+        .insert_rom(0, &vim.bytes)
+        .expect("a cartridge slot takes the editor");
+    harness::press_break(&mut machine, &[]);
+    harness::type_text(&mut machine, "*VIM\r");
+    harness::wait(&mut machine, 100);
+    (machine, os)
+}
+
+/// The regression: an Electron gives MODE 6 for MODE 7, and the editor,
+/// keeping MODE 7's teletext colours, put a blank cell before each coloured
+/// run. It takes the mode the OS gives, which has two colours and no
+/// highlighting.
+#[test]
+fn on_an_electron_mode_7_is_taken_as_the_mode_6_it_is() {
+    use crate::rom::harness;
+    let (mut machine, os) = electron_editing();
+    assert_eq!(machine.peek(zp::MODE), 6);
+    electron_keys(
+        &mut machine,
+        ":set ft=basic\r:syntax on\ri10 PRINT \"HI\"\u{1b}",
+    );
+    harness::wait(&mut machine, 100);
+    let screen = harness::screen(&machine, &os);
+    assert!(screen[0].starts_with("10 PRINT \"HI"), "{screen:?}");
+}
+
+/// An Electron's ROMs page elsewhere, so it gives the text no bank: a put
+/// past main memory is refused, nothing is paged, and the editor answers.
+#[test]
+fn on_an_electron_a_text_past_main_memory_takes_no_bank() {
+    use crate::rom::harness;
+    let (mut machine, os) = electron_editing();
+    let line = "0123456789012345678901234567890123456789";
+    electron_keys(&mut machine, &alloc::format!("i{line}\u{1b}yy600p"));
+    harness::wait(&mut machine, 100);
+    let screen = harness::screen(&machine, &os);
+    assert!(
+        screen.iter().any(|row| row.contains("No room")),
+        "{screen:?}"
+    );
+    assert_eq!(machine.peek(page::SEGMENTS), 0, "no bank held");
+    electron_keys(&mut machine, "300p:q!\r");
+    harness::wait(&mut machine, 300);
+    assert_eq!(
+        usize::from(machine.peek(crate::rom::os::zp::ROM)),
+        crate::machine::electron::BASIC_ROMS[1],
+        "back in BASIC"
+    );
+    assert!(
+        harness::shows(&machine, &os, ">"),
+        "{:?}",
+        harness::screen(&machine, &os)
+    );
+}
+
+/// The regression: leaving read the Model B's ROM type table where the OS
+/// keeps it elsewhere, as Electron OS 1.00 does at &2A0, so `:q` found no
+/// language there. Here the table OSBYTE &AA names is a copy in which BASIC
+/// is no language, and leaving for it is refused.
+#[test]
+fn leaving_reads_the_rom_type_table_where_the_os_says_it_lies() {
+    let mut machine = beeb(&[]);
+    type_text(
+        &mut machine,
+        "FOR I%=0 TO 15:I%?&A00=I%?&2A1:NEXT:?&A0F=0:?&23A=0:?&23B=&A\n",
+    )
+    .expect("typed");
+    wait(&mut machine, 50);
+    start(&mut machine, "");
+    keys(&mut machine, ":q\r");
+    status_shows(&mut machine, "No language");
+}
+
+/// The regression: BREAK resumed a text whose bank another program had
+/// taken, saying "Text kept" over "Text lost".
+#[test]
+fn break_says_a_text_whose_bank_was_taken_is_lost() {
+    let mut machine = yank_past_the_room(&[6, 7]);
+    numbers_shown(&mut machine);
+    machine
+        .sideways_ram(7)
+        .expect("RAM in slot 7")
+        .copy_from_slice(BASIC_IMAGE);
+    crate::scenario::press_break(&mut machine, &[]);
+    status_shows(&mut machine, "Text lost");
+    assert!(held_banks(&machine).is_empty());
+    assert_eq!(word(&machine, zp::LEN), 0, "the text emptied");
+}
+
+/// The regression: an OS error's message was said over "Text lost" where
+/// the command raising it had taken the text's bank.
+#[test]
+fn an_os_error_after_the_bank_was_taken_says_the_text_is_lost() {
+    let mut machine = yank_past_the_room(&[6, 7]);
+    numbers_shown(&mut machine);
+    machine
+        .sideways_ram(7)
+        .expect("RAM in slot 7")
+        .copy_from_slice(BASIC_IMAGE);
+    keys(&mut machine, ":!NOSUCH\r");
+    status_shows(&mut machine, "Text lost");
+    assert!(held_banks(&machine).is_empty());
+    assert_eq!(word(&machine, zp::LEN), 0, "the text emptied");
+}
+
+/// The status line shows `text`, waited for as long as reading or writing a
+/// part at a time past HIMEM takes, at a revolution of the disc a sector.
+fn slowly_shows(machine: &mut Machine, text: &str) -> Vec<String> {
+    until(machine, 120, |screen| screen[STATUS_ROW].contains(text))
+}
+
+/// `*VIM name` typed at BASIC's prompt, for a file read a part at a time.
+fn start_slowly(machine: &mut Machine, name: &str, lines: &str) {
+    type_text(machine, &alloc::format!("*VIM {name}\n")).expect("typed");
+    slowly_shows(machine, lines);
+}
+
+#[test]
+fn a_file_past_main_memory_is_read_into_sideways_ram_and_written_back() {
+    let text = numbered(3500);
+    let file = || File {
+        name: "T",
+        load: 0,
+        exec: 0,
+        data: &text,
+    };
+    let mut machine = beeb(&[file()]);
+    start(&mut machine, " T");
+    status_shows(&mut machine, "File too big");
+    let mut machine = beeb_fitted(&[file()], false, &[], &sideways_ram());
+    start_slowly(&mut machine, "T", "3500 lines");
+    assert!(!held_banks(&machine).is_empty());
+    // The first line put after the last: out of main memory and back.
+    keys(&mut machine, "ddGp");
+    until(&mut machine, 20, |screen| {
+        screen.iter().any(|row| row == "line 1")
+    });
+    keys(&mut machine, ":w\r");
+    slowly_shows(&mut machine, "written");
+    let first = b"line 1\r".len();
+    let wanted = [&text[first..], b"line 1\r"].concat();
+    assert_eq!(file_on_disc(&mut machine, "T").expect("written").2, wanted);
+}
+
+#[test]
+fn a_program_listed_past_main_memory_runs_on_into_sideways_ram() {
+    let line = " PRINT \"ABCDEFGHIJ\";A$;B%:GOTO 10:IF X THEN PRINT TAB(5)";
+    let lines: Vec<(u16, &str)> = (1..=500u16).map(|n| (n * 10, line)).collect();
+    let image = program_of(&lines);
+    let file = || File {
+        name: "PROG",
+        load: 0xFFFF_1900,
+        exec: 0xFFFF_8023,
+        data: &image,
+    };
+    let mut machine = beeb(&[file()]);
+    start(&mut machine, " PROG");
+    status_shows(&mut machine, "File too big");
+    let mut machine = beeb_fitted(&[file()], false, &[], &sideways_ram());
+    start_slowly(&mut machine, "PROG", "500 lines");
+    assert!(!held_banks(&machine).is_empty());
+    keys(&mut machine, ":w\r");
+    slowly_shows(&mut machine, "written");
+    assert_eq!(
+        file_on_disc(&mut machine, "PROG").expect("written").2,
+        image
+    );
+}
+
+/// A substitution in a text that runs on into a bank puts its replacement
+/// in from the page it was typed into.
+#[test]
+fn a_substitution_with_a_bank_held_puts_in_its_replacement() {
+    let text = numbered(3500);
+    let mut machine = beeb_fitted(
+        &[File {
+            name: "T",
+            load: 0,
+            exec: 0,
+            data: &text,
+        }],
+        false,
+        &[],
+        &sideways_ram(),
+    );
+    start_slowly(&mut machine, "T", "3500 lines");
+    assert!(!held_banks(&machine).is_empty());
+    keys(&mut machine, ":s/line/LINE/\r");
+    until(&mut machine, 20, |screen| screen[0] == "LINE 1");
+}
+
+/// The regression: BREAK while a file was read resumed what had been read
+/// of it still named, so writing it cut the file short.
+#[test]
+fn break_while_a_file_is_read_drops_its_name() {
+    let text = numbered(3500);
+    let mut machine = beeb_fitted(
+        &[File {
+            name: "T",
+            load: 0,
+            exec: 0,
+            data: &text,
+        }],
+        false,
+        &[],
+        &sideways_ram(),
+    );
+    type_text(&mut machine, "*VIM T\n").expect("typed");
+    wait(&mut machine, 500);
+    crate::scenario::press_break(&mut machine, &[]);
+    status_shows(&mut machine, "Text kept");
+    keys(&mut machine, ":w\r");
+    status_shows(&mut machine, "No file name");
+    assert_eq!(
+        file_on_disc(&mut machine, "T").expect("still there").2,
+        text
+    );
+}
+
+/// A machine with sideways RAM in the slots `ram` names, editing `T`, 3000
+/// numbered lines: more than MODE 7 leaves room for, so they run on into
+/// bank 7.
+fn three_thousand_lines(ram: &[usize]) -> Machine {
+    let file = File {
+        name: "T",
+        load: 0,
+        exec: 0,
+        data: &numbered(3000),
+    };
+    let mut machine = beeb_fitted(&[file], false, &[], ram);
+    start_slowly(&mut machine, "T", "3000 lines");
+    assert_eq!(held_banks(&machine), [7]);
+    machine
+}
+
+/// The screen in `mode`, waited for as long as a change of mode takes.
+fn in_mode(machine: &mut Machine, mode: u8) {
+    for _ in 0..50 {
+        if machine.peek(vdu::MODE) == mode {
+            return;
+        }
+        wait(machine, 10);
+    }
+    panic!("never in mode {mode}: {}", machine.peek(vdu::MODE));
+}
+
+/// MODE 0's screen takes more than the text leaves free: a second bank is
+/// taken on for it, and the text written from there is the file read.
+#[test]
+fn a_mode_whose_screen_leaves_too_little_room_takes_on_a_bank() {
+    let mut machine = three_thousand_lines(&sideways_ram());
+    keys(&mut machine, ":mode 0\r");
+    in_mode(&mut machine, 0);
+    assert_eq!(held_banks(&machine), [7, 6]);
+    // MODE 0's status line cannot be read off the screen: MODE 7 waits for
+    // the writing to finish.
+    keys(&mut machine, ":w\r:mode 7\rG");
+    until(&mut machine, 120, |screen| {
+        screen.iter().any(|row| row == "line 3000")
+    });
+    assert_eq!(
+        file_on_disc(&mut machine, "T").expect("written").2,
+        numbered(3000)
+    );
+}
+
+/// With no bank to take on, MODE 0 is refused; MODE 6 takes less than the
+/// text leaves free, and MODE 7 gives it back.
+#[test]
+fn with_no_bank_to_take_on_a_mode_without_room_is_refused() {
+    let mut machine = three_thousand_lines(&[7]);
+    keys(&mut machine, ":mode 0\r");
+    status_shows(&mut machine, "Not enough memory");
+    assert_eq!(machine.peek(vdu::MODE), 7);
+    assert_eq!(held_banks(&machine), [7]);
+    keys(&mut machine, ":mode 6\r");
+    in_mode(&mut machine, 6);
+    keys(&mut machine, ":mode 7\rG");
+    until(&mut machine, 20, |screen| {
+        screen.iter().any(|row| row == "line 3000")
+    });
+    keys(&mut machine, ":w\r");
+    slowly_shows(&mut machine, "written");
+    assert_eq!(
+        file_on_disc(&mut machine, "T").expect("written").2,
+        numbered(3000)
+    );
 }
 
 /// Row `row` of mode 7's screen as its bytes, however it has scrolled.
@@ -968,110 +1291,6 @@ fn help_shows_the_commands_and_each_mode_s_room() {
     until(&mut machine, 5, |screen| {
         screen[0].is_empty() && screen[1] == "~" && !screen.iter().any(|row| row == "Press a key")
     });
-}
-
-/// The rows `:dis` shows for `code` loaded at `base`: each instruction's
-/// address, bytes and text as the emulator's own disassembler spells it;
-/// an undocumented opcode, or one the code ends inside, as `EQUB`.
-fn disassembly(base: u16, code: &[u8]) -> Vec<String> {
-    use core::fmt::Write as _;
-
-    use crate::cpu::disasm::Instruction;
-    use crate::cpu::isa::OPCODES;
-
-    let mut rows = Vec::new();
-    let mut at = 0;
-    while at < code.len() {
-        let opcode = OPCODES[usize::from(code[at])];
-        let size = usize::from(opcode.size());
-        let pc = base + u16::try_from(at).expect("short");
-        let (size, text) = if opcode.documented && at + size <= code.len() {
-            let byte = |n: usize| code.get(at + n).copied().unwrap_or(0);
-            (
-                size,
-                alloc::format!("{}", Instruction::decode(pc, [byte(0), byte(1), byte(2)])),
-            )
-        } else {
-            (1, alloc::format!("EQUB &{:02X}", code[at]))
-        };
-        let mut row = alloc::format!("{pc:04X} ");
-        for n in 0..3 {
-            if n < size {
-                write!(row, "{:02X} ", code[at + n]).expect("written");
-            } else {
-                row.push_str("   ");
-            }
-        }
-        row.push(' ');
-        row.push_str(&text);
-        // Mode 7's screen holds `#` as the teletext character &5F.
-        rows.push(row.trim_end().replace('#', "_"));
-        at += size;
-    }
-    rows
-}
-
-#[test]
-fn object_code_is_disassembled_and_paged() {
-    let mut code = alloc::vec![
-        0xA9, 0x00, 0x85, 0x70, 0x95, 0x71, 0xB6, 0x72, 0xAD, 0x00, 0x19, 0x9D, 0x00, 0x19, 0xB9,
-        0x00, 0x19, 0x6C, 0xFE, 0xFF, 0xA1, 0x70, 0xB1, 0x70, 0x0A, 0xEA, 0xD0, 0xE4, 0x10, 0x02,
-        0x02, 0x60, 0x20, 0xEE, 0xFF,
-    ];
-    code.extend([0xEA; 30]);
-    code.push(0x4C);
-    let rows = disassembly(0x2000, &code);
-    let mut machine = beeb(&[File {
-        name: "CODE",
-        load: 0x2000,
-        exec: 0x2000,
-        data: &code,
-    }]);
-    start(&mut machine, "");
-    keys(&mut machine, ":dis CODE\r");
-    let screen = until(&mut machine, 10, |screen| {
-        screen[STATUS_ROW - 1].starts_with("20")
-    });
-    assert_eq!(&screen[..STATUS_ROW], &rows[..STATUS_ROW]);
-    keys(&mut machine, "j");
-    until(&mut machine, 5, |screen| screen[0] == rows[1]);
-    keys(&mut machine, "k");
-    until(&mut machine, 5, |screen| screen[0] == rows[0]);
-    keys(&mut machine, " ");
-    let screen = until(&mut machine, 5, |screen| {
-        screen[rows.len() - STATUS_ROW - 1] == *rows.last().expect("rows")
-    });
-    assert_eq!(screen[0], rows[STATUS_ROW]);
-    assert!(screen[rows.len() - STATUS_ROW].is_empty());
-    keys(&mut machine, "b");
-    until(&mut machine, 5, |screen| screen[0] == rows[0]);
-    keys(&mut machine, "q");
-    until(&mut machine, 5, |screen| screen[1] == "~");
-}
-
-/// Every opcode, each followed by operand bytes, is disassembled as the
-/// emulator's own disassembler has it, a screen at a time.
-#[test]
-fn every_opcode_is_disassembled_as_the_cpu_knows_it() {
-    let code: Vec<u8> = (0..=255u8)
-        .flat_map(|opcode| [opcode, 0x12, 0x84])
-        .collect();
-    let rows = disassembly(0x3000, &code);
-    let mut machine = beeb(&[File {
-        name: "ALL",
-        load: 0x3000,
-        exec: 0x3000,
-        data: &code,
-    }]);
-    start(&mut machine, "");
-    keys(&mut machine, ":dis ALL\r");
-    for page in rows.chunks(STATUS_ROW) {
-        let screen = until(&mut machine, 10, |screen| {
-            screen[0] == page[0] && screen[page.len() - 1] == page[page.len() - 1]
-        });
-        assert_eq!(&screen[..page.len()], page);
-        keys(&mut machine, " ");
-    }
 }
 
 #[test]

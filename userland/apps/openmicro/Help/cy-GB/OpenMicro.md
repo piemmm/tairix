@@ -48,12 +48,12 @@ anogwr y peiriant, mae `*VIM` ac enw ffeil yn golygu'r ffeil honno, ac mae
 BREAK yn VIM yn cadw'r testun sydd ynddo. Mae VIM yn golygu testun, megis y
 ffeiliau `!BOOT` y mae `*BUILD` yn eu gwneud, a rhaglenni BASIC, y mae'n eu
 rhestru fel testun ac yn eu cadw eto wedi'u tocyneiddio, gan liwio pob un fel y
-mae lliwiau'r modd sgrin yn caniatáu; mae `:dis` ac enw ffeil yn mynd fesul
-tudalen drwy god peiriant rhaglen. Yn VIM, mae `:help` yn rhestru ei orchmynion
-a'r moddau sgrin gyda'r lle y mae pob un yn ei adael, mae `:mode` a rhif yn
-newid y modd, ac mae `:q` yn mynd yn ôl i BASIC. Lle nad oes ROM mewn banc o RAM
-ochr, mae VIM yn cadw yno yr hyn y mae'n ei gopïo neu'n ei ddileu, yn y banc
-uchaf o'r fath, felly nid yw'n cymryd dim o'r cof sydd gan y testun.
+mae lliwiau'r modd sgrin yn caniatáu. Yn VIM, mae `:help` yn rhestru ei
+orchmynion a'r moddau sgrin gyda'r lle y mae pob un yn ei adael yn y prif gof,
+mae `:mode` a rhif yn newid y modd, ac mae `:q` yn mynd yn ôl i BASIC. Unwaith
+y bydd y prif gof yn llawn, mae VIM yn mynd ymlaen i fanciau o RAM ochr nad oes
+ROM ynddynt, hyd at ddau, fel y gall olygu ffeil sy'n fwy na'r prif gof; mae
+ffeil o'r fath yn cymryd mwy o amser i'w darllen a'i hysgrifennu.
 
 Mae cau ffenestr peiriant yn atal y peiriant dros dro: o'i gychwyn eto, mae'n
 ailddechrau lle y stopiodd. Mae Cau i Lawr yn ei ddewislen yn tynnu ei

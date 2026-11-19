@@ -18,6 +18,10 @@ use crate::rom::os::{event, service};
 const ACIA_IRQ: u8 = 0x80;
 /// The ULA's flash bit.
 const FLASH: u8 = 0x01;
+/// The Electron's flash phase, as Electron OS 1.00 keeps it: the EOR its
+/// flashing colours' second colours take, its bit 0 the Model B's flash bit.
+const ELECTRON_FLASH: u8 = 0x07;
+const _: () = assert!(ELECTRON_FLASH & FLASH == FLASH);
 /// Timer 1's latch: ten thousand 1 MHz ticks, a centisecond, between
 /// interrupts.
 const TICK_LATCH: u16 = 9998;
@@ -293,6 +297,7 @@ fn electron_handler(a: &mut Asm) {
 /// countdown, the printer, the Model B's ADC or the Electron's paged ROMs'
 /// poll, sound and the keyboard.
 fn tick(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     if model == Model::ModelB {
         a.here("irq_tick");
         a.lda(imm(irq::T1));
@@ -309,9 +314,9 @@ fn tick(a: &mut Asm, model: Model) {
     a.sta(zp(os::SCRATCH));
     a.sec();
     a.here("tick_time");
-    a.lda(abs(page2::CLOCKS - 1).x());
+    a.lda(abs(p2.clocks - 1).x());
     a.adc(imm(0));
-    a.sta(abs(page2::CLOCKS - 1).y());
+    a.sta(abs(p2.clocks - 1).y());
     a.dex();
     a.dey();
     a.dec(zp(os::SCRATCH));
@@ -323,9 +328,9 @@ fn tick(a: &mut Asm, model: Model) {
     a.ldx(imm(4));
     a.sec();
     a.here("tick_interval");
-    a.lda(abs(page2::INTERVAL).x());
+    a.lda(abs(p2.interval).x());
     a.adc(imm(0));
-    a.sta(abs(page2::INTERVAL).x());
+    a.sta(abs(p2.interval).x());
     a.dex();
     a.bpl("tick_interval");
     a.bcc("tick_no_interval_event");
@@ -333,14 +338,14 @@ fn tick(a: &mut Asm, model: Model) {
     a.jsr("oseven");
     a.here("tick_no_interval_event");
     // INKEY's countdown.
-    a.lda(abs(page2::INKEY_COUNT));
-    a.ora(abs(page2::INKEY_COUNT + 1));
+    a.lda(abs(p2.inkey_count));
+    a.ora(abs(p2.inkey_count + 1));
     a.beq("tick_inkey_done");
-    a.lda(abs(page2::INKEY_COUNT));
+    a.lda(abs(p2.inkey_count));
     a.bne("tick_inkey_low");
-    a.dec(abs(page2::INKEY_COUNT + 1));
+    a.dec(abs(p2.inkey_count + 1));
     a.here("tick_inkey_low");
-    a.dec(abs(page2::INKEY_COUNT));
+    a.dec(abs(p2.inkey_count));
     a.here("tick_inkey_done");
     a.jsr("printer_poll");
     match model {
@@ -412,7 +417,10 @@ fn vsync(a: &mut Asm, model: Model) {
     a.dec(abs(var::FLASH_COUNT));
     a.bne("vsync_flash_done");
     a.lda(abs(var::ULA_CONTROL));
-    a.eor(imm(FLASH));
+    a.eor(imm(match model {
+        Model::ModelB => FLASH,
+        Model::Electron => ELECTRON_FLASH,
+    }));
     a.sta(abs(var::ULA_CONTROL));
     match model {
         Model::ModelB => a.sta(abs(sheila::VIDEO_CONTROL)),

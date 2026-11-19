@@ -20,8 +20,10 @@ use crate::scenario::{mode7_text, wait};
 
 mod commands;
 mod electron;
+mod electron_sound;
 mod keyboard;
 mod system;
+mod workspace;
 
 /// Where the language marks that it has run to its end, keeps the command
 /// it is on, and records each command's error number, 0 for none.
@@ -837,13 +839,13 @@ fn a_key_sets_the_keyboard_semaphore_which_must_still_be_set_to_rearm_it() {
         machine.set_key(Key::A, false);
         wait(&mut machine, 10);
         assert_eq!(machine.peek(var::KEYBOARD_SEMAPHORE), 0, "{commands:?}");
-        let typed = machine.peek(page2::BUFFER_END);
+        let typed = machine.peek(page2::MODEL_B.buffer_end);
         machine.set_key(Key::B, true);
         wait(&mut machine, 10);
         machine.set_key(Key::B, false);
         wait(&mut machine, 10);
         assert_eq!(
-            machine.peek(page2::BUFFER_END) != typed,
+            machine.peek(page2::MODEL_B.buffer_end) != typed,
             rearmed,
             "{commands:?}"
         );
@@ -1555,7 +1557,7 @@ fn a_soft_key_expands_to_its_own_text_wherever_it_lies() {
         a.sta(abs(READ).x());
         a.cpx(imm(0));
         a.bne("read_on");
-        a.lda(abs(page2::SOFT_KEY_POINTER));
+        a.lda(abs(page2::MODEL_B.soft_key_pointer));
         a.sta(abs(STATE));
         a.lda(abs(var::SOFT_KEY_LENGTH));
         a.sta(abs(STATE + 1));

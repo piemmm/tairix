@@ -26,7 +26,7 @@ const PAGES: [&str; 3] = [
      Line  :n :d :n,md :%d :s/a/b/[g] :%s\r",
     "Set   :set nu|nonu|ft=basic|ft=text\r\
      \x20     :syntax on|off  :mode n\r\
-     \x20     :dis f  :!cmd  ^L  :help\r\
+     \x20     :!cmd  ^L  :help\r\
      \rHighlighting needs 4 colours or more\r\
      Mode Size  Colours Free\r",
 ];

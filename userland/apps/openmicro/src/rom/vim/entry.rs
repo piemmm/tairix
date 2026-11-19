@@ -3,11 +3,11 @@
 //! leaving for the language the editor was started from.
 
 use super::ops::cmp16;
+use super::paging::Ram;
+use super::vmem::BANK_PAGES;
 use super::ws::{page, reading, show, start, zp as z, SURVIVED};
 use crate::rom::asm::{abs, byte, hi, imm, lo, zp, Asm, RTS};
-use crate::rom::os::{
-    entry, osbyte, rom_type, service, vector, zp as os, COPYRIGHT, CR, ROM_TYPES,
-};
+use crate::rom::os::{entry, osbyte, rom_type, service, vector, zp as os, COPYRIGHT, CR};
 
 /// The ROM's type: a language with a service entry.
 const ROM_TYPE: u8 = rom_type::SERVICE | rom_type::LANGUAGE | rom_type::CODE;
@@ -26,7 +26,7 @@ const LOCKS_OFF: u8 = 0x30;
 /// What leaving writes: the windows reset and the screen cleared.
 const VDU_RESET: [u8; 2] = [26, 12];
 
-pub(super) fn emit(a: &mut Asm) {
+pub(super) fn emit(a: &mut Asm, ram: &Ram) {
     header(a);
     services(a);
     command_word(a);
@@ -35,7 +35,7 @@ pub(super) fn emit(a: &mut Asm) {
     main_loop(a);
     errors(a);
     keys(a);
-    leaving(a);
+    leaving(a, ram);
     messages(a);
 }
 
@@ -226,8 +226,9 @@ fn language(a: &mut Asm) {
     a.lda(imm(DEFAULT_MODE));
     a.sta(zp(z::MODE));
     a.jsr("set_mode");
+    a.lda(imm(0));
+    a.sta(abs(page::SEGMENTS));
     a.jsr("set_area");
-    a.jsr("find_ram");
     a.jsr("buf_reset");
     a.lda(imm(0));
     a.sta(zp(z::FILE));
@@ -258,10 +259,12 @@ fn language(a: &mut Asm) {
     a.sta(abs(page::NAME));
     a.jmp("main");
     a.bind(kept);
-    a.jsr("reclaim");
+    a.jsr("unread");
     a.jsr("set_mode");
     a.jsr("keep_text");
     a.call_with_text("say", &["Text kept"]);
+    // Last, so a text lost with its bank says so.
+    a.jsr("reclaim");
     a.fall_into("main");
 }
 
@@ -288,6 +291,18 @@ fn main_loop(a: &mut Asm) {
     a.jsr("normal_key");
     a.jmp("main");
 
+    // `unread`: a file whose opening was cut short, by an error or BREAK, no
+    // longer named, so nothing writes what was read of it over it.
+    a.here("unread");
+    a.bit(zp(z::READING));
+    a.bpl(RTS);
+    a.lda(imm(CR));
+    a.sta(abs(page::NAME));
+    a.lda(imm(reading::OPENED));
+    a.sta(zp(z::READING));
+    a.sta(zp(z::FILE));
+    a.rts();
+
     // `keep_text`: the text marked as kept, a BREAK resuming it.
     a.here("keep_text");
     a.lda(imm(start::RESUME));
@@ -308,11 +323,12 @@ fn main_loop(a: &mut Asm) {
     a.jsr(entry::OSBYTE);
     a.stx(zp(z::LIMIT));
     a.sty(zp(z::LIMIT + 1));
+    a.sty(zp(z::MAIN_TOP));
     a.rts();
 
     // `survived`: carry clear where the text the workspace describes is
-    // still whole: the mark, the area this mode gives, and every boundary
-    // in order.
+    // still whole: the mark, the area this mode gives running on through
+    // the banks the text holds, and every boundary in order.
     a.here("survived");
     let lost = a.local();
     for (at, mark) in SURVIVED.iter().enumerate() {
@@ -334,7 +350,21 @@ fn main_loop(a: &mut Asm) {
     a.jsr(entry::OSBYTE);
     a.cpx(zp(z::LIMIT));
     a.bne(lost);
-    a.cpy(zp(z::LIMIT + 1));
+    a.cpy(zp(z::MAIN_TOP));
+    a.bne(lost);
+    a.tya();
+    a.ldx(abs(page::SEGMENTS));
+    a.cpx(imm(page::MOST_BANKS + 1));
+    a.bcs(lost);
+    let banked = a.here_local();
+    let reached = a.local();
+    a.dex();
+    a.bmi(reached);
+    a.clc();
+    a.adc(imm(BANK_PAGES));
+    a.jmp(banked);
+    a.bind(reached);
+    a.cmp(zp(z::LIMIT + 1));
     a.bne(lost);
     for (low, high) in [
         (z::GAP, z::BUF),
@@ -369,18 +399,7 @@ fn errors(a: &mut Asm) {
     a.jsr("take_keys");
     a.jsr("set_mode");
     a.jsr("keep_text");
-    a.jsr("reclaim");
-    // A file whose opening failed is no longer named, so nothing writes the
-    // empty text over it.
-    a.bit(zp(z::READING));
-    let named = a.local();
-    a.bpl(named);
-    a.lda(imm(CR));
-    a.sta(abs(page::NAME));
-    a.lda(imm(reading::OPENED));
-    a.sta(zp(z::READING));
-    a.sta(zp(z::FILE));
-    a.bind(named);
+    a.jsr("unread");
     a.ldy(imm(1));
     a.ldx(imm(0));
     let copy = a.here_local();
@@ -399,6 +418,8 @@ fn errors(a: &mut Asm) {
     a.and(imm(!show::INSERT));
     a.ora(imm(show::MESSAGE));
     a.sta(zp(z::SHOW));
+    // After the error's message, so a text lost with its bank says so.
+    a.jsr("reclaim");
     a.jsr("close_file");
     a.jsr("fix_cursor");
     a.jmp("main");
@@ -486,7 +507,7 @@ fn keys(a: &mut Asm) {
 
 /// `leave`: the keys given back, the text no longer kept, and the language
 /// the editor was started from entered; refused where that is no language.
-fn leaving(a: &mut Asm) {
+fn leaving(a: &mut Asm, ram: &Ram) {
     a.here("leave");
     a.ldx(abs(page::LEAVE_FOR));
     a.cpx(imm(16));
@@ -494,7 +515,7 @@ fn leaving(a: &mut Asm) {
     a.bcs(none);
     a.cpx(zp(os::ROM));
     a.beq(none);
-    a.lda(abs(ROM_TYPES).x());
+    a.jsr(ram.rom_type);
     a.and(imm(rom_type::LANGUAGE));
     a.beq(none);
     a.jsr("give_keys");

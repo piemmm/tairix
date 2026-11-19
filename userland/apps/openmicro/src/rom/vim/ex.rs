@@ -3,7 +3,7 @@
 
 use super::entry::ESCAPE;
 use super::normal::DELETE;
-use super::ops::{add16, cmp16, inc16, mov16, set16, sub16};
+use super::ops::{cmp16, inc16, mov16, set16, sub16};
 use super::ws::{file, option, page, syntax, zp as z};
 use crate::rom::asm::{abs, byte, hi, imm, lo, zp, Asm, RTS};
 use crate::rom::os::{entry, osbyte, CR};
@@ -31,7 +31,6 @@ const COMMANDS: &[(&str, &str)] = &[
     ("syn", "ex_syntax"),
     ("mode", "ex_mode"),
     ("help", "ex_help"),
-    ("dis", "ex_dis"),
     ("h", "ex_help"),
 ];
 
@@ -622,8 +621,8 @@ fn settings(a: &mut Asm) {
     a.jmp("cmd_redraw");
 }
 
-/// `:mode N`: the screen mode changed, the text and what lies above it
-/// moved to the room the new mode leaves; refused where that is too little.
+/// `:mode N`: mode N taken as `change_mode` takes it; one there is not,
+/// refused.
 fn modes(a: &mut Asm) {
     a.here("ex_mode");
     a.ldx(zp(z::EX_AT));
@@ -646,50 +645,131 @@ fn modes(a: &mut Asm) {
     a.bind(alone);
     a.pla();
     a.fall_into("change_mode");
+    changing_mode(a);
+    shifting(a);
+}
 
-    // `change_mode`: the mode in A taken. With less room, what lies past
-    // the gap moves down before the screen takes the memory above it; with
-    // more, the screen is made first and what lies past the gap moves up.
+/// `change_mode`: the mode in A taken, a bank taken on where the new screen
+/// leaves the text too little room. The gap starts below both modes'
+/// HIMEMs, and what lies past it in main memory moves with HIMEM, down
+/// before the screen takes the memory or up once it has given it back. What
+/// lies in sideways RAM stays where it is, its addresses moving with HIMEM.
+fn changing_mode(a: &mut Asm) {
     a.here("change_mode");
     a.sta(zp(z::T0));
     a.lda(imm(osbyte::HIMEM_MODE));
     a.ldx(zp(z::T0));
     a.jsr(entry::OSBYTE);
-    a.stx(zp(z::N2));
-    a.sty(zp(z::N2 + 1));
-    cmp16(a, z::N2, z::LIMIT);
-    let grow = a.local();
-    let new_mode = a.local();
-    let move_top = a.local();
-    a.bcs(grow);
-    sub16(a, z::N1, z::LIMIT, z::N2);
-    a.jsr("gap_room");
+    a.sty(zp(z::T1));
+    a.lda(imm(0));
+    a.sta(zp(z::N1));
+    a.lda(zp(z::MAIN_TOP));
+    a.sec();
+    a.sbc(zp(z::T1));
+    let takes = a.local();
+    a.bcs(takes);
+    a.lda(imm(0));
+    a.bind(takes);
+    a.sta(zp(z::N1 + 1));
+    let room = a.here_local();
+    sub16(a, z::P0, z::GEND, z::GAP);
+    cmp16(a, z::P0, z::N1);
+    let fits = a.local();
+    a.bcs(fits);
+    a.jsr("grow");
+    a.bcc(room);
     let too_big = a.local();
-    a.bcs(too_big);
-    a.jsr(move_top);
-    a.jmp(new_mode);
-    a.bind(grow);
-    a.jsr(new_mode);
-    a.fall_into(move_top);
-    // What lies past the gap moved to end at the new HIMEM.
-    a.bind(move_top);
-    sub16(a, z::HOLD, z::N2, z::LIMIT);
-    a.jsr("p1_gend");
-    add16(a, z::P2, z::GEND, z::HOLD);
-    sub16(a, z::N1, z::LIMIT, z::GEND);
+    a.jmp(too_big);
+    a.bind(fits);
+    // The text before the gap below the lower HIMEM.
+    a.lda(zp(z::T1));
+    a.cmp(zp(z::MAIN_TOP));
+    let lower = a.local();
+    a.bcc(lower);
+    a.lda(zp(z::MAIN_TOP));
+    a.bind(lower);
+    a.sta(zp(z::T3));
+    a.lda(zp(z::GAP));
+    a.cmp(imm(1));
+    a.lda(zp(z::GAP + 1));
+    a.sbc(imm(0));
+    a.cmp(zp(z::T3));
+    let below = a.local();
+    a.bcc(below);
+    a.lda(imm(0));
+    a.sec();
+    a.sbc(zp(z::BUF));
+    a.sta(zp(z::N0));
+    a.lda(zp(z::T3));
+    a.sbc(zp(z::BUF + 1));
+    a.sta(zp(z::N0 + 1));
+    a.jsr("move_gap");
+    a.bind(below);
+    // Down while the old HIMEM holds, before the new screen; up once the
+    // new one does.
+    a.lda(zp(z::T1));
+    a.sec();
+    a.sbc(zp(z::MAIN_TOP));
+    a.sta(zp(z::T4));
+    crate::rom::far(a, Asm::bne, "new_mode");
+    let up = a.local();
+    a.bcs(up);
+    a.jsr("past_gap_main");
+    let unmoved = a.local();
+    a.bcs(unmoved);
     a.jsr("memmove");
-    for v in [z::GEND, z::TEND, z::REG] {
-        add16(a, v, v, z::HOLD);
-    }
-    mov16(a, z::LIMIT, z::N2);
+    a.bind(unmoved);
+    a.jsr("new_mode");
+    let shifted = a.local();
+    a.jmp(shifted);
+    a.bind(up);
+    a.jsr("new_mode");
+    a.jsr("past_gap_main");
+    a.lda(zp(z::T1));
+    a.sta(zp(z::MAIN_TOP));
+    a.bcs(shifted);
+    a.jsr("memmove");
+    a.bind(shifted);
+    a.lda(zp(z::T4));
+    a.jsr("past_gap_by");
+    a.lda(zp(z::T1));
+    a.sta(zp(z::MAIN_TOP));
     a.rts();
-    a.bind(new_mode);
-    a.lda(zp(z::T0));
-    a.sta(zp(z::MODE));
-    a.jmp("set_mode");
     a.bind(too_big);
     a.call_with_text("say", &["Not enough memory"]);
     a.rts();
+}
+
+/// `past_gap_main`: P1, P2 and N1 the move of what lies past the gap in main
+/// memory by the pages from the old HIMEM to the new; carry set where
+/// nothing does. `new_mode`: the mode in T0 set.
+fn shifting(a: &mut Asm) {
+    a.here("past_gap_main");
+    a.lda(zp(z::GEND + 1));
+    a.cmp(zp(z::MAIN_TOP));
+    a.bcs(RTS);
+    a.jsr("p1_gend");
+    mov16(a, z::P2, z::GEND);
+    a.lda(zp(z::P2 + 1));
+    a.clc();
+    a.adc(zp(z::T1));
+    a.sec();
+    a.sbc(zp(z::MAIN_TOP));
+    a.sta(zp(z::P2 + 1));
+    a.lda(imm(0));
+    a.sec();
+    a.sbc(zp(z::GEND));
+    a.sta(zp(z::N1));
+    a.lda(zp(z::MAIN_TOP));
+    a.sbc(zp(z::GEND + 1));
+    a.sta(zp(z::N1 + 1));
+    a.clc();
+    a.rts();
+
+    a.here("new_mode");
+    a.lda(zp(z::T0));
+    a.sta(zp(z::MODE));
+    a.jmp("set_mode");
 }
 
 /// `:!command`: an OS command run with the keys given back, its output

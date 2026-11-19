@@ -12,9 +12,9 @@
 //! service call as its buffer fills; with none to take them they are
 //! purged.
 
-use super::buffers::{number, PRINTER_BUSY};
+use super::buffers::number;
 use super::vdu::status;
-use super::ws::{os, var, vdu_zp, vector};
+use super::ws::{os, page2, var, vdu_zp, vector};
 use super::Model;
 use super::{uvia, DELETE};
 use crate::cpu::STACK_PAGE;
@@ -205,6 +205,7 @@ fn oswrch(a: &mut Asm) {
 }
 
 fn printers(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     // A into the printer buffer, waiting for room; the sink takes nothing.
     a.here("printer_put");
     a.ldx(abs(var::PRINTER));
@@ -233,7 +234,7 @@ fn printers(a: &mut Asm, model: Model) {
 
     // The printer buffer's first character since its driver went dormant.
     a.here("printer_wake");
-    a.lsr(abs(PRINTER_BUSY));
+    a.lsr(abs(p2.printer_busy()));
     a.lda(abs(var::PRINTER));
     a.cmp(imm(printer::SERIAL));
     a.beq("rs423_wake");
@@ -275,7 +276,7 @@ fn printers(a: &mut Asm, model: Model) {
 
     // Each centisecond a user printer with characters is given its turn.
     a.here("printer_poll");
-    a.bit(abs(PRINTER_BUSY));
+    a.bit(abs(p2.printer_busy()));
     a.bmi(RTS);
     a.lda(abs(var::PRINTER));
     a.cmp(imm(printer::SERIAL + 1));
@@ -293,6 +294,7 @@ fn printers(a: &mut Asm, model: Model) {
 /// The Model B's parallel printer, on the User VIA: each character strobed
 /// out as the last is acknowledged.
 fn model_b_parallel(a: &mut Asm) {
+    let p2 = &page2::MODEL_B;
     a.here("printer_parallel_wake");
     a.lda(imm(irq::ANY | irq::CA1));
     a.sta(abs(uvia(reg::IER)));
@@ -319,7 +321,7 @@ fn model_b_parallel(a: &mut Asm) {
     a.sta(abs(uvia(reg::IFR)));
     a.sta(abs(uvia(reg::IER)));
     a.lda(imm(0xFF));
-    a.sta(abs(PRINTER_BUSY));
+    a.sta(abs(p2.printer_busy()));
     a.pla();
     a.tax();
     a.rts();
@@ -342,6 +344,7 @@ const _: () = assert!(control::TRANSMIT_INTERRUPT != 0 && control::NOT_READY != 
 /// chip only while RS423 has it: the serial ULA set for RS423 and the
 /// cassette filing system not using it.
 fn rs423(a: &mut Asm) {
+    let p2 = &page2::MODEL_B;
     // A into the RS423 output buffer, waiting for room.
     a.here("rs423_put");
     a.ldx(imm(number::RS423_OUTPUT));
@@ -415,7 +418,7 @@ fn rs423(a: &mut Asm) {
     a.cmp(imm(printer::SERIAL));
     a.clc();
     a.bne(RTS);
-    a.lda(abs(PRINTER_BUSY));
+    a.lda(abs(p2.printer_busy()));
     a.eor(imm(0x80));
     a.asl(Acc);
     a.rts();
@@ -477,6 +480,7 @@ fn rs423_transmitter(a: &mut Asm) {
 }
 
 fn rs423_interrupts(a: &mut Asm) {
+    let p2 = &page2::MODEL_B;
     // The 6850 interrupted: the cassette's while the filing system holds
     // it, otherwise RS423's.
     a.here("acia_interrupt");
@@ -502,13 +506,13 @@ fn rs423_interrupts(a: &mut Asm) {
     a.lda(abs(var::PRINTER));
     a.cmp(imm(printer::SERIAL));
     a.bne("rs423_send_output");
-    a.bit(abs(PRINTER_BUSY));
+    a.bit(abs(p2.printer_busy()));
     a.bmi("rs423_send_output");
     a.ldx(imm(number::PRINTER));
     a.jsr("buffer_remove");
     a.bcc("rs423_send");
     a.lda(imm(0xFF));
-    a.sta(abs(PRINTER_BUSY));
+    a.sta(abs(p2.printer_busy()));
     a.here("rs423_send_output");
     a.ldx(imm(number::RS423_OUTPUT));
     a.jsr("buffer_remove");

@@ -54,13 +54,13 @@ l'emplacement 13. À l'invite de la machine, `*VIM` suivi du nom d'un fichier
 édite ce fichier, et BREAK dans VIM garde le texte qu'il contient. VIM édite du
 texte, comme les fichiers `!BOOT` que crée `*BUILD`, et des programmes BASIC,
 qu'il liste sous forme de texte et réenregistre tokenisés, en colorant chacun
-autant que le permettent les couleurs du mode d'écran ; `:dis` suivi du nom
-d'un fichier fait défiler page par page le code machine d'un programme. Dans
-VIM, `:help` liste ses commandes et les modes d'écran avec la place que laisse
-chacun, `:mode` suivi d'un nombre change de mode, et `:q` revient au BASIC. Là
-où une banque de RAM latérale ne contient aucune ROM, VIM y garde ce qu'il copie
-ou supprime, dans la plus haute de ces banques, si bien qu'il ne prend rien de
-la mémoire dont dispose le texte.
+autant que le permettent les couleurs du mode d'écran. Dans VIM, `:help` liste
+ses commandes et les modes d'écran avec la place que laisse chacun en mémoire
+principale, `:mode` suivi d'un nombre change de mode, et `:q` revient au BASIC.
+Une fois la mémoire principale pleine, VIM déborde sur des banques de RAM
+latérale ne contenant aucune ROM, deux au plus, si bien qu'il peut éditer un
+fichier plus grand que la mémoire principale ; un tel fichier est plus long à
+lire et à écrire.
 
 Fermer la fenêtre d'une machine la met en veille : redémarrée, elle reprend là
 où elle s'était arrêtée. Éteindre, dans son menu, retire ses supports et

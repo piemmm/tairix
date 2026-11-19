@@ -161,8 +161,7 @@ fn matching(a: &mut Asm) {
     a.beq(matched);
     cmp16(a, z::N1, z::LEN);
     a.bcs(differ);
-    a.ldy(imm(0));
-    a.lda(zp(z::P0).ind_y());
+    a.jsr("rd0");
     a.cmp(abs(page::PATTERN).x());
     a.bne(differ);
     a.inx();

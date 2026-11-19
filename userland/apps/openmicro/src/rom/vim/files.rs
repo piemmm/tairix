@@ -1,9 +1,9 @@
 //! Files: one read into the text by its kind — a BASIC program listed, a
 //! text's lines ending as it ends them — and written back as it was read.
-//! A file is loaded against the register, the top of the room the text
-//! has, and decoded down into the text from OSHWM.
+//! A file's bytes are put at the gap's end and decoded down into it from
+//! its start.
 
-use super::ops::{add16, cmp16, dec16, inc16, mov16, sub16, zero16};
+use super::ops::{add16, cmp16, dec16, inc16, mov16, set16, sub16, zero16};
 use super::ws::{file, page, reading, show, syntax, zp as z};
 use crate::rom::asm::{abs, hi, imm, lo, zp, Asm, RTS};
 use crate::rom::os::{entry, CR};
@@ -15,13 +15,15 @@ const READ_INFO: u8 = 5;
 const WRITE_INFO: u8 = 1;
 const LOAD: u8 = 0xFF;
 const SAVE: u8 = 0;
-/// OSFIND's call that opens a file to write.
+/// OSFIND's calls that open a file to read and to write.
+const OPEN_IN: u8 = 0x40;
 const OPEN_OUT: u8 = 0x80;
-/// OSGBPB's call that writes bytes at the file's pointer, and its block,
-/// laid over OSFILE's after the name, which a part written leaves for the
-/// file's addresses to be given by OSFILE 1: the handle, the address, the
-/// count, then the pointer.
+/// OSGBPB's calls that write bytes at the file's pointer and read them from
+/// it, and its block, laid over OSFILE's after the name, which a part
+/// written leaves for the file's addresses to be given by OSFILE 1: the
+/// handle, the address, the count, then the pointer.
 const WRITE_BYTES: u8 = 2;
+const READ_BYTES: u8 = 4;
 const GBPB_HANDLE: u16 = page::BLOCK + 2;
 const GBPB_ADDRESS: u16 = GBPB_HANDLE + 1;
 const GBPB_COUNT: u16 = GBPB_ADDRESS + 4;
@@ -43,6 +45,7 @@ const BOOT: &[u8] = b"!BOOT";
 pub(super) fn emit(a: &mut Asm) {
     opening(a);
     decoding(a);
+    placing(a);
     recognising(a);
     text_in(a);
     writing(a);
@@ -107,29 +110,16 @@ fn opening(a: &mut Asm) {
     a.sta(zp(z::N1));
     a.lda(abs(BLOCK_START + 1));
     a.sta(zp(z::N1 + 1));
-    sub16(a, z::N2, z::REG, z::BUF);
-    cmp16(a, z::N2, z::N1);
-    a.bcc(too_big);
-    // Its addresses kept for writing it back; it is loaded against the
-    // register.
+    a.jsr("gap_room");
+    a.bcs(too_big);
+    // Its addresses kept for writing it back.
     a.ldx(imm(7));
     let keep = a.here_local();
     a.lda(abs(BLOCK_LOAD).x());
     a.sta(abs(page::LOAD).x());
     a.dex();
     a.bpl(keep);
-    sub16(a, z::BASIC_IN, z::REG, z::N1);
-    a.lda(zp(z::BASIC_IN));
-    a.sta(abs(BLOCK_LOAD));
-    a.lda(zp(z::BASIC_IN + 1));
-    a.sta(abs(BLOCK_LOAD + 1));
-    a.lda(imm(HERE));
-    a.sta(abs(BLOCK_LOAD + 2));
-    a.sta(abs(BLOCK_LOAD + 3));
-    a.lda(imm(0));
-    a.sta(abs(BLOCK_EXEC));
-    a.lda(imm(LOAD));
-    a.jsr("osfile");
+    a.jsr("place_raw");
     a.lda(imm(reading::OPENED));
     a.sta(zp(z::READING));
     a.jsr("decode_in");
@@ -205,6 +195,109 @@ fn decoding(a: &mut Asm) {
     a.jmp(abs(entry::OSFILE));
 }
 
+/// `place_raw`: the N1 bytes of the file the block names put to end at
+/// GEND, `BASIC_IN` their first: loaded whole where main memory below GEND
+/// takes them, then moved up; otherwise read a page at a time through the
+/// conversion page, as no filing system can write into a bank.
+fn placing(a: &mut Asm) {
+    a.here("place_raw");
+    // Loaded to end below GEND or HIMEM, the lower.
+    mov16(a, z::P1, z::GEND);
+    a.lda(zp(z::P1 + 1));
+    a.cmp(zp(z::MAIN_TOP));
+    let low = a.local();
+    a.bcc(low);
+    a.lda(imm(0));
+    a.sta(zp(z::P1));
+    a.lda(zp(z::MAIN_TOP));
+    a.sta(zp(z::P1 + 1));
+    a.bind(low);
+    sub16(a, z::P1, z::P1, z::N1);
+    let streamed = a.local();
+    a.bcc(streamed);
+    cmp16(a, z::P1, z::GAP);
+    a.bcc(streamed);
+    a.lda(zp(z::P1));
+    a.sta(abs(BLOCK_LOAD));
+    a.lda(zp(z::P1 + 1));
+    a.sta(abs(BLOCK_LOAD + 1));
+    a.lda(imm(HERE));
+    a.sta(abs(BLOCK_LOAD + 2));
+    a.sta(abs(BLOCK_LOAD + 3));
+    a.lda(imm(0));
+    a.sta(abs(BLOCK_EXEC));
+    a.lda(imm(LOAD));
+    a.jsr("osfile");
+    sub16(a, z::BASIC_IN, z::GEND, z::N1);
+    mov16(a, z::P2, z::BASIC_IN);
+    a.lda(zp(z::P1));
+    a.cmp(zp(z::P2));
+    let moved = a.local();
+    a.bne(moved);
+    a.lda(zp(z::P1 + 1));
+    a.cmp(zp(z::P2 + 1));
+    a.beq(RTS);
+    a.bind(moved);
+    a.jmp("memmove");
+    // A page at a time, BASIC_OUT where the next goes, N2 what is left.
+    a.bind(streamed);
+    a.ldx(abs(page::BLOCK));
+    a.ldy(abs(page::BLOCK + 1));
+    a.lda(imm(OPEN_IN));
+    a.jsr(entry::OSFIND);
+    a.sta(abs(page::HANDLE));
+    sub16(a, z::BASIC_IN, z::GEND, z::N1);
+    mov16(a, z::BASIC_OUT, z::BASIC_IN);
+    mov16(a, z::N2, z::N1);
+    let next = a.here_local();
+    zero16(a, z::N2);
+    let more = a.local();
+    a.bne(more);
+    sub16(a, z::N1, z::GEND, z::BASIC_IN);
+    a.jmp("close_file");
+    a.bind(more);
+    set16(a, z::N1, 0x100);
+    a.lda(zp(z::N2 + 1));
+    let whole = a.local();
+    a.bne(whole);
+    a.lda(zp(z::N2));
+    a.sta(zp(z::N1));
+    a.lda(imm(0));
+    a.sta(zp(z::N1 + 1));
+    a.bind(whole);
+    set16(a, z::P1, page::CONVERT);
+    a.lda(imm(READ_BYTES));
+    a.jsr("gbpb");
+    set16(a, z::P1, page::CONVERT);
+    mov16(a, z::P2, z::BASIC_OUT);
+    a.jsr("memmove");
+    add16(a, z::BASIC_OUT, z::BASIC_OUT, z::N1);
+    sub16(a, z::N2, z::N2, z::N1);
+    a.jmp(next);
+
+    // `gbpb`: OSGBPB A on the file the editor has open, N1 bytes at P1.
+    a.here("gbpb");
+    a.pha();
+    a.lda(abs(page::HANDLE));
+    a.sta(abs(GBPB_HANDLE));
+    for (to, from) in [(GBPB_ADDRESS, z::P1), (GBPB_COUNT, z::N1)] {
+        a.lda(zp(from));
+        a.sta(abs(to));
+        a.lda(zp(from + 1));
+        a.sta(abs(to + 1));
+    }
+    a.lda(imm(HERE));
+    a.sta(abs(GBPB_ADDRESS + 2));
+    a.sta(abs(GBPB_ADDRESS + 3));
+    a.lda(imm(0));
+    a.sta(abs(GBPB_COUNT + 2));
+    a.sta(abs(GBPB_COUNT + 3));
+    a.pla();
+    a.ldx(imm(lo(GBPB_HANDLE)));
+    a.ldy(imm(hi(GBPB_HANDLE)));
+    a.jmp(abs(entry::OSGBPB));
+}
+
 /// `is_program`: whether a file is a BASIC program.
 fn recognising(a: &mut Asm) {
     // `is_program`: carry set where the N1 bytes from BASIC_IN are a BASIC
@@ -224,11 +317,13 @@ fn recognising(a: &mut Asm) {
     a.bcc(no);
     a.bind(long);
     a.ldy(imm(0));
-    a.lda(zp(z::P0).ind_y());
+    a.lda(imm(lo(z::P0)));
+    a.jsr("rdp");
     a.cmp(imm(CR));
     a.bne(no);
     a.iny();
-    a.lda(zp(z::P0).ind_y());
+    a.lda(imm(lo(z::P0)));
+    a.jsr("rdp");
     a.cmp(imm(0xFF));
     a.beq(yes);
     a.and(imm(0x80));
@@ -241,7 +336,8 @@ fn recognising(a: &mut Asm) {
     a.bcc(no);
     a.bind(room);
     a.ldy(imm(3));
-    a.lda(zp(z::P0).ind_y());
+    a.lda(imm(lo(z::P0)));
+    a.jsr("rdp");
     a.cmp(imm(4));
     a.bcc(no);
     a.sta(zp(z::T0));
@@ -291,7 +387,7 @@ fn text_in(a: &mut Asm) {
     zero16(a, z::N1);
     a.beq(finished);
     a.ldy(imm(0));
-    a.lda(zp(z::BASIC_IN).ind_y());
+    a.jsr("rdin");
     a.tax();
     inc16(a, z::BASIC_IN);
     dec16(a, z::N1);
@@ -382,10 +478,7 @@ fn text_in(a: &mut Asm) {
     a.rts();
 
     a.here("text_out");
-    a.ldy(imm(0));
-    a.sta(zp(z::BASIC_OUT).ind_y());
-    inc16(a, z::BASIC_OUT);
-    a.rts();
+    a.jmp("wrout");
 }
 
 /// `write_file`: the text written to the file OSFILE's block names, in its
@@ -406,6 +499,13 @@ fn writing(a: &mut Asm) {
     a.lda(zp(z::FILE));
     a.and(imm(file::CRLF | file::LFCR));
     a.bne(emitted);
+    // Whole below HIMEM, saved from where it lies.
+    a.lda(zp(z::GAP));
+    a.cmp(imm(1));
+    a.lda(zp(z::GAP + 1));
+    a.sbc(imm(0));
+    a.cmp(zp(z::MAIN_TOP));
+    a.bcs(emitted);
     mov16(a, z::P1, z::BUF);
     a.jsr("p2_gap");
     a.lda(zp(z::FILE));
@@ -419,11 +519,14 @@ fn writing(a: &mut Asm) {
     a.bind(plain);
     a.jsr("save_range");
     a.jmp("written");
-    // A program, or a text whose lines end in pairs: built in the gap and
-    // saved from it in one call; or, once it outgrows the gap, written to
+    // A program, a text whose lines end in pairs, or one past HIMEM: built
+    // in the gap, moved to the text's start so main memory holds it, and
+    // saved from there in one call; or, once it outgrows that, written to
     // the file opened for it a part at a time, then given its addresses.
     a.bind(emitted);
-    a.jsr("n0_len");
+    a.lda(imm(0));
+    a.sta(zp(z::N0));
+    a.sta(zp(z::N0 + 1));
     a.jsr("move_gap");
     mov16(a, z::BASIC_OUT, z::GAP);
     mov16(a, z::REND, z::GAP);
@@ -458,41 +561,49 @@ fn emitting(a: &mut Asm) {
     let pairs = a.local();
     a.beq(pairs);
     a.jmp("basic_emit");
-    // Each line's end a pair.
+    // Each line's end as the file has it, T1 then T2 where it is a pair,
+    // from the text after the gap, which is at its start.
     a.bind(pairs);
-    a.lda(zp(z::FILE));
-    a.and(imm(file::CRLF));
-    let lf_first = a.local();
-    a.beq(lf_first);
-    a.lda(imm(CR));
-    a.ldx(imm(LF));
     let chosen = a.local();
-    a.bne(chosen);
-    a.bind(lf_first);
-    a.lda(imm(LF));
-    a.ldx(imm(CR));
+    for (kind, first, second) in [
+        (file::CRLF, CR, LF),
+        (file::LFCR, LF, CR),
+        (file::LF, LF, 0),
+    ] {
+        a.lda(zp(z::FILE));
+        a.and(imm(kind));
+        let other = a.local();
+        a.beq(other);
+        a.lda(imm(first));
+        a.ldx(imm(second));
+        a.jmp(chosen);
+        a.bind(other);
+    }
+    a.lda(imm(CR));
+    a.ldx(imm(0));
     a.bind(chosen);
     a.sta(zp(z::T1));
     a.stx(zp(z::T2));
-    mov16(a, z::P0, z::BUF);
+    mov16(a, z::P0, z::GEND);
     let each = a.here_local();
     a.lda(zp(z::P0));
-    a.cmp(zp(z::GAP));
+    a.cmp(zp(z::TEND));
     let more = a.local();
     a.bne(more);
     a.lda(zp(z::P0 + 1));
-    a.cmp(zp(z::GAP + 1));
+    a.cmp(zp(z::TEND + 1));
     a.beq(RTS);
     a.bind(more);
-    a.ldy(imm(0));
-    a.lda(zp(z::P0).ind_y());
+    a.jsr("rd0");
     inc16(a, z::P0);
     a.cmp(imm(CR));
     let one = a.local();
     a.bne(one);
     a.lda(zp(z::T1));
+    a.ldx(zp(z::T2));
+    a.beq(one);
     a.jsr("out_byte");
-    a.lda(zp(z::T2));
+    a.txa();
     a.bind(one);
     a.jsr("out_byte");
     // A part written keeps nothing back of a whole line.
@@ -538,9 +649,10 @@ fn reporting(a: &mut Asm) {
     a.sec();
     a.rts();
     a.bind(room);
-    a.ldy(imm(0));
     a.lda(imm(CR));
-    a.sta(zp(z::GAP).ind_y());
+    a.ldx(imm(lo(z::GAP)));
+    a.ldy(imm(0));
+    a.jsr("wrp");
     inc16(a, z::GAP);
     inc16(a, z::GOFF);
     inc16(a, z::LEN);
@@ -596,18 +708,7 @@ fn reading(a: &mut Asm) {
     a.jsr("move_gap");
     a.jsr("gap_room");
     crate::rom::far(a, Asm::bcc, "no_room");
-    sub16(a, z::BASIC_IN, z::GEND, z::N1);
-    a.lda(zp(z::BASIC_IN));
-    a.sta(abs(BLOCK_LOAD));
-    a.lda(zp(z::BASIC_IN + 1));
-    a.sta(abs(BLOCK_LOAD + 1));
-    a.lda(imm(HERE));
-    a.sta(abs(BLOCK_LOAD + 2));
-    a.sta(abs(BLOCK_LOAD + 3));
-    a.lda(imm(0));
-    a.sta(abs(BLOCK_EXEC));
-    a.lda(imm(LOAD));
-    a.jsr("osfile");
+    a.jsr("place_raw");
     a.lda(zp(z::FILE));
     a.pha();
     a.lda(imm(reading::INTO_TEXT));
@@ -649,8 +750,12 @@ fn output(a: &mut Asm) {
     a.ldy(zp(z::T4));
     a.rts();
 
-    // `out_full`: zero set where BASIC_OUT has reached the gap's end.
+    // `out_full`: zero set where BASIC_OUT has reached the gap's end or
+    // HIMEM, past which no filing system can read it.
     a.here("out_full");
+    a.lda(zp(z::BASIC_OUT + 1));
+    a.cmp(zp(z::MAIN_TOP));
+    a.beq(RTS);
     a.lda(zp(z::BASIC_OUT));
     a.cmp(zp(z::GEND));
     a.bne(RTS);
@@ -682,24 +787,10 @@ fn flushing(a: &mut Asm) {
     a.jsr("say_not_file");
     a.jmp("main");
     a.bind(opened);
-    a.sta(abs(GBPB_HANDLE));
     sub16(a, z::N1, z::REND, z::GAP);
-    for (to, from) in [(GBPB_ADDRESS, z::GAP), (GBPB_COUNT, z::N1)] {
-        a.lda(zp(from));
-        a.sta(abs(to));
-        a.lda(zp(from + 1));
-        a.sta(abs(to + 1));
-    }
-    a.lda(imm(HERE));
-    a.sta(abs(GBPB_ADDRESS + 2));
-    a.sta(abs(GBPB_ADDRESS + 3));
-    a.lda(imm(0));
-    a.sta(abs(GBPB_COUNT + 2));
-    a.sta(abs(GBPB_COUNT + 3));
+    mov16(a, z::P1, z::GAP);
     a.lda(imm(WRITE_BYTES));
-    a.ldx(imm(lo(GBPB_HANDLE)));
-    a.ldy(imm(hi(GBPB_HANDLE)));
-    a.jsr(entry::OSGBPB);
+    a.jsr("gbpb");
     mov16(a, z::P1, z::REND);
     a.jsr("p2_gap");
     sub16(a, z::N1, z::BASIC_OUT, z::REND);
@@ -727,8 +818,7 @@ fn saving(a: &mut Asm) {
     a.cmp(zp(z::GAP + 1));
     a.beq(RTS);
     a.bind(go_on);
-    a.ldy(imm(0));
-    a.lda(zp(z::P0).ind_y());
+    a.jsr("rd0");
     a.cmp(imm(CR));
     let not_cr = a.local();
     let store = a.local();
@@ -741,7 +831,7 @@ fn saving(a: &mut Asm) {
     a.bne(next);
     a.lda(imm(CR));
     a.bind(store);
-    a.sta(zp(z::P0).ind_y());
+    a.jsr("wr0");
     a.bind(next);
     inc16(a, z::P0);
     a.jmp(swap);

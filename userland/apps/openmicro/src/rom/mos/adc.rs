@@ -21,6 +21,7 @@ pub fn emit(a: &mut Asm) {
 }
 
 fn conversions(a: &mut Asm) {
+    let p2 = &page2::MODEL_B;
     // From the highest channel OSBYTE 16 selects; with none, those below the
     // one converting still finish, as MOS 1.20's do.
     a.here("adc_init");
@@ -52,7 +53,7 @@ fn conversions(a: &mut Asm) {
     a.bind(channel);
     a.stx(abs(var::ADC_CHANNEL));
     a.lda(imm(0));
-    a.sta(abs(page2::ADC_LAST));
+    a.sta(abs(p2.adc_last));
     a.beq("adc_start");
 
     // End of conversion: the result kept, the event, and the next channel
@@ -70,11 +71,11 @@ fn conversions(a: &mut Asm) {
     a.and(imm(adc::CHANNEL));
     a.tax();
     a.lda(abs(LOW));
-    a.sta(abs(page2::ADC_LOW).x());
+    a.sta(abs(p2.adc_low).x());
     a.lda(abs(HIGH));
-    a.sta(abs(page2::ADC_HIGH).x());
+    a.sta(abs(p2.adc_high).x());
     a.inx();
-    a.stx(abs(page2::ADC_LAST));
+    a.stx(abs(p2.adc_last));
     a.txa();
     a.ldy(imm(event::CONVERTED));
     a.jsr("oseven");

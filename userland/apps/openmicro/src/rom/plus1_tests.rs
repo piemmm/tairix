@@ -147,12 +147,13 @@ fn fx17_converts_its_channel_with_none_selected() {
     );
 }
 
-/// A setting past the four channels is the fourth, and nothing past page 2's
-/// tables is written.
+/// A setting past the four channels is the fourth, and nothing past the
+/// readings, which end page 2, is written.
 #[test]
 fn a_channel_setting_past_four_converts_the_four() {
     let (mut machine, os) = electron_with_plus1();
-    let events = machine.peek(page2::ADC_LAST + 1);
+    let past = page2::ELECTRON.adc_high + u16::from(page2::ADC_CHANNELS);
+    let beyond = machine.peek(past);
     type_text(&mut machine, "*FX189,200\r*FX188,200\r");
     machine.set_analogue(3, 0x9000);
     wait(&mut machine, 10);
@@ -164,8 +165,8 @@ fn a_channel_setting_past_four_converts_the_four() {
         "{:?}",
         screen(&machine, &os)
     );
-    assert!((1..=4).contains(&machine.peek(page2::ADC_LAST)));
-    assert_eq!(machine.peek(page2::ADC_LAST + 1), events);
+    assert!((1..=4).contains(&machine.peek(page2::ELECTRON.adc_last)));
+    assert_eq!(machine.peek(past), beyond);
 }
 
 /// An event handler counting event 3 at &70 and keeping its channel at &71.
@@ -190,9 +191,28 @@ fn each_conversion_raises_event_3_with_its_channel() {
     assert!((1..=4).contains(&channel), "{lines:?}");
 }
 
+/// Electron OS 1.00 starts with no printer chosen, so a print goes nowhere
+/// until the parallel printer is.
+const PARALLEL: &str = "*FX5,1\r";
+
 #[test]
-fn the_parallel_printer_takes_what_vdu_2_prints() {
-    let (mut machine, _) = electron_with_plus1();
+fn the_parallel_printer_takes_what_vdu_2_prints_once_chosen() {
+    let (mut machine, os) = electron_with_plus1();
+    type_text(
+        &mut machine,
+        "A%=&F5:X%=0:Y%=&FF:PRINT (USR(&FFF4) AND &FF00) DIV 256\r",
+    );
+    wait(&mut machine, 10);
+    assert_eq!(
+        last_number(&machine, &os),
+        Some(0),
+        "{:?}",
+        screen(&machine, &os)
+    );
+    type_text(&mut machine, "VDU2:PRINT \"NOWHERE\":VDU3\r");
+    wait(&mut machine, 30);
+    assert_eq!(printed(&mut machine), b"", "no printer chosen");
+    type_text(&mut machine, PARALLEL);
     type_text(&mut machine, "VDU2:PRINT \"HELLO\":VDU3\r");
     wait(&mut machine, 30);
     assert_eq!(printed(&mut machine), b"HELLO\r");
@@ -203,6 +223,7 @@ fn the_parallel_printer_takes_what_vdu_2_prints() {
 #[test]
 fn a_long_print_arrives_whole_and_in_order() {
     let (mut machine, _) = electron_with_plus1();
+    type_text(&mut machine, PARALLEL);
     type_text(
         &mut machine,
         "VDU2:FOR I=1 TO 40:PRINT \"LINE \";I:NEXT:VDU3\r",
@@ -218,6 +239,7 @@ fn a_long_print_arrives_whole_and_in_order() {
 fn fx163_128_1_turns_both_ports_off_and_0_on_again() {
     let (mut machine, os) = electron_with_plus1();
     assert_eq!(machine.peek(POLL_SEMAPHORE), 1, "polled from the reset");
+    type_text(&mut machine, PARALLEL);
     type_text(&mut machine, "*FX163,128,1\r");
     assert_eq!(machine.peek(POLL_SEMAPHORE), 0, "and no longer");
     machine.set_analogue(0, 0x4000);
@@ -267,6 +289,7 @@ fn a_break_keeps_the_ports_off_and_a_hard_break_turns_them_on() {
     press_break(&mut machine, &[Key::CTRL]);
     assert_eq!(machine.peek(POLL_SEMAPHORE), 1, "on after CTRL-BREAK");
     press(&mut machine, &[Key::RETURN]);
+    type_text(&mut machine, PARALLEL);
     type_text(&mut machine, "VDU2:PRINT \"BACK\":VDU3\r");
     wait(&mut machine, 30);
     assert_eq!(printed(&mut machine), b"BACK\r");

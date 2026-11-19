@@ -6,7 +6,6 @@
 
 mod basic;
 mod buffer;
-mod dis;
 mod edit;
 mod entry;
 mod ex;
@@ -22,6 +21,7 @@ mod search;
 mod subst;
 mod syntax;
 mod text;
+mod vmem;
 mod ws;
 
 #[cfg(test)]
@@ -38,7 +38,7 @@ use crate::rom::asm::{Asm, AsmError, Image};
 pub fn build() -> Result<Image, AsmError> {
     let ram = paging::assemble()?;
     let mut a = Asm::new(SIDEWAYS_BASE, ROM_SIZE);
-    entry::emit(&mut a);
+    entry::emit(&mut a, &ram);
     normal::emit(&mut a);
     motion::emit(&mut a);
     edit::emit(&mut a);
@@ -48,10 +48,10 @@ pub fn build() -> Result<Image, AsmError> {
     ex::emit(&mut a);
     files::emit(&mut a);
     help::emit(&mut a);
-    dis::emit(&mut a);
     basic::emit(&mut a);
-    buffer::emit(&mut a, &ram);
+    buffer::emit(&mut a);
     paging::emit(&mut a, &ram);
+    vmem::emit(&mut a, &ram);
     screen::emit(&mut a);
     syntax::emit(&mut a);
     text::emit(&mut a);

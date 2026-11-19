@@ -36,6 +36,10 @@ const fn low_calls(model: Model) -> u8 {
 const HIGH_FIRST: u8 = 0x75;
 const HIGH_END: u8 = 0xA1;
 
+/// What an enabled event's flag holds, as both originals leave it: OSBYTE
+/// 14's own number.
+const EVENT_ENABLED: u8 = 14;
+
 /// The calls 0 to 21.
 const LOW: [&str; 22] = [
     "osbyte_identify",
@@ -147,7 +151,7 @@ pub fn emit(a: &mut Asm, model: Model) {
     dispatch(a, model);
     variables(a);
     simple(a, model);
-    streams(a);
+    streams(a, model);
     timing(a, model);
     input(a, model);
     machine(a, model);
@@ -398,7 +402,8 @@ fn osbyte_cursor_position(a: &mut Asm, model: Model) {
 }
 
 /// Streams, buffers and the Escape condition.
-fn streams(a: &mut Asm) {
+fn streams(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     // OSBYTE 2: input from RS423 for X = 1, otherwise the keyboard; RS423's
     // receiver on for any X but 0. X returns the old input buffer.
     a.here("osbyte_input");
@@ -414,7 +419,7 @@ fn streams(a: &mut Asm) {
     a.here("osbyte_printer");
     a.bit(zp(os::ESCAPE));
     a.bmi("osbyte_printer_set");
-    a.lda(abs(super::buffers::PRINTER_BUSY));
+    a.lda(abs(p2.printer_busy()));
     a.bmi("osbyte_printer_set");
     a.jsr("interrupt_window");
     a.bpl("osbyte_printer");
@@ -431,12 +436,12 @@ fn streams(a: &mut Asm) {
     a.lda(imm(0));
     a.beq("osbyte_event");
     a.here("osbyte_enable_event");
-    a.lda(imm(1));
+    a.lda(imm(EVENT_ENABLED));
     a.here("osbyte_event");
     a.cpx(imm(10));
     a.bcs(RTS);
-    a.ldy(abs(page2::EVENTS).x());
-    a.sta(abs(page2::EVENTS).x());
+    a.ldy(abs(p2.events).x());
+    a.sta(abs(p2.events).x());
     a.tya();
     a.tax();
     a.rts();
@@ -483,11 +488,12 @@ fn streams(a: &mut Asm) {
     a.here("osbyte_acknowledged");
     a.lsr(zp(os::ESCAPE));
     a.rts();
-    osbyte_insert(a);
+    osbyte_insert(a, model);
 }
 
 /// The buffer calls: OSBYTE &8A and &99 insert, &91 removes and &98 examines.
-fn osbyte_insert(a: &mut Asm) {
+fn osbyte_insert(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     a.here("osbyte_insert");
     a.tya();
     a.jmp("buffer_insert");
@@ -509,7 +515,7 @@ fn osbyte_insert(a: &mut Asm) {
     a.here("osbyte_printer_dormant");
     a.ldx(imm(super::buffers::number::PRINTER));
     a.lda(imm(0xFF));
-    a.sta(abs(super::buffers::PRINTER_BUSY));
+    a.sta(abs(p2.printer_busy()));
     a.rts();
 
     a.here("osbyte_eof");
@@ -525,6 +531,7 @@ fn osbyte_insert(a: &mut Asm) {
 
 /// Timing, the ADC and fonts.
 fn timing(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     // OSBYTE 19: until the next VSYNC, which moves the cassette's timeout.
     a.here("osbyte_wait_vsync");
     a.lda(abs(var::CFS_TIMEOUT));
@@ -569,7 +576,7 @@ fn timing(a: &mut Asm, model: Model) {
             a.lsr(Acc);
             a.and(imm(3));
             a.tax();
-            a.ldy(abs(page2::ADC_LAST));
+            a.ldy(abs(p2.adc_last));
             // C set, as MOS 1.20 leaves it.
             a.sec();
             a.rts();
@@ -588,7 +595,7 @@ fn timing(a: &mut Asm, model: Model) {
             a.beq("osbyte_electron_adc_claimed");
             a.ldx(zp(os::CALL_X));
             a.bne("osbyte_adc_channel");
-            a.ldy(abs(page2::ADC_LAST));
+            a.ldy(abs(p2.adc_last));
             a.sec();
             a.rts();
             a.here("osbyte_electron_adc_claimed");
@@ -609,8 +616,8 @@ fn timing(a: &mut Asm, model: Model) {
     a.here("osbyte_adc_channel");
     a.cpx(imm(5));
     a.bcs(RTS);
-    a.ldy(abs(page2::ADC_HIGH - 1).x());
-    a.lda(abs(page2::ADC_LOW - 1).x());
+    a.ldy(abs(p2.adc_high - 1).x());
+    a.lda(abs(p2.adc_low - 1).x());
     a.tax();
     a.rts();
     a.here("osbyte_buffer_status");
@@ -638,6 +645,7 @@ fn timing(a: &mut Asm, model: Model) {
 
 /// Input: INKEY.
 fn input(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     // &81: Y negative, as MOS 1.20 takes any Y with its top bit set, with X
     // zero reads the OS's version; with X's top bit set it tests key X EOR
     // &FF, and without it, as MOS 1.20 has it, is TRUE while no key from key
@@ -685,14 +693,14 @@ fn input(a: &mut Asm, model: Model) {
         a.rts();
     }
     a.here("osbyte_inkey_timed");
-    a.stx(abs(page2::INKEY_COUNT));
-    a.sty(abs(page2::INKEY_COUNT + 1));
+    a.stx(abs(p2.inkey_count));
+    a.sty(abs(p2.inkey_count + 1));
     // The count runs down in the interrupts `rdch_once` lets in.
     a.here("osbyte_inkey_wait");
     a.jsr("rdch_once");
     a.bvc("osbyte_inkey_got");
-    a.lda(abs(page2::INKEY_COUNT));
-    a.ora(abs(page2::INKEY_COUNT + 1));
+    a.lda(abs(p2.inkey_count));
+    a.ora(abs(p2.inkey_count + 1));
     a.bne("osbyte_inkey_wait");
     // Timed out: X as it was given, as MOS 1.20 leaves it.
     a.ldx(zp(os::CALL_X));
@@ -710,6 +718,7 @@ fn input(a: &mut Asm, model: Model) {
 /// The machine: the Model B's video ULA and 6850, FRED, JIM and SHEILA,
 /// ROMs and the filing system's calls.
 fn machine(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     if model == Model::ModelB {
         // &9B: X is a logical colour and a physical, which the ULA takes
         // inverted, as the copy keeps it.
@@ -756,7 +765,7 @@ fn machine(a: &mut Asm, model: Model) {
     a.rts();
 
     a.here("osbyte_language");
-    a.lda(abs(page2::ROM_TYPES).x());
+    a.lda(abs(p2.rom_types).x());
     a.and(imm(crate::rom::os::rom_type::LANGUAGE));
     a.beq("osbyte_not_language");
     a.jmp("enter_language");

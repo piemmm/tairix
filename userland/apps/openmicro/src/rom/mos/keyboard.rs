@@ -65,7 +65,7 @@ const KEYS: u8 = 16;
 const KEY_END: u16 = buffer::SOFT_KEYS + KEYS as u16;
 const KEY_BASE: u16 = buffer::SOFT_KEYS + 1;
 /// Every pointer's offset with no text defined: the byte after the end's.
-const KEY_EMPTY: u8 = 0x10;
+pub(super) const KEY_EMPTY: u8 = 0x10;
 const _: () = assert!(KEY_BASE + KEY_EMPTY as u16 == KEY_END + 1);
 /// The offset the end may not reach, which leaves room for 238 bytes.
 const KEY_LIMIT: u8 = 0xFF;
@@ -256,12 +256,12 @@ pub fn emit(a: &mut Asm, model: Model) {
     }
     leds(a, model);
     a.whole(|a| rdch(a, model));
-    a.whole(soft_keys);
+    a.whole(|a| soft_keys(a, model));
     if model == Model::Electron {
         firm_keys(a);
     }
     // Its branches reach across the whole of it.
-    a.whole(line_input);
+    a.whole(|a| line_input(a, model));
     editing(a);
     // Indexed by key number, as software indexes it from OSBYTE &AC's
     // address: rows sixteen keys apart, the slots past each row's tenth
@@ -358,6 +358,19 @@ fn matrix(a: &mut Asm) {
 const ELECTRON_LINES: u8 = electron_keyboard::LINES.to_le_bytes()[0];
 const _: () = assert!(electron_keyboard::LINES < 0x100);
 const NO_LINE: u16 = SIDEWAYS_BASE | ((1 << electron_keyboard::LINES) - 1);
+/// Where Electron OS 1.00 keeps its scan's state, and what a reset leaves
+/// there: no key's bit, and line 0's address. This scan keeps its state
+/// elsewhere, so only the reset's is set out.
+pub(super) const ELECTRON_SCAN: u16 = 0x02C0;
+pub(super) const ELECTRON_SCAN_RESET: [u8; 3] = {
+    let [low, high] = (NO_LINE & !1).to_le_bytes();
+    [0, low, high]
+};
+const _: () = assert!(
+    ELECTRON_SCAN == page2::ELECTRON.first_repeat + 1
+        && ELECTRON_SCAN as usize + ELECTRON_SCAN_RESET.len()
+            == page2::ELECTRON.buffer_busy as usize
+);
 /// The lines the window's low address byte selects.
 const LOW_LINES: u8 = 8;
 /// The last line, ESCAPE's and FUNC's, read alone, and every line below it
@@ -745,13 +758,14 @@ fn tick_keys(a: &mut Asm, model: Model) {
 /// one confirming it, and the auto-repeat delay to follow, and returns with
 /// Z clear.
 fn key_found(a: &mut Asm) {
+    let p2 = &page2::MODEL_B;
     a.here("tick_new_key");
     a.lda(zp(os::KEY_LAST));
     a.sta(zp(os::KEY_FIRST));
     a.here("key_alone");
     a.stx(zp(os::KEY_LAST));
     a.lda(abs(var::REPEAT_DELAY));
-    a.sta(abs(page2::FIRST_REPEAT));
+    a.sta(abs(p2.first_repeat));
     a.lda(imm(1));
     a.sta(zp(os::REPEAT_COUNT));
     a.rts();
@@ -764,6 +778,7 @@ fn key_found(a: &mut Asm) {
 /// the delay the first time and the period after; a count of 0 runs no
 /// more.
 fn follow_keys(a: &mut Asm, scan: Label) {
+    let p2 = &page2::MODEL_B;
     a.lda(zp(os::KEY_FIRST));
     let first_kept = a.local();
     a.beq(first_kept);
@@ -790,15 +805,16 @@ fn follow_keys(a: &mut Asm, scan: Label) {
     a.beq(scan);
     a.dec(zp(os::REPEAT_COUNT));
     a.bne(scan);
-    a.lda(abs(page2::FIRST_REPEAT));
+    a.lda(abs(p2.first_repeat));
     a.sta(zp(os::REPEAT_COUNT));
     a.lda(abs(var::REPEAT_PERIOD));
-    a.sta(abs(page2::FIRST_REPEAT));
+    a.sta(abs(p2.first_repeat));
     a.txa();
     a.jsr("key_pressed");
 }
 
-/// The Electron's keys: one let go is forgotten, from either slot.
+/// The Electron's keys: one let go is forgotten, from either slot, the delay
+/// then the count auto-repeat reloads next.
 fn forget_keys(a: &mut Asm) {
     a.ldy(imm(1));
     a.here("tick_forget");
@@ -810,13 +826,16 @@ fn forget_keys(a: &mut Asm) {
     a.bmi("tick_forget_next");
     a.lda(imm(0));
     a.sta(abs(os::KEY_LAST).y());
+    a.lda(abs(var::REPEAT_DELAY));
+    a.sta(abs(page2::ELECTRON.first_repeat));
     a.here("tick_forget_next");
     a.dey();
     a.bpl("tick_forget");
 }
 
 /// The Electron's auto-repeat of the key held, once its delay and then each
-/// period ends; a delay of zero turns it off. A new key is typed at once.
+/// period ends, the period then reloading next; a delay of zero turns it
+/// off. A new key is typed at once.
 fn electron_repeat(a: &mut Asm) {
     a.lda(zp(os::KEY_LAST));
     a.bne("tick_repeat");
@@ -826,7 +845,7 @@ fn electron_repeat(a: &mut Asm) {
     a.beq(RTS);
     a.dec(zp(os::REPEAT_COUNT));
     a.bne(RTS);
-    a.lda(abs(var::REPEAT_PERIOD));
+    a.lda(abs(page2::ELECTRON.first_repeat));
     a.sta(zp(os::REPEAT_COUNT));
     a.lda(zp(os::KEY_LAST));
     a.cmp(imm(CAPS_LOCK_DOWN));
@@ -840,6 +859,8 @@ fn electron_repeat(a: &mut Asm) {
     a.sta(zp(os::KEY_LAST));
     a.ldx(abs(var::REPEAT_DELAY));
     a.stx(zp(os::REPEAT_COUNT));
+    a.ldx(abs(var::REPEAT_PERIOD));
+    a.stx(abs(page2::ELECTRON.first_repeat));
     a.fall_into("key_pressed");
 }
 
@@ -1191,8 +1212,9 @@ fn leds(a: &mut Asm, model: Model) {
     a.rts();
 }
 
-/// RDCHV's default: a character, X and Y kept.
-pub(super) fn osrdch_default(a: &mut Asm) {
+/// RDCHV's default: a character, X and Y kept. On the Electron each pass of
+/// the wait draws noise afresh, as Electron OS 1.00's does.
+pub(super) fn osrdch_default(a: &mut Asm, model: Model) {
     a.here("osrdch_default");
     a.here("nvrdch");
     a.txa();
@@ -1200,6 +1222,9 @@ pub(super) fn osrdch_default(a: &mut Asm) {
     a.tya();
     a.pha();
     a.here("rdch_next");
+    if model == Model::Electron {
+        a.jsr("sound_noise_wait");
+    }
     a.jsr("rdch_once");
     a.bvs("rdch_next");
     a.sta(zp(os::TEMP));
@@ -1215,6 +1240,7 @@ pub(super) fn osrdch_default(a: &mut Asm) {
 /// file, then the input buffer, codes from &80 interpreted as *FX4 and
 /// *FX221–228 say. Returns C set and A = &1B for an Escape.
 fn rdch(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     // One attempt: V clear with A to return and C set for an Escape; V set
     // to try again.
     a.here("rdch_once");
@@ -1228,8 +1254,8 @@ fn rdch(a: &mut Asm, model: Model) {
     a.lda(abs(var::SOFT_KEY_LENGTH));
     a.beq("rdch_not_expanding");
     a.dec(abs(var::SOFT_KEY_LENGTH));
-    a.ldx(abs(page2::SOFT_KEY_POINTER));
-    a.inc(abs(page2::SOFT_KEY_POINTER));
+    a.ldx(abs(p2.soft_key_pointer));
+    a.inc(abs(p2.soft_key_pointer));
     a.lda(abs(KEY_BASE).x());
     a.jmp("rdch_return");
     a.here("rdch_not_expanding");
@@ -1330,6 +1356,7 @@ fn rdch_codes(a: &mut Asm, model: Model) {
 /// says it does, through its entry point, else the OS from its own table of
 /// the keycaps' keywords.
 fn firm_keys(a: &mut Asm) {
+    let p2 = &page2::ELECTRON;
     // Begin firm key A.
     a.here("firm_key_start");
     a.tay();
@@ -1378,7 +1405,7 @@ fn firm_keys(a: &mut Asm) {
     // Z clear if the language expands firm keys itself.
     a.here("firm_by_language");
     a.ldx(abs(var::LANGUAGE));
-    a.lda(abs(page2::ROM_TYPES).x());
+    a.lda(abs(p2.rom_types).x());
     a.and(imm(crate::rom::os::rom_type::FIRM_KEYS));
     a.rts();
 
@@ -1424,14 +1451,15 @@ fn firm_keys(a: &mut Asm) {
 }
 
 /// The soft keys: starting one, *KEY, and OSBYTE 18.
-fn soft_keys(a: &mut Asm) {
+fn soft_keys(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     // Expand soft key A.
     a.here("soft_key_start");
     a.tax();
     a.jsr("key_length");
     a.sta(abs(var::SOFT_KEY_LENGTH));
     a.lda(abs(KEY_POINTERS).x());
-    a.sta(abs(page2::SOFT_KEY_POINTER));
+    a.sta(abs(p2.soft_key_pointer));
     a.rts();
 
     // A = the length of key X's text: from its start to the nearest pointer
@@ -1561,7 +1589,8 @@ fn key_gather(a: &mut Asm) {
 /// ended it. As in MOS 1.20 it reads with interrupts enabled, so an EXEC
 /// file's disc reads lose no clock ticks; its block is copied first, since
 /// an interrupt routine's OS call may change the call registers.
-fn line_input(a: &mut Asm) {
+fn line_input(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     // The block: the buffer's address to &E8, the limits after it to theirs.
     a.here("osword_0");
     a.ldy(imm(4));
@@ -1569,7 +1598,7 @@ fn line_input(a: &mut Asm) {
     a.lda(zp(os::CALL_X).ind_y());
     a.cpy(imm(2));
     a.bcc(pointer);
-    a.sta(abs(page2::LINE_LIMITS - 2).y());
+    a.sta(abs(p2.line_limits - 2).y());
     a.bcs(copied);
     a.bind(pointer);
     a.sta(abs(os::LINE_BUFFER).y());
@@ -1589,11 +1618,11 @@ fn line_input(a: &mut Asm) {
     a.beq("line_cancel");
     a.cmp(imm(CR));
     a.beq("line_end");
-    a.cpy(abs(page2::LINE_LIMITS));
+    a.cpy(abs(p2.line_limits));
     a.bcs("line_full");
-    a.cmp(abs(page2::LINE_LIMITS + 1));
+    a.cmp(abs(p2.line_limits + 1));
     a.bcc("line_echo");
-    a.cmp(abs(page2::LINE_LIMITS + 2));
+    a.cmp(abs(p2.line_limits + 2));
     a.beq("line_store");
     a.bcs("line_echo");
     a.here("line_store");

@@ -12,10 +12,10 @@ use super::ws::{os, page2, page_d, var, vdu, vector};
 use super::{keyboard, Model};
 use super::{page, svia, Held, VECTOR_DEFAULTS};
 use crate::machine::bbc::keyboard::Key;
-use crate::machine::electron::{irq as ula_irq, sheila as ula, LOCKED_ROMS};
+use crate::machine::electron::{irq as ula_irq, sheila as ula};
 use crate::machine::via::reg;
 use crate::machine::SIDEWAYS_BASE;
-use crate::rom::asm::{abs, hi, imm, lo, zp, Acc, Addr, Asm, RTS};
+use crate::rom::asm::{abs, byte, hi, imm, lo, zp, Acc, Addr, Asm, RTS};
 use crate::rom::os::{header, rom_type, service};
 
 /// The page the OS's high-water mark starts from.
@@ -128,6 +128,21 @@ fn reset(a: &mut Asm, model: Model) {
     a.here("reset_settings_done");
     a.stx(abs(var::LAST_BREAK));
     a.jsr("hardware_init");
+    if model == Model::Electron {
+        a.ldx(imm(byte(usize::from(0x0300 - page2::ELECTRON_FILLED - 1))));
+        a.lda(imm(0xFF));
+        a.here("reset_filled");
+        a.sta(abs(page2::ELECTRON_FILLED).x());
+        a.dex();
+        a.bpl("reset_filled");
+        a.lda(imm(0));
+        a.sta(abs(page2::ELECTRON.adc_last));
+        a.sta(abs(page2::ELECTRON.first_repeat));
+        for (at, value) in (keyboard::ELECTRON_SCAN..).zip(keyboard::ELECTRON_SCAN_RESET) {
+            a.lda(imm(value));
+            a.sta(abs(at));
+        }
+    }
     a.jsr("rom_scan");
     a.jsr("buffers_flush_all");
     a.jsr("cfs_init");
@@ -212,6 +227,7 @@ fn clear_memory(a: &mut Asm) {
 /// "\0(C)"; BASIC is the highest with no service entry. Then the ROMs'
 /// workspace claims.
 fn rom_scan(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     a.here("rom_scan");
     a.lda(imm(0xFF));
     a.sta(abs(var::BASIC_ROM));
@@ -230,7 +246,7 @@ fn rom_scan(a: &mut Asm, model: Model) {
     a.bne("rom_scan_copyright");
     a.ldx(zp(os::ROM));
     a.lda(abs(header::TYPE));
-    a.sta(abs(page2::ROM_TYPES).x());
+    a.sta(abs(p2.rom_types).x());
     a.bmi("rom_scan_done");
     a.ldy(abs(var::BASIC_ROM));
     a.bpl("rom_scan_done");
@@ -239,7 +255,7 @@ fn rom_scan(a: &mut Asm, model: Model) {
     a.here("rom_scan_none");
     a.ldx(zp(os::ROM));
     a.lda(imm(0));
-    a.sta(abs(page2::ROM_TYPES).x());
+    a.sta(abs(p2.rom_types).x());
     a.here("rom_scan_done");
     a.dex();
     a.bpl("rom_scan_next");
@@ -264,6 +280,7 @@ fn rom_scan(a: &mut Asm, model: Model) {
 /// and X zero if claimed and &FF if not, as MOS 1.20 does, Y as the ROMs
 /// leave it; the ROM paged in is kept.
 fn service_call(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     a.here("service_call");
     a.tax();
     a.lda(zp(os::ROM));
@@ -273,7 +290,7 @@ fn service_call(a: &mut Asm, model: Model) {
     a.here("service_next");
     a.pha();
     // A ROM's type has its top bit set for a service entry.
-    a.lda(abs(page2::ROM_TYPES).x());
+    a.lda(abs(p2.rom_types).x());
     a.bpl("service_skip");
     page(a, model, Held::X);
     a.pla();
@@ -297,6 +314,7 @@ fn service_call(a: &mut Asm, model: Model) {
 /// Offer the boot, which a filing system ROM takes; unclaimed, SHIFT-BREAK
 /// runs !BOOT from the ROM filing system. Then enter the language.
 fn boot_and_enter(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     a.here("boot_and_enter");
     // The boot reads SHIFT from the keyboard status, recording SHIFT and
     // CTRL there as the original OSes do, with the tick held off.
@@ -323,23 +341,11 @@ fn boot_and_enter(a: &mut Asm, model: Model) {
     a.beq("enter_kept_language");
     a.ldx(imm(15));
     a.here("find_language");
-    if model == Model::Electron {
-        // A language in a cartridge or the expansion's slots comes before
-        // BASIC.
-        a.cpx(imm(*LOCKED_ROMS.end()));
-        a.bne("find_language_kept");
-        a.ldx(imm(*LOCKED_ROMS.start() - 1));
-        a.here("find_language_kept");
-    }
-    a.lda(abs(page2::ROM_TYPES).x());
+    a.lda(abs(p2.rom_types).x());
     a.and(imm(rom_type::LANGUAGE));
     a.bne("enter_found_language");
     a.dex();
     a.bpl("find_language");
-    if model == Model::Electron {
-        a.ldx(abs(var::BASIC_ROM));
-        a.bpl("enter_found_language");
-    }
     a.error(0, b"Language?");
     a.here("enter_found_language");
     a.stx(abs(var::LANGUAGE));
@@ -429,6 +435,7 @@ pub(super) fn pin_entry(a: &mut Asm) {
 /// The vectors' defaults, then the OSBYTE settings to &27F, every reset
 /// restores.
 fn vector_defaults(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     a.here("vector_defaults");
     for (routine, address) in VECTOR_DEFAULTS {
         match model {
@@ -441,7 +448,7 @@ fn vector_defaults(a: &mut Asm, model: Model) {
     let addresses: [Addr; ADDRESSES] = [
         var::BASE.into(),
         page_d::EXTENDED_VECTORS.into(),
-        page2::ROM_TYPES.into(),
+        p2.rom_types.into(),
         super::keyboard::key_table(),
         vdu::GRAPHICS_WINDOW.into(),
     ];
@@ -550,8 +557,13 @@ fn settings(model: Model) -> [u8; SETTINGS] {
             (var::ULA_ENABLES, ula_irq::RTC | ula_irq::DISPLAY_END),
             // CAPS LOCK on, FUNC, SHIFT and CTRL up.
             (var::KEYBOARD_STATUS, 0x00),
-            (var::BELL_PITCH, 0x65),
             (var::EXTERNAL_SOUND, 0x00),
+            // No RS423 or 6850 of its own; &E7 as Electron OS 1.00 leaves it,
+            // and &E9 its soft key pointer, at the soft keys' start.
+            (var::RS423_MODE, 0x00),
+            (var::ACIA_CONTROL, 0x00),
+            (var::USER_VIA_MASK, 0x3B),
+            (page2::ELECTRON.soft_key_pointer, keyboard::KEY_EMPTY),
             // FUNC with a letter types its keyword, as FUNC with a digit its
             // soft key.
             (var::KEY_ZONES + 1, 0x01),
@@ -575,7 +587,9 @@ fn hard(model: Model) -> alloc::vec::Vec<u8> {
     ];
     let mut hard = HARD.to_vec();
     if model == Model::Electron {
-        hard[usize::from(var::ULA_CONTROL_COPY - var::COUNTRY)] = 0x00;
+        for variable in [var::ULA_CONTROL_COPY, var::PRINTER, var::RAM] {
+            hard[usize::from(variable - var::COUNTRY)] = 0x00;
+        }
         hard.push(0xFF);
     }
     hard

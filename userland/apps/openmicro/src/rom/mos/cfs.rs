@@ -19,7 +19,7 @@
 //! response to an error, 0 to ignore it, 2 to report it and look for the
 //! block again, 1 to raise it.
 
-use super::ws::{buffer, cfs, fs, os, var, vector};
+use super::ws::{buffer, cfs, fs, os, page2, var, vector};
 use super::Model;
 use super::{page, Held};
 use crate::machine::bbc::acia::{control, status};
@@ -219,6 +219,9 @@ pub fn emit(a: &mut Asm, model: Model) {
 /// The Electron's `&FE07` bits the cassette sets: the motor and the
 /// counter's use.
 const ULA_CASSETTE_BITS: u8 = ula_control::MOTOR | ula_control::COMMS;
+/// Those bits while the Electron reads, and while it writes.
+const READING_BITS: u8 = ula_control::MOTOR | ula_control::CASSETTE_INPUT;
+const WRITING_BITS: u8 = ula_control::MOTOR | ula_control::CASSETTE_OUTPUT;
 
 /// Set the Electron's motor and counter's use to `bits`.
 fn ula_cassette(a: &mut Asm, bits: u8) {
@@ -1274,7 +1277,10 @@ fn cfs_write_block(a: &mut Asm, model: Model) {
             a.ora(zp(fs::BAUD));
             a.sta(abs(sheila::ACIA_CONTROL));
         }
-        Model::Electron => ula_cassette(a, ula_control::MOTOR | ula_control::CASSETTE_OUTPUT),
+        Model::Electron => {
+            ula_cassette(a, WRITING_BITS);
+            a.sta(abs(page2::ULA_FIELD));
+        }
     }
     a.lda(imm(SYNC));
     a.jsr("cfs_write_byte");
@@ -1483,8 +1489,12 @@ fn devices(a: &mut Asm, model: Model) {
     a.sta(zp(os::RFS_ROM));
     a.beq("rfs_start_rom");
     a.here("cassette_read_on");
-    if model == Model::ModelB {
-        a.ldx(imm(READING));
+    match model {
+        Model::ModelB => a.ldx(imm(READING)),
+        Model::Electron => {
+            a.lda(imm(READING_BITS));
+            a.sta(abs(page2::ULA_FIELD));
+        }
     }
     a.fall_into("cassette_take");
     cassette_take(a, model);
@@ -1509,7 +1519,7 @@ fn cassette_take(a: &mut Asm, model: Model) {
             a.sta(abs(sheila::ACIA_CONTROL));
         }
         Model::Electron => {
-            ula_cassette(a, ula_control::MOTOR | ula_control::CASSETTE_INPUT);
+            ula_cassette(a, READING_BITS);
             // Receiving, the counter is cleared.
             a.lda(imm(0));
             a.sta(abs(ula::COUNTER));
@@ -1527,7 +1537,7 @@ fn cassette_take(a: &mut Asm, model: Model) {
         }
         Model::Electron => {
             a.jsr("cassette_take");
-            ula_cassette(a, ula_control::MOTOR | ula_control::CASSETTE_OUTPUT);
+            ula_cassette(a, WRITING_BITS);
         }
     }
     a.lda(imm(DUMMY));

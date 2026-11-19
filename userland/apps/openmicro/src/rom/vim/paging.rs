@@ -1,82 +1,55 @@
-//! Sideways RAM, which holds the register where a free bank is found. A bank
-//! pages in at &8000, where the editor runs, so what reaches one runs from
-//! [`page::RAM_CODE`], copied there at each entry: `copy`, the forward copy
-//! the text's moves share; `bank_copy`, the same with a bank paged in; and
-//! `claim`, which takes a free bank. A bank is free where the MOS found no
-//! ROM in it, it holds no ROM image since and it takes a write; a claimed
-//! bank's header marks it as no ROM, so no BREAK registers it.
+//! Sideways RAM, which the text's memory runs on into once main memory is
+//! full ([`super::vmem`]). A bank pages in at &8000, where the editor runs,
+//! so what reaches one runs from [`page::RAM_CODE`], copied there at each
+//! entry. A bank is free where the MOS found no ROM in it, it holds no ROM
+//! image since and it takes a write; a claimed bank's header marks it as no
+//! ROM, so no BREAK registers it.
 
 use alloc::vec::Vec;
 
-use super::ops::{add16, cmp16, sub16};
-use super::ws::{page, zp as z};
+use super::ops::{mov16, sub16};
+use super::vmem::BANK_PAGES;
+use super::ws::{page, show, zp as z};
 use crate::machine::bbc::sheila;
-use crate::machine::{OS_BASE, SIDEWAYS_BASE};
+use crate::machine::SIDEWAYS_BASE;
 use crate::rom::asm::{abs, byte, hi, imm, lo, zp, Asm, AsmError, RTS};
-use crate::rom::os::{entry, header, osbyte, zp as os, CR, ROM_TYPES};
+use crate::rom::os::{entry, header, osbyte, page2, zp as os, CR};
 
 /// What a claimed bank's copyright offset holds: an offset to itself, not a
 /// zero, so the MOS finds no copyright there.
 pub(super) const UNSIGNED: u8 = 7;
 const _: () = assert!(header::COPYRIGHT - SIDEWAYS_BASE == UNSIGNED as u16);
-/// The register's first byte in a claimed bank, past the header the claim
-/// marks, and the most it holds there.
-pub(super) const REGISTER: u16 = header::COPYRIGHT + 1;
-const REGISTER_ROOM: u16 = OS_BASE - REGISTER;
 /// What OSBYTE &81 returns in X for X 0, Y &FF on an Electron, which pages
 /// its ROMs elsewhere.
 const ELECTRON: u8 = 1;
+/// The highest bank number.
+const LAST_BANK: u8 = 15;
 
 /// The routines assembled for [`page::RAM_CODE`], and where each starts.
 pub(super) struct Ram {
     bytes: Vec<u8>,
-    /// N1 bytes from P1 to P2, first byte first, so the destination lies
-    /// below the source or apart from it; A, X, Y and the pointers' high
-    /// bytes changed.
-    pub copy: u16,
-    /// The same with bank X paged in for it, the editor's own bank paged
-    /// for none.
-    pub bank_copy: u16,
-    /// Carry set where bank X is taken for the register, X kept.
+    /// [`page::VA`] the byte at VP, Y with bank X paged in; Y kept.
+    pub get: u16,
+    /// [`page::VA`] written at VP, Y with bank X paged in; Y kept.
+    pub put: u16,
+    /// [`page::XC`] bytes, 0 for 256, from VP to P3 with bank X paged in,
+    /// first byte first; `down` last byte first.
+    pub up: u16,
+    pub down: u16,
+    /// The same from bank [`page::SB`] to bank [`page::DB`].
+    pub up2: u16,
+    pub down2: u16,
+    /// Carry set where bank X is taken for the text, X kept.
     claim: u16,
-    /// A CR, which `reg_cr` copies to end a register's last line.
-    cr: u16,
+    /// A bank X's type from the ROM type table, as `lda` leaves the flags;
+    /// `install` sets the table's address the OS gives.
+    pub rom_type: u16,
 }
 
 /// The routines for [`page::RAM_CODE`].
 pub(super) fn assemble() -> Result<Ram, AsmError> {
     let room = usize::from(page::MARK - page::RAM_CODE);
     let mut a = Asm::new(page::RAM_CODE, room);
-    a.here("copy");
-    a.ldy(imm(0));
-    a.ldx(zp(z::N1 + 1));
-    let part = a.local();
-    a.beq(part);
-    let pages = a.here_local();
-    a.lda(zp(z::P1).ind_y());
-    a.sta(zp(z::P2).ind_y());
-    a.iny();
-    a.bne(pages);
-    a.inc(zp(z::P1 + 1));
-    a.inc(zp(z::P2 + 1));
-    a.dex();
-    a.bne(pages);
-    a.bind(part);
-    a.ldx(zp(z::N1));
-    a.beq(RTS);
-    let bytes = a.here_local();
-    a.lda(zp(z::P1).ind_y());
-    a.sta(zp(z::P2).ind_y());
-    a.iny();
-    a.dex();
-    a.bne(bytes);
-    a.rts();
-
-    a.here("bank_copy");
-    a.cpx(zp(os::ROM));
-    a.beq("copy");
-    page_in(&mut a);
-    a.jsr("copy");
     a.here("page_back");
     a.pla();
     a.sta(zp(os::ROM));
@@ -109,8 +82,66 @@ pub(super) fn assemble() -> Result<Ram, AsmError> {
     a.clc();
     a.bcc("page_back");
 
-    a.here("cr");
-    a.byte(CR);
+    a.here("get");
+    page_in(&mut a);
+    a.lda(zp(z::VP).ind_y());
+    a.sta(abs(page::VA));
+    a.jmp("page_back");
+
+    a.here("put");
+    page_in(&mut a);
+    a.lda(abs(page::VA));
+    a.sta(zp(z::VP).ind_y());
+    a.jmp("page_back");
+
+    a.here("up");
+    page_in(&mut a);
+    a.ldy(imm(0));
+    let up = a.here_local();
+    a.lda(zp(z::VP).ind_y());
+    a.sta(zp(z::P3).ind_y());
+    a.iny();
+    a.cpy(abs(page::XC));
+    a.bne(up);
+    a.jmp("page_back");
+
+    a.here("down");
+    page_in(&mut a);
+    a.ldy(abs(page::XC));
+    let down = a.here_local();
+    a.dey();
+    a.lda(zp(z::VP).ind_y());
+    a.sta(zp(z::P3).ind_y());
+    a.tya();
+    a.bne(down);
+    a.jmp("page_back");
+
+    a.here("up2");
+    a.lda(zp(os::ROM));
+    a.pha();
+    a.ldy(imm(0));
+    let up2 = a.here_local();
+    across(&mut a);
+    a.iny();
+    a.cpy(abs(page::XC));
+    a.bne(up2);
+    a.jmp("page_back");
+
+    a.here("down2");
+    a.lda(zp(os::ROM));
+    a.pha();
+    a.ldy(abs(page::XC));
+    let down2 = a.here_local();
+    a.dey();
+    across(&mut a);
+    a.tya();
+    a.bne(down2);
+    a.jmp("page_back");
+
+    a.here("rom_type");
+    a.lda(abs(page2::MODEL_B.rom_types).x());
+    a.rts();
+
     a.here("ram_top");
 
     let image = a.finish()?;
@@ -118,10 +149,14 @@ pub(super) fn assemble() -> Result<Ram, AsmError> {
     let top = at("ram_top")?;
     Ok(Ram {
         bytes: image.bytes[..usize::from(top - page::RAM_CODE)].to_vec(),
-        copy: at("copy")?,
-        bank_copy: at("bank_copy")?,
+        get: at("get")?,
+        put: at("put")?,
+        up: at("up")?,
+        down: at("down")?,
+        up2: at("up2")?,
+        down2: at("down2")?,
         claim: at("claim")?,
-        cr: at("cr")?,
+        rom_type: at("rom_type")?,
     })
 }
 
@@ -133,23 +168,45 @@ fn page_in(a: &mut Asm) {
     a.stx(abs(sheila::ROMSEL));
 }
 
-pub(super) fn emit(a: &mut Asm, ram: &Ram) {
-    installing(a, ram);
-    finding(a, ram);
-    register(a, ram);
+/// The byte at VP, Y read from bank [`page::SB`] and written at P3, Y in
+/// bank [`page::DB`].
+fn across(a: &mut Asm) {
+    for (bank, at, read) in [(page::SB, z::VP, true), (page::DB, z::P3, false)] {
+        a.ldx(abs(bank));
+        a.stx(zp(os::ROM));
+        a.stx(abs(sheila::ROMSEL));
+        if read {
+            a.lda(zp(at).ind_y());
+        } else {
+            a.sta(zp(at).ind_y());
+        }
+    }
 }
 
-/// `install`: the routines copied to [`page::RAM_CODE`]. `reclaim`: the same,
-/// after anything else has run, and the register's bank taken again, the
-/// register emptied and another found where it is no longer free.
+pub(super) fn emit(a: &mut Asm, ram: &Ram) {
+    installing(a, ram);
+    growing(a, ram);
+}
+
+/// `install`: the routines copied to [`page::RAM_CODE`]. `reclaim`: the same
+/// after anything else has run, and the text given up, and said so, where a
+/// bank it runs on into is no longer the editor's.
 fn installing(a: &mut Asm, ram: &Ram) {
+    // Counting up, since the routines pass 128 bytes.
     a.here("install");
-    a.ldx(imm(byte(ram.bytes.len() - 1)));
+    a.ldx(imm(0));
     let copy = a.here_local();
     a.lda(abs("ram_code").x());
     a.sta(abs(page::RAM_CODE).x());
-    a.dex();
-    a.bpl(copy);
+    a.inx();
+    a.cpx(imm(byte(ram.bytes.len())));
+    a.bne(copy);
+    a.lda(imm(osbyte::ROM_TABLE));
+    a.ldx(imm(0));
+    a.ldy(imm(0xFF));
+    a.jsr(entry::OSBYTE);
+    a.stx(abs(ram.rom_type + 1));
+    a.sty(abs(ram.rom_type + 2));
     a.rts();
     let bytes = ram.bytes.clone();
     a.later(move |a| {
@@ -159,141 +216,107 @@ fn installing(a: &mut Asm, ram: &Ram) {
 
     a.here("reclaim");
     a.jsr("install");
-    a.ldx(abs(page::REG_BANK));
-    a.cpx(zp(os::ROM));
-    a.beq(RTS);
-    a.jsr(ram.claim);
-    a.bcs(RTS);
+    a.ldx(abs(page::SEGMENTS));
+    let each = a.here_local();
+    a.dex();
+    a.bmi(RTS);
+    a.stx(zp(z::T0));
+    a.lda(abs(page::BANKS).x());
+    a.tax();
+    a.jsr(ram.rom_type);
+    let lost = a.local();
+    a.bne(lost);
+    a.lda(imm(lo(header::COPYRIGHT)));
+    a.sta(zp(z::VP));
+    a.lda(imm(hi(header::COPYRIGHT)));
+    a.sta(zp(z::VP + 1));
+    a.ldy(imm(0));
+    a.jsr(ram.get);
+    a.lda(abs(page::VA));
+    a.cmp(imm(UNSIGNED));
+    a.bne(lost);
+    a.ldx(zp(z::T0));
+    a.jmp(each);
+    // Another program took it: the text, the undo record and the register
+    // lost with it, and no name left to write the empty text over.
+    a.bind(lost);
     a.lda(imm(0));
-    a.sta(abs(page::REG_LEN));
-    a.sta(abs(page::REG_LEN + 1));
-    a.fall_into("find_ram");
+    a.sta(abs(page::SEGMENTS));
+    a.sta(zp(z::FILE));
+    a.jsr("set_area");
+    a.jsr("buf_reset");
+    a.lda(imm(CR));
+    a.sta(abs(page::NAME));
+    a.call_with_text("say", &["Text lost"]);
+    a.lda(imm(show::ALL));
+    a.jmp("owe");
 }
 
-/// `find_ram`: the register's bank: the highest free one claimed, or the
-/// editor's own. An Electron's ROMs page elsewhere, so it keeps its own.
-fn finding(a: &mut Asm, ram: &Ram) {
-    a.here("find_ram");
-    a.lda(zp(os::ROM));
-    a.sta(abs(page::REG_BANK));
+/// `grow`: a free bank taken onto the end of the text's memory, what lies
+/// past the gap moved up into it; carry set where none can be, nothing
+/// changed. N0, N1, N2 and P3 kept.
+fn growing(a: &mut Asm, ram: &Ram) {
+    a.here("grow");
+    a.lda(abs(page::SEGMENTS));
+    a.cmp(imm(page::MOST_BANKS));
+    let refused = a.local();
+    a.bcs(refused);
     a.lda(imm(osbyte::INKEY));
     a.ldx(imm(0));
     a.ldy(imm(0xFF));
     a.jsr(entry::OSBYTE);
     a.cpx(imm(ELECTRON));
-    a.beq(RTS);
-    a.ldx(imm(15));
+    a.beq(refused);
+    // A free bank that is neither the editor's nor already the text's.
+    a.ldx(imm(LAST_BANK));
     let scan = a.here_local();
     let next = a.local();
-    a.lda(abs(ROM_TYPES).x());
+    a.jsr(ram.rom_type);
     a.bne(next);
+    a.cpx(zp(os::ROM));
+    a.beq(next);
+    a.txa();
+    a.ldy(abs(page::SEGMENTS));
+    let held = a.here_local();
+    let free = a.local();
+    a.dey();
+    a.bmi(free);
+    a.cmp(abs(page::BANKS).y());
+    a.bne(held);
+    a.beq(next);
+    a.bind(free);
     a.jsr(ram.claim);
     let found = a.local();
     a.bcs(found);
     a.bind(next);
     a.dex();
     a.bpl(scan);
+    a.bind(refused);
+    a.sec();
     a.rts();
     a.bind(found);
-    a.stx(abs(page::REG_BANK));
-    a.rts();
-}
-
-/// `reg_room`: carry set where the register cannot be made N1 long, N1
-/// kept. `reg_source`: N1 its length, P3 its first byte, and X and
-/// [`page::SRC_BANK`] its bank. `reg_cr`: a CR put at the register's N0th
-/// byte.
-fn register(a: &mut Asm, ram: &Ram) {
-    a.here("reg_room");
-    a.lda(abs(page::REG_BANK));
-    a.cmp(zp(os::ROM));
-    let banked = a.local();
-    a.bne(banked);
-    a.lda(zp(z::N1));
-    a.pha();
-    a.lda(zp(z::N1 + 1));
-    a.pha();
-    a.jsr("resize_reg");
-    a.pla();
-    a.sta(zp(z::N1 + 1));
-    a.pla();
-    a.sta(zp(z::N1));
-    a.rts();
-    a.bind(banked);
-    a.lda(zp(z::N1));
-    a.cmp(imm(lo(REGISTER_ROOM + 1)));
-    a.lda(zp(z::N1 + 1));
-    a.sbc(imm(hi(REGISTER_ROOM + 1)));
-    a.rts();
-
-    a.here("reg_source");
-    a.lda(abs(page::REG_LEN));
-    a.sta(zp(z::N1));
-    a.lda(abs(page::REG_LEN + 1));
-    a.sta(zp(z::N1 + 1));
-    a.ldx(abs(page::REG_BANK));
-    a.stx(abs(page::SRC_BANK));
-    a.lda(zp(z::REG));
-    a.ldy(zp(z::REG + 1));
-    a.cpx(zp(os::ROM));
-    let at = a.local();
-    a.beq(at);
-    a.lda(imm(lo(REGISTER)));
-    a.ldy(imm(hi(REGISTER)));
-    a.bind(at);
-    a.sta(zp(z::P3));
-    a.sty(zp(z::P3 + 1));
-    a.rts();
-
-    // `cut_room`: the command abandoned where the free memory cannot take
-    // N1 bytes into the undo record and, below HIMEM, the register too, a CR
-    // more for whole lines (A non-zero); N0 and N1 kept.
-    a.here("cut_room");
-    a.cmp(imm(1));
-    a.lda(zp(z::N1));
-    a.adc(imm(0));
-    a.sta(zp(z::N2));
-    a.lda(zp(z::N1 + 1));
-    a.adc(imm(0));
-    a.sta(zp(z::N2 + 1));
-    let refuse = a.local();
-    let below = a.local();
-    a.lda(abs(page::REG_BANK));
-    a.cmp(zp(os::ROM));
-    a.beq(below);
-    a.lda(zp(z::N2));
-    a.cmp(imm(lo(REGISTER_ROOM + 1)));
-    a.lda(zp(z::N2 + 1));
-    a.sbc(imm(hi(REGISTER_ROOM + 1)));
-    a.bcs(refuse);
-    a.lda(imm(0));
-    a.sta(zp(z::N2));
-    a.sta(zp(z::N2 + 1));
-    a.bind(below);
-    add16(a, z::N2, z::N2, z::N1);
-    sub16(a, z::P0, z::LIMIT, z::BUF);
-    sub16(a, z::P0, z::P0, z::LEN);
-    cmp16(a, z::P0, z::N2);
-    a.bcs(RTS);
-    a.bind(refuse);
-    a.jmp("no_room");
-
-    a.here("reg_cr");
-    a.jsr("reg_source");
+    a.txa();
+    a.ldy(abs(page::SEGMENTS));
+    a.sta(abs(page::BANKS).y());
+    a.inc(abs(page::SEGMENTS));
+    for v in [z::N1, z::N1 + 1, z::P3, z::P3 + 1] {
+        a.lda(zp(v));
+        a.pha();
+    }
+    a.jsr("p1_gend");
+    mov16(a, z::P2, z::GEND);
+    a.lda(zp(z::P2 + 1));
     a.clc();
-    a.lda(zp(z::P3));
-    a.adc(zp(z::N0));
-    a.sta(zp(z::P2));
-    a.lda(zp(z::P3 + 1));
-    a.adc(zp(z::N0 + 1));
+    a.adc(imm(BANK_PAGES));
     a.sta(zp(z::P2 + 1));
-    a.lda(imm(lo(ram.cr)));
-    a.sta(zp(z::P1));
-    a.lda(imm(hi(ram.cr)));
-    a.sta(zp(z::P1 + 1));
-    a.lda(imm(1));
-    a.sta(zp(z::N1));
-    a.lda(imm(0));
-    a.sta(zp(z::N1 + 1));
-    a.jmp(abs(ram.bank_copy));
+    sub16(a, z::N1, z::LIMIT, z::GEND);
+    a.jsr("memmove");
+    for v in [z::P3 + 1, z::P3, z::N1 + 1, z::N1] {
+        a.pla();
+        a.sta(zp(v));
+    }
+    a.lda(imm(BANK_PAGES));
+    a.jsr("past_gap_by");
+    a.clc();
+    a.rts();
 }

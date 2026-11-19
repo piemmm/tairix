@@ -2,6 +2,7 @@
 //! USERV, and the rest offered to the ROMs.
 
 use super::ws::{os, page2, var, vdu, vector};
+use super::Model;
 use crate::rom::asm::{abs, hi, imm, lo, sym, zp, Asm, RTS};
 
 const CALL_COUNT: u8 = 14;
@@ -26,7 +27,7 @@ const CALLS: [&str; CALL_COUNT as usize] = [
 /// The first call passed to USERV.
 const USER_FIRST: u8 = 0xE0;
 
-pub fn emit(a: &mut Asm) {
+pub fn emit(a: &mut Asm, model: Model) {
     a.here("osword_dispatch");
     a.cmp(imm(CALL_COUNT));
     a.bcs("osword_unrecognised");
@@ -62,7 +63,7 @@ pub fn emit(a: &mut Asm) {
     a.ldy(imm(0));
     a.rts();
 
-    clocks(a);
+    clocks(a, model);
     memory(a);
     graphics(a);
     a.later(|a| {
@@ -81,14 +82,15 @@ pub fn emit(a: &mut Asm) {
 
 /// TIME and the interval timer: kept most significant byte first, read and
 /// written least significant first. A written TIME goes into both copies.
-fn clocks(a: &mut Asm) {
+fn clocks(a: &mut Asm, model: Model) {
+    let p2 = page2::layout(model);
     a.here("osword_read_clock");
     a.ldx(abs(var::TIME_SWITCH));
     a.jmp("osword_read_five");
     a.here("osword_read_interval");
     a.ldx(imm(15));
     a.here("osword_read_five");
-    a.lda(abs(page2::CLOCKS - 1).x());
+    a.lda(abs(p2.clocks - 1).x());
     a.sta(zp(os::CALL_X).ind_y());
     a.dex();
     a.iny();
@@ -100,8 +102,8 @@ fn clocks(a: &mut Asm) {
     a.ldx(imm(5));
     a.here("osword_write_clock_byte");
     a.lda(zp(os::CALL_X).ind_y());
-    a.sta(abs(page2::CLOCKS - 1).x());
-    a.sta(abs(page2::CLOCKS + 4).x());
+    a.sta(abs(p2.clocks - 1).x());
+    a.sta(abs(p2.clocks + 4).x());
     a.dex();
     a.iny();
     a.cpy(imm(5));
@@ -112,7 +114,7 @@ fn clocks(a: &mut Asm) {
     a.ldx(imm(15));
     a.here("osword_write_interval_byte");
     a.lda(zp(os::CALL_X).ind_y());
-    a.sta(abs(page2::CLOCKS - 1).x());
+    a.sta(abs(p2.clocks - 1).x());
     a.dex();
     a.iny();
     a.cpy(imm(5));

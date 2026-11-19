@@ -33,10 +33,6 @@ const COMMANDS: [(&str, &str); 17] = [
     ("TV", "star_tv"),
 ];
 
-/// Service calls: an unrecognised command, and *HELP.
-/// FSCV's reasons.
-/// OSFILE's block, as *LOAD and *SAVE build it.
-const BLOCK: u16 = page2::OSFILE_BLOCK;
 /// GSREAD's flags at &E4: the string is quoted; a space ends it.
 const QUOTED: u8 = 0x80;
 const SPACE_ENDS: u8 = 0x40;
@@ -45,9 +41,9 @@ pub fn emit(a: &mut Asm, model: Model) {
     // Its branches reach across the whole of it.
     a.whole(oscli);
     commands(a, model);
-    files(a);
+    files(a, model);
     gs(a);
-    numbers(a);
+    numbers(a, model);
     tables(a);
 }
 
@@ -273,7 +269,8 @@ fn commands(a: &mut Asm, model: Model) {
 }
 
 /// *LOAD, *SAVE, *SPOOL and *EXEC.
-fn files(a: &mut Asm) {
+fn files(a: &mut Asm, model: Model) {
+    let block = page2::layout(model).osfile_block;
     // Between the commands and the files, so both reach it.
     a.here("bad_command");
     a.error(0xFE, b"Bad command");
@@ -282,12 +279,12 @@ fn files(a: &mut Asm) {
     a.here("star_load");
     a.jsr("filename");
     a.lda(imm(0xFF));
-    a.sta(abs(BLOCK + 6));
+    a.sta(abs(block + 6));
     a.ldx(imm(2));
     a.jsr("read_hex_into");
     a.bcs("star_load_go");
     a.lda(imm(0));
-    a.sta(abs(BLOCK + 6));
+    a.sta(abs(block + 6));
     a.here("star_load_go");
     a.lda(imm(0xFF));
     a.bne("osfile_block");
@@ -314,14 +311,14 @@ fn files(a: &mut Asm) {
     a.ldx(imm(0xFC));
     a.clc();
     a.here("star_save_add");
-    a.lda(abs(BLOCK + 10 - 0xFC).x());
-    a.adc(abs(BLOCK + 14 - 0xFC).x());
-    a.sta(abs(BLOCK + 14 - 0xFC).x());
+    a.lda(abs(block + 10 - 0xFC).x());
+    a.adc(abs(block + 14 - 0xFC).x());
+    a.sta(abs(block + 14 - 0xFC).x());
     a.inx();
     a.bne("star_save_add");
     a.here("star_save_exec");
     // The execution and reload addresses default to the start.
-    copy(a, &[(BLOCK + 10, &[BLOCK + 6, BLOCK + 2])], 4);
+    copy(a, &[(block + 10, &[block + 6, block + 2])], 4);
     a.ldx(imm(6));
     a.jsr("read_hex_into");
     a.bcs("star_save_go");
@@ -332,8 +329,8 @@ fn files(a: &mut Asm) {
 
     // OSFILE A on the block.
     a.here("osfile_block");
-    a.ldx(imm(lo(BLOCK)));
-    a.ldy(imm(hi(BLOCK)));
+    a.ldx(imm(lo(block)));
+    a.ldy(imm(hi(block)));
     a.jmp("osfile");
 
     // The block's filename address: the name at (&F2),Y, which is then
@@ -342,8 +339,8 @@ fn files(a: &mut Asm) {
     a.tya();
     a.pha();
     a.jsr("text_address");
-    a.stx(abs(BLOCK));
-    a.sty(abs(BLOCK + 1));
+    a.stx(abs(block));
+    a.sty(abs(block + 1));
     a.pla();
     a.tay();
     a.clc();
@@ -501,7 +498,8 @@ fn gs(a: &mut Asm) {
 }
 
 /// Reading the numbers commands are given.
-fn numbers(a: &mut Asm) {
+fn numbers(a: &mut Asm, model: Model) {
+    let block = page2::layout(model).osfile_block;
     a.here("skip_spaces");
     a.lda(zp(os::TEXT).ind_y());
     a.cmp(imm(b' '));
@@ -565,7 +563,7 @@ fn numbers(a: &mut Asm) {
     a.pha();
     a.lda(imm(0));
     for offset in 0..4u16 {
-        a.sta(abs(BLOCK + offset).x());
+        a.sta(abs(block + offset).x());
     }
     a.pla();
     a.here("read_hex_digit");
@@ -574,17 +572,17 @@ fn numbers(a: &mut Asm) {
     a.pha();
     a.ldy(imm(4));
     a.here("read_hex_shift");
-    a.asl(abs(BLOCK).x());
+    a.asl(abs(block).x());
     for offset in 1..4u16 {
-        a.rol(abs(BLOCK + offset).x());
+        a.rol(abs(block + offset).x());
     }
     a.dey();
     a.bne("read_hex_shift");
     a.pla();
     a.tay();
     a.lda(zp(os::TEMP));
-    a.ora(abs(BLOCK).x());
-    a.sta(abs(BLOCK).x());
+    a.ora(abs(block).x());
+    a.sta(abs(block).x());
     a.iny();
     a.jsr("hex_digit");
     a.bcc("read_hex_digit");

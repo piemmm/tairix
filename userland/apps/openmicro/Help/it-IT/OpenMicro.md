@@ -51,12 +51,13 @@ prompt della macchina, `*VIM` seguito dal nome di un file modifica quel file, e
 BREAK in VIM conserva il testo che contiene. VIM modifica testi, come i file
 `!BOOT` che crea `*BUILD`, e programmi BASIC, che elenca come testo e salva di
 nuovo tokenizzati, colorando ciascuno per quanto lo consentono i colori della
-modalità dello schermo; `:dis` seguito dal nome di un file scorre pagina per
-pagina il codice macchina di un programma. In VIM, `:help` elenca i suoi
-comandi e le modalità dello schermo con lo spazio che ciascuna lascia, `:mode`
-seguito da un numero cambia la modalità, e `:q` torna al BASIC. Dove un banco di
-RAM laterale non contiene alcuna ROM, VIM vi tiene ciò che copia o cancella, nel
-banco più alto fra questi, così da non togliere nulla alla memoria del testo.
+modalità dello schermo. In VIM, `:help` elenca i suoi comandi e le modalità
+dello schermo con lo spazio che ciascuna lascia nella memoria principale,
+`:mode` seguito da un numero cambia la modalità, e `:q` torna al BASIC. Quando
+la memoria principale è piena, VIM prosegue nei banchi di RAM laterale che non
+contengono alcuna ROM, fino a due, così da poter modificare un file più grande
+della memoria principale; leggere e scrivere un file del genere richiede più
+tempo.
 
 Chiudere la finestra di una macchina la sospende: riavviata, riprende da dove
 si era fermata. Spegni nel suo menu ne toglie i supporti e la spegne,

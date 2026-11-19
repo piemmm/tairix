@@ -46,12 +46,12 @@ A Model B also has VIM, a vi-style editor, fitted in slot 13. At its prompt,
 `*VIM` and a file's name edits that file, and BREAK in VIM keeps the text it
 holds. VIM edits text, such as the `!BOOT` files `*BUILD` makes, and
 BASIC programs, which it lists as text and saves back tokenised, colouring
-each as the screen mode's colours allow; `:dis` and a file's name pages
-through a program's machine code. In VIM, `:help` lists its commands and the
-screen modes with the room each leaves, `:mode` and a number changes the
-mode, and `:q` goes back to BASIC. Where a bank of sideways RAM holds no ROM,
-VIM keeps what it yanks or deletes there, in the highest such bank, so it takes
-none of the memory the text has.
+each as the screen mode's colours allow. In VIM, `:help` lists its commands
+and the screen modes with the room each leaves in main memory, `:mode` and a
+number changes the mode, and `:q` goes back to BASIC. Once main memory is
+full, VIM goes on into banks of sideways RAM that hold no ROM, up to two, so
+it can edit a file larger than main memory; such a file takes longer to read
+and write.
 
 Closing a machine's window suspends the machine: started again, it resumes
 where it stopped. Shut Down in its menu takes its media out and turns it off,

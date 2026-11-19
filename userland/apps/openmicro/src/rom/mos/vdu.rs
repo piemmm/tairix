@@ -27,6 +27,9 @@ pub mod status {
     pub const SCROLL_DISABLED: u8 = 0x02;
     pub const PAGED: u8 = 0x04;
     pub const WINDOWED: u8 = 0x08;
+    /// On the Electron: VDU 23,1,0 has turned the cursor off, as Electron OS
+    /// 1.00 records it.
+    pub const CURSOR_OFF: u8 = 0x10;
     pub const GRAPHICS_CURSOR: u8 = 0x20;
     pub const EDITING: u8 = 0x40;
     pub const DISABLED: u8 = 0x80;
@@ -92,7 +95,6 @@ const QUEUE_LAST: u16 = vdu::QUEUE_END;
 mod cursor_state {
     pub const DRAWN: u8 = 0x80;
     pub const BUSY: u8 = 0x40;
-    pub const OFF: u8 = 0x20;
 }
 /// TIME's bit the Electron's cursor flashes on: shown for 16 centiseconds,
 /// hidden for 16.
@@ -727,14 +729,14 @@ fn vdu_cursor_hide(a: &mut Asm, model: Model) {
             a.jmp("crtc_register");
         }
         Model::Electron => {
-            a.lda(abs(vdu::CURSOR_STATE));
-            a.ora(imm(cursor_state::OFF));
+            a.lda(zp(vdu_zp::STATUS));
+            a.ora(imm(status::CURSOR_OFF));
             a.bne("vdu_cursor_set");
             a.here("vdu_cursor_show");
-            a.lda(abs(vdu::CURSOR_STATE));
-            a.and(imm(!cursor_state::OFF));
+            a.lda(zp(vdu_zp::STATUS));
+            a.and(imm(!status::CURSOR_OFF));
             a.here("vdu_cursor_set");
-            a.sta(abs(vdu::CURSOR_STATE));
+            a.sta(zp(vdu_zp::STATUS));
             a.rts();
         }
     }
@@ -1558,6 +1560,7 @@ fn mode(a: &mut Asm, model: Model) {
             // and &35F as the Model B's 6845 cursor is set out, though the
             // Electron draws its own.
             a.lda(abs("mode_ula").x());
+            a.sta(abs(page2::ULA_FIELD));
             a.ldx(imm(!control::MODE));
             a.jsr("ula_control");
             a.jsr("pixel_masks");
@@ -1751,6 +1754,7 @@ fn tables(a: &mut Asm, model: Model) {
 /// put back where it now is as they finish, unless it is off; between,
 /// display end flashes it, inverting the bottom line of its cell.
 fn electron_cursor(a: &mut Asm) {
+    let p2 = &page2::ELECTRON;
     // A kept.
     a.here("cursor_remove");
     a.php();
@@ -1774,7 +1778,8 @@ fn electron_cursor(a: &mut Asm) {
     a.lda(abs(vdu::CURSOR_STATE));
     a.and(imm(!cursor_state::BUSY));
     a.sta(abs(vdu::CURSOR_STATE));
-    a.and(imm(cursor_state::OFF));
+    a.lda(zp(vdu_zp::STATUS));
+    a.and(imm(status::CURSOR_OFF));
     a.bne("cursor_restore_done");
     a.jsr("cursor_toggle");
     a.here("cursor_restore_done");
@@ -1786,10 +1791,13 @@ fn electron_cursor(a: &mut Asm) {
     // drivers are at work or it is off.
     a.here("cursor_flash");
     a.lda(abs(vdu::CURSOR_STATE));
-    a.and(imm(cursor_state::BUSY | cursor_state::OFF));
+    a.and(imm(cursor_state::BUSY));
+    a.bne(RTS);
+    a.lda(zp(vdu_zp::STATUS));
+    a.and(imm(status::CURSOR_OFF));
     a.bne(RTS);
     a.ldx(abs(var::TIME_SWITCH));
-    a.lda(abs(page2::CLOCKS - 1).x());
+    a.lda(abs(p2.clocks - 1).x());
     a.and(imm(CURSOR_FLASH));
     for _ in 0..3 {
         a.asl(Acc);

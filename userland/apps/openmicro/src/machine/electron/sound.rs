@@ -1,6 +1,8 @@
 //! The ULA's sound: while its counter is given to sound, a square wave of
-//! 1 MHz / (16 (S + 1)), rendered a sample each 250 kHz as the Model B's
-//! sound is, unipolar as the ULA drives the speaker; silence otherwise.
+//! 1 MHz / (32 (S + 1)), rendered a sample each 250 kHz as the Model B's
+//! sound is, unipolar as the ULA drives the speaker; silence otherwise. The
+//! Advanced User Guide's first issues gave 1 MHz / (16 (S + 1)), which its
+//! later issues correct; Electron OS 1.00's pitches are in tune by this.
 
 use alloc::vec::Vec;
 
@@ -10,9 +12,9 @@ use crate::machine::CYCLES_PER_SAMPLE;
 /// SN76489's four channels at full volume, so the two machines sound alike.
 const LEVEL: f32 = 0.25;
 
-/// Cycles each half of the wave lasts for each step of counter value S: it
-/// lasts 16 (S + 1).
-const HALF_CYCLES: u64 = 16;
+/// 2 MHz cycles each half of the wave lasts for each step of counter value
+/// S: it lasts 32 (S + 1), 16 (S + 1) µs.
+const HALF_CYCLES: u64 = 32;
 const _: () = assert!(HALF_CYCLES.is_multiple_of(CYCLES_PER_SAMPLE));
 
 /// Samples each half of the wave lasts for counter value `counter`.
@@ -122,14 +124,14 @@ mod tests {
         assert!(out.iter().all(|&level| level == 0.0), "off");
         sound.set_on(true);
         out.clear();
-        sound.render(1000 + 2000, &mut out);
+        sound.render(1000 + 4000, &mut out);
         let rises = out
             .windows(2)
             .filter(|pair| pair[0] == 0.0 && pair[1] == LEVEL)
             .count();
-        // 1 MHz / (16 × 125) is 500 Hz: a rise each 500 samples at 250 kHz.
+        // 1 MHz / (32 × 125) is 250 Hz: a rise each 1000 samples at 250 kHz.
         assert!((3..=4).contains(&rises), "{rises}");
-        assert_eq!(half_period(124), 250);
-        assert_eq!(half_period(0), 2, "62.5 kHz");
+        assert_eq!(half_period(124), 500);
+        assert_eq!(half_period(0), 4, "31.25 kHz");
     }
 }

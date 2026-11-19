@@ -9,7 +9,7 @@ use super::buffer::LINE_BUF;
 use super::ops::{cmp16, dec16, inc16, mov16, sub16};
 use super::ws::{option, page, show, zp as z};
 use crate::rom::asm::{abs, byte, imm, zp, Acc, Asm, RTS};
-use crate::rom::os::entry;
+use crate::rom::os::{entry, osbyte};
 
 /// Each mode's columns, rows and colours, by number.
 pub(super) const MODES: [(u8, u8, Colours); 8] = [
@@ -96,14 +96,18 @@ pub(super) fn emit(a: &mut Asm) {
     tables(a);
 }
 
-/// `set_mode`: the mode in [`z::MODE`] selected, its geometry and palette
-/// taken, everything owed.
+/// `set_mode`: the mode in [`z::MODE`] selected, and the mode the OS gives
+/// taken for it, an Electron giving MODE 6 for MODE 7; its geometry and
+/// palette taken, everything owed.
 fn modes(a: &mut Asm) {
     a.here("set_mode");
     a.lda(imm(VDU_MODE));
     a.jsr(entry::OSWRCH);
     a.lda(zp(z::MODE));
     a.jsr(entry::OSWRCH);
+    a.lda(imm(osbyte::CHARACTER_AND_MODE));
+    a.jsr(entry::OSBYTE);
+    a.sty(zp(z::MODE));
     a.ldx(zp(z::MODE));
     a.lda(abs("mode_rows").x());
     a.sec();
@@ -182,7 +186,7 @@ fn refresh(a: &mut Asm) {
     a.jsr("status");
     a.lda(imm(VDU_TAB));
     a.jsr(entry::OSWRCH);
-    a.lda(zp(z::WAT));
+    a.lda(abs(page::WAT));
     a.jsr(entry::OSWRCH);
     a.lda(zp(z::CROW));
     a.jmp(abs(entry::OSWRCH));
@@ -352,7 +356,7 @@ fn columns(a: &mut Asm) {
     a.jsr("n0_lstart");
     a.jsr("fetch_line");
     a.lda(zp(z::COL));
-    a.sta(zp(z::WSTOP));
+    a.sta(abs(page::WSTOP));
     mov16(a, z::N2, z::LINE);
     a.lda(imm(0));
     a.jmp("walk");
@@ -489,7 +493,7 @@ fn walk(a: &mut Asm) {
     let draw = a.local();
     a.bmi(draw);
     a.lda(zp(z::WCOL));
-    a.cmp(zp(z::WSTOP));
+    a.cmp(abs(page::WSTOP));
     let measured = a.local();
     a.beq(measured);
     let counted = a.local();
@@ -514,7 +518,7 @@ fn walk(a: &mut Asm) {
     a.bcs(RTS);
     a.bind(measured);
     a.lda(zp(z::WX));
-    a.sta(zp(z::WAT));
+    a.sta(abs(page::WAT));
     a.clc();
     a.rts();
     a.bind(full);
@@ -762,6 +766,7 @@ fn output(a: &mut Asm) {
 
 /// The powers of ten `decimal` counts in, from the highest.
 const POWERS: [u16; 5] = [10_000, 1_000, 100, 10, 1];
+const _: () = assert!(POWERS.len() == page::DIGITS_LEN as usize);
 
 fn tables(a: &mut Asm) {
     a.later(|a| {

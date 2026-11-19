@@ -3,11 +3,11 @@
 
 use alloc::vec::Vec;
 
-use super::{boot_offer_rom, var, vdu, BOOT_OFFER};
+use super::{boot_offer_rom, page2, program, var, vdu, BOOT_OFFER, DONE, DONE_MARK};
 use crate::machine::canvas::encode;
 use crate::machine::electron::keyboard::Key;
 use crate::machine::electron::Machine;
-use crate::machine::electron::{control, sheila as ula, CARTRIDGE_ROMS};
+use crate::machine::electron::{control, sheila as ula, BASIC_ROMS, CARTRIDGE_ROMS, PLUS1_ROM};
 use crate::media::tape::Tape;
 use crate::rom::harness::{
     electron, electron_with_plus1, last_number, press, press_break, screen, shows, type_text, wait,
@@ -216,9 +216,19 @@ fn a_program_saved_to_tape_loads_back() {
     type_text(&mut machine, "\r");
     wait(&mut machine, 2000);
     machine.set_tape_record(false);
+    assert_eq!(
+        machine.peek(page2::ULA_FIELD),
+        control::MOTOR | control::CASSETTE_OUTPUT,
+        "the ULA field a block's writing set"
+    );
     machine.wind_tape(0);
     type_text(&mut machine, "NEW\rLOAD \"P\"\r");
     wait(&mut machine, 2000);
+    assert_eq!(
+        machine.peek(page2::ULA_FIELD),
+        control::MOTOR | control::CASSETTE_INPUT,
+        "and the read's"
+    );
     type_text(&mut machine, "RUN\r");
     wait(&mut machine, 30);
     assert!(shows(&machine, &os, "TAPE"), "{:?}", screen(&machine, &os));
@@ -289,4 +299,40 @@ fn the_cursor_flashes_every_sixteen_centiseconds() {
     }
     let changes = shown.windows(2).filter(|pair| pair[0] != pair[1]).count();
     assert!((3..=5).contains(&changes), "on and off: {shown:?}");
+}
+
+/// At power-on a language in a cartridge waits behind BASIC, as Electron
+/// OS 1.00 enters the first language from ROM 15 down.
+#[test]
+fn a_cartridge_language_waits_behind_basic() {
+    let os = crate::rom::mos::electron()
+        .expect("the Electron's OS assembles")
+        .bytes;
+    let basic = crate::rom::basic::build().expect("BASIC assembles").bytes;
+    let plus1 = crate::rom::plus1::build()
+        .expect("the Plus 1 ROM assembles")
+        .bytes;
+    let mut machine = Machine::new(&os).expect("a 16 KiB OS");
+    machine.fit_basic(&basic).expect("BASIC fits");
+    machine.fit_plus1();
+    machine
+        .insert_rom(PLUS1_ROM, &plus1)
+        .expect("slot 12 takes the Plus 1's ROM");
+    for slot in CARTRIDGE_ROMS.iter().flatten() {
+        machine
+            .insert_rom(*slot, &program(None, |_| {}))
+            .expect("a cartridge slot takes a language");
+    }
+    wait(&mut machine, 300);
+    assert_ne!(
+        machine.peek(DONE),
+        DONE_MARK,
+        "no cartridge's language entered"
+    );
+    assert_eq!(
+        usize::from(machine.peek(crate::rom::os::zp::ROM)),
+        BASIC_ROMS[1],
+        "BASIC entered"
+    );
+    assert!(shows(&machine, &os, "BASIC"), "{:?}", screen(&machine, &os));
 }

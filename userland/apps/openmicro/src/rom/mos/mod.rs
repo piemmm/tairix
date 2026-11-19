@@ -78,7 +78,7 @@ type Emit = fn(&mut Asm, Model);
 /// rest.
 const PLACED: [(&str, Emit); 10] = [
     ("oswrch_default", |a, _| serial::oswrch_default(a)),
-    ("osrdch_default", |a, _| keyboard::osrdch_default(a)),
+    ("osrdch_default", keyboard::osrdch_default),
     ("brk_default", |a, _| reset::brk_default(a)),
     ("irq2_default", irq::irq2_default),
     ("cnpv_default", buffers::count_purge),
@@ -224,7 +224,7 @@ pub fn build(model: Model) -> Result<Image, AsmError> {
     graphics::emit(&mut a, model);
     modes::emit(&mut a, model);
     osbyte::emit(&mut a, model);
-    osword::emit(&mut a);
+    osword::emit(&mut a, model);
     cli::emit(&mut a, model);
     serial::emit(&mut a, model);
     sound::emit(&mut a, model);
