@@ -82,12 +82,12 @@ const fn offset(address: u16) -> u8 {
 }
 
 pub fn emit(a: &mut Asm) {
-    a.whole(scaling);
-    a.whole(text_to_fac);
-    a.whole(take_sign);
-    a.whole(fac_to_text);
-    a.whole(make_digits);
-    a.whole(print_unsigned);
+    a.movable(scaling);
+    a.movable(text_to_fac);
+    a.movable(take_sign);
+    a.movable(fac_to_text);
+    a.movable(make_digits);
+    a.movable(print_unsigned);
     a.later(constants);
 }
 

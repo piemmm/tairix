@@ -5,6 +5,9 @@
 use super::ws::zp;
 use crate::rom::asm::{abs, imm, zp as z, Asm, AsmError};
 
+/// TXTPTR as the cold start leaves it, until NEW sets it: the original's.
+const FIRST_TXTPTR: u16 = 0xEA60;
+
 /// CHRGET's bytes as they run from `$73`, TXTPTR the operand of CHRGOT's
 /// load.
 ///
@@ -18,7 +21,7 @@ pub fn code() -> Result<alloc::vec::Vec<u8>, AsmError> {
     a.bne("read");
     a.inc(z(zp::TXTPTR + 1));
     a.here("read");
-    a.lda(abs(0x0000));
+    a.lda(abs(FIRST_TXTPTR));
     a.cmp(imm(b':'));
     a.bcs("done");
     a.cmp(imm(b' '));

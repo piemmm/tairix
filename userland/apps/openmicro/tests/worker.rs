@@ -100,6 +100,8 @@ impl SessionService for Liar {
             lights: Lights::default(),
             case: LetterCase::default(),
             drives: [false; 2],
+            turning: [false; 2],
+            audible: false,
             loaded: Loaded::default(),
         };
         let _ = out.frame(&Reply::Ran(ran).encode());

@@ -159,6 +159,29 @@ fn bad_lines_stall_the_cpu_for_forty_cycles_a_row() {
 }
 
 #[test]
+fn a_read_ba_holds_is_made_once_when_ba_rises() {
+    let mut machine = machine(&halt(0), &[]);
+    let board = &mut machine.board;
+    // Timer A, latch 1, one-shot, its cause masked: the flag rises and waits.
+    board.write(0xDC04, 1);
+    board.write(0xDC05, 0);
+    board.write(0xDC0E, cia::cr::START | cia::cr::ONE_SHOT);
+    board.write(0xD011, 0x1B);
+    while board.vic.beam() != (0x33, 12) {
+        board.write(0x0400, 0);
+    }
+    assert!(board.vic.ba(), "line $33's BA falls in cycle 12");
+    let flags = board.read(0xDC0D);
+    assert_eq!(
+        flags & cia::icr::TA,
+        cia::icr::TA,
+        "the flag the read waited on"
+    );
+    assert_eq!(board.vic.beam(), (0x33, 56), "the read made in cycle 55");
+    assert_eq!(board.read(0xDC0D) & cia::icr::TA, 0, "and it took the flag");
+}
+
+#[test]
 fn a_program_loads_into_memory_as_load_leaves_it() {
     use crate::media::prg::Program;
     let mut program = vec![0xA9, 0x01, 0x85, 0x2B, 0xA9, 0x08, 0x85, 0x2C];

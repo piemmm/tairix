@@ -136,7 +136,6 @@ pub struct MachineService<W: ShareWrite> {
     machine: Option<Machine>,
     built: Option<Built>,
     sound: Option<Sound>,
-    sounding: bool,
     /// Where the last slice ended as asked: slices tile this timeline, so
     /// the instruction each overruns by never accumulates.
     timeline: u64,
@@ -154,7 +153,6 @@ impl<W: ShareWrite> MachineService<W> {
             machine: None,
             built: None,
             sound: None,
-            sounding: false,
             timeline: 0,
             whole_picture: true,
         })
@@ -300,7 +298,9 @@ impl<W: ShareWrite> MachineService<W> {
         if let Some(old) = self.machine.as_mut() {
             move_media(old, &mut machine)?;
         }
-        machine.set_sound_output(self.sounding);
+        // Its sound is made even for a slice not heard, so every slice can
+        // say whether the sound moved.
+        machine.set_sound_output(true);
         self.timeline = machine.cycles();
         let timing = machine.timing();
         self.machine = Some(machine);
@@ -350,10 +350,6 @@ impl<W: ShareWrite> MachineService<W> {
         {
             return send(out, &Reply::Refused(Refusal::Model));
         }
-        if sound != self.sounding {
-            machine.set_sound_output(sound);
-            self.sounding = sound;
-        }
         let start = self.timeline;
         for input in inputs {
             machine.run_until(start + u64::from(input.at));
@@ -369,14 +365,19 @@ impl<W: ShareWrite> MachineService<W> {
             motor: machine.tape_motor(),
         };
         let case = machine.letter_case();
-        let (drives, discs) = match &*machine {
-            Machine::ModelB(machine) => (
-                PhysicalDrive::ALL.map(|drive| machine.drive_active(drive)),
-                PhysicalDrive::ALL.map(|drive| machine.disc(drive).is_some()),
-            ),
-            Machine::Electron(_) => ([false; 2], [false; 2]),
+        let (drives, turning, discs) = match &*machine {
+            Machine::ModelB(machine) => {
+                let active = PhysicalDrive::ALL.map(|drive| machine.drive_active(drive));
+                (
+                    active,
+                    active,
+                    PhysicalDrive::ALL.map(|drive| machine.disc(drive).is_some()),
+                )
+            }
+            Machine::Electron(_) => ([false; 2], [false; 2], [false; 2]),
             Machine::C64(machine) => (
                 Unit::ALL.map(|unit| machine.drive(unit).is_some_and(Drive::led)),
+                Unit::ALL.map(|unit| machine.drive(unit).is_some_and(Drive::motor)),
                 Unit::ALL.map(|unit| machine.drive(unit).and_then(Drive::disk).is_some()),
             ),
         };
@@ -393,13 +394,15 @@ impl<W: ShareWrite> MachineService<W> {
         };
         let per_sample = timing.cycles_per_sample();
         let overrun = (machine.cycles() / per_sample).saturating_sub(self.timeline / per_sample);
-        let sound: &[u8] = match (&mut self.sound, sound) {
+        let (sound, audible): (&[u8], bool) = match (&mut self.sound, sound) {
             (Some(pipeline), true) => pipeline.take(machine, overrun),
-            (Some(pipeline), false) => {
-                pipeline.forget();
-                &[]
+            (pipeline, _) => {
+                let audible = moved(machine.take_audio().as_slice());
+                if let Some(pipeline) = pipeline {
+                    pipeline.forget();
+                }
+                (&[], audible)
             }
-            (None, _) => &[],
         };
         send(
             out,
@@ -410,6 +413,8 @@ impl<W: ShareWrite> MachineService<W> {
                 lights,
                 case,
                 drives,
+                turning,
+                audible,
                 loaded,
             }),
         )
@@ -797,6 +802,21 @@ fn apply(machine: &mut Machine, change: Change) {
     }
 }
 
+/// How far a slice's sound must move to be a sound rather than a level: a
+/// thousandth of full scale, some 60 dB down.
+const AUDIBLE: f32 = 1.0 / 1024.0;
+
+/// Whether `updates` move by more than [`AUDIBLE`].
+fn moved(updates: &[f32]) -> bool {
+    let Some((&first, rest)) = updates.split_first() else {
+        return false;
+    };
+    let (low, high) = rest.iter().fold((first, first), |(low, high), &update| {
+        (low.min(update), high.max(update))
+    });
+    high - low > AUDIBLE
+}
+
 /// The sound's way to the owner: the chip's updates resampled to the output
 /// rate, AC-coupled as the machine's output is, then signed 16-bit. A
 /// slice's sound is its cycles' exactly: what the instruction that ran past
@@ -841,13 +861,14 @@ impl Sound {
     }
 
     /// The sound of the slice that ended `overrun` updates before the
-    /// machine's time, encoded; nothing if a buffer could not grow, and at
-    /// most [`MAX_SAMPLES`].
-    fn take(&mut self, machine: &mut Machine, overrun: u64) -> &[u8] {
+    /// machine's time, encoded, and whether it [`moved`]; nothing if a buffer
+    /// could not grow, and at most [`MAX_SAMPLES`].
+    fn take(&mut self, machine: &mut Machine, overrun: u64) -> (&[u8], bool) {
         self.output.clear();
         self.bytes.clear();
         let audio = machine.take_audio();
         let fresh = audio.as_slice();
+        let audible = moved(fresh);
         let held = usize::try_from(overrun).map_or(fresh.len(), |held| held.min(fresh.len()));
         let (this, next) = fresh.split_at(fresh.len() - held);
         let mut carried = core::mem::take(&mut self.carried);
@@ -861,11 +882,11 @@ impl Sound {
         self.output.truncate(MAX_SAMPLES);
         let length = self.output.len() * SAMPLE_BYTES;
         if self.bytes.try_reserve(length).is_err() {
-            return &[];
+            return (&[], audible);
         }
         self.bytes.resize(length, 0);
         let written = convert::encode(SampleFormat::S16, &self.output, &mut self.bytes);
-        &self.bytes[..written]
+        (&self.bytes[..written], audible)
     }
 
     /// `updates` resampled onto the output, while it has room.

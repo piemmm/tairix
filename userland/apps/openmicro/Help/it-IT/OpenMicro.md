@@ -33,18 +33,20 @@ funzione, anche il menu della macchina. Al primo avvio l'emulatore crea un
 BBC Micro Model B con un disco vuoto.
 
 Impostazioni cambia il nome di una macchina, il suo volume, il caricamento
-rapido da nastro, che fa girare la macchina il più veloce possibile mentre il
-motore del registratore gira, e, su un Commodore 64, la porta di controllo in
-cui è inserito il suo joystick sul tastierino. Ciò che vi è montato si può
-cambiare solo mentre è spenta: la ROM in ogni zoccolo — l'OS del Model B e i
-suoi sedici slot laterali, l'OS e il BASIC dell'Electron, la ROM e le cartucce
-del suo Plus 1 e, sul Commodore 64, il KERNAL, il BASIC, il set di caratteri e
-il DOS di ogni unità —, ciascuno con una ROM fornita, RAM laterale in uno slot
-del Model B, niente in uno slot o in una cartuccia, o una tua immagine di ROM,
-messa nell'archivio dell'emulatore con Installa un'immagine; il Plus 1
-dell'Electron; lo standard video, il SID e le unità del Commodore 64; e i
-ponticelli della tastiera del Model B, che fissano la modalità dello schermo
-all'avvio, il modo in cui si avvia un disco e i tempi del disco.
+rapido, che fa girare la macchina il più veloce possibile mentre il motore del
+registratore gira o il disco di un'unità ruota e la macchina è in silenzio, e,
+su un Commodore 64, la porta di controllo in cui è inserito il suo joystick sul
+tastierino. Ciò che vi è montato si può cambiare solo mentre è spenta: la ROM
+in ogni zoccolo — l'OS del Model B e i suoi sedici slot laterali, l'OS e il
+BASIC dell'Electron, la ROM e le cartucce del suo Plus 1 e, sul Commodore 64,
+il KERNAL, il BASIC, il set di caratteri e il DOS di ogni unità —, ciascuno con
+una ROM fornita, RAM laterale in uno slot del Model B, niente in uno slot o in
+una cartuccia, o una tua immagine di ROM, messa nell'archivio dell'emulatore
+con Installa un'immagine; il Plus 1 dell'Electron; lo standard video, il SID e
+le unità del Commodore 64; e i ponticelli della tastiera del Model B, che
+fissano la modalità dello schermo all'avvio, il modo in cui si avvia un disco e
+i tempi del disco. Alcuni programmi leggono il codice delle ROM originali
+stesse e funzionano solo se ne sono montate le immagini.
 
 Un Model B ha anche VIM, un editor nello stile di vi, montato nello slot 13. Al
 prompt della macchina, `*VIM` seguito dal nome di un file modifica quel file, e

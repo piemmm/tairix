@@ -54,16 +54,16 @@ pub const LEFT: u16 = zp::TEMPF2;
 
 /// The flowing code; [`eval`] is pinned by the module above.
 pub fn emit(a: &mut Asm) {
-    a.whole(expression);
-    a.whole(|a| {
+    a.movable(expression);
+    a.movable(|a| {
         binary(a);
         relations(a);
     });
-    a.whole(logic);
-    a.whole(operands);
-    a.whole(unary);
-    a.whole(functions);
-    a.whole(checks);
+    a.movable(logic);
+    a.movable(operands);
+    a.movable(unary);
+    a.movable(functions);
+    a.movable(checks);
     a.later(tables);
 }
 

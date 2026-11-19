@@ -123,6 +123,11 @@ output's place between them, so a linked domain's correction goes on without
 the restart a new resampler would make audible. A bank of more taps reads the
 frames the history no longer holds as silence until they pass.
 
+**An output is one contiguous dot product.** Each channel's history is held
+twice over, so no window wraps; the exact case reads its row straight from the
+bank; and the taps are summed in independent lanes, so a decimating ratio's
+long filter costs its multiplies rather than a chain of dependent additions.
+
 **One windowed sinc.** `Lowpass` is the Kaiser-windowed sinc every bank is cut
 from; band-limited synthesis that draws a level's changes, as an emulated
 DAC's are, builds its steps from the same kernel rather than designing a

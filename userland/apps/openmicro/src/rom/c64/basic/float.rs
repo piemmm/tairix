@@ -39,19 +39,19 @@ pub const WORD_EXPONENT: u8 = 0x90;
 const WHOLE_EXPONENT: u8 = 0xA8;
 
 pub fn emit(a: &mut Asm) {
-    a.whole(loads);
-    a.whole(stores);
-    a.whole(round);
-    a.whole(normalise);
-    a.whole(sum);
-    a.whole(shifts);
-    a.whole(product);
-    a.whole(quotient);
-    a.whole(exponents);
-    a.whole(signs);
-    a.whole(compare);
-    a.whole(int);
-    a.whole(integers);
+    a.movable(loads);
+    a.movable(stores);
+    a.movable(round);
+    a.movable(normalise);
+    a.movable(sum);
+    a.movable(shifts);
+    a.movable(product);
+    a.movable(quotient);
+    a.movable(exponents);
+    a.movable(signs);
+    a.movable(compare);
+    a.movable(int);
+    a.movable(integers);
 }
 
 /// `fac_load` and `arg_load`: the real at A (low) and Y into FAC or ARG,

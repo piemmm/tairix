@@ -488,3 +488,47 @@ fn the_keypad_is_a_joystick_and_lets_every_other_key_by() {
     assert_eq!(stick.release_all(), Some(0));
     assert_eq!(stick.release_all(), None, "nothing left held");
 }
+
+#[test]
+fn a_tap_is_held_and_a_release_kept_for_the_least_hold() {
+    const LEAST: u64 = 50;
+    let mut edges = Edges::new();
+    assert_eq!(edges.key(3, true, 100, LEAST), 100, "a first press at once");
+    assert_eq!(
+        edges.key(3, false, 110, LEAST),
+        150,
+        "a tap held long enough"
+    );
+    assert_eq!(
+        edges.key(3, true, 150, LEAST),
+        200,
+        "pressed again only once the release has lasted"
+    );
+    assert_eq!(
+        edges.key(3, false, 400, LEAST),
+        400,
+        "a long press as it was"
+    );
+    assert_eq!(
+        edges.key(4, true, 160, LEAST),
+        160,
+        "another key is not held up"
+    );
+}
+
+#[test]
+fn a_stick_line_is_held_and_released_as_a_key_is() {
+    use crate::machine::c64::joystick::{FIRE, UP};
+    const LEAST: u64 = 50;
+    let mut edges = Edges::new();
+    assert_eq!(edges.stick(1, UP, 0, LEAST), 0);
+    assert_eq!(
+        edges.stick(1, UP | FIRE, 10, LEAST),
+        10,
+        "a new line at once"
+    );
+    assert_eq!(edges.stick(1, FIRE, 20, LEAST), 50, "up held long enough");
+    assert_eq!(edges.stick(1, 0, 60, LEAST), 60, "fire held since 10");
+    assert_eq!(edges.stick(1, FIRE, 70, LEAST), 110, "fire's release kept");
+    assert_eq!(edges.stick(2, FIRE, 5, LEAST), 5, "no third port");
+}

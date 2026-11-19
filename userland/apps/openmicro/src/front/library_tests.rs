@@ -42,7 +42,7 @@ fn every_model_reads_back_from_its_record() {
     changed.scaling = Scaling::Smooth;
     changed.keyboard = Mapping::Physical;
     changed.volume = 250;
-    changed.fast_tape = false;
+    changed.fast_loading = false;
     changed.folder = Some(String::from("Electron"));
     changed.tape = Some(Held {
         name: String::from("Blank.uef"),

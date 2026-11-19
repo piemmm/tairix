@@ -665,6 +665,97 @@ impl Stick {
     }
 }
 
+/// A control port's joystick lines.
+pub const STICK_LINES: usize = joystick::ALL.count_ones() as usize;
+
+/// When each key and each joystick line last went down and came up, in the
+/// machine's cycles, so an edge is put off until the press before it has
+/// been held, or the release before it kept, for the least hold: a scan of
+/// the keyboard then sees every press and every release, however quickly
+/// the host's keys moved.
+#[derive(Clone, Debug)]
+pub struct Edges {
+    keys: [Times; KEY_NUMBERS],
+    stick: [u8; 2],
+    stick_times: [[Times; STICK_LINES]; 2],
+}
+
+/// When a key or a line last went down and last came up.
+#[derive(Clone, Copy, Debug, Default)]
+struct Times {
+    down: Option<u64>,
+    up: Option<u64>,
+}
+
+impl Times {
+    /// The cycle an edge going `down` or up at `at` takes effect at, the
+    /// edge before it given `least` cycles; recorded.
+    fn edge(&mut self, down: bool, at: u64, least: u64) -> u64 {
+        let (before, now) = if down {
+            (self.up, &mut self.down)
+        } else {
+            (self.down, &mut self.up)
+        };
+        let at = before.map_or(at, |before| at.max(before.saturating_add(least)));
+        *now = Some(at);
+        at
+    }
+}
+
+impl Default for Edges {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Edges {
+    /// No edge yet.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            keys: [Times::default(); KEY_NUMBERS],
+            stick: [0; 2],
+            stick_times: [[Times::default(); STICK_LINES]; 2],
+        }
+    }
+
+    /// The cycle key `number` going `down` or up takes effect at: `at` or
+    /// later, once the edge before it has lasted `least` cycles.
+    pub fn key(&mut self, number: usize, down: bool, at: u64, least: u64) -> u64 {
+        self.keys[number % KEY_NUMBERS].edge(down, at, least)
+    }
+
+    /// The cycle `port`'s lines become `lines` at: `at` or later, once each
+    /// line that changes has kept its state `least` cycles. A port past the
+    /// second changes nothing.
+    pub fn stick(&mut self, port: usize, lines: u8, at: u64, least: u64) -> u64 {
+        let (Some(held), Some(times)) = (self.stick.get_mut(port), self.stick_times.get_mut(port))
+        else {
+            return at;
+        };
+        let changed = *held ^ lines;
+        let lasted = (0..STICK_LINES)
+            .filter(|&line| changed & 1 << line != 0)
+            .filter_map(|line| {
+                let times = times[line];
+                if lines & 1 << line != 0 {
+                    times.up
+                } else {
+                    times.down
+                }
+            })
+            .map(|before| before.saturating_add(least))
+            .fold(at, u64::max);
+        for (line, times) in times.iter_mut().enumerate() {
+            if changed & 1 << line != 0 {
+                times.edge(lines & 1 << line != 0, lasted, 0);
+            }
+        }
+        *held = lines;
+        lasted
+    }
+}
+
 #[cfg(test)]
 #[path = "keys_tests.rs"]
 mod tests;

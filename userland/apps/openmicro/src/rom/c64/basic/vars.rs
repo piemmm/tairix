@@ -46,23 +46,23 @@ const LOOP: u16 = zp::ENDCHR;
 const SAVED_STATE: u8 = 5;
 
 pub fn emit(a: &mut Asm) {
-    a.whole(|a| {
+    a.movable(|a| {
         simple(a);
         creation(a);
     });
-    a.whole(names);
-    a.whole(|a| {
+    a.movable(names);
+    a.movable(|a| {
         reading(a);
         clock(a);
     });
-    a.whole(assignment);
-    a.whole(|a| {
+    a.movable(assignment);
+    a.movable(|a| {
         arrays(a);
         array_creation(a);
         subscripts(a);
     });
-    a.whole(dim);
-    a.whole(|a| {
+    a.movable(dim);
+    a.movable(|a| {
         functions(a);
         function_calls(a);
     });

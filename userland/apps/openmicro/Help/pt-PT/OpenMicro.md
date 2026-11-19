@@ -33,19 +33,21 @@ para essa máquina e, enquanto funciona, também o menu da máquina. Na primeira
 vez que é iniciado, o emulador cria um BBC Micro Model B com um disco em
 branco.
 
-Definições altera o nome de uma máquina, o seu volume, o carregamento rápido
-de cassete, que põe a máquina a correr o mais depressa possível enquanto o
-motor do gravador gira, e, num Commodore 64, a porta de controlo em que está o
-seu joystick do teclado numérico. O que está instalado nela só muda enquanto
-está desligada: a ROM de cada encaixe — o OS do Model B e as suas dezasseis
-ranhuras laterais, o OS e o BASIC do Electron, a ROM e os cartuchos do seu
-Plus 1 e, no Commodore 64, o KERNAL, o BASIC, os caracteres e o DOS de cada
-unidade —, cada um com uma ROM incluída, RAM lateral numa ranhura do Model B,
-nada numa ranhura ou cartucho, ou uma imagem de ROM sua, posta no armazém do
-emulador com Instalar uma imagem; o Plus 1 do Electron; a norma de televisão,
-o SID e as unidades do Commodore 64; e os jumpers do teclado do Model B, que
-definem o seu modo de ecrã no arranque, como um disco arranca e os tempos de
-disco.
+Definições altera o nome de uma máquina, o seu volume, o carregamento rápido,
+que põe a máquina a correr o mais depressa possível enquanto o motor do
+gravador gira ou o disco de uma unidade roda e a máquina está em silêncio, e,
+num Commodore 64, a porta de controlo em que está o seu joystick do teclado
+numérico. O que está instalado nela só muda enquanto está desligada: a ROM de
+cada encaixe — o OS do Model B e as suas dezasseis ranhuras laterais, o OS e o
+BASIC do Electron, a ROM e os cartuchos do seu Plus 1 e, no Commodore 64, o
+KERNAL, o BASIC, os caracteres e o DOS de cada unidade —, cada um com uma ROM
+incluída, RAM lateral numa ranhura do Model B, nada numa ranhura ou cartucho,
+ou uma imagem de ROM sua, posta no armazém do emulador com Instalar uma
+imagem; o Plus 1 do Electron; a norma de televisão, o SID e as unidades do
+Commodore 64; e os jumpers do teclado do Model B, que definem o seu modo de
+ecrã no arranque, como um disco arranca e os tempos de disco. Alguns programas
+leem o próprio código das ROM originais e só funcionam com imagens dessas ROM
+instaladas.
 
 Um Model B tem também o VIM, um editor ao estilo do vi, instalado na
 ranhura 13. Na linha de comandos da máquina, `*VIM` seguido do nome de um

@@ -809,8 +809,8 @@ pub struct Machine {
     pub joystick: Joystick,
     /// Its sound's level, in thousandths.
     pub volume: u16,
-    /// Whether a tape loads as fast as the machine can run.
-    pub fast_tape: bool,
+    /// Whether a tape or a disc loads as fast as the machine can run.
+    pub fast_loading: bool,
     /// Its folder's name in the application's documents folder, once made.
     pub folder: Option<String>,
     /// The files of its folder each drive held.
@@ -833,7 +833,7 @@ impl Machine {
             keyboard: Mapping::default(),
             joystick: Joystick::default(),
             volume: FULL_VOLUME,
-            fast_tape: true,
+            fast_loading: true,
             folder: None,
             discs: [None, None],
             tape: None,
@@ -896,7 +896,7 @@ impl Kept for Machine {
         });
         w.u8(self.joystick.number());
         w.u16(self.volume);
-        w.u8(u8::from(self.fast_tape));
+        w.u8(u8::from(self.fast_loading));
         match &self.folder {
             Some(folder) => {
                 w.u8(1);
@@ -929,7 +929,7 @@ impl Kept for Machine {
             return Ok(None);
         };
         let volume = r.u16()?;
-        let fast_tape = match r.u8()? {
+        let fast_loading = match r.u8()? {
             0 => false,
             1 => true,
             _ => return Ok(None),
@@ -949,7 +949,7 @@ impl Kept for Machine {
             keyboard,
             joystick,
             volume,
-            fast_tape,
+            fast_loading,
             folder,
             discs: [zero, one],
             tape,

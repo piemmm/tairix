@@ -548,6 +548,28 @@ fn an_electron_snapshot_restores_and_a_model_bs_is_refused() {
 /// out the Electron's display window in mode 0 does, put its sound in that
 /// slice, more than its cycles make, and the owner condemned the worker.
 #[test]
+fn a_slice_says_whether_its_sound_moved_heard_or_not() {
+    let mut rig = Rig::configured();
+    let mut slice = |sound| {
+        let reply = rig.ask(&run(100_000, sound));
+        let Ok(Reply::Ran(ran)) = Reply::decode(&reply) else {
+            panic!("a slice ran")
+        };
+        (ran.audible, ran.sound.is_empty())
+    };
+    let bell: Vec<(bool, bool)> = (0..20).map(|_| slice(false)).collect();
+    assert!(
+        bell.iter().any(|&(audible, unheard)| audible && unheard),
+        "the power-on bell moves the sound in slices not heard"
+    );
+    for _ in 0..80 {
+        slice(false);
+    }
+    assert_eq!(slice(false), (false, true), "the bell long over");
+    assert_eq!(slice(true), (false, false), "heard, and silent");
+}
+
+#[test]
 fn a_slices_sound_is_its_cycles_whatever_the_last_instruction_overruns_by() {
     let mut rig = Rig::electron(false);
     let mut client = crate::worker::MachineClient::new();
@@ -729,6 +751,34 @@ mod commodore {
             .is_empty());
         let reply = rig.ask(&run(1000, false));
         assert_eq!(ran(&reply).loaded.discs, [true, false]);
+    }
+
+    #[test]
+    fn a_commodore_s_drive_reports_its_disk_turning_while_it_works() {
+        use crate::machine::c64::keyboard::Key;
+        let mut rig = rig([true, false]);
+        let image = d64::formatted(b"GAMES", *b"GA");
+        rig.ask(&disk(DiscFormat::D64, &image));
+        for _ in 0..3 {
+            let reply = rig.ask(&run(PAL_SECOND, false));
+            assert_eq!(ran(&reply).turning, [false; 2], "idle");
+        }
+        let key = |key, down| Input {
+            at: 0,
+            change: Change::Key(ModelKey::C64(Keycap::Matrix(key)), down),
+        };
+        for character in "LOAD\"$\",8\r".chars() {
+            let (pressed, shifted) = Key::typing(character).expect("a key types it");
+            let shift = shifted.then(|| key(Key::LEFT_SHIFT, true));
+            rig.run_with(shift.into_iter().chain([key(pressed, true)]).collect());
+            let shift = shifted.then(|| key(Key::LEFT_SHIFT, false));
+            rig.run_with([key(pressed, false)].into_iter().chain(shift).collect());
+        }
+        let turned = (0..100).any(|_| {
+            let reply = rig.ask(&run(PAL_SECOND / 10, false));
+            ran(&reply).turning == [true, false]
+        });
+        assert!(turned, "device 8's disk turns as it reads the directory");
     }
 
     #[test]

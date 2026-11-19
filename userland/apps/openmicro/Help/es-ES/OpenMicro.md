@@ -32,19 +32,21 @@ una máquina ofrece Iniciar, Ajustes, Duplicar, Eliminar y Mostrar carpeta para
 esa máquina y, mientras funciona, también el menú de la máquina. La primera vez
 que se inicia, el emulador crea un BBC Micro Model B con un disco en blanco.
 
-Ajustes cambia el nombre de una máquina, su volumen, la carga rápida de cinta,
-que hace correr la máquina tan deprisa como puede mientras gira el motor del
-magnetófono, y en un Commodore 64 el puerto de control en el que está su
-joystick de teclado numérico. Lo que tiene instalado solo cambia mientras está
-apagada: la ROM de cada zócalo —el OS y las dieciséis ranuras laterales del
-Model B, el OS y el BASIC del Electron, la ROM y los cartuchos de su Plus 1, y
-el KERNAL, el BASIC, el juego de caracteres y el DOS de cada unidad del
-Commodore 64—, sea una ROM incluida, RAM lateral en una ranura del Model B,
-nada en una ranura o un cartucho, o una imagen de ROM propia, puesta en el
-almacén del emulador con Instalar una imagen; el Plus 1 del Electron; la norma
-de televisión, el SID y las unidades del Commodore 64; y los puentes del
-teclado del Model B, que fijan su modo de pantalla al arrancar, el arranque
-desde disco y los tiempos de disco.
+Ajustes cambia el nombre de una máquina, su volumen, la carga rápida, que hace
+correr la máquina tan deprisa como puede mientras gira el motor del magnetófono
+o el disco de una unidad y la máquina está en silencio, y en un Commodore 64 el
+puerto de control en el que está su joystick de teclado numérico. Lo que tiene
+instalado solo cambia mientras está apagada: la ROM de cada zócalo —el OS y las
+dieciséis ranuras laterales del Model B, el OS y el BASIC del Electron, la ROM
+y los cartuchos de su Plus 1, y el KERNAL, el BASIC, el juego de caracteres y
+el DOS de cada unidad del Commodore 64—, sea una ROM incluida, RAM lateral en
+una ranura del Model B, nada en una ranura o un cartucho, o una imagen de ROM
+propia, puesta en el almacén del emulador con Instalar una imagen; el Plus 1
+del Electron; la norma de televisión, el SID y las unidades del Commodore 64; y
+los puentes del teclado del Model B, que fijan su modo de pantalla al arrancar,
+el arranque desde disco y los tiempos de disco. Unos pocos programas leen el
+propio código de las ROM originales y solo funcionan con imágenes de esas ROM
+instaladas.
 
 Un Model B tiene además VIM, un editor al estilo de vi, instalado en la
 ranura 13. En el indicador de la máquina, `*VIM` seguido del nombre de un

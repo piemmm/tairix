@@ -875,3 +875,199 @@ fn a_room_code_has_since_taken_part_of_takes_tables_only_in_what_is_left() {
     );
     assert_eq!(image[0x30..0x39], [2; 9], "the other placed after");
 }
+
+/// `count` `NOP`s and an `RTS`, under the label `name`.
+fn block(asm: &mut Asm, name: &'static str, count: usize) {
+    asm.here(name);
+    for _ in 0..count {
+        asm.nop();
+    }
+    asm.rts();
+}
+
+#[test]
+fn a_movable_block_fitting_before_a_pin_needs_no_room_for_a_hop() {
+    let image = finished(|asm| {
+        asm.pin(ORIGIN + 4, Asm::rts);
+        asm.rts();
+        asm.movable(|asm| block(asm, "fits", 2));
+    })
+    .unwrap();
+    assert_eq!(image[..5], [0x60, 0xEA, 0xEA, 0x60, 0x60], "up to the pin");
+}
+
+#[test]
+fn a_block_meeting_a_pin_is_held_while_the_next_fills_the_room() {
+    let mut asm = Asm::new(ORIGIN, 0x100);
+    asm.pin(ORIGIN + 8, Asm::rts);
+    asm.rts();
+    asm.later(|asm| {
+        asm.here("table");
+        asm.bytes(&[7; 3]);
+    });
+    asm.movable(|asm| block(asm, "long", 9));
+    asm.movable(|asm| block(asm, "short", 3));
+    asm.movable(|asm| block(asm, "next", 4));
+    asm.place_later();
+    let image = asm.finish().unwrap();
+    assert_eq!(image.symbol("short"), Some(ORIGIN + 1), "into the room");
+    assert_eq!(
+        image.symbol("next"),
+        Some(ORIGIN + 9),
+        "not fitting either, so past the pin"
+    );
+    assert_eq!(
+        image.symbol("table"),
+        Some(ORIGIN + 5),
+        "what was left of the room"
+    );
+    assert_eq!(
+        image.symbol("long"),
+        Some(ORIGIN + 14),
+        "where the flow ended"
+    );
+}
+
+#[test]
+fn a_room_filled_ahead_of_later_code_is_hopped_as_a_pin() {
+    let image = finished(|asm| {
+        asm.later(|asm| asm.bytes(&[7; 4]));
+        asm.org(ORIGIN + 0x40);
+        asm.room(8);
+        asm.place_later();
+        asm.org(ORIGIN + 0x38);
+        for _ in 0..8 {
+            asm.nop();
+        }
+    })
+    .unwrap();
+    assert_eq!(image[0x40..0x44], [7; 4], "the table in the room");
+    let [low, high] = (ORIGIN + 0x44).to_le_bytes();
+    assert_eq!(
+        image[0x38..0x40],
+        [0xEA, 0xEA, 0xEA, 0xEA, 0xEA, 0x4C, low, high],
+        "a hop over the table"
+    );
+    assert_eq!(image[0x44..0x47], [0xEA; 3], "the rest past it");
+}
+
+#[test]
+fn what_no_room_takes_fills_the_smallest_stretch_first_with_what_fills_it_most() {
+    let mut asm = Asm::new(ORIGIN, 0x0E);
+    asm.pin(ORIGIN + 6, Asm::rts);
+    asm.rts();
+    for (name, len) in [("four", 4), ("three", 3), ("other_three", 3), ("two", 2)] {
+        asm.later(move |asm| {
+            asm.here(name);
+            asm.fill(len, 0xAA);
+        });
+    }
+    asm.place_later();
+    let image = asm.finish().expect("the four fill both stretches exactly");
+    assert_eq!(
+        image.symbol("three"),
+        Some(ORIGIN + 1),
+        "the five bytes first"
+    );
+    assert_eq!(image.symbol("two"), Some(ORIGIN + 4));
+    assert_eq!(
+        image.symbol("four"),
+        Some(ORIGIN + 7),
+        "the seven after the pin"
+    );
+    assert_eq!(image.symbol("other_three"), Some(ORIGIN + 0x0B));
+}
+
+#[test]
+fn what_fits_after_the_code_follows_it_in_the_order_held() {
+    let mut asm = Asm::new(ORIGIN, 0x100);
+    asm.pin(ORIGIN + 0x40, Asm::rts);
+    asm.rts();
+    for (name, len) in [("two", 2), ("five", 5)] {
+        asm.later(move |asm| {
+            asm.here(name);
+            asm.fill(len, 0xAA);
+        });
+    }
+    asm.place_later();
+    let image = asm.finish().unwrap();
+    assert_eq!(image.symbol("two"), Some(ORIGIN + 1));
+    assert_eq!(image.symbol("five"), Some(ORIGIN + 3));
+}
+
+#[test]
+fn a_held_item_longer_than_every_free_stretch_is_refused() {
+    let mut asm = Asm::new(ORIGIN, 0x10);
+    asm.pin(ORIGIN + 8, Asm::rts);
+    asm.rts();
+    asm.later(|asm| asm.fill(8, 0xAA));
+    asm.place_later();
+    assert_eq!(asm.finish(), Err(AsmError::NoRoom { len: 8 }));
+}
+
+#[test]
+fn a_table_a_held_block_holds_is_placed_after_it() {
+    let mut asm = Asm::new(ORIGIN, 0x100);
+    asm.pin(ORIGIN + 4, Asm::rts);
+    asm.rts();
+    asm.movable(|asm| {
+        block(asm, "outer", 4);
+        asm.later(|asm| {
+            asm.here("inner");
+            asm.bytes(&[9; 2]);
+        });
+    });
+    asm.place_later();
+    let image = asm.finish().unwrap();
+    assert_eq!(image.symbol("outer"), Some(ORIGIN + 5));
+    assert_eq!(
+        image.symbol("inner"),
+        Some(ORIGIN + 1),
+        "in the room it left"
+    );
+}
+
+#[test]
+fn a_table_placing_a_pin_is_refused_and_a_block_doing_so_stays() {
+    assert_eq!(
+        finished(|asm| {
+            asm.rts();
+            asm.later(|asm| asm.pin(ORIGIN + 0x20, Asm::rts));
+            asm.place_later();
+        }),
+        Err(AsmError::HeldPin { at: ORIGIN + 1 })
+    );
+    let mut asm = Asm::new(ORIGIN, 0x100);
+    asm.pin(ORIGIN + 2, Asm::rts);
+    asm.rts();
+    asm.movable(|asm| {
+        block(asm, "block", 1);
+        asm.pin(ORIGIN + 0x40, |asm| block(asm, "pinned", 0));
+    });
+    asm.here("after");
+    asm.rts();
+    let image = asm.finish().unwrap();
+    assert_eq!(image.symbol("block"), Some(ORIGIN + 3), "placed whole");
+    assert_eq!(image.symbol("after"), Some(ORIGIN + 5));
+    assert_eq!(image.symbol("pinned"), Some(ORIGIN + 0x40));
+}
+
+#[test]
+fn a_block_a_label_just_bound_names_stays_with_it() {
+    let mut asm = Asm::new(ORIGIN, 0x100);
+    asm.pin(ORIGIN + 3, Asm::rts);
+    asm.rts();
+    asm.here("start");
+    asm.movable(|asm| block(asm, "body", 3));
+    asm.here("after");
+    asm.rts();
+    asm.place_later();
+    let image = asm.finish().unwrap();
+    assert_eq!(
+        image.symbol("body"),
+        Some(ORIGIN + 4),
+        "placed whole, past the pin"
+    );
+    assert_eq!(image.symbol("start"), image.symbol("body"));
+    assert_eq!(image.symbol("after"), Some(ORIGIN + 8));
+}

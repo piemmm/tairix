@@ -15,15 +15,14 @@ use tairix_crt::screen::{fit, Drawing, Picture, Scaling, DOT};
 use tairix_crt::Tube;
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_machines::menu::{Effect, Followed};
-use tairix_openmicro::front::keys::{self, Keyboard, MachineKey, Mapping, Press, Stick};
+use tairix_openmicro::front::keys::{self, Edges, Keyboard, MachineKey, Mapping, Press, Stick};
 use tairix_openmicro::front::library::Joystick;
 use tairix_openmicro::front::media::{Disc, FileWork, Handover, Holding, Rack, Saving, Tape};
 use tairix_openmicro::front::menu::{Offered, Shown, SHIFT_BREAK};
-use tairix_openmicro::front::pacing::{Next, Pacer};
+use tairix_openmicro::front::pacing::{Next, Pacer, Quiet};
 use tairix_openmicro::front::picture::{expand, palette_of};
 use tairix_openmicro::front::{events, LEAST_PICTURE, OPEN_PICTURE};
 use tairix_openmicro::machine::bbc::fdc::PhysicalDrive;
-use tairix_openmicro::machine::c64::joystick;
 use tairix_openmicro::machine::c64::keyboard::Keycap;
 use tairix_openmicro::machine::canvas::{CANVAS_HEIGHT, CANVAS_WIDTH};
 use tairix_openmicro::machine::{
@@ -47,9 +46,6 @@ use tairix_window::{pointer_input_events, pointer_point, Desktop, Owed, Repaint,
 use crate::files::Speaker;
 use crate::program::{record, unwatch_sound, Client, APP_NAME};
 use tairix_openmicro::front::images::Images;
-
-/// A control port's joystick lines.
-const STICK_LINES: usize = joystick::ALL.count_ones() as usize;
 
 /// The least a key is held, in the OS's keyboard scans, halves counted: two
 /// and a half, so two see it.
@@ -320,11 +316,9 @@ pub struct MachineWindow {
     pending: VecDeque<Pending>,
     inputs: VecDeque<(u64, Change)>,
     timeline: u64,
-    pressed_at: [u64; keys::KEY_NUMBERS],
-    /// Each control port's lines as last queued, and when each went down,
-    /// so a tap is held as long as a key's.
-    stick_queued: [u8; 2],
-    stick_pressed_at: [[u64; STICK_LINES]; 2],
+    /// When each key and stick line last moved, so every press and release
+    /// lasts long enough for the scan to see.
+    edges: Edges,
     pacer: Pacer,
     keys: Keys,
     /// The keypad as a C64's joystick, and the port it plays in.
@@ -340,7 +334,6 @@ pub struct MachineWindow {
     images: Option<Box<Images>>,
     /// Its sound stream.
     pub sound: Option<Speaker>,
-    scratch: Vec<u8>,
     slots: Vec<u8>,
     /// Its media and the picker.
     pub rack: Rack,
@@ -350,6 +343,10 @@ pub struct MachineWindow {
     /// How its letter keys typed at the last slice's end.
     case: LetterCase,
     drives: [bool; 2],
+    /// Whether each drive's disc turned as the last slice ended.
+    turning: [bool; 2],
+    /// When its sound last moved.
+    quiet: Quiet,
     loaded: Loaded,
     /// The menu up over its window.
     pub menu: Option<Followed<()>>,
@@ -357,8 +354,8 @@ pub struct MachineWindow {
     full_screen: bool,
     /// Its sound's level.
     pub volume: u16,
-    /// Whether a tape loads as fast as the machine can run.
-    pub fast_tape: bool,
+    /// Whether a tape or a disc loads as fast as the machine can run.
+    pub fast_loading: bool,
     /// What its folder offers.
     pub offered: Offered,
     /// Whether it was ever run, so a stop keeps its last screen.
@@ -456,9 +453,7 @@ impl MachineWindow {
             pending: VecDeque::new(),
             inputs: VecDeque::new(),
             timeline: 0,
-            pressed_at: [0; keys::KEY_NUMBERS],
-            stick_queued: [0; 2],
-            stick_pressed_at: [[0; STICK_LINES]; 2],
+            edges: Edges::new(),
             pacer: Pacer::new(machine.fitting.timing()),
             keys: Keys::new(model, machine.keyboard),
             stick: Stick::new(),
@@ -468,19 +463,20 @@ impl MachineWindow {
             cartridge: None,
             images: None,
             sound: None,
-            scratch: Vec::new(),
             slots: alloc::vec![0; CANVAS_WIDTH],
             rack: Rack::new(model),
             picked: None,
             lights: Lights::default(),
             case: LetterCase::default(),
             drives: [false; 2],
+            turning: [false; 2],
+            quiet: Quiet::default(),
             loaded: Loaded::default(),
             menu: None,
             message: Some((String::from("Starting\u{2026}"), StatusTone::Muted)),
             full_screen: false,
             volume: machine.volume,
-            fast_tape: machine.fast_tape,
+            fast_loading: machine.fast_loading,
             offered: Offered::default(),
             ran: false,
             running_from: None,
@@ -627,6 +623,7 @@ impl MachineWindow {
 
     /// Ask for the next request waiting, or the slice the pace asks for.
     pub fn pump(&mut self, now: u64) {
+        let hurried = self.hurried();
         let Some(link) = self
             .link
             .as_mut()
@@ -646,7 +643,6 @@ impl MachineWindow {
         if self.images.is_none() || self.life != Life::Running {
             return;
         }
-        let hurried = self.fast_tape && self.lights.motor;
         let ring = self.sound.as_mut().and_then(Speaker::ring);
         if let Next::Run { cycles, sound } = self.pacer.next(now, ring, hurried) {
             let end = self.timeline + u64::from(cycles);
@@ -713,9 +709,7 @@ impl MachineWindow {
             self.pending.push_front(asked);
         }
         self.inputs.clear();
-        self.pressed_at = [0; keys::KEY_NUMBERS];
-        self.stick_queued = [0; 2];
-        self.stick_pressed_at = [[0; STICK_LINES]; 2];
+        self.edges = Edges::new();
         self.loaded = Loaded::default();
     }
 
@@ -733,6 +727,7 @@ impl MachineWindow {
         }
         self.share = link.share().cloned();
         self.timeline = 0;
+        self.quiet = Quiet::default();
         let discs = PhysicalDrive::ALL.into_iter().filter_map(|drive| {
             let disc = self.rack.disc(drive)?.clone();
             Some(Pending::InsertDisc {
@@ -761,7 +756,7 @@ impl MachineWindow {
             && self.images.is_some()
             && self.life == Life::Running)
             .then(|| {
-                let hurried = self.fast_tape && self.lights.motor;
+                let hurried = self.hurried();
                 let ring = self.sound.as_mut().and_then(Speaker::ring);
                 let mut pacer = self.pacer;
                 match pacer.next(now, ring, hurried) {
@@ -872,11 +867,15 @@ impl MachineWindow {
                 }
             }
         }
-        if !ran.sound.is_empty() {
+        if ran.sound.is_empty() {
+            if let Some(sound) = self.sound.as_mut() {
+                sound.forget();
+            }
+        } else {
             let played = self
                 .sound
                 .as_mut()
-                .map(|sound| sound.play(ran.sound, self.volume, &mut self.scratch));
+                .map(|sound| sound.play(ran.sound, self.volume));
             if let Some(Err(err)) = played {
                 if let Some(sound) = self.sound.take() {
                     sound.close();
@@ -897,6 +896,8 @@ impl MachineWindow {
             self.drives = ran.drives;
             self.owe_strip();
         }
+        self.turning = ran.turning;
+        self.quiet.slice(self.timeline, ran.audible);
         self.loaded = ran.loaded;
         self.case = ran.case;
         if self
@@ -1018,36 +1019,15 @@ impl MachineWindow {
     fn press(&mut self, changes: &[Change]) {
         let last = self.inputs.back().map_or(self.timeline, |&(at, _)| at);
         let mut at = self.timeline.max(last);
-        let minimum = self.least_hold();
+        let hold = self.least_hold();
         for &change in changes {
-            match change {
-                Change::Key(key, down) => {
-                    let held = &mut self.pressed_at[key_number(key) % keys::KEY_NUMBERS];
-                    if down {
-                        *held = at;
-                    } else {
-                        at = at.max(*held + minimum);
-                    }
-                }
+            at = match change {
+                Change::Key(key, down) => self.edges.key(key_number(key), down, at, hold),
                 Change::Joystick(port, lines) => {
-                    let port = usize::from(port);
-                    if let (Some(queued), Some(pressed)) = (
-                        self.stick_queued.get_mut(port),
-                        self.stick_pressed_at.get_mut(port),
-                    ) {
-                        for (line, pressed_at) in pressed.iter_mut().enumerate() {
-                            let bit = 1 << line;
-                            match (*queued & bit != 0, lines & bit != 0) {
-                                (false, true) => *pressed_at = at,
-                                (true, false) => at = at.max(*pressed_at + minimum),
-                                _ => {}
-                            }
-                        }
-                        *queued = lines;
-                    }
+                    self.edges.stick(usize::from(port), lines, at, hold)
                 }
-                _ => {}
-            }
+                _ => at,
+            };
             self.inputs.push_back((at, change));
         }
     }
@@ -1062,10 +1042,17 @@ impl MachineWindow {
         };
         let clock = self.pacer.timing().clock();
         let last = self.inputs.back().map_or(self.timeline, |&(at, _)| at);
-        let down = self.timeline.max(last);
+        let hold = self.least_hold();
+        let down = self
+            .edges
+            .key(key_number(shift), true, self.timeline.max(last), hold);
         let up = down + clock * BREAK_HELD_MICROS / 1_000_000;
-        let let_go = up + clock * BREAK_KEYS_HELD_CENTISECONDS / 100;
-        self.pressed_at[key_number(shift) % keys::KEY_NUMBERS] = down;
+        let let_go = self.edges.key(
+            key_number(shift),
+            false,
+            up + clock * BREAK_KEYS_HELD_CENTISECONDS / 100,
+            hold,
+        );
         self.inputs.extend([
             (down, Change::Key(shift, true)),
             (down, Change::Break(true)),
@@ -1133,22 +1120,24 @@ impl MachineWindow {
         let last = self.inputs.back().map_or(self.timeline, |&(at, _)| at);
         let mut at = self.timeline.max(last);
         let hold = self.least_hold();
-        // As long up as down, so the scan sees each letter of a pair apart.
-        let gap = 2 * hold;
         for ch in text.chars().take(MOST_PASTE) {
             let Some((key, shift, shifted)) = self.keys.typing(ch, self.case) else {
                 continue;
             };
-            let up = at + hold;
             if shifted {
+                at = self.edges.key(key_number(shift), true, at, hold);
                 self.inputs.push_back((at, Change::Key(shift, true)));
             }
+            at = self.edges.key(key_number(key), true, at, hold);
             self.inputs.push_back((at, Change::Key(key, true)));
-            self.inputs.push_back((up, Change::Key(key, false)));
+            at = self.edges.key(key_number(key), false, at, hold);
+            self.inputs.push_back((at, Change::Key(key, false)));
             if shifted {
-                self.inputs.push_back((up, Change::Key(shift, false)));
+                at = self.edges.key(key_number(shift), false, at, hold);
+                self.inputs.push_back((at, Change::Key(shift, false)));
             }
-            at += gap;
+            // As long up as down, so the scan sees each letter of a pair apart.
+            at += hold;
         }
     }
 
@@ -1166,6 +1155,14 @@ impl MachineWindow {
     pub fn set_speed(&mut self, speed: tairix_openmicro::front::pacing::Speed) {
         self.pacer.set_speed(speed);
         self.owe_strip();
+    }
+
+    /// Whether the pace is hurried: fast loading is on, the cassette motor
+    /// runs or a drive's disc turns, and the machine has been silent a while.
+    fn hurried(&self) -> bool {
+        self.fast_loading
+            && (self.lights.motor || self.turning[0] || self.turning[1])
+            && self.quiet.settled(self.timeline, self.pacer.timing())
     }
 
     /// Show its picture through `tube` and as `scaling` enlarges it.

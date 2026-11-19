@@ -185,7 +185,7 @@ fn what_is_fitted_is_read_only_unless_the_machine_is_off() {
         FieldAction::Set { on: false },
     );
     assert_eq!(settings.choices().volume, 400);
-    assert!(!settings.choices().fast_tape);
+    assert!(!settings.choices().fast_loading);
     let electron = Fitting::electron(true);
     let locked = Settings::new(&machine(electron), Standing::Suspended, Vec::new());
     assert!(!enabled(&locked, (at::MACHINE, at::PLUS1)));

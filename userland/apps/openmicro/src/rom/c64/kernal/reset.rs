@@ -66,6 +66,10 @@ const fn jiffy_latch(standard: Standard) -> [u8; 2] {
 
 const PAL_JIFFY: [u8; 2] = jiffy_latch(Standard::Pal);
 const NTSC_JIFFY: [u8; 2] = jiffy_latch(Standard::Ntsc);
+const _: () = assert!(
+    PAL_JIFFY[1] != 0,
+    "PAL's latch branches on to the high byte"
+);
 
 const _: () = assert!(
     fixed::NMI_ENTRY + 4 == fixed::NMI,
@@ -80,14 +84,15 @@ pub fn pin(a: &mut Asm) {
         a.jmp("nmi_handler");
     });
     a.pin(fixed::NMI_EXIT, restore_and_return);
+    a.pin(fixed::RESTOR, restor);
+    a.pin(fixed::VECTOR_TABLE, vector_table);
+    a.pin(fixed::IOINIT, ioinit);
 }
 
 pub fn emit(a: &mut Asm) {
     reset(a);
-    ioinit(a);
     ramtas(a);
-    restor(a);
-    vector_table(a);
+    vector(a);
     nmi(a);
     warm_start(a);
 }
@@ -159,18 +164,21 @@ fn ioinit(a: &mut Asm) {
 
     // Timer A running continuously at the standard's sixtieth of a second,
     // its underflow CIA1's interrupt. The time of day keeps the rate the
-    // control register had.
+    // control register had. X and Y are kept, as the original keeps them.
     a.here("start_jiffies");
-    let set = a.local();
+    let (ntsc, high) = (a.local(), a.local());
+    a.lda(abs(page::TVSFLG));
+    a.beq(ntsc);
     a.lda(imm(PAL_JIFFY[0]));
-    a.ldx(imm(PAL_JIFFY[1]));
-    a.ldy(abs(page::TVSFLG));
-    a.bne(set);
-    a.lda(imm(NTSC_JIFFY[0]));
-    a.ldx(imm(NTSC_JIFFY[1]));
-    a.bind(set);
     a.sta(abs(cia1(reg::TA_LO)));
-    a.stx(abs(cia1(reg::TA_HI)));
+    a.lda(imm(PAL_JIFFY[1]));
+    a.bne(high);
+    a.bind(ntsc);
+    a.lda(imm(NTSC_JIFFY[0]));
+    a.sta(abs(cia1(reg::TA_LO)));
+    a.lda(imm(NTSC_JIFFY[1]));
+    a.bind(high);
+    a.sta(abs(cia1(reg::TA_HI)));
     a.lda(imm(icr::SET | icr::TA));
     a.sta(abs(cia1(reg::ICR)));
     a.lda(abs(cia1(reg::CRA)));
@@ -228,16 +236,22 @@ fn ramtas(a: &mut Asm) {
     a.rts();
 }
 
-/// RESTOR, the defaults copied into the RAM vectors, and VECTOR: with C
-/// set the vectors copied to the table at (X, Y), with C clear the table
-/// copied into them. Interrupts are held off so none meets a vector half
-/// changed.
+/// RESTOR, the defaults copied into the RAM vectors, and VECTOR's entry.
 fn restor(a: &mut Asm) {
     a.here("restor");
     a.ldx(imm(lo("vector_defaults")));
     a.ldy(imm(hi("vector_defaults")));
     a.clc();
     a.here("vector");
+    a.jmp("vector_body");
+}
+
+/// VECTOR: with C set the vectors copied to the table at (X, Y), with C
+/// clear the table copied into them. Interrupts are held off so none meets a
+/// vector half changed. Apart from RESTOR, so the table follows RESTOR where
+/// the original's does.
+fn vector(a: &mut Asm) {
+    a.here("vector_body");
     a.stx(z(zp::MEMUSS));
     a.sty(z(zp::MEMUSS + 1));
     a.php();
@@ -290,6 +304,6 @@ fn warm_start(a: &mut Asm) {
     a.here("warm_start");
     a.jsr("restor");
     a.jsr("ioinit");
-    a.jsr("cint");
+    a.jsr("screen_init");
     a.jmp(abs(BASIC_WARM).ind());
 }

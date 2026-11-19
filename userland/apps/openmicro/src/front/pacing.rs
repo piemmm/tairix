@@ -1,9 +1,15 @@
 //! How far the machine runs next and when: just ahead of the audio device
 //! while its sound is heard, by the clock while it is not, and as fast as the
-//! worker runs it when asked to or while a tape loads fast.
+//! worker runs it when asked to or while a tape or a disc loads fast in
+//! silence; and the sound the audio ring had no room for.
 
+use alloc::vec::Vec;
+
+use tairix_abi::Errno;
+
+use crate::front::library::FULL_VOLUME;
 use crate::machine::Timing;
-use crate::worker::protocol::{MAX_SLICE, SAMPLE_RATE};
+use crate::worker::protocol::{MAX_SLICE, SAMPLE_BYTES, SAMPLE_RATE};
 
 /// How fast the machine runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -38,6 +44,85 @@ pub struct Ring {
     pub queued: u32,
     /// Frames to keep it at.
     pub target: u32,
+}
+
+/// When the machine's sound last moved, for fast loading: a load is hurried
+/// only after a second of the machine's time without sound, so a loader's
+/// music, rests and all, plays as it would.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Quiet {
+    heard_at: Option<u64>,
+}
+
+impl Quiet {
+    /// The slice ending at machine cycle `at` moved the sound, or not.
+    pub const fn slice(&mut self, at: u64, audible: bool) {
+        if audible {
+            self.heard_at = Some(at);
+        }
+    }
+
+    /// Whether a machine keeping `timing` has been silent for a second at
+    /// cycle `now`.
+    #[must_use]
+    pub fn settled(&self, now: u64, timing: Timing) -> bool {
+        self.heard_at
+            .is_none_or(|at| now >= at.saturating_add(timing.clock()))
+    }
+}
+
+/// Sound the audio ring had no room for, played ahead of whatever follows,
+/// so that a slice's last frames are never dropped.
+#[derive(Debug, Default)]
+pub struct Backlog {
+    bytes: Vec<u8>,
+}
+
+impl Backlog {
+    /// Frames waiting for room: queued, as far as the pace is concerned.
+    #[must_use]
+    pub fn frames(&self) -> u32 {
+        u32::try_from(self.bytes.len() / SAMPLE_BYTES).unwrap_or(u32::MAX)
+    }
+
+    /// `samples`, signed 16-bit, at `volume` thousandths of their level,
+    /// after what waits, offered to `write`, which answers the bytes the ring
+    /// took; the rest waits.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] where the backlog cannot hold `samples`, or what
+    /// `write` refuses.
+    pub fn play(
+        &mut self,
+        samples: &[u8],
+        volume: u16,
+        write: impl FnOnce(&[u8]) -> Result<usize, Errno>,
+    ) -> Result<(), Errno> {
+        self.bytes
+            .try_reserve(samples.len())
+            .map_err(|_| Errno::OutOfMemory)?;
+        let volume = i32::from(volume.min(FULL_VOLUME));
+        self.bytes.extend(
+            samples
+                .as_chunks::<SAMPLE_BYTES>()
+                .0
+                .iter()
+                .flat_map(|&pair| {
+                    let level =
+                        i32::from(i16::from_le_bytes(pair)) * volume / i32::from(FULL_VOLUME);
+                    i16::try_from(level).unwrap_or_default().to_le_bytes()
+                }),
+        );
+        let taken = write(&self.bytes)?.min(self.bytes.len());
+        self.bytes.drain(..taken);
+        Ok(())
+    }
+
+    /// Drop what waits: the sound it belongs to has stopped.
+    pub fn forget(&mut self) {
+        self.bytes.clear();
+    }
 }
 
 /// What to do next.
@@ -117,8 +202,9 @@ impl Pacer {
     }
 
     /// What to run at `now_ns`, with the audio ring as `ring` says while the
-    /// sound has a stream, `hurried` while a tape loads fast. Called only when
-    /// a slice can be asked for: an answered `Run` is taken as asked.
+    /// sound has a stream, `hurried` while a tape or a disc loads fast.
+    /// Called only when a slice can be asked for: an answered `Run` is taken
+    /// as asked.
     pub fn next(&mut self, now_ns: u64, ring: Option<Ring>, hurried: bool) -> Next {
         if self.paused {
             return Next::Wait;

@@ -177,3 +177,75 @@ fn the_clock_keeps_its_pace_however_long_the_machine_runs() {
         }
     }
 }
+
+/// Signed 16-bit samples as their bytes.
+fn pcm(samples: &[i16]) -> Vec<u8> {
+    samples
+        .iter()
+        .flat_map(|sample| sample.to_le_bytes())
+        .collect()
+}
+
+#[test]
+fn sound_the_ring_refuses_waits_and_goes_first_next_time() {
+    let mut backlog = Backlog::default();
+    let mut ring = Vec::new();
+    let room = |ring: &mut Vec<u8>, room: usize, bytes: &[u8]| {
+        let taken = bytes.len().min(room);
+        ring.extend_from_slice(&bytes[..taken]);
+        Ok(taken)
+    };
+    backlog
+        .play(&pcm(&[1, 2, 3]), FULL_VOLUME, |bytes| {
+            room(&mut ring, 4, bytes)
+        })
+        .expect("plays");
+    assert_eq!(ring, pcm(&[1, 2]), "the ring took what fitted");
+    assert_eq!(
+        backlog.frames(),
+        1,
+        "the frame it refused waits, counted queued"
+    );
+    backlog
+        .play(&pcm(&[4, 5]), FULL_VOLUME, |bytes| {
+            room(&mut ring, 64, bytes)
+        })
+        .expect("plays");
+    assert_eq!(ring, pcm(&[1, 2, 3, 4, 5]), "in order, nothing dropped");
+    assert_eq!(backlog.frames(), 0);
+}
+
+#[test]
+fn the_backlog_plays_at_the_volume_and_forgets_a_stopped_sound() {
+    let mut backlog = Backlog::default();
+    let mut heard = Vec::new();
+    backlog
+        .play(&pcm(&[1_000, -2_000]), FULL_VOLUME / 2, |bytes| {
+            heard.extend_from_slice(bytes);
+            Ok(0)
+        })
+        .expect("plays");
+    assert_eq!(heard, pcm(&[500, -1_000]), "half the level");
+    assert_eq!(backlog.frames(), 2);
+    backlog.forget();
+    assert_eq!(backlog.frames(), 0);
+    assert_eq!(
+        backlog.play(&pcm(&[7]), FULL_VOLUME, |_| Err(Errno::NotConnected)),
+        Err(Errno::NotConnected),
+        "the ring's refusal is the caller's"
+    );
+}
+
+#[test]
+fn a_load_is_hurried_only_after_a_second_without_sound() {
+    let mut quiet = Quiet::default();
+    assert!(quiet.settled(0, ACORN), "nothing heard yet");
+    quiet.slice(CLOCK, true);
+    assert!(!quiet.settled(CLOCK, ACORN), "the sound just moved");
+    quiet.slice(CLOCK + CLOCK / 2, false);
+    assert!(
+        !quiet.settled(CLOCK + CLOCK / 2, ACORN),
+        "a rest is still the music"
+    );
+    assert!(quiet.settled(2 * CLOCK, ACORN), "a second of quiet");
+}

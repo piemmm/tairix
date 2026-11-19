@@ -150,8 +150,10 @@ const _: () = assert!(
     "CLALL runs on into CLRCHN"
 );
 
-/// CLALL at its address: every file forgotten, then on into CLRCHN.
+/// GETIN and CLALL at their addresses, CLALL forgetting every file, then
+/// on into CLRCHN.
 pub fn pin(a: &mut Asm) {
+    a.pin(fixed::GETIN, getin);
     a.pin(fixed::CLALL, |a| {
         a.lda(imm(0));
         a.sta(z(zp::LDTND));
@@ -536,10 +538,10 @@ fn clrchn(a: &mut Asm) {
     }
 }
 
-/// GETIN, CHRIN and CHROUT by the current device, GETIN running on into
-/// CHRIN for a device it does not read itself. A serial read with STATUS
-/// already set gives RETURN; CHROUT keeps A.
-fn characters(a: &mut Asm) {
+/// GETIN, placed whole where the original's is, so its keyboard part
+/// starts four bytes in as the original's does; CHRIN for a device it does
+/// not read itself.
+fn getin(a: &mut Asm) {
     a.here("getin");
     let (other, waiting, rs232) = (a.local(), a.local(), a.local());
     a.lda(z(zp::DFLTN));
@@ -554,10 +556,17 @@ fn characters(a: &mut Asm) {
     a.bind(other);
     a.cmp(imm(device::RS232));
     a.beq(rs232);
-    a.fall_into("chrin");
+    a.jmp("chrin");
+    a.bind(rs232);
+    a.jmp("rs232_get");
+}
 
+/// CHRIN and CHROUT by the current device. A serial read with STATUS
+/// already set gives RETURN; CHROUT keeps A.
+fn characters(a: &mut Asm) {
     a.here("chrin");
-    let (not_keyboard, not_screen, serial, read) = (a.local(), a.local(), a.local(), a.local());
+    let (not_keyboard, not_screen, serial, read, rs232) =
+        (a.local(), a.local(), a.local(), a.local(), a.local());
     a.lda(z(zp::DFLTN));
     a.bne(not_keyboard);
     a.jmp("editor_in");

@@ -235,8 +235,8 @@ the front end writes it back through its delegated handle.
 **Tape.** UEF chunks and CSW pulse runs are turned into the cassette signal
 the serial ULA demodulates; the motor relay gates the tape. With record down,
 what the 6850 sends is recorded over the tape, which saves back as UEF.
-Accelerated loading runs the machine unpaced while the motor is on, with
-sound muted.
+Accelerated loading runs the machine unpaced while the motor is on and the
+machine has been silent for a second, with sound muted.
 
 **Bus monitor.** While asked, the machine records every access to the I/O
 pages, its cycle, address, value and direction, for the reference harness and
@@ -360,9 +360,16 @@ the code runs on, otherwise by moving its labels on. A table or routine held
 for later fills the rooms the flow leaves before pins, a pin leaves before
 an address of its own (`room_to`) and a table laid out on a stride leaves
 between its rows (`room`), each taking the held items that fill the most of
-it, or follows the code; data meeting a pin moves past it from its last
-named label; code whose branches must reach across (`whole`), a `BRK` and
-its error block, and a call with the text after it, are placed whole. Encoding comes from `cpu::isa`; only
+it; what no room takes goes into the free stretches from the code's end, all
+of it into the first where it fits, else the smallest stretch first, each
+taking what fills the most of it, and each stretch's in the order held; what
+is placed so is then a pin later code hops. A block that ends the flow
+(`movable`) is placed whole where it fits before the next pin, and otherwise
+held so while the blocks after it go on into the room before the pin, until
+one does not fit either and the flow moves past it; one placing a pin is
+never held. Data meeting a pin moves past it from its last named label; code
+whose branches must reach across (`whole`), a `BRK` and its error block, and
+a call with the text after it, are placed whole. Encoding comes from `cpu::isa`; only
 documented opcodes are encodable. Hardware addresses come from `machine`, so
 a register address is defined once for both the emulation and the firmware.
 
@@ -995,7 +1002,7 @@ to the windows, the sessions, the audio streams and the store.
   socket takes it, nothing in a slot or cartridge, an installed image, or
   *Install an image…*, which asks the picker for an image and keeps it in the
   store as `rom.<name>`, offered in every socket from then on; the Model B's
-  start-up links; and the sound's volume and fast tape loading. The fitting —
+  start-up links; and the sound's volume and fast loading. The fitting —
   ROMs, Plus 1 and links — is read-only unless the machine is off, so one that
   runs or is suspended is shut down to change it. An installed image no
   machine is fitted with is swept when the library is next read.
@@ -1035,10 +1042,14 @@ to the windows, the sessions, the audio streams and the store.
   types the clipboard's text a key at a time.
 - **Pacing.** While the sound plays the audio ring is kept at the latency the
   stream was granted: whenever it falls below, the slice that refills it is
-  asked for, so the machine and the device cannot drift. Without a stream, or
-  at double speed, a slice is due each 20 ms of the clock, a long stall given
-  up rather than raced; at the fastest speed, or while fast tape loading has
-  the motor running, slices of 100 ms run back to back, silent.
+  asked for, so the machine and the device cannot drift; what a slice brings
+  that the ring has no room for waits, counted as queued, and goes first next
+  time. Without a stream, or at double speed, a slice is due each 20 ms of
+  the clock, a long stall given up rather than raced; at the fastest speed,
+  or while fast loading has the cassette motor running or a drive's disc
+  turning and the machine has been silent for a second, slices of 100 ms run
+  back to back, silent. Every slice reports whether its sound moved, heard or
+  not, so loading music is played rather than raced.
 - **Media.** Discs and tapes arrive by the picker, a drop on the window or its
   icon-bar icon, Open With, or the machine's folder; reads and write-backs run
   on the file worker, never the loop. A document handed to the application

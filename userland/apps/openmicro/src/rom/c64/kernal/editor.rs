@@ -9,8 +9,7 @@
 
 use super::files::device;
 use super::fixed;
-use super::irq::BLINK_JIFFIES;
-use super::keyboard::{DELAY_AT_RESET, KOUNT_JIFFIES, LOWER_CASE, NO_KEY};
+use super::keyboard::{DELAY_AT_RESET, KOUNT_JIFFIES, LOWER_CASE};
 use super::ws::{page, zp};
 use crate::machine::c64::cia::reg;
 use crate::machine::c64::io;
@@ -63,38 +62,19 @@ const CONTROL_ROW: u8 = 1 << Key::CONTROL.row();
 #[rustfmt::skip]
 const VIC_DEFAULTS: [u8; 47] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0x1B, 0, 0, 0, 0, 0x08, 0, 0x14, 0, 0, 0, 0, 0, 0, 0,
+    0, 0x1B, 0, 0, 0, 0, 0x08, 0, 0x14, 0x0F, 0, 0, 0, 0, 0, 0,
     14, 6, 1, 2, 3, 4, 0, 1, 2, 3, 4, 5, 6, 7, 12,
 ];
 const CR1: u8 = VIC_DEFAULTS[vic::CR1 as usize];
+const RASTER: u8 = VIC_DEFAULTS[vic::RASTER as usize];
 const _: () = assert!(
-    vic::IRQ_ENABLE > vic::CR1
-        && vic::IRQ_ENABLE > vic::RASTER
-        && VIC_DEFAULTS[vic::IRQ_ENABLE as usize] == 0,
-    "CINT finds the standard with the VIC-II's interrupts off, its raster still to set"
+    VIC_DEFAULTS[vic::IRQ_ENABLE as usize] == 0,
+    "CINT finds the standard with the VIC-II's interrupts off"
 );
 
-/// What CINT sets from XMAX and from KEYLOG on: the keyboard buffer's size,
-/// the repeat for the keys that repeat and its delays, KEYLOG's default,
-/// MODE and AUTODN.
-const SETTINGS: [u8; 8] = [
-    KEYBOARD_BUFFER,
-    0,
-    KOUNT_JIFFIES,
-    DELAY_AT_RESET,
-    fixed::KEYLOG.to_le_bytes()[0],
-    fixed::KEYLOG.to_le_bytes()[1],
-    0,
-    0,
-];
-const _: () = assert!(
-    page::RPTFLG == page::XMAX + 1
-        && page::KOUNT == page::XMAX + 2
-        && page::DELAY == page::XMAX + 3
-        && page::MODE == page::KEYLOG + 2
-        && page::AUTODN == page::KEYLOG + 3,
-    "CINT's settings lie in two runs of four"
-);
+/// The cursor's first countdown after the screen is set up, and its flash
+/// held off until input starts, as the original leaves them.
+const FIRST_BLINK: u8 = 12;
 
 /// Each row's offset from the screen's start: its low byte, and its page.
 const ROW_OFFSETS: ([u8; ROWS as usize], [u8; ROWS as usize]) = {
@@ -145,14 +125,23 @@ const FROM_SCREEN: [u8; 12] = [
 ];
 
 /// The editor's tables, each held apart for the room a pin leaves.
-const TABLES: [(&str, &[u8]); 6] = [
+const TABLES: [(&str, &[u8]); 5] = [
     ("vic_defaults", &VIC_DEFAULTS),
-    ("settings", &SETTINGS),
     ("row_low", &ROW_OFFSETS.0),
     ("row_page", &ROW_OFFSETS.1),
     ("from_screen", &FROM_SCREEN),
     ("load_run", LOAD_RUN),
 ];
+
+/// CINT at its address, the screen set up and then on into the rest, which
+/// software calls on its own too.
+pub fn pin(a: &mut Asm) {
+    a.pin(fixed::CINT, |a| {
+        a.here("cint");
+        a.jsr("screen_init");
+        a.fall_into(fixed::CINT_STANDARD);
+    });
+}
 
 pub fn emit(a: &mut Asm) {
     cint(a);
@@ -194,49 +183,61 @@ pub fn emit(a: &mut Asm) {
     });
 }
 
-/// CINT: the VIC-II's registers, the standard found as they are set, the
-/// editor's and the keyboard's state, the channels, the screen cleared and
-/// the jiffy interrupt started at the standard's rate.
+/// CINT past the screen: the standard found and the jiffy interrupt started
+/// at its rate. Then the screen's set-up, which CINT starts with.
 fn cint(a: &mut Asm) {
-    a.here("cint");
-    let (registers, next, settings) = (a.local(), a.local(), a.local());
+    a.here("cint_standard");
+    detect_standard(a);
+    a.lda(imm(RASTER));
+    a.sta(abs(io::vic(vic::RASTER)));
+    a.lda(imm(CR1));
+    a.sta(abs(io::vic(vic::CR1)));
+    a.jmp("start_jiffies");
+
+    // What the warm start and software calling the original's $E518 set up
+    // again: the VIC-II's registers and the channels, the editor's and the
+    // keyboard's settings, then the text colour, the cursor's phase and the
+    // screen cleared, the keyboard buffer, the editor's modes and the keys'
+    // repeat left as they are. Each later part is an entry of the original's:
+    // the second leaves the VIC-II be, the third takes the colour in A.
+    a.here("screen_init");
+    a.jsr("vic_init");
+    a.here("editor_init");
+    for (at, value) in [
+        (page::XMAX, KEYBOARD_BUFFER),
+        (page::KOUNT, KOUNT_JIFFIES),
+        (page::DELAY, DELAY_AT_RESET),
+        (page::KEYLOG, fixed::KEYLOG.to_le_bytes()[0]),
+        (page::KEYLOG + 1, fixed::KEYLOG.to_le_bytes()[1]),
+    ] {
+        a.lda(imm(value));
+        a.sta(abs(at));
+    }
+    a.lda(imm(0));
+    a.sta(abs(page::MODE));
+    a.sta(z(zp::BLNON));
+    a.lda(imm(TEXT_COLOUR));
+    a.here("cursor_init");
+    a.sta(abs(page::COLOR));
+    a.lda(imm(FIRST_BLINK));
+    a.sta(z(zp::BLNCT));
+    a.sta(z(zp::BLNSW));
+    a.jmp("clear_screen");
+
+    // The VIC-II's registers and the channels.
+    a.here("vic_init");
+    let registers = a.local();
     a.ldx(imm(byte(VIC_DEFAULTS.len() - 1)));
     a.bind(registers);
     a.lda(abs("vic_defaults").x());
     a.sta(abs(io::VIC).x());
-    // The interrupts off, the standard is found before the raster's
-    // registers, lower down, are set.
-    a.cpx(imm(vic::IRQ_ENABLE));
-    a.bne(next);
-    detect_standard(a);
-    a.bind(next);
     a.dex();
     a.bpl(registers);
-    let half = SETTINGS.len() / 2;
-    a.ldx(imm(byte(half - 1)));
-    a.bind(settings);
-    a.lda(abs("settings").x());
-    a.sta(abs(page::XMAX).x());
-    a.lda(abs(sym("settings") + i32::from(byte(half))).x());
-    a.sta(abs(page::KEYLOG).x());
-    a.dex();
-    a.bpl(settings);
     a.lda(imm(0));
-    for at in [zp::DFLTN, zp::RVS, zp::QTSW, zp::INSRT, zp::CRSW, zp::NDX] {
-        a.sta(z(at));
-    }
-    a.lda(imm(TEXT_COLOUR));
-    a.sta(abs(page::COLOR));
+    a.sta(z(zp::DFLTN));
     a.lda(imm(device::SCREEN));
     a.sta(z(zp::DFLTO));
-    a.lda(imm(BLINK_JIFFIES));
-    a.sta(z(zp::BLNCT));
-    a.sta(z(zp::BLNSW));
-    a.lda(imm(NO_KEY));
-    a.sta(z(zp::LSTX));
-    a.sta(z(zp::SFDX));
-    a.jsr("clear_screen");
-    a.jmp("start_jiffies");
+    a.rts();
 }
 
 /// TVSFLG set where the raster reaches the last PAL line in a frame; the
@@ -619,7 +620,8 @@ fn output(a: &mut Asm) {
 
 /// `screen_out` run on at `put` with a screen code: put at the cursor in
 /// the text colour, reversed in RVS, an insert counted off. `edit_done`:
-/// the registers restored, C clear.
+/// the registers restored, interrupts on and C clear, as the original leaves
+/// them whatever its caller had.
 fn screen_put(a: &mut Asm, put: Label) {
     let (plain, counted, within, wrap) = (a.local(), a.local(), a.local(), a.local());
     a.bind(put);
@@ -659,6 +661,7 @@ fn screen_put(a: &mut Asm, put: Label) {
     a.pla();
     a.tax();
     a.pla();
+    a.cli();
     a.clc();
     a.rts();
 }

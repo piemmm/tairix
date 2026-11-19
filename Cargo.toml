@@ -818,6 +818,11 @@ opt-level = 3
 [profile.dev.package.tairix-video]
 opt-level = 3
 
+# Every sample the mixer and the players resample, convert and mix runs
+# through the audio engine, period after period.
+[profile.dev.package.tairix-audio]
+opt-level = 3
+
 # The ray-traced screensaver traces every pixel of its picture from scratch,
 # tens of samples each: at `opt-level = 1` the reveal a debug image shows
 # measures the profile, not the tracer.

@@ -1118,7 +1118,7 @@ mod program {
             }
             machine.name.clone_from(&choices.name);
             machine.volume = choices.volume;
-            machine.fast_tape = choices.fast_tape;
+            machine.fast_loading = choices.fast_loading;
             machine.joystick = choices.joystick;
             if let Err(err) = self.library.replace(machine) {
                 self.refuse(
@@ -1130,7 +1130,7 @@ mod program {
             if let Some(n) = self.index(id) {
                 let window = &mut self.machines[n];
                 window.volume = choices.volume;
-                window.fast_tape = choices.fast_tape;
+                window.fast_loading = choices.fast_loading;
                 window.set_joystick(choices.joystick);
                 if window.name != choices.name {
                     window.rename(&mut self.client, &choices.name);

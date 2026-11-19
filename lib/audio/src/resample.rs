@@ -177,6 +177,60 @@ fn taps_for(ratio: Ratio) -> usize {
     scaled.next_multiple_of(2).min(MAX_TAPS)
 }
 
+/// `frame`'s samples into slot `slot` of each channel's ring in `history`,
+/// a ring being `span` samples held twice over so that no window wraps.
+fn store(history: &mut [f32], span: usize, slot: usize, frame: &[f32]) {
+    for (ring, &sample) in history.chunks_exact_mut(2 * span.max(1)).zip(frame) {
+        for at in [slot, slot + span] {
+            if let Some(cell) = ring.get_mut(at) {
+                *cell = sample;
+            }
+        }
+    }
+}
+
+/// Partial sums the dot product keeps apart, so that its additions do not
+/// each wait on the one before.
+const LANES: usize = 16;
+
+/// The dot product of `samples` and `taps`.
+fn dot(samples: &[f32], taps: &[f32]) -> f32 {
+    let (samples_whole, samples_rest) = samples.as_chunks::<LANES>();
+    let (taps_whole, taps_rest) = taps.as_chunks::<LANES>();
+    let mut lanes = [0.0f32; LANES];
+    for (samples, taps) in samples_whole.iter().zip(taps_whole) {
+        for ((lane, &sample), &tap) in lanes.iter_mut().zip(samples).zip(taps) {
+            *lane += sample * tap;
+        }
+    }
+    let rest: f32 = samples_rest
+        .iter()
+        .zip(taps_rest)
+        .map(|(&sample, &tap)| sample * tap)
+        .sum();
+    lanes.iter().sum::<f32>() + rest
+}
+
+/// One output position's taps: `bank`'s row for `phase`, or that row
+/// blended toward the next into `scratch` where the position falls between
+/// rows.
+fn phase_taps<'a>(
+    bank: &'a FilterBank,
+    phase: u32,
+    blend: f32,
+    scratch: &'a mut [f32],
+) -> &'a [f32] {
+    let lower = bank.row(phase);
+    if blend == 0.0 {
+        return lower;
+    }
+    let upper = bank.row(phase + 1);
+    for (slot, (low, high)) in scratch.iter_mut().zip(lower.iter().zip(upper)) {
+        *slot = low + (high - low) * blend;
+    }
+    scratch
+}
+
 /// The greatest common divisor, by Euclid.
 const fn gcd(a: u32, b: u32) -> u32 {
     let (mut a, mut b) = (a, b);
@@ -397,12 +451,13 @@ pub struct Resampler {
     /// belongs to this resampler from one that does not.
     ratio: Ratio,
     channels: usize,
-    /// The last [`FilterBank::taps`] input frames, interleaved, indexed by
-    /// frame number modulo the tap count. Zero-initialised, which is the
-    /// filter's ramp-in.
+    /// The last [`FilterBank::taps`] input frames, a ring of them for each
+    /// channel in turn, each frame held at its number modulo the tap count
+    /// and again one tap span on, so that every output reads one contiguous
+    /// run a channel. Zero-initialised, which is the filter's ramp-in.
     history: Vec<f32>,
-    /// One output position's blended tap vector, reused every frame so the
-    /// per-period path allocates nothing.
+    /// One output position's blended taps where it falls between phase
+    /// rows, reused every frame so the per-period path allocates nothing.
     taps: Vec<f32>,
     /// Input frames pushed since the last reset.
     pushed: u64,
@@ -432,7 +487,7 @@ impl Resampler {
             (Vec::new(), Vec::new())
         } else {
             (
-                fallible::filled(bank.taps() * channels, 0.0f32).ok_or(Errno::OutOfMemory)?,
+                fallible::filled(2 * bank.taps() * channels, 0.0f32).ok_or(Errno::OutOfMemory)?,
                 fallible::filled(bank.taps(), 0.0f32).ok_or(Errno::OutOfMemory)?,
             )
         };
@@ -489,15 +544,22 @@ impl Resampler {
         if bank.taps() != self.taps.len() {
             let taps = bank.taps();
             let mut history =
-                fallible::filled(taps * self.channels, 0.0f32).ok_or(Errno::OutOfMemory)?;
+                fallible::filled(2 * taps * self.channels, 0.0f32).ok_or(Errno::OutOfMemory)?;
             let scratch = fallible::filled(taps, 0.0f32).ok_or(Errno::OutOfMemory)?;
             let (old, new) = (self.modulus(), u64::try_from(taps).unwrap_or(1).max(1));
             let kept = old.min(new);
+            let span = self.taps.len();
+            let mut frame_samples = [0.0f32; MAX_CHANNELS];
             for frame in self.pushed.saturating_sub(kept)..self.pushed {
-                let from = usize::try_from(frame % old).unwrap_or(0) * self.channels;
-                let to = usize::try_from(frame % new).unwrap_or(0) * self.channels;
-                history[to..to + self.channels]
-                    .copy_from_slice(&self.history[from..from + self.channels]);
+                let from = usize::try_from(frame % old).unwrap_or(0);
+                let to = usize::try_from(frame % new).unwrap_or(0);
+                for (sample, ring) in frame_samples
+                    .iter_mut()
+                    .zip(self.history.chunks_exact(2 * span.max(1)))
+                {
+                    *sample = ring.get(from).copied().unwrap_or(0.0);
+                }
+                store(&mut history, taps, to, &frame_samples[..self.channels]);
             }
             self.history = history;
             self.taps = scratch;
@@ -588,8 +650,7 @@ impl Resampler {
     /// Take one input frame into the history.
     fn push(&mut self, frame: &[f32]) {
         let slot = usize::try_from(self.pushed % self.modulus()).unwrap_or(0);
-        self.history[slot * self.channels..slot * self.channels + self.channels]
-            .copy_from_slice(frame);
+        store(&mut self.history, self.taps.len(), slot, frame);
         self.pushed += 1;
     }
 
@@ -625,41 +686,18 @@ impl Resampler {
         let blend = mathf::single(
             f64::from(u32::try_from(scaled % denominator).unwrap_or(0)) / f64::from(ratio.output()),
         );
-        self.blend_taps(bank, phase, blend);
-        let base = self.window_base();
-        let modulus = self.modulus();
-        for (channel, slot) in out.iter_mut().enumerate().take(self.channels) {
-            let mut sum = 0.0f32;
-            for (tap, coefficient) in self.taps.iter().enumerate() {
-                let index = usize::try_from((base + u64::try_from(tap).unwrap_or(0)) % modulus)
-                    .unwrap_or(0);
-                sum += self.history[index * self.channels + channel] * coefficient;
-            }
-            *slot = sum;
+        let start = usize::try_from(self.window_base() % self.modulus()).unwrap_or(0);
+        let span = self.taps.len();
+        let taps = phase_taps(bank, phase, blend, &mut self.taps);
+        for (slot, ring) in out
+            .iter_mut()
+            .zip(self.history.chunks_exact(2 * span.max(1)))
+        {
+            *slot = dot(ring.get(start..start + span).unwrap_or(&[]), taps);
         }
         let advanced = u64::from(self.remainder) + u64::from(ratio.input());
         self.whole += advanced / denominator;
         self.remainder = u32::try_from(advanced % denominator).unwrap_or(0);
-    }
-
-    /// Load the tap vector for one output position into the reused scratch:
-    /// the phase row, blended toward the next where the ratio lands between
-    /// two.
-    ///
-    /// Built once per output frame rather than once per channel, so a
-    /// multi-channel stream pays the blend once.
-    fn blend_taps(&mut self, bank: &FilterBank, phase: u32, blend: f32) {
-        let lower = bank.row(phase);
-        if blend == 0.0 {
-            for (slot, value) in self.taps.iter_mut().zip(lower) {
-                *slot = *value;
-            }
-            return;
-        }
-        let upper = bank.row(phase + 1);
-        for (slot, (low, high)) in self.taps.iter_mut().zip(lower.iter().zip(upper)) {
-            *slot = low + (high - low) * blend;
-        }
     }
 }
 

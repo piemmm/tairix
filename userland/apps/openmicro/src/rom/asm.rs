@@ -20,9 +20,11 @@
 //! meeting a pin moves past it, from where the last instruction ended or the
 //! named label last bound in it, its labels and uses with it, unless code
 //! runs on into it or an [`Asm::org`] fixed it there. A table held by
-//! [`Asm::later`] fills the room a pin leaves unused, or goes where
-//! [`Asm::place_later`] puts the rest; [`Asm::error`] and
-//! [`Asm::call_with_text`] place an instruction and the data after it whole.
+//! [`Asm::later`], or a block [`Asm::movable`] could not fit before a pin,
+//! fills the room a pin leaves unused, or goes into the free space
+//! [`Asm::place_later`] packs the rest into; what is placed so is then a pin
+//! itself. [`Asm::error`] and [`Asm::call_with_text`] place an instruction
+//! and the data after it whole.
 //!
 //! The first mistake is kept and returned by [`Asm::finish`]; the methods
 //! themselves never fail, so a ROM's source reads as its instructions.
@@ -372,6 +374,18 @@ pub enum AsmError {
         /// The label's name, or `""` for a local one.
         name: &'static str,
     },
+    /// A table or block [`Asm::place_later`] holds is longer than every free
+    /// stretch left for it.
+    NoRoom {
+        /// Its length.
+        len: usize,
+    },
+    /// A table held for later places a pin, which could land where other
+    /// held tables had gone first.
+    HeldPin {
+        /// Where it was held.
+        at: u16,
+    },
     /// Code running on into a pin had no room left for a `JMP` over it.
     PinBlocked {
         /// Where the code stands.
@@ -464,15 +478,19 @@ pub struct Asm {
     later: Later,
     /// The rooms hops left free, filled from what is held once it all is.
     rooms: Vec<Range<usize>>,
+    /// The start of the pin the last block [`Asm::movable`] held would have
+    /// run over: the next not fitting before it either moves the flow past.
+    straddled: Option<usize>,
     /// The pages a read of acts on no device, on the machine the image runs.
     quiet_page: fn(u8) -> bool,
     error: Option<AsmError>,
 }
 
-/// What [`Asm::later`] holds for [`Asm::place_later`], in order.
+/// What [`Asm::later`] and [`Asm::movable`] hold for [`Asm::place_later`],
+/// in order.
 struct Later(Vec<Held>);
 
-/// A table held for later, and the bytes it places.
+/// A table or block held for later, and the bytes it places.
 struct Held {
     body: Box<dyn Fn(&mut Asm)>,
     len: usize,
@@ -490,20 +508,19 @@ const HOP: usize = 3;
 /// How far past a hop's own two bytes a branch over a pin reaches.
 const BRANCH_REACH: usize = 2 + 127;
 
-/// The branch a conditional branch not taken makes certain.
-/// The held tables, by index in the order held, whose lengths together fill
-/// the most of `room` bytes.
-fn fullest(held: &[Held], room: usize) -> Vec<usize> {
+/// The items, by index in the order given, whose lengths together fill the
+/// most of `room` bytes.
+fn fullest(lens: &[usize], room: usize) -> Vec<usize> {
     const NONE_YET: usize = usize::MAX;
-    // by[total]: the table that first brought a choice to `total` bytes.
+    // by[total]: the item that first brought a choice to `total` bytes.
     let mut by: Vec<Option<usize>> = alloc::vec![None; room + 1];
     by[0] = Some(NONE_YET);
-    for (index, table) in held.iter().enumerate() {
-        if table.len == 0 || table.len > room {
+    for (index, &len) in lens.iter().enumerate() {
+        if len == 0 || len > room {
             continue;
         }
-        for total in (table.len..=room).rev() {
-            if by[total].is_none() && by[total - table.len].is_some() {
+        for total in (len..=room).rev() {
+            if by[total].is_none() && by[total - len].is_some() {
                 by[total] = Some(index);
             }
         }
@@ -515,12 +532,57 @@ fn fullest(held: &[Held], room: usize) -> Vec<usize> {
     let mut chosen = Vec::new();
     while let Some(index) = by[total].filter(|&index| index != NONE_YET) {
         chosen.push(index);
-        total -= held[index].len;
+        total -= lens[index];
     }
     chosen.reverse();
     chosen
 }
 
+/// The tables at `chosen`, indices in the order held, taken out of `held`
+/// and kept in that order.
+fn take_chosen(held: &mut Vec<Held>, chosen: &[usize]) -> Vec<Held> {
+    let mut taken: Vec<Held> = chosen
+        .iter()
+        .rev()
+        .map(|&index| held.remove(index))
+        .collect();
+    taken.reverse();
+    taken
+}
+
+/// For each held item, the stretch it goes in. All of it fitting in the
+/// first stretch goes there; otherwise each stretch, the smallest first,
+/// takes the items still unplaced that fill the most of it, the larger
+/// stretches then left the larger items. An item no stretch took is refused
+/// with its length.
+fn pack(held: &[Held], stretches: &[Range<usize>]) -> Result<Vec<usize>, usize> {
+    let size = |stretch: usize| stretches[stretch].end - stretches[stretch].start;
+    let total: usize = held.iter().map(|table| table.len).sum();
+    if !stretches.is_empty() && size(0) >= total {
+        return Ok(vec![0; held.len()]);
+    }
+    let mut smallest_first: Vec<usize> = (0..stretches.len()).collect();
+    smallest_first.sort_by_key(|&stretch| size(stretch));
+    let mut into: Vec<Option<usize>> = held
+        .iter()
+        .map(|table| smallest_first.first().copied().filter(|_| table.len == 0))
+        .collect();
+    for &stretch in &smallest_first {
+        let unplaced: Vec<usize> = (0..held.len())
+            .filter(|&index| into[index].is_none())
+            .collect();
+        let lens: Vec<usize> = unplaced.iter().map(|&index| held[index].len).collect();
+        for chosen in fullest(&lens, size(stretch)) {
+            into[unplaced[chosen]] = Some(stretch);
+        }
+    }
+    into.iter()
+        .zip(held)
+        .map(|(&stretch, table)| stretch.ok_or(table.len))
+        .collect()
+}
+
+/// The branch a conditional branch not taken makes certain.
 const fn opposite(branch: Mnemonic) -> Option<Mnemonic> {
     match branch {
         Mnemonic::Bcc => Some(Mnemonic::Bcs),
@@ -603,6 +665,7 @@ impl Asm {
             pinning: false,
             later: Later(Vec::new()),
             rooms: Vec::new(),
+            straddled: None,
             quiet_page: lower_half_ram,
             error: None,
         };
@@ -701,6 +764,7 @@ impl Asm {
                 self.runs_on = false;
                 self.anchored = true;
                 self.data_run = DataRun::Absent;
+                self.straddled = None;
             }
             _ => self.fail(AsmError::OutsideImage {
                 offset: usize::from(address.wrapping_sub(self.origin)),
@@ -710,10 +774,13 @@ impl Asm {
 
     /// Emit `body` where [`Asm::place_later`] is next called, or sooner in
     /// the room a pin leaves unused before it, not here: for tables, which
-    /// their labels reach wherever they lie.
+    /// their labels reach wherever they lie. A body placing a pin is refused.
     pub fn later(&mut self, body: impl Fn(&mut Self) + 'static) {
-        let mut measure = Self::new(self.origin, self.image.len());
-        body(&mut measure);
+        let measure = self.measure(&body);
+        if !measure.pins.is_empty() {
+            let at = self.pc();
+            self.fail(AsmError::HeldPin { at });
+        }
         let len = measure.offset;
         self.later.0.push(Held {
             body: Box::new(body),
@@ -721,12 +788,98 @@ impl Asm {
         });
     }
 
-    /// Emit what [`Asm::later`] holds: into the rooms hops left, then here
-    /// in the order it was held.
+    /// `body` emitted alone, to learn what it places.
+    fn measure(&self, body: &impl Fn(&mut Self)) -> Self {
+        let mut measure = Self::new(self.origin, self.image.len());
+        body(&mut measure);
+        measure
+    }
+
+    /// A block placed whole where it fits before the next pin, the room for
+    /// a hop after it not needed as nothing runs on past it. One that does
+    /// not fit is held as [`Asm::later`] holds a table, and the blocks after
+    /// it go on into the room before the pin until one does not fit either,
+    /// which moves the flow past the pin, the room left to be filled. A block
+    /// the flow runs on into, one a label just bound or an [`Asm::org`] puts
+    /// here, one that runs on itself and one placing a pin stay where they
+    /// are, placed as [`Asm::whole`] places one.
+    pub fn movable(&mut self, body: impl Fn(&mut Self) + 'static) {
+        let measure = self.measure(&body);
+        let len = measure.offset;
+        let entered = self.runs_on || self.anchored || !self.pending.is_empty();
+        if self.pinning || entered || measure.runs_on || !measure.pins.is_empty() {
+            self.make_way(len, false);
+            body(self);
+            return;
+        }
+        while let Some(pin) = self.next_pin().filter(|pin| self.offset + len > pin.start) {
+            if self.straddled != Some(pin.start) {
+                self.straddled = Some(pin.start);
+                self.later.0.push(Held {
+                    body: Box::new(body),
+                    len,
+                });
+                return;
+            }
+            self.straddled = None;
+            self.pass(&pin);
+        }
+        // Ending the flow, it needs no room for a hop after it.
+        self.pinning = true;
+        body(self);
+        self.pinning = false;
+    }
+
+    /// The first pin not wholly before the flow.
+    fn next_pin(&self) -> Option<Range<usize>> {
+        let first = self.pins.partition_point(|pin| pin.end <= self.offset);
+        self.pins.get(first).cloned()
+    }
+
+    /// Move the flow past `pin` and the pins it abuts, leaving the room
+    /// before it to be filled.
+    fn pass(&mut self, pin: &Range<usize>) {
+        let mut past = pin.end;
+        let after = self.pins.partition_point(|other| other.end <= past);
+        for other in &self.pins[after..] {
+            if other.start != past {
+                break;
+            }
+            past = other.end;
+        }
+        self.leave_rooms(self.offset, past);
+        self.offset = past;
+        self.certain = None;
+        self.data_run = DataRun::Absent;
+    }
+
+    /// Emit what [`Asm::later`] and [`Asm::movable`] hold: into the rooms
+    /// hops left, filled as [`Asm::place_later_before`] fills them, then
+    /// into the free stretches from here to the image's end: all in the
+    /// first where it fits, else the smallest stretch first, each taking
+    /// what fills the most of it, and each stretch's in the order held. What
+    /// is held by a body placed so is placed after it.
     pub fn place_later(&mut self) {
         self.fill_rooms();
-        for held in core::mem::take(&mut self.later.0) {
-            (held.body)(self);
+        while !self.later.0.is_empty() && self.error.is_none() {
+            let held = core::mem::take(&mut self.later.0);
+            let stretches = self.free_runs(self.offset..self.image.len());
+            let into = match pack(&held, &stretches) {
+                Ok(into) => into,
+                Err(len) => {
+                    self.fail(AsmError::NoRoom { len });
+                    return;
+                }
+            };
+            let mut each: Vec<Vec<Held>> = stretches.iter().map(|_| Vec::new()).collect();
+            for (table, stretch) in held.into_iter().zip(into) {
+                each[stretch].push(table);
+            }
+            for (stretch, tables) in stretches.iter().zip(each) {
+                if !tables.is_empty() {
+                    self.fill_room(stretch.start, tables);
+                }
+            }
         }
     }
 
@@ -738,8 +891,10 @@ impl Asm {
         rooms.sort_by_key(|room| room.start);
         for room in rooms {
             for free in self.free_runs(room) {
-                let chosen = fullest(&self.later.0, free.end - free.start);
-                self.fill_room(free.start, &chosen);
+                let lens: Vec<usize> = self.later.0.iter().map(|table| table.len).collect();
+                let chosen = fullest(&lens, free.end - free.start);
+                let tables = take_chosen(&mut self.later.0, &chosen);
+                self.fill_room(free.start, tables);
             }
         }
     }
@@ -764,9 +919,9 @@ impl Asm {
         runs
     }
 
-    /// Place the held tables `chosen` picks, in the order they were held,
-    /// from `start`, the flow left as it was.
-    fn fill_room(&mut self, start: usize, chosen: &[usize]) {
+    /// Place `tables` in turn from `start`, the flow left as it was, and
+    /// make what they take a pin that code flowing after hops.
+    fn fill_room(&mut self, start: usize, tables: Vec<Held>) {
         let flow = (
             self.offset,
             self.runs_on,
@@ -777,22 +932,16 @@ impl Asm {
         let pending = core::mem::take(&mut self.pending);
         self.pinning = true;
         let mut at = start;
-        let mut held = core::mem::take(&mut self.later.0);
-        let mut tables: Vec<Held> = chosen
-            .iter()
-            .rev()
-            .map(|&index| held.remove(index))
-            .collect();
-        tables.reverse();
         for table in tables {
             (self.offset, self.runs_on, self.anchored, self.data_run) =
                 (at, false, false, DataRun::Absent);
             (table.body)(self);
             at = self.offset;
         }
-        held.append(&mut self.later.0);
-        self.later.0 = held;
         self.pinning = false;
+        if at > start {
+            self.merge_pin(start..at);
+        }
         (
             self.offset,
             self.runs_on,
@@ -857,9 +1006,8 @@ impl Asm {
     /// Emit what `body` emits with no pin inside it, the flow hopping first
     /// if one would be: for code whose branches must reach across it.
     pub fn whole(&mut self, body: impl Fn(&mut Self)) {
-        let mut measure = Self::new(self.origin, self.image.len());
-        body(&mut measure);
-        self.make_way(measure.offset, false);
+        let len = self.measure(&body).offset;
+        self.make_way(len, false);
         body(self);
     }
 

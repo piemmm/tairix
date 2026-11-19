@@ -35,8 +35,9 @@ und, solange er läuft, auch das Menü des Rechners. Beim ersten Start legt der
 Emulator einen BBC Micro Model B mit einer leeren Diskette an.
 
 Einstellungen ändert den Namen eines Rechners, seine Lautstärke, das schnelle
-Laden vom Band, das den Rechner so schnell wie möglich laufen lässt, solange
-der Kassettenmotor läuft, und beim Commodore 64 den Control-Port, in dem sein
+Laden, das den Rechner so schnell wie möglich laufen lässt, solange der
+Kassettenmotor läuft oder sich in einem Laufwerk eine Diskette dreht und der
+Rechner still ist, und beim Commodore 64 den Control-Port, in dem sein
 Ziffernblock-Joystick steckt. Was in ihn eingebaut ist, lässt sich nur ändern,
 solange er heruntergefahren ist: das ROM in jedem Sockel — OS und sechzehn
 Seitensteckplätze beim Model B, OS und BASIC beim Electron, ROM und Steckmodule
@@ -46,7 +47,9 @@ Steckplatz des Model B, nichts in einem Steckplatz oder Steckmodul oder ein
 eigenes ROM-Abbild, das mit Abbild installieren im Speicher des Emulators
 abgelegt wurde; das Plus 1 des Electron; Fernsehnorm, SID und Laufwerke des
 Commodore 64; und die Tastaturbrücken des Model B, die seinen Bildschirmmodus
-beim Start, das Starten von Diskette und die Diskettenzeiten festlegen.
+beim Start, das Starten von Diskette und die Diskettenzeiten festlegen. Einige
+wenige Programme lesen Code aus den Original-ROMs und laufen nur, wenn Abbilder
+dieser ROMs eingebaut sind.
 
 Ein Model B hat außerdem VIM, einen Editor im Stil von vi, in Steckplatz 13
 eingebaut. An der Eingabe des Rechners bearbeitet `*VIM` mit dem Namen einer

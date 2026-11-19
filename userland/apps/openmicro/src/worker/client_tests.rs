@@ -64,6 +64,8 @@ fn ran_lit(cycles: u32, sound: &[u8], lights: Lights, drives: [bool; 2]) -> Vec<
         lights,
         case: case_by(lights),
         drives,
+        turning: drives,
+        audible: false,
         loaded: Loaded {
             discs: drives,
             ..Loaded::default()
@@ -291,11 +293,22 @@ fn the_model_is_the_last_configure_the_worker_took_and_a_restart_forgets_it() {
     );
 }
 
-/// A slice's reply with these lamps, drive lights and media.
+/// A slice's reply with these lamps, drive lights and media, no disc
+/// turning.
 fn ran_holding(
     cycles: u32,
     sound: &[u8],
     (lights, drives, loaded): (Lights, [bool; 2], Loaded),
+) -> Vec<u8> {
+    ran_turning(cycles, sound, (lights, drives, loaded), [false; 2])
+}
+
+/// A slice's reply with these lamps, drive lights, media and turning discs.
+fn ran_turning(
+    cycles: u32,
+    sound: &[u8],
+    (lights, drives, loaded): (Lights, [bool; 2], Loaded),
+    turning: [bool; 2],
 ) -> Vec<u8> {
     Reply::Ran(Ran {
         cycles,
@@ -304,6 +317,8 @@ fn ran_holding(
         lights,
         case: case_by(lights),
         drives,
+        turning,
+        audible: false,
         loaded,
     })
     .encode()
@@ -364,6 +379,24 @@ fn a_commodore_s_answers_are_believed_only_with_its_own_lamps_and_media() {
             (motor, [false, true], Loaded::default())
         )),
         "device 9's light, unfitted"
+    );
+    assert!(
+        believed(&ran_turning(
+            40_000,
+            &[],
+            (motor, [false; 2], Loaded::default()),
+            [true, false]
+        )),
+        "device 8's disk turning"
+    );
+    assert!(
+        !believed(&ran_turning(
+            40_000,
+            &[],
+            (motor, [false; 2], Loaded::default()),
+            [false, true]
+        )),
+        "device 9's disk turning, unfitted"
     );
     assert!(
         !believed(&ran_holding(
@@ -435,6 +468,8 @@ fn a_letter_case_is_believed_only_as_the_model_s_keyboard_makes_it() {
             lights,
             case,
             drives: [false; 2],
+            turning: [false; 2],
+            audible: false,
             loaded: Loaded::default(),
         })
         .encode()

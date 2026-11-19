@@ -3,9 +3,8 @@
 //!
 //! Each bus cycle takes the VIC-II's half first: [`Vic::begin_cycle`] has run
 //! for a cycle before the CPU's access in it, and the cycle ends with the
-//! chip's second half. While BA is low a CPU read waits, repeating its access
-//! until the chip takes the bus outright; writes go ahead, as the 6510's
-//! three-cycle warning lets them.
+//! chip's second half. While BA is low a CPU read waits and is made once BA
+//! rises; writes go ahead, as the 6510's three-cycle warning lets them.
 
 pub mod cartridge;
 pub mod cia;
@@ -501,6 +500,23 @@ impl Board {
         }
     }
 
+    /// What the data bus carries while a CPU read of `addr` waits on BA: the
+    /// memory byte it addresses, or the floating bus where a chip or a
+    /// cartridge answers, since the waiting read is not made until BA rises.
+    fn waiting_bus(&self, addr: u16) -> u8 {
+        let floating = self.vic.phi1();
+        match self.memory.cpu_chip(addr) {
+            _ if addr <= 1 => floating,
+            Chip::Io if (io::COLOUR..io::CIA1).contains(&addr) => {
+                self.memory.colour(addr) | floating & 0xF0
+            }
+            Chip::Io | Chip::RomLow | Chip::RomHigh | Chip::Open => floating,
+            chip @ (Chip::Ram | Chip::Basic | Chip::Kernal | Chip::Character) => {
+                self.memory.read_chip(chip, addr)
+            }
+        }
+    }
+
     fn access_write(&mut self, addr: u16, value: u8) {
         if addr <= 1 {
             self.memory.port.write(addr, value, self.now);
@@ -744,11 +760,10 @@ fn audio_capacity(standard: Standard) -> usize {
 impl Bus for Board {
     fn read(&mut self, addr: u16) -> u8 {
         while self.vic.ba() {
-            // The read repeats on the bus until the VIC-II takes it outright.
             let bus = if self.vic.dma() {
                 self.vic.phi1()
             } else {
-                self.access_read(addr)
+                self.waiting_bus(addr)
             };
             self.end_cycle(bus);
         }

@@ -33,27 +33,27 @@ const DEFAULT_DEVICE: u8 = device::TAPE;
 const DEFAULT_SECONDARY: u8 = 0;
 
 pub fn emit(a: &mut Asm) {
-    a.whole(|a| {
+    a.movable(|a| {
         output(a);
         channels(a);
         print(a);
     });
-    a.whole(|a| {
+    a.movable(|a| {
         reading(a);
         items(a);
     });
-    a.whole(|a| {
+    a.movable(|a| {
         let syntax = a.local();
         fetching(a);
         parsing(a, syntax);
         getting(a, syntax);
     });
-    a.whole(|a| {
+    a.movable(|a| {
         files(a);
         file_arguments(a);
         loads(a);
     });
-    a.whole(memory_functions);
+    a.movable(memory_functions);
     a.later(|a| {
         for (name, text) in [
             ("redo_text", REDO),

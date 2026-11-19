@@ -51,10 +51,10 @@ pub fn pin(a: &mut Asm) {
         a.lda(abs(io::cia1(reg::ICR)));
         restore_and_return(a);
     });
+    a.pin(fixed::IRQ_ENTRY, entry);
 }
 
 pub fn emit(a: &mut Asm) {
-    entry(a);
     clock(a);
     stop(a);
 }
@@ -62,7 +62,6 @@ pub fn emit(a: &mut Asm) {
 /// The IRQ vector's entry: A, X and Y pushed, then CBINV for a BRK or
 /// CINV for an interrupt.
 fn entry(a: &mut Asm) {
-    a.here("irq_entry");
     a.pha();
     a.txa();
     a.pha();

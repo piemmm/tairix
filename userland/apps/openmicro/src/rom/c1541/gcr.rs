@@ -26,98 +26,209 @@ const NYBBLES: [u8; 32] = {
     table
 };
 
+/// A group's eight codes, in the order its nybbles come, high first.
+const CODES_IN_GROUP: u8 = 8;
+/// The GCR bytes of a group.
+const GCR_BYTES: u8 = 5;
+/// The bits of a code.
+const CODE_BITS: u8 = 5;
+
+/// The GCR bytes code `code` of a group reaches into, first and last.
+const fn bytes_of(code: u8) -> (u8, u8) {
+    let first_bit = CODE_BITS * code;
+    (first_bit / 8, (first_bit + CODE_BITS - 1) / 8)
+}
+
+/// What each nybble's code puts in byte `byte` of a group as code `code`:
+/// its bits there, where the group's forty bits place them.
+const fn part(code: u8, byte: u8) -> [u8; 16] {
+    let mut table = [0; 16];
+    let mut nybble = 0;
+    while nybble < 16 {
+        let mut bit = 0;
+        while bit < CODE_BITS {
+            let at = CODE_BITS * code + bit;
+            if at / 8 == byte && CODES[nybble] & (1 << (CODE_BITS - 1 - bit)) != 0 {
+                table[nybble] |= 0x80 >> (at % 8);
+            }
+            bit += 1;
+        }
+        nybble += 1;
+    }
+    table
+}
+
+/// Each code's parts, one table for each byte it reaches into, by code.
+const PARTS: [(&str, &str); CODES_IN_GROUP as usize] = [
+    ("gcr_part_0", ""),
+    ("gcr_part_1a", "gcr_part_1b"),
+    ("gcr_part_2", ""),
+    ("gcr_part_3a", "gcr_part_3b"),
+    ("gcr_part_4a", "gcr_part_4b"),
+    ("gcr_part_5", ""),
+    ("gcr_part_6a", "gcr_part_6b"),
+    ("gcr_part_7", ""),
+];
+const _: () = {
+    let mut code = 0;
+    while code < CODES_IN_GROUP {
+        let (first, last) = bytes_of(code);
+        assert!(
+            last < GCR_BYTES && (PARTS[code as usize].1.is_empty() == (first == last)),
+            "a code's second table only where it reaches a second byte"
+        );
+        code += 1;
+    }
+};
+
 pub fn emit(a: &mut Asm) {
-    groups(a);
+    encoding(a);
+    decoding(a);
     streams(a);
     blocks(a);
     unblocks(a);
     a.later(|a| {
-        a.here("gcr_codes");
-        a.bytes(&CODES);
         a.here("gcr_nybbles");
         a.bytes(&NYBBLES);
     });
-}
-
-/// `encode_group`: PLAIN's four bytes as GCR's five, each nybble's code
-/// shifted in from the right, the high nybble first. `decode_group`: GCR's
-/// five back into PLAIN's four, C set where a value is no code.
-fn groups(a: &mut Asm) {
-    a.here("encode_group");
-    let (byte, shift, bit) = (a.local(), a.local(), a.local());
-    a.ldy(imm(0));
-    a.bind(byte);
-    a.lda(abs(zp::PLAIN).y());
-    for _ in 0..4 {
-        a.lsr(Acc);
-    }
-    a.jsr(shift);
-    a.lda(abs(zp::PLAIN).y());
-    a.and(imm(0x0F));
-    a.jsr(shift);
-    a.iny();
-    a.cpy(imm(4));
-    a.bne(byte);
-    a.rts();
-    // Nybble A's five-bit code shifted into GCR's forty bits.
-    a.bind(shift);
-    a.tax();
-    a.lda(abs("gcr_codes").x());
-    for _ in 0..3 {
-        a.asl(Acc);
-    }
-    a.ldx(imm(5));
-    a.bind(bit);
-    a.asl(Acc);
-    for offset in (0..5).rev() {
-        a.rol(z(zp::GCR + offset));
-    }
-    a.dex();
-    a.bne(bit);
-    a.rts();
-
-    a.here("decode_group");
-    let (byte, take, bit, invalid) = (a.local(), a.local(), a.local(), a.local());
-    a.ldy(imm(0));
-    a.bind(byte);
-    a.jsr(take);
-    for _ in 0..4 {
-        a.asl(Acc);
-    }
-    a.sta(abs(zp::PLAIN).y());
-    a.jsr(take);
-    a.ora(abs(zp::PLAIN).y());
-    a.sta(abs(zp::PLAIN).y());
-    a.iny();
-    a.cpy(imm(4));
-    a.bne(byte);
-    a.clc();
-    a.rts();
-    // The next five bits off GCR's top as their nybble; no code returns
-    // from `decode_group` with C set.
-    a.bind(take);
-    a.lda(imm(0));
-    a.ldx(imm(5));
-    a.bind(bit);
-    for offset in (0..5).rev() {
-        if offset == 4 {
-            a.asl(z(zp::GCR + offset));
-        } else {
-            a.rol(z(zp::GCR + offset));
+    for code in 0..CODES_IN_GROUP {
+        let (first, last) = bytes_of(code);
+        let (into_first, into_last) = PARTS[usize::from(code)];
+        a.later(move |a| {
+            a.here(into_first);
+            a.bytes(&part(code, first));
+        });
+        if first != last {
+            a.later(move |a| {
+                a.here(into_last);
+                a.bytes(&part(code, last));
+            });
         }
     }
-    a.rol(Acc);
-    a.dex();
-    a.bne(bit);
-    a.tax();
-    a.lda(abs("gcr_nybbles").x());
-    a.bmi(invalid);
+}
+
+/// `encode_group`: PLAIN's four bytes as GCR's five, each nybble's code put
+/// where the group's forty bits hold it, the high nybble first.
+fn encoding(a: &mut Asm) {
+    a.here("encode_group");
+    for code in 0..CODES_IN_GROUP {
+        a.lda(z(zp::PLAIN + u16::from(code / 2)));
+        if code % 2 == 0 {
+            for _ in 0..4 {
+                a.lsr(Acc);
+            }
+        } else {
+            a.and(imm(0x0F));
+        }
+        a.tax();
+        let (first, last) = bytes_of(code);
+        let (into_first, into_last) = PARTS[usize::from(code)];
+        for (byte, table) in [(first, into_first), (last, into_last)] {
+            if table.is_empty() {
+                continue;
+            }
+            let gcr = z(zp::GCR + u16::from(byte));
+            a.lda(abs(table).x());
+            // A byte's first code starts it.
+            if code > 0 && bytes_of(code - 1).1 == byte {
+                a.ora(gcr);
+            }
+            a.sta(gcr);
+        }
+    }
     a.rts();
-    a.bind(invalid);
-    a.pla();
-    a.pla();
+}
+
+/// `decode_group`: GCR's five back into PLAIN's four, C set where a value
+/// is no code; each code is taken from where it lies, so GCR is spent.
+fn decoding(a: &mut Asm) {
+    // Two exits for no code, each within its half's branches.
+    let (early, late) = (a.local(), a.local());
+    a.bind(early);
     a.sec();
     a.rts();
+    a.here("decode_group");
+    for code in 0..CODES_IN_GROUP {
+        take_code(a, code);
+        a.tax();
+        a.lda(abs("gcr_nybbles").x());
+        a.bmi(if code < CODES_IN_GROUP / 2 {
+            early
+        } else {
+            late
+        });
+        let plain = z(zp::PLAIN + u16::from(code / 2));
+        if code % 2 == 0 {
+            for _ in 0..4 {
+                a.asl(Acc);
+            }
+        } else {
+            a.ora(plain);
+        }
+        a.sta(plain);
+    }
+    a.clc();
+    a.rts();
+    a.bind(late);
+    a.sec();
+    a.rts();
+}
+
+/// A group's code `code` into A from where its five bits lie, the codes in
+/// order: one over two bytes leaves the first shifted.
+fn take_code(a: &mut Asm, code: u8) {
+    let gcr = |byte: u8| z(zp::GCR + u16::from(byte));
+    match code {
+        0 => {
+            a.lda(gcr(0));
+            for _ in 0..3 {
+                a.lsr(Acc);
+            }
+        }
+        // The next byte's top bits shifted into this one's bottom, which
+        // then holds the code.
+        1 | 6 => {
+            let (first, _) = bytes_of(code);
+            a.lda(gcr(first + 1));
+            for _ in 0..(CODE_BITS * code % 8 + CODE_BITS - 8) {
+                a.asl(Acc);
+                a.rol(gcr(first));
+            }
+            a.lda(gcr(first));
+            a.and(imm(0x1F));
+        }
+        2 => {
+            a.lda(gcr(1));
+            a.lsr(Acc);
+            a.and(imm(0x1F));
+        }
+        3 => {
+            a.lda(gcr(1));
+            a.lsr(Acc);
+            a.lda(gcr(2));
+            a.ror(Acc);
+            for _ in 0..3 {
+                a.lsr(Acc);
+            }
+        }
+        4 => {
+            a.lda(gcr(3));
+            a.asl(Acc);
+            a.lda(gcr(2));
+            a.rol(Acc);
+            a.and(imm(0x1F));
+        }
+        5 => {
+            a.lda(gcr(3));
+            a.lsr(Acc);
+            a.lsr(Acc);
+            a.and(imm(0x1F));
+        }
+        _ => {
+            a.lda(gcr(4));
+            a.and(imm(0x1F));
+        }
+    }
 }
 
 /// The GCR stream through the job's buffer and on into the overflow:
@@ -161,14 +272,31 @@ fn streams(a: &mut Asm) {
     a.dec(z(zp::STREAM));
     a.rts();
 
+    // A group that ends short of its page's last byte is taken at once; the
+    // rest go byte by byte, so the buffer still hands on to the overflow.
     a.here("stream_get_group");
-    let get = a.local();
+    let (get, singly) = (a.local(), a.local());
+    a.lda(z(zp::STREAM));
+    a.cmp(imm(0xFF - GCR_BYTES + 1));
+    a.bcs(singly);
+    a.ldy(imm(0));
+    for byte in 0..GCR_BYTES {
+        a.lda(z(zp::STREAM).ind_y());
+        a.sta(z(zp::GCR + u16::from(byte)));
+        a.iny();
+    }
+    a.tya();
+    a.clc();
+    a.adc(z(zp::STREAM));
+    a.sta(z(zp::STREAM));
+    a.rts();
+    a.bind(singly);
     a.ldx(imm(0));
     a.bind(get);
     a.jsr("stream_get");
     a.sta(z(zp::GCR).x());
     a.inx();
-    a.cpx(imm(5));
+    a.cpx(imm(GCR_BYTES));
     a.bne(get);
     a.rts();
 }

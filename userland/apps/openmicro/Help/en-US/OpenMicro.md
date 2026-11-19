@@ -30,17 +30,19 @@ machine's card offers Start, Settings, Duplicate, Delete and Show Folder for
 that machine, and while it runs, its machine's menu as well. The first time
 the emulator starts it makes a BBC Micro Model B with a blank disc.
 
-Settings changes a machine's name, its volume, fast tape loading, which runs
-the machine as fast as it can while the cassette motor runs, and on a
-Commodore 64 the control port its keypad joystick is in. What is fitted to it
-changes only while it is shut down: the ROM in each socket — the Model B's OS
-and its sixteen sideways slots, the Electron's OS and BASIC, its Plus 1's ROM
-and cartridges, and the Commodore 64's KERNAL, BASIC, characters and each
-drive's DOS — each a shipped ROM, sideways RAM in a Model B slot, nothing in a
-slot or cartridge, or a ROM image of your own, put in the emulator's store
-with Install an image; the Electron's Plus 1; the Commodore 64's standard, SID
-and drives; and the Model B's keyboard links, which set its screen mode at
-start-up, how a disc boots, and the disc timings.
+Settings changes a machine's name, its volume, fast loading, which runs the
+machine as fast as it can while the cassette motor runs or a drive's disc turns
+and the machine is silent, and on a Commodore 64 the control port its keypad
+joystick is in. What is fitted to it changes only while it is shut down: the
+ROM in each socket — the Model B's OS and its sixteen sideways slots, the
+Electron's OS and BASIC, its Plus 1's ROM and cartridges, and the Commodore
+64's KERNAL, BASIC, characters and each drive's DOS — each a shipped ROM,
+sideways RAM in a Model B slot, nothing in a slot or cartridge, or a ROM image
+of your own, put in the emulator's store with Install an image; the Electron's
+Plus 1; the Commodore 64's standard, SID and drives; and the Model B's keyboard
+links, which set its screen mode at start-up, how a disc boots, and the disc
+timings. A few programs read the original ROMs' own code, and run only with
+images of those fitted.
 
 A Model B also has VIM, a vi-style editor, fitted in slot 13. At its prompt,
 `*VIM` and a file's name edits that file, and BREAK in VIM keeps the text it

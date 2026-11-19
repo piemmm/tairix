@@ -130,7 +130,7 @@ fn encode(message: &str) -> Vec<u8> {
 
 /// The flowing code; [`raisers`] is pinned by the module above.
 pub fn emit(a: &mut Asm) {
-    a.whole(report);
+    a.movable(report);
     a.later(texts);
 }
 

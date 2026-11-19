@@ -16,9 +16,11 @@ use tairix_audio::live::{LiveStream, RtAudio};
 use tairix_fscopy::{DataCopy, Sparse};
 use tairix_openmicro::front::folder::{self, MOST_NAMES};
 use tairix_openmicro::front::media::{self, Purpose};
-use tairix_openmicro::front::pacing::Ring;
+use tairix_openmicro::front::pacing::{Backlog, Ring};
 use tairix_openmicro::machine::Model;
-use tairix_openmicro::worker::protocol::{MAX_BULK, MAX_CARTRIDGE, MAX_ROM, SAMPLE_RATE};
+use tairix_openmicro::worker::protocol::{
+    MAX_BULK, MAX_CARTRIDGE, MAX_ROM, SAMPLE_BYTES, SAMPLE_RATE,
+};
 use tairix_rt::work::Worker;
 use tairix_rt::{Dir, File};
 use tairix_util::defer::JobQueue;
@@ -710,11 +712,13 @@ fn copy_file((from, to): (&Dir, &Dir), name: &str, chunk: &mut [u8]) -> Result<(
         .map_err(|err| format!("{name} could not be copied ({})", errno(err)))
 }
 
-/// An open sound stream, and how full its ring is kept.
+/// An open sound stream, how full its ring is kept, and the sound its ring
+/// had no room for.
 pub struct Speaker {
     audio: RtAudio,
     stream: LiveStream,
     target: u32,
+    backlog: Backlog,
 }
 
 impl Speaker {
@@ -770,6 +774,7 @@ impl Speaker {
             audio,
             stream,
             target,
+            backlog: Backlog::default(),
         })
     }
 
@@ -778,31 +783,36 @@ impl Speaker {
         self.stream.notify_port()
     }
 
-    /// How full the ring is, and how full it is kept.
+    /// How full the ring is, the backlog counted, and how full it is kept.
     pub fn ring(&mut self) -> Option<Ring> {
-        let queued = self.stream.ring().ok()?.readable_frames().ok()?;
+        let readable = self.stream.ring().ok()?.readable_frames().ok()?;
         Some(Ring {
-            queued,
+            queued: readable.saturating_add(self.backlog.frames()),
             target: self.target,
         })
     }
 
     /// `samples` queued after what is already queued, at `volume`
     /// thousandths of their level.
-    pub fn play(
-        &mut self,
-        samples: &[u8],
-        volume: u16,
-        scratch: &mut Vec<u8>,
-    ) -> Result<(), Errno> {
-        let volume = i32::from(volume);
-        scratch.clear();
-        scratch.extend(samples.as_chunks::<2>().0.iter().flat_map(|&pair| {
-            let level = i32::from(i16::from_le_bytes(pair)) * volume / 1000;
-            i16::try_from(level).unwrap_or(0).to_le_bytes()
-        }));
-        let at = self.stream.ring()?.producer_position()?;
-        self.stream.write_at(at, scratch).map(drop)
+    ///
+    /// # Errors
+    ///
+    /// The stream's refusal, or [`Errno::OutOfMemory`] where the backlog
+    /// cannot hold what the ring has no room for.
+    pub fn play(&mut self, samples: &[u8], volume: u16) -> Result<(), Errno> {
+        let stream = &mut self.stream;
+        self.backlog.play(samples, volume, |bytes| {
+            let at = stream.ring()?.producer_position()?;
+            let written = stream.write_at(at, bytes)?;
+            usize::try_from(written.sample_frames)
+                .map(|frames| frames * SAMPLE_BYTES)
+                .map_err(|_| Errno::OutOfRange)
+        })
+    }
+
+    /// The backlog dropped: the sound it belongs to has stopped.
+    pub fn forget(&mut self) {
+        self.backlog.forget();
     }
 
     /// Every notice taken, so the port's readiness is spent.

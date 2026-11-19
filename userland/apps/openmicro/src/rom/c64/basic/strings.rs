@@ -35,15 +35,15 @@ pub const ARRAY_DIMENSIONS: u8 = 4;
 pub const ARRAY_HEADER: u8 = 5;
 
 pub fn emit(a: &mut Asm) {
-    a.whole(temporaries);
-    a.whole(allocation);
-    a.whole(|a| {
+    a.movable(temporaries);
+    a.movable(allocation);
+    a.movable(|a| {
         collection(a);
         considering(a);
     });
-    a.whole(concatenation);
-    a.whole(comparison);
-    a.whole(|a| {
+    a.movable(concatenation);
+    a.movable(comparison);
+    a.movable(|a| {
         let illegal = a.local();
         functions(a, illegal);
         substrings(a, illegal);

@@ -436,6 +436,10 @@ pub struct Ran<'a> {
     pub case: LetterCase,
     /// Each drive's activity light.
     pub drives: [bool; 2],
+    /// Whether each drive's disc turns.
+    pub turning: [bool; 2],
+    /// Whether the machine's sound moved in the slice, heard or not.
+    pub audible: bool,
     /// What is in the drives and the deck.
     pub loaded: Loaded,
 }
@@ -906,8 +910,12 @@ impl Reply<'_> {
                 w.u8(u8::from(ran.lights.caps_lock)
                     | u8::from(ran.lights.shift_lock) << 1
                     | u8::from(ran.lights.motor) << 2
-                    | position(&CASES, &ran.case) << 3);
-                w.u8(u8::from(ran.drives[0]) | u8::from(ran.drives[1]) << 1);
+                    | position(&CASES, &ran.case) << 3
+                    | u8::from(ran.audible) << 5);
+                w.u8(u8::from(ran.drives[0])
+                    | u8::from(ran.drives[1]) << 1
+                    | u8::from(ran.turning[0]) << 2
+                    | u8::from(ran.turning[1]) << 3);
                 w.u8(u8::from(ran.loaded.discs[0])
                     | u8::from(ran.loaded.discs[1]) << 1
                     | u8::from(ran.loaded.tape) << 2
@@ -975,10 +983,10 @@ impl<'a> Reply<'a> {
                         return Err(WireError::Malformed);
                     }
                     let (lights, drives, loaded) = (r.u8()?, r.u8()?, r.u8()?);
-                    if lights >> 5 != 0 || drives >> 2 != 0 || loaded >> 6 != 0 {
+                    if lights >> 6 != 0 || drives >> 4 != 0 || loaded >> 6 != 0 {
                         return Err(WireError::Malformed);
                     }
-                    let case = case_of(lights >> 3).ok_or(WireError::Malformed)?;
+                    let case = case_of((lights >> 3) & 3).ok_or(WireError::Malformed)?;
                     Self::Ran(Ran {
                         cycles,
                         rows,
@@ -990,6 +998,8 @@ impl<'a> Reply<'a> {
                         },
                         case,
                         drives: [drives & 1 != 0, drives & 2 != 0],
+                        turning: [drives & 4 != 0, drives & 8 != 0],
+                        audible: lights & 0x20 != 0,
                         loaded: Loaded {
                             discs: [loaded & 1 != 0, loaded & 2 != 0],
                             tape: loaded & 4 != 0,

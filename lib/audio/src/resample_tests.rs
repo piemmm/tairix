@@ -389,6 +389,41 @@ fn channels_stay_independent_through_the_filter() {
 }
 
 #[test]
+fn each_channel_resamples_exactly_as_it_would_alone() {
+    // A decimating ratio between rows, so the blended taps and the window's
+    // wrap through the history are both exercised.
+    let bank = FilterBank::for_ratio(Ratio::new(985_248, 192_000).expect("ratio")).expect("bank");
+    let frames = 3_000;
+    let channel = |which: usize, frame: usize| {
+        let n = u32::try_from(frame * 7_919 + which * 104_729).expect("small") % 9_973;
+        mathf::single(f64::from(n) / 9_973.0 - 0.5)
+    };
+    let mut stereo = Resampler::new(&bank, 2).expect("stereo");
+    let interleaved: Vec<f32> = (0..frames)
+        .flat_map(|frame| [channel(0, frame), channel(1, frame)])
+        .collect();
+    let mut both = vec![0.0f32; 2 * 1_024];
+    let (_, made) = stereo
+        .process(&bank, &interleaved, &mut both)
+        .expect("frames");
+    assert!(made > 400, "the window filled and outputs followed");
+    for which in 0..2 {
+        let mut mono = Resampler::new(&bank, 1).expect("mono");
+        let alone: Vec<f32> = (0..frames).map(|frame| channel(which, frame)).collect();
+        let mut out = vec![0.0f32; 1_024];
+        let (_, produced) = mono.process(&bank, &alone, &mut out).expect("frames");
+        assert_eq!(produced, made);
+        let from_both: Vec<f32> = both[..2 * made]
+            .iter()
+            .skip(which)
+            .step_by(2)
+            .copied()
+            .collect();
+        assert_eq!(from_both, out[..made], "channel {which}");
+    }
+}
+
+#[test]
 fn a_reset_returns_the_filter_to_the_start_of_a_stream() {
     let bank = FilterBank::new(rate(24_000), rate(48_000)).expect("bank");
     let mut resampler = Resampler::new(&bank, 1).expect("mono");

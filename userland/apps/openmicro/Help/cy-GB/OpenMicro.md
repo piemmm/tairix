@@ -31,17 +31,20 @@ cynnig Cychwyn, Gosodiadau, Dyblygu, Dileu a Dangos Ffolder ar gyfer y
 peiriant hwnnw, a dewislen y peiriant hefyd tra bo'n rhedeg. Y tro cyntaf iddo
 gychwyn, mae'r efelychydd yn gwneud BBC Micro Model B gyda disg wag.
 
-Mae Gosodiadau yn newid enw peiriant, ei lefel sain, llwytho tâp yn gyflym,
-sy'n rhedeg y peiriant mor gyflym ag y gall tra bo modur y casét yn troi, ac ar
-Commodore 64 y porth rheoli y mae ffon reoli'r bysellbad ynddo. Dim ond tra bo
-wedi'i gau i lawr y newidir yr hyn sydd wedi'i osod ynddo: y ROM ym mhob
-soced — OS y Model B a'i un ar bymtheg slot ochr, OS a BASIC yr Electron, ROM a
-chetris ei Plus 1, a KERNAL, BASIC a nodau'r Commodore 64 a DOS pob un o'i
-yriannau — pob un yn ROM a ddaw gyda'r efelychydd, RAM ochr mewn slot Model B,
-dim byd mewn slot neu getrisen, neu eich delwedd ROM eich hun, wedi'i rhoi yn
-storfa'r efelychydd gyda Gosod Delwedd; Plus 1 yr Electron; safon deledu, SID a
-gyriannau'r Commodore 64; a chysylltiadau bysellfwrdd y Model B, sy'n gosod ei
-fodd sgrin wrth gychwyn, sut mae disg yn cychwyn, ac amseru'r disg.
+Mae Gosodiadau yn newid enw peiriant, ei lefel sain, llwytho cyflym, sy'n
+rhedeg y peiriant mor gyflym ag y gall tra bo modur y casét yn troi neu ddisg
+yn troi mewn gyriant a'r peiriant yn dawel, ac ar Commodore 64 y porth rheoli y
+mae ffon reoli'r bysellbad ynddo. Dim ond tra bo wedi'i gau i lawr y newidir yr
+hyn sydd wedi'i osod ynddo: y ROM ym mhob soced — OS y Model B a'i un ar
+bymtheg slot ochr, OS a BASIC yr Electron, ROM a chetris ei Plus 1, a KERNAL,
+BASIC a nodau'r Commodore 64 a DOS pob un o'i yriannau — pob un yn ROM a ddaw
+gyda'r efelychydd, RAM ochr mewn slot Model B, dim byd mewn slot neu getrisen,
+neu eich delwedd ROM eich hun, wedi'i rhoi yn storfa'r efelychydd gyda Gosod
+Delwedd; Plus 1 yr Electron; safon deledu, SID a gyriannau'r Commodore 64; a
+chysylltiadau bysellfwrdd y Model B, sy'n gosod ei fodd sgrin wrth gychwyn, sut
+mae disg yn cychwyn, ac amseru'r disg. Mae ychydig o raglenni yn darllen cod y
+ROMau gwreiddiol eu hunain, a dim ond gyda delweddau o'r rheini wedi'u gosod y
+maent yn rhedeg.
 
 Mae gan Model B hefyd VIM, golygydd yn null vi, wedi'i osod yn slot 13. Wrth
 anogwr y peiriant, mae `*VIM` ac enw ffeil yn golygu'r ffeil honno, ac mae

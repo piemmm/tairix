@@ -35,17 +35,18 @@ const BYTES_FREE: &str = " BASIC BYTES FREE\r";
 /// [`crunch`] and [`qplop`].
 pub fn emit(a: &mut Asm) -> Result<(), AsmError> {
     defaults(a)?;
-    a.whole(main_entries);
-    a.whole(read_line);
-    a.whole(line_number);
-    a.whole(find_line);
-    a.whole(store_line);
-    a.whole(link_program);
-    a.whole(|a| {
+    a.later(cold_start);
+    a.movable(main_entries);
+    a.movable(read_line);
+    a.movable(line_number);
+    a.movable(find_line);
+    a.movable(store_line);
+    a.movable(link_program);
+    a.movable(|a| {
         clear(a);
         moving(a);
     });
-    a.whole(list);
+    a.movable(list);
     a.later(texts);
     Ok(())
 }
@@ -57,7 +58,7 @@ fn texts(a: &mut Asm) {
     a.here("bytes_free_text");
     a.bytes(BYTES_FREE.as_bytes());
     a.byte(0);
-    // Page 3 from IERROR: the vectors, SYS's registers, USR's jump.
+    // Page 3's vectors from IERROR.
     a.here("page_three_defaults");
     for address in [
         fixed::ERROR,
@@ -69,16 +70,7 @@ fn texts(a: &mut Asm) {
     ] {
         a.word(address);
     }
-    a.bytes(&[0; SYS_REGISTERS]);
-    a.byte(JMP);
-    a.word(fixed::ILLEGAL_QUANTITY);
 }
-
-/// SYS's registers, from SAREG to SPREG.
-const SYS_REGISTERS: usize = 4;
-const _: () = assert!(
-    vector::IERROR as usize + vector::BYTES as usize + SYS_REGISTERS == page::USRPOK as usize
-);
 
 /// The cold start: BASIC's vectors and zero page, the memory BASIC has
 /// from the KERNAL, NEW, the banner, READY. The warm start: output to the
@@ -100,16 +92,38 @@ const ZERO_PAGE_DEFAULTS: usize = (zp::RNDX - zp::CHRGET) as usize + RND_SEED.le
 
 pub(super) fn cold_start(a: &mut Asm) {
     a.here("basic_cold");
+    a.jsr("init_vectors");
+    a.jsr("init_ram");
+    a.jsr("new_program");
+    a.lda(imm(lo("banner_text")));
+    a.ldy(imm(hi("banner_text")));
+    a.jsr("print_string");
+    a.lda(z(zp::MEMSIZ));
+    a.sec();
+    a.sbc(z(zp::TXTTAB));
+    a.tax();
+    a.lda(z(zp::MEMSIZ + 1));
+    a.sbc(z(zp::TXTTAB + 1));
+    a.jsr("print_unsigned");
+    a.lda(imm(lo("bytes_free_text")));
+    a.ldy(imm(hi("bytes_free_text")));
+    a.jsr("print_string");
+    a.jmp("ready");
+
+    a.here("init_vectors");
     let vectors = a.local();
-    let copy = a.local();
-    a.ldx(imm(vector::BYTES
-        + crate::rom::asm::byte(SYS_REGISTERS)
-        + 2));
+    a.ldx(imm(vector::BYTES - 1));
     a.bind(vectors);
     a.lda(abs("page_three_defaults").x());
     a.sta(abs(vector::IERROR).x());
     a.dex();
     a.bpl(vectors);
+    a.rts();
+
+    // The original's $E3BF: CHRGET, RND's seed, the conversions' vectors and
+    // jumps, the strings' and channel's state, and the KERNAL's memory.
+    a.here("init_ram");
+    let (copy, no_carry) = (a.local(), a.local());
     a.ldx(imm(crate::rom::asm::byte(ZERO_PAGE_DEFAULTS - 1)));
     a.bind(copy);
     a.lda(abs("zero_page_defaults").x());
@@ -127,6 +141,19 @@ pub(super) fn cold_start(a: &mut Asm) {
     }
     a.lda(imm(JMP));
     a.sta(z(zp::JMPER));
+    a.sta(abs(page::USRPOK));
+    a.lda(imm(lo(fixed::ILLEGAL_QUANTITY)));
+    a.sta(abs(page::USRPOK + 1));
+    a.lda(imm(hi(fixed::ILLEGAL_QUANTITY)));
+    a.sta(abs(page::USRPOK + 2));
+    a.lda(imm(zp::TEMPST.to_le_bytes()[0]));
+    a.sta(z(zp::TEMPPT));
+    a.lda(imm(DESCRIPTOR_STEP));
+    a.sta(z(zp::FOUR6));
+    a.lda(imm(0));
+    a.sta(z(zp::CHANNL));
+    a.sta(z(zp::LASTPT + 1));
+    a.sta(z(zp::BITS));
     a.sec();
     a.jsr(kernal::MEMBOT);
     a.stx(z(zp::TXTTAB));
@@ -135,30 +162,20 @@ pub(super) fn cold_start(a: &mut Asm) {
     a.jsr(kernal::MEMTOP);
     a.stx(z(zp::MEMSIZ));
     a.sty(z(zp::MEMSIZ + 1));
+    a.stx(z(zp::FRETOP));
+    a.sty(z(zp::FRETOP + 1));
     a.ldy(imm(0));
     a.tya();
     a.sta(z(zp::TXTTAB).ind_y());
     a.inc(z(zp::TXTTAB));
-    let no_carry = a.local();
     a.bne(no_carry);
     a.inc(z(zp::TXTTAB + 1));
     a.bind(no_carry);
-    a.jsr("new_program");
-    a.lda(imm(lo("banner_text")));
-    a.ldy(imm(hi("banner_text")));
-    a.jsr("print_string");
-    a.lda(z(zp::MEMSIZ));
-    a.sec();
-    a.sbc(z(zp::TXTTAB));
-    a.tax();
-    a.lda(z(zp::MEMSIZ + 1));
-    a.sbc(z(zp::TXTTAB + 1));
-    a.jsr("print_unsigned");
-    a.lda(imm(lo("bytes_free_text")));
-    a.ldy(imm(hi("bytes_free_text")));
-    a.jsr("print_string");
-    a.jmp("ready");
+    a.rts();
 }
+
+/// FOUR6 as the original's RAM set-up leaves it.
+const DESCRIPTOR_STEP: u8 = 3;
 
 pub(super) fn warm_start(a: &mut Asm) {
     a.here("basic_warm");
@@ -606,6 +623,10 @@ fn link_program(a: &mut Asm) {
 /// return, no temporary strings. `restore_data` and `text_start`: DATPTR
 /// and TXTPTR before the program's first line.
 fn clear(a: &mut Asm) {
+    a.here("run_start");
+    a.jsr("text_start");
+    a.jmp("clear_all");
+
     a.here("new_program");
     a.lda(imm(0));
     a.tay();

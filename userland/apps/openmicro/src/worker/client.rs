@@ -32,7 +32,7 @@ impl Session {
     /// Whether `ran`'s lamps, letter case and media are ones the machine
     /// has: the lock lights its model has, the case CAPS LOCK makes where it
     /// has one and the C64's otherwise, PLAY and a cartridge only on a C64,
-    /// and lights and discs only of drives fitted.
+    /// and lights, turning discs and discs only of drives fitted.
     fn lamps_fit(self, ran: &Ran<'_>) -> bool {
         let commodore = self.model == Model::C64;
         let case_fits = match ran.case {
@@ -45,8 +45,10 @@ impl Session {
             && (self.model.has_shift_lock() || !ran.lights.shift_lock)
             && (self.model.has_play_key() || !ran.loaded.playing)
             && (commodore || !ran.loaded.cartridge)
-            && (0..2)
-                .all(|drive| self.drives[drive] || !(ran.drives[drive] || ran.loaded.discs[drive]))
+            && (0..2).all(|drive| {
+                self.drives[drive]
+                    || !(ran.drives[drive] || ran.turning[drive] || ran.loaded.discs[drive])
+            })
     }
 }
 

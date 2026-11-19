@@ -51,6 +51,19 @@ pub(crate) mod fixed {
     pub const AY_TO_FAC: u16 = 0xB391;
     /// USR's default: ILLEGAL QUANTITY.
     pub const ILLEGAL_QUANTITY: u16 = 0xB248;
+    /// The routines software calls directly: RUN's start, the program
+    /// rewound then CLR; the program rewound; the statement loop's next
+    /// statement; a string printed from A (low) and Y; FAC to an unsigned
+    /// word; the unsigned word in A (high) and X printed; and the cold
+    /// start's two halves, BASIC's RAM and its vectors.
+    pub const RUN_START: u16 = 0xA659;
+    pub const TEXT_START: u16 = 0xA68E;
+    pub const NEXT_STATEMENT: u16 = 0xA7AE;
+    pub const PRINT_STRING: u16 = 0xAB1E;
+    pub const FAC_TO_WORD: u16 = 0xB7F7;
+    pub const PRINT_UNSIGNED: u16 = 0xBDCD;
+    pub const INIT_RAM: u16 = 0xE3BF;
+    pub const INIT_VECTORS: u16 = 0xE453;
 }
 
 /// `main`'s `JMP (IMAIN)`, which IMAIN's default follows.
@@ -59,12 +72,25 @@ const MAIN_JUMP: u16 = 3;
 /// Each fixed address's routine, pinned there: IERROR's a jump, as the cold
 /// start follows it too closely.
 pub fn pin(a: &mut Asm) {
-    a.pin(fixed::COLD, text::cold_start);
+    for (address, routine) in [
+        (fixed::COLD, "basic_cold"),
+        (fixed::RUN_START, "run_start"),
+        (fixed::TEXT_START, "text_start"),
+        (fixed::NEXT_STATEMENT, "next_statement"),
+        (fixed::PRINT_STRING, "print_string"),
+        (fixed::FAC_TO_WORD, "fac_to_word"),
+        (fixed::PRINT_UNSIGNED, "print_unsigned"),
+        (fixed::INIT_RAM, "init_ram"),
+        (fixed::INIT_VECTORS, "init_vectors"),
+    ] {
+        a.pin(address, |a| a.jmp(routine));
+    }
     a.pin(fixed::WARM, text::warm_start);
     a.pin(fixed::ERROR, |a| a.jmp("error_report"));
     a.pin(fixed::MAIN - MAIN_JUMP, text::main_loop);
     a.pin(fixed::CRUNCH, text::crunch);
     a.pin(fixed::QPLOP, text::qplop);
+    a.pin(fixed::GONE, exec::gone);
     a.pin(fixed::EVAL, expr::eval);
     a.pin(fixed::FAC_TO_AY, vars::fac_to_ay);
     a.pin(fixed::ILLEGAL_QUANTITY, errors::raisers);

@@ -4,7 +4,6 @@
 //! SYS.
 
 use super::errors::{number, raise};
-use super::fixed;
 use super::text::{LINE_FOUND, STACK_BASE};
 use super::tokens::token;
 use super::ws::{page, vector, zp};
@@ -40,22 +39,30 @@ const WAIT_MASK: u16 = zp::CHARAC;
 const WAIT_INVERT: u16 = zp::ENDCHR;
 
 pub fn emit(a: &mut Asm) {
-    a.whole(statement_loop);
-    a.whole(ends);
-    a.whole(run);
-    a.whole(jumps);
-    a.whole(conditions);
-    a.whole(skips);
-    a.whole(frames);
-    a.whole(for_loop);
-    a.whole(next_loop);
-    a.whole(memory);
+    a.movable(statement_loop);
+    a.movable(ends);
+    a.movable(run);
+    a.movable(jumps);
+    a.movable(conditions);
+    a.movable(skips);
+    a.movable(frames);
+    a.movable(for_loop);
+    a.movable(next_loop);
+    a.movable(memory);
+}
+
+/// `gone`, IGONE's default: the next statement fetched and run.
+pub(super) fn gone(a: &mut Asm) {
+    a.here("gone");
+    a.jsr(zp::CHRGET);
+    a.jsr("execute");
+    a.jmp("next_statement");
 }
 
 /// `next_statement`: after a statement, STOP checked and, in a program, the
 /// place kept for CONT; then the next statement after a colon, or the next
-/// line, CURLIN its number; past the last line, READY. `gone`, IGONE's default:
-/// the next statement fetched and run. `run_direct`: the tokenised buffer run.
+/// line, CURLIN its number; past the last line, READY. `run_direct`: the
+/// tokenised buffer run.
 fn statement_loop(a: &mut Asm) {
     a.here("run_direct");
     a.jsr(zp::CHRGET);
@@ -106,13 +113,6 @@ fn statement_loop(a: &mut Asm) {
     a.jsr("add_txtptr");
     a.here("gone_vector");
     a.jmp(abs(vector::IGONE).ind());
-
-    a.pin(fixed::GONE, |a| {
-        a.here("gone");
-        a.jsr(zp::CHRGET);
-        a.jsr("execute");
-        a.jmp("next_statement");
-    });
 
     // The statement whose first character is A: a token's routine, or LET
     // for a name; GO TO is GOTO.
@@ -416,7 +416,7 @@ fn skips(a: &mut Asm) {
     a.tya();
     a.jmp("add_txtptr");
 
-    a.whole(|a| {
+    a.movable(|a| {
         a.here("scan_statement");
         a.ldx(imm(b':'));
         a.here("scan_to");

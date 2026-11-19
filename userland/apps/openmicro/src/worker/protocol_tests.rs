@@ -103,6 +103,8 @@ fn every_reply_survives_its_wire_form() {
             },
             case: LetterCase::Capitals,
             drives: [false, true],
+            turning: [true, false],
+            audible: true,
             loaded: Loaded {
                 discs: [true, false],
                 tape: true,
@@ -153,6 +155,8 @@ fn a_ran_reply_says_which_rows_changed() {
         lights: Lights::default(),
         case: LetterCase::Small,
         drives: [false; 2],
+        turning: [false; 2],
+        audible: false,
         loaded: Loaded::default(),
     };
     assert!(ran.row_changed(9));
@@ -270,21 +274,22 @@ fn a_configure_out_of_bounds_does_not_decode() {
     assert!(refused(&c64(0, 0, 2)), "a drive flag of 2");
 }
 
+/// A slice's reply on the wire: the last row-map byte, the sound and the
+/// lights byte as given, nothing else set.
+fn ran(rows_last: u8, sound: &[u8], lights: u8) -> Vec<u8> {
+    let mut bytes = vec![2];
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    let mut rows = [0; ROW_MAP];
+    rows[ROW_MAP - 1] = rows_last;
+    bytes.extend_from_slice(&rows);
+    bytes.extend_from_slice(&u32::try_from(sound.len()).unwrap().to_le_bytes());
+    bytes.extend_from_slice(sound);
+    bytes.extend_from_slice(&[lights, 0, 0]);
+    bytes
+}
+
 #[test]
-fn a_reply_out_of_bounds_does_not_decode() {
-    let ran = |rows_last: u8, sound: &[u8], lights: u8| {
-        let mut bytes = vec![2];
-        bytes.extend_from_slice(&1u32.to_le_bytes());
-        let mut rows = [0; ROW_MAP];
-        rows[ROW_MAP - 1] = rows_last;
-        bytes.extend_from_slice(&rows);
-        bytes.extend_from_slice(&u32::try_from(sound.len()).unwrap().to_le_bytes());
-        bytes.extend_from_slice(sound);
-        bytes.extend_from_slice(&[lights, 0, 0]);
-        bytes
-    };
-    assert!(Reply::decode(&ran(0xFF, &[0; 4], 7)).is_ok());
-    assert!(Reply::decode(&ran(0, &[0; 3], 0)).is_err(), "half a sample");
+fn a_reply_s_lights_byte_carries_the_case_and_whether_the_sound_moved() {
     for (bits, case) in [
         (0, LetterCase::Small),
         (1, LetterCase::Capitals),
@@ -300,9 +305,19 @@ fn a_reply_out_of_bounds_does_not_decode() {
         "a fourth case"
     );
     assert!(
-        Reply::decode(&ran(0, &[], 0x20)).is_err(),
-        "a bit past the case"
+        matches!(Reply::decode(&ran(0, &[], 0x20)), Ok(Reply::Ran(slice)) if slice.audible),
+        "the sound moved"
     );
+    assert!(
+        Reply::decode(&ran(0, &[], 0x40)).is_err(),
+        "a bit past the sound's"
+    );
+}
+
+#[test]
+fn a_reply_out_of_bounds_does_not_decode() {
+    assert!(Reply::decode(&ran(0xFF, &[0; 4], 7)).is_ok());
+    assert!(Reply::decode(&ran(0, &[0; 3], 0)).is_err(), "half a sample");
     let mut loaded = ran(0, &[], 0);
     *loaded.last_mut().unwrap() = 0x3F;
     assert!(
@@ -311,6 +326,15 @@ fn a_reply_out_of_bounds_does_not_decode() {
     );
     *loaded.last_mut().unwrap() = 0x40;
     assert!(Reply::decode(&loaded).is_err(), "a bit past the cartridge");
+    let mut drives = ran(0, &[], 0);
+    let at = drives.len() - 2;
+    drives[at] = 0x0F;
+    assert!(
+        matches!(Reply::decode(&drives), Ok(Reply::Ran(slice)) if slice.drives == [true; 2] && slice.turning == [true; 2]),
+        "both drives lit and turning"
+    );
+    drives[at] = 0x10;
+    assert!(Reply::decode(&drives).is_err(), "a bit past the turning");
     let samples: Vec<u8> = vec![0; (MAX_SAMPLES + 1) * SAMPLE_BYTES];
     assert!(
         Reply::decode(&ran(0, &samples, 0)).is_err(),

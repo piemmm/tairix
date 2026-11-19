@@ -106,7 +106,7 @@ whose pipes cannot be watched is stopped with that reason.
 
 The library is `lib/machines`' (`docs/src/lib/machines.md`), the one
 PCEmulator keeps: a record of every machine — its number, name, model and
-fitting, its display, key mapping, volume and fast tape loading, its folder
+fitting, its display, key mapping, volume and fast loading, its folder
 and the media of its folder its drives and deck hold — written to `library-a`
 and `library-b` in turn, and a state blob a machine holding its last screen
 and, while it is suspended, its snapshot, all in the application's own store.
@@ -126,7 +126,7 @@ starts, configures, copies and deletes its machine, and carries the machine's
 own rows while it runs.
 
 A machine's settings are an owner-modal dialog over the window it was opened
-from: its name, its volume, fast tape loading and a Commodore 64's keypad
+from: its name, its volume, fast loading and a Commodore 64's keypad
 joystick at any time, and, only while the machine is off, what is fitted —
 each socket's ROM (the Model B's OS and sixteen slots, the Electron's OS and
 BASIC, its Plus 1's ROM and cartridges, the Commodore 64's KERNAL, BASIC,
@@ -243,8 +243,9 @@ leaves the folder, which is the user's.
 Each ROM is Rust driving `tairix_openmicro::rom::asm::Asm`, which encodes from the
 CPU's own instruction table, checks every branch, placement and run-on into
 a label, places entry points at fixed addresses with the code flowing round
-them and the gaps they leave filled with the tables and routines held for
-them, and takes hardware addresses from the machine, so a register address is defined once
+them and the gaps they leave filled with the tables, routines and blocks held
+for them, the rest packed into the free space after the code, and takes
+hardware addresses from the machine, so a register address is defined once
 for the emulation and the firmware. The images are committed in the crate's
 `firmware/` and compiled into `Run`, so the window needs no filesystem
 authority to fit them: `cargo xtask openmicro --write-roms` rebuilds them, and the
@@ -418,7 +419,11 @@ jiffy clock, the serial bus, the tape, RS-232 and the logical files, its jump
 table at `$FF81–$FFF3` and its RAM vectors at `$0314–$0333`; and BASIC's
 tokens, every statement and function, its five-byte reals to the same bits as
 the original's, its vectors at `$0300–$030B` and its documented workspace,
-under the banner `**** OPENMICRO 64 BASIC V2 ****`.
+under the banner `**** OPENMICRO 64 BASIC V2 ****`; and the addresses inside
+the originals software is found calling — the screen's set-up and output,
+CINT's parts, the IRQ's entry, RESTOR's table, the serial bus's bodies,
+RUN's start, NEWSTT, BASIC's prints and its cold start's halves among them —
+each doing there what the original's does.
 `tairix_openmicro::rom::c64::charset` draws the character ROM's two sets, the
 letters and digits this ROM's own design and the graphics the shapes their
 function fixes. `tairix_openmicro::rom::c1541` assembles the 1541's DOS: the
@@ -431,8 +436,9 @@ Their screens and the disks they write match KERNAL 3's, BASIC V2's and 1541
 DOS 2.6's for the same steps. Where they differ on purpose: the memory test
 reads a byte of each page, so READY comes about two seconds sooner; a full
 format takes about 28 seconds where the original's takes 74; the bytes past a
-file's last byte in its last block are zero; and the rest `plans/C64.md`
-lists with the behaviour pinned against the originals.
+file's last byte in its last block are zero; a program reading the original
+ROMs' own code as data runs only with images of those fitted; and the rest
+`plans/C64.md` lists with the behaviour pinned against the originals.
 
 ## Testing
 

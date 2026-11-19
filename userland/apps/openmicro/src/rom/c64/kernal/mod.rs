@@ -27,6 +27,8 @@ pub(crate) mod fixed {
     pub const RESET: u16 = 0xFCE2;
     /// The NMI's entry, which the NMI vector holds.
     pub const NMI_ENTRY: u16 = 0xFE43;
+    /// The IRQ's entry, which the IRQ vector holds.
+    pub const IRQ_ENTRY: u16 = 0xFF48;
     /// CINV's default: the jiffy interrupt's handler.
     pub const IRQ: u16 = 0xEA31;
     /// CINV's handler's end: CIA1's interrupts acknowledged, then
@@ -70,6 +72,38 @@ pub(crate) mod fixed {
     pub const HOME: u16 = 0xE566;
     /// KEYLOG's default: the shift keys' table picked, the key decoded.
     pub const KEYLOG: u16 = 0xEB48;
+    /// The bodies the jump table's entries lead to, where software calls
+    /// them directly: IOINIT and RESTOR placed there whole, VECTOR five
+    /// bytes into RESTOR as it is in the original.
+    pub const IOINIT: u16 = 0xFDA3;
+    pub const RESTOR: u16 = 0xFD15;
+    /// The vectors' defaults as RESTOR hands them to VECTOR, which software
+    /// copies itself.
+    pub const VECTOR_TABLE: u16 = 0xFD30;
+    pub const CINT: u16 = 0xFF5B;
+    /// CINT past its screen part: the standard found and the jiffy
+    /// interrupt started at its rate.
+    pub const CINT_STANDARD: u16 = 0xFF5E;
+    pub const UNTLK: u16 = 0xEDEF;
+    pub const ACPTR: u16 = 0xEE13;
+    pub const TALK: u16 = 0xED09;
+    pub const LISTEN: u16 = 0xED0C;
+    pub const SECOND: u16 = 0xEDB9;
+    pub const TKSA: u16 = 0xEDC7;
+    pub const CIOUT: u16 = 0xEDDD;
+    pub const UNLSN: u16 = 0xEDFE;
+    pub const SCNKEY: u16 = 0xEA87;
+    pub const UDTIM: u16 = 0xF69B;
+    /// CINT's screen part, which the warm start calls, and its parts from
+    /// the editor's settings, from the text colour A gives, and the VIC-II's
+    /// registers with the channels alone.
+    pub const SCREEN_INIT: u16 = 0xE518;
+    pub const EDITOR_INIT: u16 = 0xE51B;
+    pub const CURSOR_INIT: u16 = 0xE536;
+    pub const VIC_INIT: u16 = 0xE5A0;
+    /// CHROUT's screen part: A put on the screen at the cursor, A, X and Y
+    /// kept.
+    pub const SCREEN_OUT: u16 = 0xE716;
 }
 
 /// What is at a fixed address: a jump to a routine, or code a part of the
@@ -93,7 +127,7 @@ const VECTOR_DEFAULTS: [(u16, Lead); 16] = [
     (fixed::CHRIN, Lead::Jump("chrin")),
     (fixed::CHROUT, Lead::Jump("chrout")),
     (fixed::STOP, Lead::Jump("stop")),
-    (fixed::GETIN, Lead::Jump("getin")),
+    (fixed::GETIN, Lead::Placed),
     (fixed::CLALL, Lead::Placed),
     (fixed::BRK, Lead::Jump("warm_start")),
     (fixed::LOAD, Lead::Jump("load_vectored")),
@@ -101,11 +135,27 @@ const VECTOR_DEFAULTS: [(u16, Lead); 16] = [
 ];
 
 /// The other fixed addresses that are a jump to their routine.
-const ENTRY_JUMPS: [(u16, &str); 4] = [
+const ENTRY_JUMPS: [(u16, &str); 20] = [
     (fixed::RESET, "reset"),
     (fixed::CLEAR_SCREEN, "clear_screen"),
     (fixed::HOME, "home"),
     (fixed::KEYLOG, "keylog"),
+    (fixed::CINT_STANDARD, "cint_standard"),
+    (fixed::UNTLK, "untlk"),
+    (fixed::ACPTR, "acptr"),
+    (fixed::TALK, "talk"),
+    (fixed::LISTEN, "listen"),
+    (fixed::SECOND, "second"),
+    (fixed::TKSA, "tksa"),
+    (fixed::CIOUT, "ciout"),
+    (fixed::UNLSN, "unlsn"),
+    (fixed::SCNKEY, "scnkey"),
+    (fixed::UDTIM, "udtim"),
+    (fixed::SCREEN_INIT, "screen_init"),
+    (fixed::EDITOR_INIT, "editor_init"),
+    (fixed::CURSOR_INIT, "cursor_init"),
+    (fixed::VIC_INIT, "vic_init"),
+    (fixed::SCREEN_OUT, "screen_out"),
 ];
 
 /// A jump-table entry: a jump to a routine, or through a RAM vector.
@@ -215,6 +265,7 @@ pub fn pin(a: &mut Asm) {
     pin_jumps(a);
     reset::pin(a);
     irq::pin(a);
+    editor::pin(a);
     files::pin(a);
 }
 
@@ -243,7 +294,7 @@ fn jump_table(a: &mut Asm) {
     a.pin(NMI_VECTOR, |a| {
         a.word(fixed::NMI_ENTRY);
         a.word(fixed::RESET);
-        a.word("irq_entry");
+        a.word(fixed::IRQ_ENTRY);
     });
 }
 
@@ -268,7 +319,7 @@ fn pin_jumps(a: &mut Asm) {
     }
 }
 
-/// The vector defaults as RESTOR copies them.
+/// The vector defaults as RESTOR copies them, at the original's place.
 fn vector_table(a: &mut Asm) {
     a.here("vector_defaults");
     for (address, _) in VECTOR_DEFAULTS {

@@ -92,14 +92,14 @@ const EXP_FRACTION_BIAS: u8 = 0x50;
 const EXP_UNDERFLOW: u8 = 0x80;
 
 pub fn emit(a: &mut Asm) {
-    a.whole(polynomials);
-    a.whole(sine);
-    a.whole(tangent);
-    a.whole(arctangent);
-    a.whole(logarithm);
-    a.whole(exponential);
-    a.whole(power);
-    a.whole(random);
+    a.movable(polynomials);
+    a.movable(sine);
+    a.movable(tangent);
+    a.movable(arctangent);
+    a.movable(logarithm);
+    a.movable(exponential);
+    a.movable(power);
+    a.movable(random);
     a.later(tables);
 }
 

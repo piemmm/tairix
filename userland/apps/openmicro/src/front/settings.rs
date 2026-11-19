@@ -67,7 +67,7 @@ pub struct Choices {
     /// Its sound's level, in thousandths.
     pub volume: u16,
     /// Whether a tape loads as fast as the machine can run.
-    pub fast_tape: bool,
+    pub fast_loading: bool,
     /// Where a C64's keypad plays a joystick.
     pub joystick: Joystick,
 }
@@ -240,7 +240,7 @@ impl Settings {
             name: machine.name.clone(),
             fitting: machine.fitting.clone(),
             volume: machine.volume,
-            fast_tape: machine.fast_tape,
+            fast_loading: machine.fast_loading,
             joystick: machine.joystick,
         };
         let roms = rom_rows(&choices.fitting, &installed, locked.is_some());
@@ -262,7 +262,7 @@ impl Settings {
             "SOUND AND TAPE",
             vec![
                 FieldRow::new("Volume", FieldControl::Slider(Slider::new(choices.volume))),
-                FieldRow::toggle("Fast tape loading", choices.fast_tape)
+                FieldRow::toggle("Fast loading", choices.fast_loading)
                     .with_description("Runs the machine as fast as it can while the motor runs."),
             ],
         ));
@@ -382,7 +382,7 @@ impl Settings {
                 self.choices.volume = (*permille).min(FULL_VOLUME);
             }
             (group, row, FieldAction::Set { on }) if group == sound && row == at::FAST_TAPE => {
-                self.choices.fast_tape = *on;
+                self.choices.fast_loading = *on;
                 self.form.show_toggle((group, row), *on, looks, damage);
             }
             (at::MACHINE, at::JOYSTICK, FieldAction::Selected { index })

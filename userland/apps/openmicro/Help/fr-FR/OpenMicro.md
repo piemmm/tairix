@@ -34,20 +34,22 @@ Supprimer et Afficher le dossier pour cette machine et, tant qu'elle tourne,
 le menu de la machine aussi. Au premier lancement, l'émulateur crée un BBC
 Micro Model B avec une disquette vierge.
 
-Réglages change le nom d'une machine, son volume, le chargement rapide des
-cassettes, qui fait tourner la machine aussi vite que possible tant que le
-moteur du magnétophone tourne, et, sur un Commodore 64, le port de manette où
-est branché son joystick au pavé numérique. Ce qui y est installé ne change que
-lorsqu'elle est éteinte : la ROM de chaque support — l'OS et les seize
-emplacements latéraux du Model B, l'OS et le BASIC de l'Electron, la ROM et les
-cartouches de son Plus 1, et, sur le Commodore 64, le KERNAL, le BASIC, le jeu
-de caractères et le DOS de chaque lecteur —, chacune pouvant être une ROM
-livrée, de la RAM latérale dans un emplacement du Model B, rien dans un
-emplacement ou une cartouche, ou une image de ROM à vous, placée dans le
-magasin de l'émulateur avec Installer une image ; le Plus 1 de l'Electron ; la
-norme vidéo, le SID et les lecteurs du Commodore 64 ; et les cavaliers du
-clavier du Model B, qui fixent son mode d'écran au démarrage, la façon dont une
-disquette s'amorce et les temporisations de disquette.
+Réglages change le nom d'une machine, son volume, le chargement rapide, qui
+fait tourner la machine aussi vite que possible tant que le moteur du
+magnétophone ou la disquette d'un lecteur tourne et que la machine est
+silencieuse, et, sur un Commodore 64, le port de manette où est branché son
+joystick au pavé numérique. Ce qui y est installé ne change que lorsqu'elle est
+éteinte : la ROM de chaque support — l'OS et les seize emplacements latéraux du
+Model B, l'OS et le BASIC de l'Electron, la ROM et les cartouches de son Plus
+1, et, sur le Commodore 64, le KERNAL, le BASIC, le jeu de caractères et le DOS
+de chaque lecteur —, chacune pouvant être une ROM livrée, de la RAM latérale
+dans un emplacement du Model B, rien dans un emplacement ou une cartouche, ou
+une image de ROM à vous, placée dans le magasin de l'émulateur avec Installer
+une image ; le Plus 1 de l'Electron ; la norme vidéo, le SID et les lecteurs du
+Commodore 64 ; et les cavaliers du clavier du Model B, qui fixent son mode
+d'écran au démarrage, la façon dont une disquette s'amorce et les
+temporisations de disquette. Quelques programmes lisent le code même des ROM
+d'origine et ne fonctionnent que si des images de celles-ci sont installées.
 
 Un Model B a aussi VIM, un éditeur dans le style de vi, installé dans
 l'emplacement 13. À l'invite de la machine, `*VIM` suivi du nom d'un fichier
