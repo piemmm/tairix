@@ -156,8 +156,8 @@ impl Model {
 
     /// The X coordinate a half-cycle begins at, counting halves from the
     /// first of cycle 1.
-    fn half_x(self, half: usize) -> u16 {
-        let x = match self {
+    const fn half_x(self, half: u16) -> u16 {
+        match self {
             Self::Mos6569 => (404 + 4 * half) % 504,
             Self::Mos6567R8 => {
                 // The counter holds at $184 through three halves of cycles 62
@@ -171,8 +171,16 @@ impl Model {
                 };
                 (412 + 4 * counted) % 512
             }
+        }
+    }
+
+    /// The X coordinates cycle `cycle`'s two halves begin at.
+    fn halves(self, cycle: u16) -> [u16; 2] {
+        let table = match self {
+            Self::Mos6569 => &PAL_HALVES,
+            Self::Mos6567R8 => &NTSC_HALVES,
         };
-        u16::try_from(x).unwrap_or(u16::MAX)
+        table.get(usize::from(cycle)).copied().unwrap_or_default()
     }
 
     /// The first line the picture shows and how many it does.
@@ -289,6 +297,23 @@ type Table = [Slot; MAX_CYCLES + 1];
 
 const PAL: Table = table(Model::Mos6569);
 const NTSC: Table = table(Model::Mos6567R8);
+
+/// Each cycle's halves' X coordinates, indexed from 1.
+type Halves = [[u16; 2]; MAX_CYCLES + 1];
+
+const PAL_HALVES: Halves = halves(Model::Mos6569);
+const NTSC_HALVES: Halves = halves(Model::Mos6567R8);
+
+const fn halves(model: Model) -> Halves {
+    let mut table = [[0; 2]; MAX_CYCLES + 1];
+    let mut cycle = 1;
+    while cycle <= model.cycles() {
+        let half = 2 * (cycle - 1);
+        table[cycle as usize] = [model.half_x(half), model.half_x(half + 1)];
+        cycle += 1;
+    }
+    table
+}
 
 /// The cycle `steps` on from `cycle`, wrapping into the next line.
 const fn cycle_after(model: Model, cycle: usize, steps: usize) -> usize {
@@ -427,6 +452,65 @@ snapshot::fields!(Graphics {
     pair,
     second_half
 });
+
+impl Graphics {
+    /// The byte fetched for pixel `beam`, loaded if one waits for it.
+    fn load_at(&mut self, beam: u16) -> bool {
+        let Some(slot) = self
+            .pending
+            .iter_mut()
+            .find(|slot| slot.is_some_and(|load| load.at == beam))
+        else {
+            return false;
+        };
+        if let Some(load) = slot.take() {
+            self.shifter = load.byte;
+            self.matrix = load.matrix;
+            self.second_half = false;
+        }
+        true
+    }
+
+    /// The next pixel's bits: one of the byte's, or a pair shown over two
+    /// pixels.
+    const fn next_bits(&mut self, multicolour: bool) -> u8 {
+        let bits = if multicolour {
+            if !self.second_half {
+                self.pair = self.shifter >> 6;
+                self.shifter <<= 2;
+            }
+            self.pair
+        } else {
+            let bit = self.shifter >> 7;
+            self.shifter <<= 1;
+            bit
+        };
+        self.second_half = !self.second_half;
+        bits
+    }
+}
+
+/// What the graphics sequencer's bits show until its next load: each
+/// value's colour, the values that are foreground, and whether the bits come
+/// in pairs.
+#[derive(Clone, Copy, Debug)]
+struct Look {
+    colours: [u8; 4],
+    foreground: u8,
+    multicolour: bool,
+}
+
+impl Look {
+    /// The colour of `bits`.
+    const fn colour(self, bits: u8) -> u8 {
+        self.colours[(bits & 3) as usize]
+    }
+
+    /// The colour of `bits`, and whether they are foreground.
+    const fn of(self, bits: u8) -> (u8, bool) {
+        (self.colour(bits), self.foreground >> (bits & 3) & 1 != 0)
+    }
+}
 
 /// The picture's place on the canvas.
 const fn margin(available: usize, used: u16) -> usize {
@@ -979,25 +1063,29 @@ impl Vic {
         }
     }
 
-    /// The sprites that can show a pixel in this cycle: those shifting out,
-    /// and those displayed that have not started in this line.
-    fn live_sprites(&self) -> u8 {
-        self.sprites
-            .iter()
-            .enumerate()
-            .filter(|&(n, sprite)| {
-                sprite.shown.is_some() || (sprite.display && self.started & 1 << n == 0)
-            })
-            .fold(0, |live, (n, _)| live | 1 << n)
+    /// The sprites that can show a pixel in this cycle, whose halves begin
+    /// at `half_x`: those shifting out, and those displayed and not started
+    /// in this line whose X falls in it.
+    fn live_sprites(&self, half_x: [u16; 2]) -> u8 {
+        let mut live = 0;
+        for (n, sprite) in self.sprites.iter().enumerate() {
+            let starting =
+                sprite.display && self.started & 1 << n == 0 && in_cycle(half_x, self.sprite_x[n]);
+            if sprite.shown.is_some() || starting {
+                live |= 1 << n;
+            }
+        }
+        live
     }
 
     fn draw(&mut self) {
-        let (first, count) = self.model.visible_pixels();
-        let csel = self.cr2 & cr2::CSEL != 0;
-        let (left, right) = if csel { (24, 344) } else { (31, 335) };
         let base = (self.cycle - 1) * 8;
-        let half = 2 * (usize::from(self.cycle) - 1);
-        let half_x = [self.model.half_x(half), self.model.half_x(half + 1)];
+        let half_x = self.model.halves(self.cycle);
+        let (left, right) = if self.cr2 & cr2::CSEL != 0 {
+            (24, 344)
+        } else {
+            (31, 335)
+        };
         let window = base..base + 8;
         let loading = self
             .graphics
@@ -1005,42 +1093,85 @@ impl Vic {
             .iter()
             .flatten()
             .any(|load| window.contains(&load.at));
-        let sprites = self.live_sprites();
-        for pixel in 0..8 {
-            let beam = base + pixel;
-            let x = half_x[usize::from(pixel / 4)] + pixel % 4;
-            if loading {
-                for slot in &mut self.graphics.pending {
-                    if let Some(load) = slot.filter(|load| load.at == beam) {
-                        self.graphics.shifter = load.byte;
-                        self.graphics.matrix = load.matrix;
-                        self.graphics.second_half = false;
-                        *slot = None;
+        let sprites = self.live_sprites(half_x);
+        let mut colours = [0; 8];
+        if sprites == 0 && !in_cycle(half_x, left) && !in_cycle(half_x, right) {
+            self.draw_plain(base, loading, &mut colours);
+        } else {
+            let mut look = self.look();
+            for (pixel, colour) in (0..8).zip(&mut colours) {
+                let beam = base + pixel;
+                let x = half_x[usize::from(pixel / 4)] + pixel % 4;
+                if loading && self.graphics.load_at(beam) {
+                    look = self.look();
+                }
+                if x == right {
+                    self.main_border = true;
+                }
+                if x == left {
+                    self.check_vertical_border();
+                    if !self.vertical_border {
+                        self.main_border = false;
                     }
+                    look = self.look();
                 }
+                *colour = self.pixel(x, sprites, look);
             }
-            if x == right {
-                self.main_border = true;
-            }
-            if x == left {
-                self.check_vertical_border();
-                if !self.vertical_border {
-                    self.main_border = false;
+        }
+        self.put(base, colours);
+    }
+
+    /// The colours of a cycle starting at pixel `base` that no sprite shows in
+    /// and no border edge falls in, `loading` where a fetched byte loads in
+    /// it: the graphics, or the border over them, without the sprite logic.
+    fn draw_plain(&mut self, base: u16, loading: bool, colours: &mut [u8; 8]) {
+        if self.main_border {
+            // The sequencer runs on beneath the border, which is all it shows.
+            let mut multicolour = self.multicolour_bits();
+            for beam in base..base + 8 {
+                if loading && self.graphics.load_at(beam) {
+                    multicolour = self.multicolour_bits();
                 }
+                self.graphics.next_bits(multicolour);
             }
-            let colour = self.pixel(x, sprites);
-            if let Some(column) = beam.checked_sub(first).filter(|&c| c < count) {
-                let at = 2 * usize::from(column);
-                self.row[at] = colour;
-                self.row[at + 1] = colour;
+            *colours = [self.border; 8];
+            return;
+        }
+        let mut look = self.look();
+        for (beam, colour) in (base..).zip(colours) {
+            if loading && self.graphics.load_at(beam) {
+                look = self.look();
             }
+            *colour = look.colour(self.graphics.next_bits(look.multicolour));
+        }
+    }
+
+    /// The colours of the cycle starting at pixel `base` into the line,
+    /// as far as the picture shows them.
+    fn put(&mut self, base: u16, colours: [u8; 8]) {
+        let (first, count) = self.model.visible_pixels();
+        let (first, base) = (usize::from(first), usize::from(base));
+        let from = first.max(base);
+        let to = (first + usize::from(count)).min(base + colours.len());
+        if from >= to {
+            return;
+        }
+        let mut doubled = [0; 16];
+        for (pair, colour) in doubled.as_chunks_mut::<2>().0.iter_mut().zip(colours) {
+            *pair = [colour; 2];
+        }
+        if let (Some(shown), Some(slots)) = (
+            doubled.get(2 * (from - base)..2 * (to - base)),
+            self.row.get_mut(2 * (from - first)..2 * (to - first)),
+        ) {
+            slots.copy_from_slice(shown);
         }
     }
 
     /// The colour of the pixel at `x`, with its collisions, `sprites` the
-    /// ones that can show there.
-    fn pixel(&mut self, x: u16, sprites: u8) -> u8 {
-        let (graphics, foreground) = self.graphics_pixel();
+    /// ones that can show there and `look` what the sequencer's bits show.
+    fn pixel(&mut self, x: u16, sprites: u8, look: Look) -> u8 {
+        let (graphics, foreground) = look.of(self.graphics.next_bits(look.multicolour));
         let mut present = 0u8;
         let mut top = None;
         let mut rest = sprites;
@@ -1107,59 +1238,53 @@ impl Vic {
         }
     }
 
-    /// The graphics sequencer's next pixel: its colour, and whether it
-    /// counts as foreground for priority and collisions.
-    fn graphics_pixel(&mut self) -> (u8, bool) {
+    /// What the sequencer's bits show in the mode and colours as they stand
+    /// and with the matrix byte it holds.
+    fn look(&self) -> Look {
         let ecm = self.cr1 & cr1::ECM != 0;
         let bmm = self.cr1 & cr1::BMM != 0;
         let mcm = self.cr2 & cr2::MCM != 0;
-        let g = &mut self.graphics;
-        let [char, colour] = g.matrix.to_le_bytes();
+        let [char, colour] = self.graphics.matrix.to_le_bytes();
         let colour = colour & 0x0F;
-        let multicolour = mcm && (bmm || colour & 0x08 != 0);
-        let bits = if multicolour {
-            if !g.second_half {
-                g.pair = g.shifter >> 6;
-                g.shifter <<= 2;
-            }
-            g.pair
+        let multicolour = self.multicolour_bits();
+        let background = self.background;
+        // A single bit is foreground set; a pair, its two high values.
+        let (single, pair) = (0b10, 0b1100);
+        let (colours, foreground) = if self.vertical_border {
+            ([background[0]; 4], 0)
         } else {
-            let bit = g.shifter >> 7;
-            g.shifter <<= 1;
-            bit
-        };
-        g.second_half = !g.second_half;
-        if self.vertical_border {
-            return (self.background[0], false);
-        }
-        let background = |index: u8| self.background[usize::from(index)];
-        match (ecm, bmm, mcm) {
-            (false, false, false) => text(bits, colour, background(0)),
-            (false, false, true) if colour & 0x08 == 0 => text(bits, colour & 0x07, background(0)),
-            (false, false, true) => match bits {
-                0 | 1 => (background(bits), false),
-                2 => (background(2), true),
-                _ => (colour & 0x07, true),
-            },
-            (false, true, false) => {
-                if bits != 0 {
-                    (char >> 4, true)
-                } else {
-                    (char & 0x0F, false)
+            match (ecm, bmm, mcm) {
+                (false, false, false) => ([background[0], colour, 0, 0], single),
+                (false, false, true) if colour & 0x08 == 0 => {
+                    ([background[0], colour & 0x07, 0, 0], single)
                 }
+                (false, false, true) => (
+                    [background[0], background[1], background[2], colour & 0x07],
+                    pair,
+                ),
+                (false, true, false) => ([char & 0x0F, char >> 4, 0, 0], single),
+                (false, true, true) => ([background[0], char >> 4, char & 0x0F, colour], pair),
+                (true, false, false) => {
+                    ([background[usize::from(char >> 6)], colour, 0, 0], single)
+                }
+                // The invalid modes draw black, keeping their foreground.
+                (true, false, true) => ([0; 4], if multicolour { pair } else { single }),
+                (true, true, false) => ([0; 4], single),
+                (true, true, true) => ([0; 4], pair),
             }
-            (false, true, true) => match bits {
-                0 => (background(0), false),
-                1 => (char >> 4, false),
-                2 => (char & 0x0F, true),
-                _ => (colour, true),
-            },
-            (true, false, false) => text(bits, colour, background(char >> 6)),
-            // The invalid modes draw black, keeping their foreground.
-            (true, false, true) => (0, if multicolour { bits >= 2 } else { bits != 0 }),
-            (true, true, false) => (0, bits != 0),
-            (true, true, true) => (0, bits >= 2),
+        };
+        Look {
+            colours,
+            foreground,
+            multicolour,
         }
+    }
+
+    /// Whether the sequencer's bits come in pairs: in multicolour mode, for
+    /// a bitmap or a character whose colour has bit 3 set.
+    const fn multicolour_bits(&self) -> bool {
+        let colour = (self.graphics.matrix >> 8) & 0x0F;
+        self.cr2 & cr2::MCM != 0 && (self.cr1 & cr1::BMM != 0 || colour & 0x08 != 0)
     }
 
     /// The line is drawn: paint it, and finish the frame after its last
@@ -1276,7 +1401,7 @@ impl Vic {
     /// frame.
     pub fn set_light_pen(&mut self, level: bool) {
         if self.light_pen_level && !level && !self.light_pen_fired {
-            let end = self.model.half_x(2 * usize::from(self.cycle));
+            let end = self.model.half_x(2 * self.cycle);
             self.light_pen = [(end >> 1).to_le_bytes()[0], self.raster.to_le_bytes()[0]];
             self.irq_latch |= irq::LIGHT_PEN;
             self.light_pen_fired = true;
@@ -1285,13 +1410,10 @@ impl Vic {
     }
 }
 
-/// A text-mode pixel: set, its own colour; clear, `background`.
-const fn text(bits: u8, colour: u8, background: u8) -> (u8, bool) {
-    if bits != 0 {
-        (colour, true)
-    } else {
-        (background, false)
-    }
+/// Whether pixel `x` falls in the cycle whose halves begin at `half_x`:
+/// four pixels each, from a multiple of four.
+fn in_cycle(half_x: [u16; 2], x: u16) -> bool {
+    half_x.iter().any(|&start| x.wrapping_sub(start) < 4)
 }
 
 #[cfg(test)]

@@ -85,6 +85,49 @@ fn a_shrink_is_bilinear() {
 }
 
 #[test]
+fn rows_alike_draw_as_rows_that_differ_would() {
+    // Each line twice and then a run of one colour, against the same picture
+    // with each row's alpha its own: the drawing ignores alpha, so the second
+    // shares no row and is drawn row by row, and both come out alike. The
+    // first column is alike in every row, so only a whole row tells two apart.
+    let shade = |x: u32, y: u32| {
+        let level = if y >= 8 {
+            200
+        } else {
+            x * (37 + y / 2 * 53) % 251
+        };
+        u8::try_from(level).unwrap()
+    };
+    for (source, dest) in [
+        ((5, 12), (13, 29)),
+        ((6, 12), (4, 7)),
+        ((3, 12), (9, 12)),
+        ((4, 12), (16, 36)),
+        ((4, 12), (7, 100)),
+    ] {
+        let paint = |alpha: fn(u32) -> u8| {
+            picture(source.0, source.1, move |x, y| {
+                let level = shade(x, y);
+                [level, level / 2, 255 - level, alpha(y)]
+            })
+        };
+        let shared = paint(|_| 255);
+        let apart = paint(|y| u8::try_from(y).unwrap());
+        let shared = scaled((source.0, source.1, &shared), dest);
+        let apart = scaled((source.0, source.1, &apart), dest);
+        for y in 0..dest.1 {
+            for x in 0..dest.0 {
+                assert_eq!(
+                    shared.get(x, y),
+                    apart.get(x, y),
+                    "({x}, {y}) of {source:?} to {dest:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn the_picture_is_drawn_opaque() {
     let source = picture(2, 2, |_, _| [90, 80, 70, 0]);
     let out = scaled((2, 2, &source), (5, 3));

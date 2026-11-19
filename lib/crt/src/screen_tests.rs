@@ -148,6 +148,35 @@ fn a_frame_written_by_rows_draws_only_the_rows_written() {
 }
 
 #[test]
+fn a_copied_row_is_its_source_row_and_draws_as_changed() {
+    let mut screen = Screen::new();
+    let mut surface = Surface::new(20, 10).unwrap();
+    assert!(screen.reshape(2, 2));
+    assert_eq!(screen.draw(&mut surface, SMALL_TARGET), Ok(0..8));
+    screen
+        .row_mut(0)
+        .unwrap()
+        .copy_from_slice(&[90, 80, 70, 255, 60, 50, 40, 255]);
+    assert_eq!(screen.draw(&mut surface, SMALL_TARGET), Ok(0..4));
+    assert!(screen.copy_row(0, 1));
+    assert_eq!(screen.pixels()[8..], screen.pixels()[..8]);
+    assert_eq!(
+        screen.draw(&mut surface, SMALL_TARGET),
+        Ok(4..8),
+        "the row written is owed"
+    );
+    assert_eq!(surface.get(2, 7).unwrap().r, 90);
+    assert!(!screen.copy_row(0, 2), "no third row");
+    assert!(!screen.copy_row(2, 0), "nor from one");
+    assert!(!screen.copy_row(u32::MAX, 1));
+    assert_eq!(
+        screen.draw(&mut surface, SMALL_TARGET),
+        Ok(0..0),
+        "nothing written"
+    );
+}
+
+#[test]
 fn a_smooth_screen_blends_and_redraws_what_a_change_reaches() {
     let mut screen = Screen::new();
     screen.set_scaling(Scaling::Smooth);

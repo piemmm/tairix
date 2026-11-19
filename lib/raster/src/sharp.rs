@@ -115,10 +115,11 @@ const fn opaque([r, g, b, _]: [u8; 4]) -> Pixel {
     }
 }
 
-/// One source row enlarged across the target's width.
+/// One source row enlarged across the target's width, and the run of source
+/// rows holding the same pixels: a doubled or blank row is enlarged once.
 #[derive(Debug, Default)]
 struct Line {
-    source_row: Option<u32>,
+    source_rows: Range<u32>,
     pixels: Vec<Pixel>,
 }
 
@@ -148,11 +149,11 @@ impl SharpScaler {
             rows: Vec::new(),
             lines: [
                 Line {
-                    source_row: None,
+                    source_rows: 0..0,
                     pixels: Vec::new(),
                 },
                 Line {
-                    source_row: None,
+                    source_rows: 0..0,
                     pixels: Vec::new(),
                 },
             ],
@@ -177,7 +178,7 @@ impl SharpScaler {
         for line in &mut self.lines {
             line.pixels =
                 fallible::filled(width, Pixel::TRANSPARENT).ok_or(SharpError::OutOfMemory)?;
-            line.source_row = None;
+            line.source_rows = 0..0;
         }
         self.sizes = Some(sizes);
         Ok(())
@@ -208,7 +209,7 @@ impl SharpScaler {
             dest: (target.width, target.height),
         })?;
         for line in &mut self.lines {
-            line.source_row = None;
+            line.source_rows = 0..0;
         }
         for y in rows.start..rows.end.min(target.height) {
             let Some(&tap) = self.rows.get(y as usize) else {
@@ -228,6 +229,11 @@ impl SharpScaler {
                 continue;
             }
             let lower = self.line_of(frame, tap.index + 1);
+            if lower == upper {
+                // Two rows alike: their blend is either.
+                copy_from(span, &self.lines[upper].pixels, skip);
+                continue;
+            }
             let (upper, lower) = (&self.lines[upper].pixels, &self.lines[lower].pixels);
             let pairs = upper.iter().zip(lower).skip(skip);
             for (out, (&a, &b)) in span.iter_mut().zip(pairs) {
@@ -237,19 +243,36 @@ impl SharpScaler {
         Ok(())
     }
 
-    /// Which of the two lines holds source row `row` enlarged, enlarging it
-    /// into the one not holding the other row a target row may still want.
+    /// Which of the two lines holds source row `row` enlarged: one holding
+    /// it or a run of rows next to it alike it, else the one not holding the
+    /// other row a target row may still want, enlarged into.
     fn line_of(&mut self, frame: &Rgba8Image<'_>, row: u32) -> usize {
-        if let Some(held) = self.lines.iter().position(|l| l.source_row == Some(row)) {
+        if let Some(held) = self
+            .lines
+            .iter()
+            .position(|line| line.source_rows.contains(&row))
+        {
             return held;
         }
-        let into = match self.lines[0].source_row {
-            Some(r) if r + 1 == row => 1,
-            _ => 0,
-        };
+        let source = frame.row(row);
+        let alike = source.and_then(|pixels| {
+            self.lines.iter().position(|line| {
+                let rows = &line.source_rows;
+                !rows.is_empty()
+                    && (rows.end == row || row + 1 == rows.start)
+                    && frame.row(rows.start) == Some(pixels)
+            })
+        });
+        if let Some(alike) = alike {
+            let rows = &mut self.lines[alike].source_rows;
+            *rows = rows.start.min(row)..rows.end.max(row + 1);
+            return alike;
+        }
+        let held = &self.lines[0].source_rows;
+        let into = usize::from(!held.is_empty() && held.end == row);
         let line = &mut self.lines[into];
-        line.source_row = Some(row);
-        let Some(source) = frame.row(row) else {
+        line.source_rows = row..row + 1;
+        let Some(source) = source else {
             line.pixels.fill(Pixel::TRANSPARENT);
             return into;
         };

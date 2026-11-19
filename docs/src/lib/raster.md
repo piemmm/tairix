@@ -35,7 +35,9 @@ call; this page is what the parts are for and the rules they share.
   the one output pixel a non-integer scale leaves at a block's edge, and a
   shrink plain bilinear. Its taps are worked out once per pair of sizes, it
   draws only the rows asked for, and `rows_reached` names the rows a change to
-  some source rows redraws. The asset resampler stays exact and runs once per
+  some source rows redraws. A source row alike the one beside it is enlarged
+  once, and two alike rows blend as either, so a screen drawing each line twice
+  costs about half. The asset resampler stays exact and runs once per
   asset; this one costs well under 2 ns a pixel (`cargo xtask bench --filter
   sharp`), most of its pixels copies.
 - **Meshes in depth** — `mesh` and `view`: triangles scan-converted against a

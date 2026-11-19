@@ -188,6 +188,31 @@ impl Screen {
         self.pixels.get_mut(start..end)
     }
 
+    /// Row `from`'s dots written into row `to`, counted changed: a picture
+    /// drawing a line twice is expanded once. `false`, nothing written, for
+    /// a row past the frame.
+    pub fn copy_row(&mut self, from: u32, to: u32) -> bool {
+        let Some(stride) = stride(self.width) else {
+            return false;
+        };
+        let start = |row: u32| {
+            usize::try_from(row)
+                .ok()?
+                .checked_mul(stride)
+                .filter(|&at| {
+                    at.checked_add(stride)
+                        .is_some_and(|end| end <= self.pixels.len())
+                })
+        };
+        let (Some(source), Some(dest), Some(next)) = (start(from), start(to), to.checked_add(1))
+        else {
+            return false;
+        };
+        self.pixels.copy_within(source..source + stride, dest);
+        self.mark(to..next);
+        true
+    }
+
     /// Forget what has been drawn: the next draw is whole.
     pub fn invalidate(&mut self) {
         self.drawn = None;

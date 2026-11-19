@@ -2,8 +2,9 @@
 //! canvas holds them.
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
-use tairix_crt::screen::DOT;
+use tairix_crt::screen::{Screen, DOT};
 
 use crate::machine::c64::palette::{self as c64_palette, Luma};
 use crate::machine::Model;
@@ -65,6 +66,43 @@ pub fn expand(palette: &[[u8; DOT]; 256], slots: &[u8], dots: &mut [u8]) {
     }
 }
 
+/// Changed rows of slots expanded onto a screen in order, a row alike the
+/// one expanded before it copied from that row: a model drawing each line
+/// twice expands it once.
+#[derive(Debug, Default)]
+pub struct Expansion {
+    held: Vec<u8>,
+    last: Option<u32>,
+}
+
+impl Expansion {
+    /// A fresh run of rows: what was expanded before is not looked at, as
+    /// the screen may have changed since.
+    pub const fn restart(&mut self) {
+        self.last = None;
+    }
+
+    /// Row `row` of `screen` showing `slots` through `palette`.
+    pub fn row(&mut self, palette: &[[u8; DOT]; 256], screen: &mut Screen, row: u32, slots: &[u8]) {
+        if let Some(from) = self.last.filter(|_| self.held == slots) {
+            if screen.copy_row(from, row) {
+                self.last = Some(row);
+                return;
+            }
+        }
+        self.last = None;
+        let Some(dots) = screen.row_mut(row) else {
+            return;
+        };
+        expand(palette, slots, dots);
+        self.held.clear();
+        if self.held.try_reserve(slots.len()).is_ok() {
+            self.held.extend_from_slice(slots);
+            self.last = Some(row);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +137,36 @@ mod tests {
         let colours = c64_palette::palette(Luma::Later);
         assert_eq!(table[6][..3], colours[6], "blue");
         assert_eq!(*palette_of(Model::ModelB), palette(), "an Acorn's mix");
+    }
+
+    #[test]
+    fn a_row_alike_the_last_is_copied_and_any_other_expanded() {
+        let table = palette();
+        let black = [[0, 0, 0, 0xFF]; 256];
+        let (red, blue) = (encode(1, 0, 3), encode(4, 0, 3));
+        let (r, b) = ([255, 0, 0, 255], [0, 0, 255, 255]);
+        let row_of = |screen: &Screen, row: usize| screen.pixels()[8 * row..8 * row + 8].to_vec();
+        let mut screen = Screen::new();
+        assert!(screen.reshape(2, 4));
+        let mut expansion = Expansion::default();
+        expansion.row(&table, &mut screen, 0, &[red, blue]);
+        // Copied, so a palette that would draw it black is not looked at.
+        expansion.row(&black, &mut screen, 1, &[red, blue]);
+        expansion.row(&table, &mut screen, 2, &[blue, blue]);
+        assert_eq!(row_of(&screen, 1), [r, b].concat(), "copied");
+        assert_eq!(row_of(&screen, 2), [b, b].concat(), "expanded");
+        screen.row_mut(2).unwrap().fill(0);
+        expansion.restart();
+        expansion.row(&table, &mut screen, 3, &[blue, blue]);
+        assert_eq!(row_of(&screen, 3), [b, b].concat(), "a fresh run expands");
+        expansion.row(&table, &mut screen, 4, &[blue, blue]);
+        screen.row_mut(3).unwrap().fill(0);
+        expansion.row(&table, &mut screen, 1, &[blue, blue]);
+        assert_eq!(
+            row_of(&screen, 1),
+            [b, b].concat(),
+            "nothing held past the frame"
+        );
     }
 
     #[test]

@@ -148,8 +148,9 @@ a row: BREAK pressed and let go with SHIFT held on until the reset has read
 the keyboard, which boots the disc or tape. It is
 enlarged sharp, each dot a block of whole pixels, or smooth, optionally with
 scan lines, through `tairix_crt::screen` — the PC emulator's picture too — and
-only the rows a slice changed are expanded, scaled and presented; a lamp or
-message repaints only the strip.
+only the rows a slice changed are expanded, scaled and presented, a row
+alike the one before it copied rather than expanded again, as a Commodore 64's
+every line is; a lamp or message repaints only the strip.
 
 The keyboard is read raw. *By character*, a symbol presses the machine's key
 and SHIFT that type it, and a letter its own key, its case the machine's CAPS

@@ -519,7 +519,8 @@ This crate owns:
   pixels kept square, each source pixel a block of whole output pixels and only
   the output pixel at a block's edge blended; a shrink is plain bilinear. Taps
   are kept per pair of sizes, `draw` takes the target rows to draw, and
-  `rows_reached` the rows a change to some source rows redraws. It is not the
+  `rows_reached` the rows a change to some source rows redraws; a source row
+  alike the one beside it is enlarged once. It is not the
   resampler: that is exact and per asset, this is a copy almost everywhere and
   per frame.
 - `Surface`'s `tairix_reclaim::CachedBytes` impl — the one measurement of a

@@ -14,7 +14,7 @@ the effects are written once.
 | `frame_due`, `frame_interval_ns` | When the next animation frame is due: whole display frames, never faster than `FASTEST_MHZ` (twenty a second), armed only while something moves. |
 | `scaled(strength, full)` | A strength's share of a full-scale physical value, rounded to nearest. |
 | `screen::fit` | The largest 4:3 picture an area holds, centred on whole pixels. |
-| `screen::Screen` | A machine's frame as straight RGBA8, taken whole (only the rows that differ count as changed) or written row by row by a producer that knows which rows it wrote, enlarged `Sharp` (whole-pixel blocks, blended where they meet) or `Smooth` (bilinear); a draw redraws only the target rows a change reaches in a target it drew before, and draws whole after a refused draw. |
+| `screen::Screen` | A machine's frame as straight RGBA8, taken whole (only the rows that differ count as changed) or written row by row by a producer that knows which rows it wrote (`row_mut`, or `copy_row` for a row alike one already written), enlarged `Sharp` (whole-pixel blocks, blended where they meet) or `Smooth` (bilinear); a draw redraws only the target rows a change reaches in a target it drew before, and draws whole after a refused draw. |
 | `screen::Picture` | A `Screen` seen through a `Tube`: drawn plain into a surface of the target's size, the tube over it, and only what changed copied into the window; a tube the heap cannot hold shows the plain picture, whole, until it can. |
 
 ## The stages

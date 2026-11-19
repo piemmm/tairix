@@ -20,7 +20,7 @@ use tairix_openmicro::front::library::Joystick;
 use tairix_openmicro::front::media::{Disc, FileWork, Handover, Holding, Rack, Saving, Tape};
 use tairix_openmicro::front::menu::{Offered, Shown, SHIFT_BREAK};
 use tairix_openmicro::front::pacing::{Next, Pacer, Quiet};
-use tairix_openmicro::front::picture::{expand, palette_of};
+use tairix_openmicro::front::picture::{palette_of, Expansion};
 use tairix_openmicro::front::{events, LEAST_PICTURE, OPEN_PICTURE};
 use tairix_openmicro::machine::bbc::fdc::PhysicalDrive;
 use tairix_openmicro::machine::c64::keyboard::Keycap;
@@ -41,7 +41,9 @@ use tairix_sandbox::session::Share;
 use tairix_sandbox::{SupervisedSession, WorkerMemory};
 use tairix_theme::Theme;
 use tairix_window::app::{self, Fitted, LazyPool, WindowPane};
-use tairix_window::{pointer_input_events, pointer_point, Desktop, Owed, Repaint, WindowSizing};
+use tairix_window::{
+    pointer_input_events, pointer_point, Desktop, Owed, PresentState, Repaint, WindowSizing,
+};
 
 use crate::files::Speaker;
 use crate::program::{record, unwatch_sound, Client, APP_NAME};
@@ -335,6 +337,7 @@ pub struct MachineWindow {
     /// Its sound stream.
     pub sound: Option<Speaker>,
     slots: Vec<u8>,
+    expansion: Expansion,
     /// Its media and the picker.
     pub rack: Rack,
     /// The file a picker picked, held while its name is asked.
@@ -464,6 +467,7 @@ impl MachineWindow {
             images: None,
             sound: None,
             slots: alloc::vec![0; CANVAS_WIDTH],
+            expansion: Expansion::default(),
             rack: Rack::new(model),
             picked: None,
             lights: Lights::default(),
@@ -855,15 +859,14 @@ impl MachineWindow {
     fn ran(&mut self, ran: &Ran<'_>) {
         self.ran = true;
         if let Some(share) = &self.share {
+            self.expansion.restart();
             for row in 0..CANVAS_HEIGHT {
                 if !ran.row_changed(row) || !share.copy_out(row * CANVAS_WIDTH, &mut self.slots) {
                     continue;
                 }
-                let dots = u32::try_from(row)
-                    .ok()
-                    .and_then(|row| self.picture.screen_mut().row_mut(row));
-                if let Some(dots) = dots {
-                    expand(&self.palette, &self.slots, dots);
+                if let Ok(row) = u32::try_from(row) {
+                    let screen = self.picture.screen_mut();
+                    self.expansion.row(&self.palette, screen, row, &self.slots);
                 }
             }
         }
@@ -1303,13 +1306,23 @@ impl MachineWindow {
         work
     }
 
-    /// Draw what changed into the surface, then present only that.
+    /// Draw what changed into the surface, then present only that: nothing
+    /// while the window is hidden, and nothing while both its frames are the
+    /// desktop's, what changed meanwhile drawn once one comes back.
     pub fn paint(
         &mut self,
         client: &mut Client,
         (desktop, theme): (&Desktop, &Theme),
         (now, pool): (u64, &LazyPool),
     ) {
+        let window = self.pane.id();
+        if client.is_hidden(window) {
+            return;
+        }
+        if client.present_state(window) == PresentState::InFlight {
+            client.owe_frame(window);
+            return;
+        }
         let looks = (desktop.scale(), theme);
         let Some((target, strip)) = self.layout(looks) else {
             return;
@@ -1394,7 +1407,7 @@ impl MachineWindow {
         }
     }
 
-    /// Present what the window drew while both its frames were the desktop's.
+    /// Present what the pane held back for a frame to come back.
     pub fn present_deferred(&mut self, client: &mut Client) {
         let _ = self.pane.present_deferred(client, &self.surface);
     }
