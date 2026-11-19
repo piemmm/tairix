@@ -1,6 +1,6 @@
 # FileCore's messages, in TAIRiX Bridge's own words.
 ExtEscape:Escape was pressed
-Defect:That disc has a defect there
+Defect:That part of the disc is in use and cannot be mapped out
 TooManyDefects:That disc holds as many defects as it can record
 CompactReq:The disc's free space is too scattered: compact it first
 MapFull:The disc's map has no room for another object
@@ -43,3 +43,5 @@ Bytes:%0 bytes free, %1 bytes used, %2 bytes in all
 MapHeader:Free areas of %0
 MapLine:%0  %1 bytes
 Verified:The disc reads correctly
+DefectObject:%0 lies over that defect: move it, then map the defect out
+DefectStructure:The disc's own structures lie over that defect

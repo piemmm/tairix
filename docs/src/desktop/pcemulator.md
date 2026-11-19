@@ -220,9 +220,13 @@ machines have an 8087.
   rotation, special mask and special fully nested modes, and MCS-80 vectors;
   the 8253 in all six modes with BCD and latching, each counter's output and
   count a function of when it was loaded; the 8237 with the PC's write-only
-  page registers, where channels 0 and 1 share one; the 8255 in either IBM
-  wiring, showing the configuration switches the BIOS reads; and the
-  keyboard with its own typematic, self-test and 16-byte buffer.
+  page registers, where channels 0 and 1 share one, serving each request
+  with one cycle in the direction its mode register asks for whatever the
+  device wanted (a read cycle writes memory's byte to the device's port, a
+  write cycle reads the port into memory, and verify moves nothing but
+  counts and acknowledges); the 8255 in either IBM wiring, showing the
+  configuration switches the BIOS reads; and the keyboard with its own
+  typematic, self-test and 16-byte buffer.
 - **The keyboard** is the enhanced 101-key keyboard in XT mode, sending scan
   code set 1. An XT BIOS reads an `E0` prefix as the release of a key it does
   not have, so the grey keys reach it as the keypad's; the keyboard keeps them
@@ -372,8 +376,11 @@ leaves that memory with the card that had it.
   A sector is found where it passes the head and each data byte moves as it
   passes: over DMA channel 2, where terminal count ends the transfer and an
   unanswered request overruns, or in non-DMA mode through the data register
-  with an interrupt a byte. A search gives up at the second index pulse, and
-  with no disk turning a command waits for one.
+  with an interrupt a byte. The acknowledge serves a request whatever the
+  cycle, so verify moves nothing without an overrun, as the BIOS's verify
+  relies on, and a channel set the wrong way loses a read's bytes or writes
+  the data register's last byte. A search gives up at the second index
+  pulse, and with no disk turning a command waits for one.
 - **Floppy media.** Raw images of the seven standard formats, and ImageDisk
   (`.IMD`) archives with each track's own encoding, density, sector IDs,
   deleted marks and CRC errors; an archive is parsed as hostile input and
@@ -391,7 +398,12 @@ leaves that memory with the card that had it.
   into its one buffer and then hands it to the host, at the DMA controller's
   pace or through the data port, so an interleave of 3 reads a track in
   three revolutions and anything tighter waits a revolution for each next
-  sector.
+  sector. Each byte waits for an acknowledge, which a strobe of the data
+  port gives, the host's or a DMA cycle's, through whichever latch it
+  reached. So a channel set the wrong way still runs the transfer to its end
+  without moving it. A verify cycle clears the request without acknowledging,
+  leaving the controller waiting until the data port is read or written, and
+  DMA turned back on waits for the controller's next request.
 - **What an image keeps.** A fixed disk's image holds its sectors; the
   interleave and the tracks marked bad are its low-level format, which its
   owner keeps beside the image (`Board::fixed_format`) and hands back when

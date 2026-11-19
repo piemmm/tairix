@@ -66,8 +66,8 @@ fn features_and_drives_are_as_risc_os_5_gives_them() {
     assert_eq!(drives[..3], [0, 1, 0], "drive 0, one floppy, no hard disc");
     assert_eq!(
         with_instance(&mut os, DRIVES, instance + 4, &[]).map(drop),
-        Err(0xA1),
-        "no instance's private word there"
+        Err(0x108A1),
+        "no instance's private word there: FileCore's own BadParms"
     );
 }
 
@@ -161,4 +161,116 @@ fn misc_op_6_describes_the_client() {
     let described = with_instance(&mut os, MISC_OP, instance, &[6]).expect("described");
     let words = read(&mut os, described[0], 20);
     assert_eq!(words[3], 0x17, "RamFS's filing system number");
+}
+
+/// `FileCore_DiscFormat`.
+const DISC_FORMAT: u32 = 0x4_0547;
+/// `OS_ValidateAddress`, the vetting SWI a caller with no controller of its
+/// own hands `FileCore_DiscFormat`.
+const VALIDATE_ADDRESS: u32 = 0x2003A;
+
+#[test]
+fn disc_format_describes_each_format_as_risc_os_5_describes_it() {
+    let (mut kernel, _) = session();
+    let mut os = kernel.os();
+    let at = block(&mut os, &[0xEE; 64]);
+    // Sector size, the first gap on each side, the third gap, sectors a
+    // track, density, options, side and track skew, the fill byte, tracks.
+    for (format, layout) in [
+        (0x80, (256, [42, 42], 57, 16, 2, 0x0C, 0, 0)),
+        (0x81, (1024, [303, 32], 90, 5, 2, 0, 0, 0)),
+        (0x82, (1024, [303, 32], 90, 5, 2, 0, 0, 0)),
+        (0x83, (1024, [50, 50], 90, 10, 4, 0, 1, 3)),
+        (0x84, (1024, [50, 50], 90, 20, 8, 0, 1, 5)),
+    ] {
+        call(
+            &mut os,
+            DISC_FORMAT,
+            &[at, VALIDATE_ADDRESS, at + 64, format],
+        )
+        .expect("described");
+        let got = read(&mut os, at, 25);
+        let word = |n: usize| u32::from_le_bytes([got[n], got[n + 1], got[n + 2], got[n + 3]]);
+        let (sector, gap1, gap3, per_track, density, options, side, track) = layout;
+        assert_eq!(
+            (word(0), [word(4), word(8)], word(12)),
+            (sector, gap1, gap3),
+            "{format:#X}"
+        );
+        assert_eq!(
+            (
+                got[16],
+                got[17],
+                got[18],
+                got[21],
+                got[22],
+                got[23],
+                word(24 - 3) >> 24
+            ),
+            (
+                per_track,
+                density,
+                options,
+                side,
+                track,
+                0xA5,
+                u32::from(got[24])
+            ),
+            "{format:#X}"
+        );
+        assert_eq!(got[24], 160, "{format:#X}");
+    }
+    let refused = call(&mut os, DISC_FORMAT, &[at, VALIDATE_ADDRESS, at + 64, 0x85]);
+    assert_eq!(refused.map_err(|(number, _)| number).err(), Some(0x108A1));
+}
+
+/// `FileCore_FloppyStructure` and `FileCore_LayoutStructure`.
+const FLOPPY_STRUCTURE: u32 = 0x4_0544;
+const LAYOUT_STRUCTURE: u32 = 0x4_0548;
+
+/// An 800K E floppy's record, but for its size.
+fn e_record(os: &mut Os<'_>, size: u64) -> u32 {
+    let mut raw = [0u8; 64];
+    raw[..12].copy_from_slice(&[10, 5, 2, 2, 15, 7, 1, 0, 0, 1, 0x20, 0x05]);
+    raw[12..16].copy_from_slice(&0x203u32.to_le_bytes());
+    let size = size.to_le_bytes();
+    raw[16..20].copy_from_slice(&size[..4]);
+    raw[36..40].copy_from_slice(&size[4..]);
+    raw[22..32].copy_from_slice(b"Probe     ");
+    block(os, &raw)
+}
+
+#[test]
+fn a_structure_is_refused_for_a_disc_its_record_cannot_lay_out() {
+    let (mut kernel, _) = session();
+    let mut os = kernel.os();
+    let defects = block(&mut os, &0x2000_0000u32.to_le_bytes());
+    let buffer = block(&mut os, &[0; 0x1000]);
+    let floppy = e_record(&mut os, 0xC_8000);
+    call(&mut os, FLOPPY_STRUCTURE, &[buffer, floppy, 0, defects]).expect("an E floppy");
+    let past_its_zones = e_record(&mut os, 1 << 32);
+    assert_eq!(
+        call(
+            &mut os,
+            FLOPPY_STRUCTURE,
+            &[buffer, past_its_zones, 0, defects]
+        )
+        .map(drop)
+        .map_err(|(number, _)| number),
+        Err(0x108A1),
+        "more disc than one zone describes"
+    );
+    let past_an_image = e_record(&mut os, 5 << 30);
+    let name = text(&mut os, b"Probe");
+    assert_eq!(
+        call(
+            &mut os,
+            LAYOUT_STRUCTURE,
+            &[past_an_image, defects, name, 0]
+        )
+        .map(drop)
+        .map_err(|(number, _)| number),
+        Err(0x108A1),
+        "more disc than an image file's offsets reach"
+    );
 }

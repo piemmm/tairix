@@ -1,0 +1,3161 @@
+# FileCore's own facilities as RISC OS 5 has them: what holds a disc
+# offset and the name it writes, the defect lists and adding a defect,
+# compacting a new map, the structures FileCore_FloppyStructure and
+# FileCore_LayoutStructure lay out, and a big directory's stored name
+# through renames. Only what is the same on every run is shown: no disc
+# id or check byte over one, no disc record, no name a ROM holds; and of
+# LayoutStructure nothing of zone 0, which RISC OS 5 leaves without a
+# fragment. Each scenario leaves the RAM disc empty.
+
+scenario filecore-object-at-offset
+block data 64
+block buf 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_CLI r0="CDir RAM:$.Alpha"
+show v
+call XOS_CLI r0="CDir RAM:$.Alpha.Inner2"
+show v
+call XOS_File r0=10 r1="RAM:$.Alpha.Inner2.X" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.Alpha.Y" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.B" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_CLI r0="CDir RAM:$.Beta"
+show v
+call XOS_File r0=10 r1="RAM:$.Beta.Z" r2=&FFD r4=$data r5=$data+&800
+show v
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&0 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&4000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&4400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&4800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&4C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&5000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&5400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&5800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&5C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&20000 r3=$buf r4=0
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&20000 r3=$buf r4=5
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&20000 r3=$buf r4=12
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&20000 r3=$buf r4=13
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&20000 r3=$buf r4=14
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&20000 r3=$buf r4=15
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=0
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=1
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=12
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=13
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=14
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=15
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=16
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=17
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=18
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=19
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=20
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1800 r3=$buf r4=26
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1800 r3=$buf r4=27
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2000 r3=$buf r4=20
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2000 r3=$buf r4=26
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2000 r3=$buf r4=28
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2000 r3=$buf r4=29
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&0 r3=$buf r4=0
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&0 r3=$buf r4=5
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&0 r3=$buf r4=13
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3FC00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3FFFF r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&40000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&40400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&7FFFFFFF r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&FFFFFFFF r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1001 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&17FF r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::Probe" r2=&1000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+call XOS_File r0=6 r1="RAM:$.Alpha.Inner2.X"
+show v
+call XOS_File r0=6 r1="RAM:$.Alpha.Inner2"
+show v
+call XOS_File r0=6 r1="RAM:$.Alpha.Y"
+show v
+call XOS_File r0=6 r1="RAM:$.Alpha"
+show v
+call XOS_File r0=6 r1="RAM:$.B"
+show v
+call XOS_File r0=6 r1="RAM:$.Beta.Z"
+show v
+call XOS_File r0=6 r1="RAM:$.Beta"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-defect-list
+block data 64
+block list 64
+block buf 64
+call XOS_ChangeDynamicArea r0=5 r1=&100000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=0
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=3
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=4
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=256
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=56 r1="RAM::0" r2=$list r3=0 r4=0 r5=0
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=56 r1="RAM::0" r2=$list r3=0 r4=0 r5=8
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=56 r1="RAM::0" r2=$list r3=0 r4=0 r5=256
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+show $da+&C00:32
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+call XOS_CLI r0="Defect :0 80000"
+show v
+show $da+&C00:32
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=0
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=4
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=7
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=8
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=256
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=56 r1="RAM::0" r2=$list r3=0 r4=0 r5=0
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=56 r1="RAM::0" r2=$list r3=0 r4=0 r5=8
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=56 r1="RAM::0" r2=$list r3=0 r4=0 r5=16
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=56 r1="RAM::0" r2=$list r3=0 r4=0 r5=256
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+call XOS_FSControl r0=42 r1="RAM::0" r2=&90400
+show v
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=8
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=11
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=12
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=256
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=56 r1="RAM::0" r2=$list r3=0 r4=0 r5=16
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=56 r1="RAM::0" r2=$list r3=0 r4=0 r5=24
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=56 r1="RAM::0" r2=$list r3=0 r4=0 r5=256
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+call XOS_FSControl r0=57 r1="RAM::0" r2=&A0000 r3=0
+show v
+show $da+&C00:32
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+call XOS_FSControl r0=42 r1="RAM::0" r2=&B0001
+show v
+show $da+&C00:32
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+call XOS_FSControl r0=42 r1="RAM::0" r2=&FFC00
+show v
+show $da+&C00:32
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+call XOS_FSControl r0=42 r1="RAM::0" r2=&100000
+show v
+show $da+&C00:32
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+call XOS_FSControl r0=42 r1="RAM::0" r2=&80000
+show v
+show $da+&C00:32
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+call XOS_FSControl r0=57 r1="RAM::0" r2=&C0400 r3=0
+show v
+show $da+&C00:32
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=256
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+write $list+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=56 r1="RAM::0" r2=$list r3=0 r4=0 r5=256
+show r0 r2-list r3 r4 r5 v
+show $list+&0:32
+call XOS_CLI r0="Defect :0 200000"
+show v
+call XOS_CLI r0="Defect :0 FFFFF"
+show v
+call XOS_CLI r0="Defect :0 1801"
+show v
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&80000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+call XOS_File r0=10 r1="RAM:$.F" r2=&FFD r4=$data r5=$data+&2000
+show v
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&F1800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+call XOS_CLI r0="Defect :0 F2000"
+show v
+show $da+&C00:32
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+call XOS_FSControl r0=42 r1="RAM::0" r2=&F2400
+show v
+show $da+&C00:32
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+call XOS_CLI r0="Defect :0 F1000"
+show v
+show $da+&C00:32
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+call XOS_FSControl r0=42 r1="RAM::0" r2=&F0400
+show v
+show $da+&C00:32
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+call XOS_File r0=6 r1="RAM:$.F"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&100000
+show r1 v
+
+scenario filecore-map-defects
+block data 64
+block list 512
+block buf 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_File r0=10 r1="RAM:$.F" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_FSControl r0=42 r1="RAM::0" r2=&20001
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+call XOS_FSControl r0=42 r1="RAM::0" r2=&40000
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+call XOS_FSControl r0=57 r1="RAM::0" r2=&30000 r3=0
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+call XOS_FSControl r0=41 r1="RAM::0" r2=$list r3=0 r4=0 r5=448
+show v
+show $list+&0:64
+show $list+&40:64
+show $list+&80:64
+show $list+&C0:64
+show $list+&100:64
+show $list+&140:64
+show $list+&180:64
+call XOS_FSControl r0=56 r1="RAM::0" r2=$list r3=0 r4=0 r5=448
+show v
+show $list+&0:64
+show $list+&40:64
+show $list+&80:64
+show $list+&C0:64
+show $list+&100:64
+show $list+&140:64
+show $list+&180:64
+call XOS_CLI r0="Defect :0 1400"
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+call XOS_File r0=6 r1="RAM:$.F"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-defect-below-object
+block data 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_File r0=10 r1="RAM:$.A" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.B" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=6 r1="RAM:$.A"
+show v
+call XOS_CLI r0="Defect :0 1400"
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+show $da+&1:3
+show $da+&40:64
+call XOS_File r0=6 r1="RAM:$.B"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-defect-sliver
+block data 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_File r0=10 r1="RAM:$.A" r2=&FFD r4=$data r5=$data+&C00
+show v
+call XOS_File r0=10 r1="RAM:$.B" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=6 r1="RAM:$.A"
+show v
+call XOS_CLI r0="Defect :0 1000"
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+show $da+&1:3
+show $da+&40:64
+call XOS_File r0=6 r1="RAM:$.B"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-defect-sliver-high
+block data 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_File r0=10 r1="RAM:$.A" r2=&FFD r4=$data r5=$data+&C00
+show v
+call XOS_File r0=10 r1="RAM:$.B" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=6 r1="RAM:$.A"
+show v
+call XOS_CLI r0="Defect :0 1800"
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+show $da+&1:3
+show $da+&40:64
+call XOS_File r0=6 r1="RAM:$.B"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-defect-middle
+block data 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_File r0=10 r1="RAM:$.A" r2=&FFD r4=$data r5=$data+&1800
+show v
+call XOS_File r0=10 r1="RAM:$.B" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=6 r1="RAM:$.A"
+show v
+call XOS_CLI r0="Defect :0 1800"
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+show $da+&1:3
+show $da+&40:64
+call XOS_File r0=6 r1="RAM:$.B"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-compact-one
+block data 64
+block buf 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_File r0=10 r1="RAM:$.A" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.B" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.C" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.D" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.E" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=6 r1="RAM:$.B"
+show v
+call XOS_File r0=6 r1="RAM:$.D"
+show v
+call XOS_CLI r0="Compact :0"
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+call XOS_File r0=6 r1="RAM:$.E"
+show v
+call XOS_File r0=6 r1="RAM:$.C"
+show v
+call XOS_File r0=6 r1="RAM:$.A"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-compact-two
+block data 64
+block buf 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_File r0=10 r1="RAM:$.A" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.B" r2=&FFD r4=$data r5=$data+&1000
+show v
+call XOS_File r0=10 r1="RAM:$.C" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=6 r1="RAM:$.A"
+show v
+call XOS_CLI r0="Compact :0"
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+call XOS_File r0=6 r1="RAM:$.C"
+show v
+call XOS_File r0=6 r1="RAM:$.B"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-compact-three
+block data 64
+block buf 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_File r0=10 r1="RAM:$.A" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.B" r2=&FFD r4=$data r5=$data+&1800
+show v
+call XOS_File r0=10 r1="RAM:$.C" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.D" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=6 r1="RAM:$.A"
+show v
+call XOS_File r0=6 r1="RAM:$.C"
+show v
+call XOS_CLI r0="Compact :0"
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+call XOS_File r0=6 r1="RAM:$.D"
+show v
+call XOS_File r0=6 r1="RAM:$.B"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-compact-unfit
+block data 64
+block buf 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_File r0=10 r1="RAM:$.A" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.B" r2=&FFD r4=$data r5=$data+&C00
+show v
+call XOS_File r0=10 r1="RAM:$.C" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.D" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.E" r2=&FFD r4=$data r5=$data+&1000
+show v
+call XOS_File r0=10 r1="RAM:$.F" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=6 r1="RAM:$.B"
+show v
+call XOS_File r0=6 r1="RAM:$.D"
+show v
+call XOS_CLI r0="Compact :0"
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+call XOS_File r0=6 r1="RAM:$.F"
+show v
+call XOS_File r0=6 r1="RAM:$.E"
+show v
+call XOS_File r0=6 r1="RAM:$.C"
+show v
+call XOS_File r0=6 r1="RAM:$.A"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-compact-dir-exact
+block data 64
+block buf 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_File r0=10 r1="RAM:$.A" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.B" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_CLI r0="CDir RAM:$.Dir"
+show v
+call XOS_File r0=10 r1="RAM:$.F" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=6 r1="RAM:$.B"
+show v
+call XOS_CLI r0="Compact :0"
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+call XOS_File r0=6 r1="RAM:$.F"
+show v
+call XOS_File r0=6 r1="RAM:$.Dir"
+show v
+call XOS_File r0=6 r1="RAM:$.A"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-compact-dir-unfit
+block data 64
+block buf 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_File r0=10 r1="RAM:$.A" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.B" r2=&FFD r4=$data r5=$data+&C00
+show v
+call XOS_CLI r0="CDir RAM:$.Dir"
+show v
+call XOS_File r0=10 r1="RAM:$.F" r2=&FFD r4=$data r5=$data+&1000
+show v
+call XOS_File r0=6 r1="RAM:$.B"
+show v
+call XOS_CLI r0="Compact :0"
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+call XOS_File r0=6 r1="RAM:$.F"
+show v
+call XOS_File r0=6 r1="RAM:$.Dir"
+show v
+call XOS_File r0=6 r1="RAM:$.A"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-compact-no-slide
+block data 64
+block buf 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_File r0=10 r1="RAM:$.A" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.B" r2=&FFD r4=$data r5=$data+&C00
+show v
+call XOS_File r0=10 r1="RAM:$.C" r2=&FFD r4=$data r5=$data+&1000
+show v
+call XOS_File r0=10 r1="RAM:$.F" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=6 r1="RAM:$.B"
+show v
+call XOS_CLI r0="Compact :0"
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+call XOS_File r0=6 r1="RAM:$.F"
+show v
+call XOS_File r0=6 r1="RAM:$.C"
+show v
+call XOS_File r0=6 r1="RAM:$.A"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-compact-order
+block data 64
+block buf 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_File r0=10 r1="RAM:$.A" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.B" r2=&FFD r4=$data r5=$data+&1000
+show v
+call XOS_File r0=10 r1="RAM:$.C" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=10 r1="RAM:$.F" r2=&FFD r4=$data r5=$data+&800
+show v
+call XOS_File r0=6 r1="RAM:$.B"
+show v
+call XOS_CLI r0="Compact :0"
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+call XOS_File r0=6 r1="RAM:$.F"
+show v
+call XOS_File r0=6 r1="RAM:$.C"
+show v
+call XOS_File r0=6 r1="RAM:$.A"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-compact-shared
+block data 64
+block buf 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_File r0=10 r1="RAM:$.A" r2=&FFD r4=$data r5=$data+&3E8
+show v
+call XOS_File r0=10 r1="RAM:$.B" r2=&FFD r4=$data r5=$data+&BB8
+show v
+call XOS_CLI r0="CDir RAM:$.Dir"
+show v
+call XOS_File r0=10 r1="RAM:$.Dir.Inner" r2=&FFD r4=$data r5=$data+&7D0
+show v
+call XOS_File r0=10 r1="RAM:$.C" r2=&FFD r4=$data r5=$data+&3E8
+show v
+call XOS_File r0=6 r1="RAM:$.B"
+show v
+call XOS_CLI r0="Compact :0"
+show v
+call XOS_FSControl r0=49 r1="RAM:"
+show r0 v
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&1C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&2C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3400 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3C00 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3E800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F000 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+write $buf+&0 w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE w=&EEEEEEEE
+call XOS_FSControl r0=52 r1="RAM::0" r2=&3F800 r3=$buf r4=256
+show r2 r3-buf r4 v
+show $buf+&0:32
+call XOS_File r0=6 r1="RAM:$.C"
+show v
+call XOS_File r0=6 r1="RAM:$.Dir.Inner"
+show v
+call XOS_File r0=6 r1="RAM:$.Dir"
+show v
+call XOS_File r0=6 r1="RAM:$.A"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+
+scenario filecore-floppy-structure
+block rec 64
+block dl 64
+block e 8192
+write $rec+&0 b=10 b=5 b=2 b=2 b=15 b=7 b=1 b=0 b=0 b=1 b=32 b=5 w=&203 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&20000000
+call XFileCore_FloppyStructure r0=$e r1=$rec r2=&0 r3=$dl
+show r3 v
+show $e+&1:3
+show $e+&40:64
+show $e+&80:64
+show $e+&C0:64
+show $e+&100:64
+show $e+&140:64
+show $e+&180:64
+show $e+&1C0:64
+show $e+&200:64
+show $e+&240:64
+show $e+&280:64
+show $e+&2C0:64
+show $e+&300:64
+show $e+&340:64
+show $e+&380:64
+show $e+&3C0:64
+show $e+&401:3
+show $e+&440:64
+show $e+&480:64
+show $e+&4C0:64
+show $e+&500:64
+show $e+&540:64
+show $e+&580:64
+show $e+&5C0:64
+show $e+&600:64
+show $e+&640:64
+show $e+&680:64
+show $e+&6C0:64
+show $e+&700:64
+show $e+&740:64
+show $e+&780:64
+show $e+&7C0:64
+show $e+&800:64
+show $e+&840:64
+show $e+&880:64
+show $e+&8C0:64
+show $e+&900:64
+show $e+&940:64
+show $e+&980:64
+show $e+&9C0:64
+show $e+&A00:64
+show $e+&A40:64
+show $e+&A80:64
+show $e+&AC0:64
+show $e+&B00:64
+show $e+&B40:64
+show $e+&B80:64
+show $e+&BC0:64
+show $e+&C00:64
+show $e+&C40:64
+show $e+&C80:64
+show $e+&CC0:64
+show $e+&D00:64
+show $e+&D40:64
+show $e+&D80:64
+show $e+&DC0:64
+show $e+&E00:64
+show $e+&E40:64
+show $e+&E80:64
+show $e+&EC0:64
+show $e+&F00:64
+show $e+&F40:64
+show $e+&F80:64
+show $e+&FC0:64
+block ep 8192
+write $rec+&0 b=10 b=5 b=2 b=2 b=15 b=7 b=1 b=0 b=0 b=1 b=32 b=5 w=&203 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&1 w=&800 w=0 w=0 w=0
+write $dl+&0 w=&20000000
+call XFileCore_FloppyStructure r0=$ep r1=$rec r2=&0 r3=$dl
+show r3 v
+show $ep+&1:3
+show $ep+&40:64
+show $ep+&80:64
+show $ep+&C0:64
+show $ep+&100:64
+show $ep+&140:64
+show $ep+&180:64
+show $ep+&1C0:64
+show $ep+&200:64
+show $ep+&240:64
+show $ep+&280:64
+show $ep+&2C0:64
+show $ep+&300:64
+show $ep+&340:64
+show $ep+&380:64
+show $ep+&3C0:64
+show $ep+&401:3
+show $ep+&440:64
+show $ep+&480:64
+show $ep+&4C0:64
+show $ep+&500:64
+show $ep+&540:64
+show $ep+&580:64
+show $ep+&5C0:64
+show $ep+&600:64
+show $ep+&640:64
+show $ep+&680:64
+show $ep+&6C0:64
+show $ep+&700:64
+show $ep+&740:64
+show $ep+&780:64
+show $ep+&7C0:64
+show $ep+&800:64
+show $ep+&840:64
+show $ep+&880:64
+show $ep+&8C0:64
+show $ep+&900:64
+show $ep+&940:64
+show $ep+&980:64
+show $ep+&9C0:64
+show $ep+&A00:64
+show $ep+&A40:64
+show $ep+&A80:64
+show $ep+&AC0:64
+show $ep+&B00:64
+show $ep+&B40:64
+show $ep+&B80:64
+show $ep+&BC0:64
+show $ep+&C00:64
+show $ep+&C40:64
+show $ep+&C80:64
+show $ep+&CC0:64
+show $ep+&D00:64
+show $ep+&D40:64
+show $ep+&D80:64
+show $ep+&DC0:64
+show $ep+&E00:64
+show $ep+&E40:64
+show $ep+&E80:64
+show $ep+&EC0:64
+show $ep+&F00:64
+show $ep+&F40:64
+show $ep+&F80:64
+show $ep+&FC0:64
+block ed 8192
+write $rec+&0 b=10 b=5 b=2 b=2 b=15 b=7 b=1 b=0 b=0 b=1 b=32 b=5 w=&203 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&40000 w=&20000000
+call XFileCore_FloppyStructure r0=$ed r1=$rec r2=&0 r3=$dl
+show r3 v
+show $ed+&1:3
+show $ed+&40:64
+show $ed+&80:64
+show $ed+&C0:64
+show $ed+&100:64
+show $ed+&140:64
+show $ed+&180:64
+show $ed+&1C0:64
+show $ed+&200:64
+show $ed+&240:64
+show $ed+&280:64
+show $ed+&2C0:64
+show $ed+&300:64
+show $ed+&340:64
+show $ed+&380:64
+show $ed+&3C0:64
+show $ed+&401:3
+show $ed+&440:64
+show $ed+&480:64
+show $ed+&4C0:64
+show $ed+&500:64
+show $ed+&540:64
+show $ed+&580:64
+show $ed+&5C0:64
+show $ed+&600:64
+show $ed+&640:64
+show $ed+&680:64
+show $ed+&6C0:64
+show $ed+&700:64
+show $ed+&740:64
+show $ed+&780:64
+show $ed+&7C0:64
+show $ed+&800:64
+show $ed+&840:64
+show $ed+&880:64
+show $ed+&8C0:64
+show $ed+&900:64
+show $ed+&940:64
+show $ed+&980:64
+show $ed+&9C0:64
+show $ed+&A00:64
+show $ed+&A40:64
+show $ed+&A80:64
+show $ed+&AC0:64
+show $ed+&B00:64
+show $ed+&B40:64
+show $ed+&B80:64
+show $ed+&BC0:64
+show $ed+&C00:64
+show $ed+&C40:64
+show $ed+&C80:64
+show $ed+&CC0:64
+show $ed+&D00:64
+show $ed+&D40:64
+show $ed+&D80:64
+show $ed+&DC0:64
+show $ed+&E00:64
+show $ed+&E40:64
+show $ed+&E80:64
+show $ed+&EC0:64
+show $ed+&F00:64
+show $ed+&F40:64
+show $ed+&F80:64
+show $ed+&FC0:64
+block e1 8192
+write $rec+&0 b=10 b=5 b=2 b=2 b=15 b=7 b=1 b=0 b=0 b=1 b=32 b=5 w=&203 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&40100 w=&20000000
+call XFileCore_FloppyStructure r0=$e1 r1=$rec r2=&0 r3=$dl
+show r3 v
+show $e1+&1:3
+show $e1+&40:64
+show $e1+&80:64
+show $e1+&C0:64
+show $e1+&100:64
+show $e1+&140:64
+show $e1+&180:64
+show $e1+&1C0:64
+show $e1+&200:64
+show $e1+&240:64
+show $e1+&280:64
+show $e1+&2C0:64
+show $e1+&300:64
+show $e1+&340:64
+show $e1+&380:64
+show $e1+&3C0:64
+show $e1+&401:3
+show $e1+&440:64
+show $e1+&480:64
+show $e1+&4C0:64
+show $e1+&500:64
+show $e1+&540:64
+show $e1+&580:64
+show $e1+&5C0:64
+show $e1+&600:64
+show $e1+&640:64
+show $e1+&680:64
+show $e1+&6C0:64
+show $e1+&700:64
+show $e1+&740:64
+show $e1+&780:64
+show $e1+&7C0:64
+show $e1+&800:64
+show $e1+&840:64
+show $e1+&880:64
+show $e1+&8C0:64
+show $e1+&900:64
+show $e1+&940:64
+show $e1+&980:64
+show $e1+&9C0:64
+show $e1+&A00:64
+show $e1+&A40:64
+show $e1+&A80:64
+show $e1+&AC0:64
+show $e1+&B00:64
+show $e1+&B40:64
+show $e1+&B80:64
+show $e1+&BC0:64
+show $e1+&C00:64
+show $e1+&C40:64
+show $e1+&C80:64
+show $e1+&CC0:64
+show $e1+&D00:64
+show $e1+&D40:64
+show $e1+&D80:64
+show $e1+&DC0:64
+show $e1+&E00:64
+show $e1+&E40:64
+show $e1+&E80:64
+show $e1+&EC0:64
+show $e1+&F00:64
+show $e1+&F40:64
+show $e1+&F80:64
+show $e1+&FC0:64
+block e2 8192
+write $rec+&0 b=10 b=5 b=2 b=2 b=15 b=7 b=1 b=0 b=0 b=1 b=32 b=5 w=&203 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&40000 w=&40400 w=&20000000
+call XFileCore_FloppyStructure r0=$e2 r1=$rec r2=&0 r3=$dl
+show r3 v
+show $e2+&1:3
+show $e2+&40:64
+show $e2+&80:64
+show $e2+&C0:64
+show $e2+&100:64
+show $e2+&140:64
+show $e2+&180:64
+show $e2+&1C0:64
+show $e2+&200:64
+show $e2+&240:64
+show $e2+&280:64
+show $e2+&2C0:64
+show $e2+&300:64
+show $e2+&340:64
+show $e2+&380:64
+show $e2+&3C0:64
+show $e2+&401:3
+show $e2+&440:64
+show $e2+&480:64
+show $e2+&4C0:64
+show $e2+&500:64
+show $e2+&540:64
+show $e2+&580:64
+show $e2+&5C0:64
+show $e2+&600:64
+show $e2+&640:64
+show $e2+&680:64
+show $e2+&6C0:64
+show $e2+&700:64
+show $e2+&740:64
+show $e2+&780:64
+show $e2+&7C0:64
+show $e2+&800:64
+show $e2+&840:64
+show $e2+&880:64
+show $e2+&8C0:64
+show $e2+&900:64
+show $e2+&940:64
+show $e2+&980:64
+show $e2+&9C0:64
+show $e2+&A00:64
+show $e2+&A40:64
+show $e2+&A80:64
+show $e2+&AC0:64
+show $e2+&B00:64
+show $e2+&B40:64
+show $e2+&B80:64
+show $e2+&BC0:64
+show $e2+&C00:64
+show $e2+&C40:64
+show $e2+&C80:64
+show $e2+&CC0:64
+show $e2+&D00:64
+show $e2+&D40:64
+show $e2+&D80:64
+show $e2+&DC0:64
+show $e2+&E00:64
+show $e2+&E40:64
+show $e2+&E80:64
+show $e2+&EC0:64
+show $e2+&F00:64
+show $e2+&F40:64
+show $e2+&F80:64
+show $e2+&FC0:64
+block e3 8192
+write $rec+&0 b=10 b=5 b=2 b=2 b=15 b=7 b=1 b=0 b=0 b=1 b=32 b=5 w=&203 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&40000 w=&40800 w=&20000000
+call XFileCore_FloppyStructure r0=$e3 r1=$rec r2=&0 r3=$dl
+show r3 v
+show $e3+&1:3
+show $e3+&40:64
+show $e3+&80:64
+show $e3+&C0:64
+show $e3+&100:64
+show $e3+&140:64
+show $e3+&180:64
+show $e3+&1C0:64
+show $e3+&200:64
+show $e3+&240:64
+show $e3+&280:64
+show $e3+&2C0:64
+show $e3+&300:64
+show $e3+&340:64
+show $e3+&380:64
+show $e3+&3C0:64
+show $e3+&401:3
+show $e3+&440:64
+show $e3+&480:64
+show $e3+&4C0:64
+show $e3+&500:64
+show $e3+&540:64
+show $e3+&580:64
+show $e3+&5C0:64
+show $e3+&600:64
+show $e3+&640:64
+show $e3+&680:64
+show $e3+&6C0:64
+show $e3+&700:64
+show $e3+&740:64
+show $e3+&780:64
+show $e3+&7C0:64
+show $e3+&800:64
+show $e3+&840:64
+show $e3+&880:64
+show $e3+&8C0:64
+show $e3+&900:64
+show $e3+&940:64
+show $e3+&980:64
+show $e3+&9C0:64
+show $e3+&A00:64
+show $e3+&A40:64
+show $e3+&A80:64
+show $e3+&AC0:64
+show $e3+&B00:64
+show $e3+&B40:64
+show $e3+&B80:64
+show $e3+&BC0:64
+show $e3+&C00:64
+show $e3+&C40:64
+show $e3+&C80:64
+show $e3+&CC0:64
+show $e3+&D00:64
+show $e3+&D40:64
+show $e3+&D80:64
+show $e3+&DC0:64
+show $e3+&E00:64
+show $e3+&E40:64
+show $e3+&E80:64
+show $e3+&EC0:64
+show $e3+&F00:64
+show $e3+&F40:64
+show $e3+&F80:64
+show $e3+&FC0:64
+block e4 8192
+write $rec+&0 b=10 b=5 b=2 b=2 b=15 b=7 b=1 b=0 b=0 b=1 b=32 b=5 w=&203 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&C7C00 w=&20000000
+call XFileCore_FloppyStructure r0=$e4 r1=$rec r2=&0 r3=$dl
+show r3 v
+show $e4+&1:3
+show $e4+&40:64
+show $e4+&80:64
+show $e4+&C0:64
+show $e4+&100:64
+show $e4+&140:64
+show $e4+&180:64
+show $e4+&1C0:64
+show $e4+&200:64
+show $e4+&240:64
+show $e4+&280:64
+show $e4+&2C0:64
+show $e4+&300:64
+show $e4+&340:64
+show $e4+&380:64
+show $e4+&3C0:64
+show $e4+&401:3
+show $e4+&440:64
+show $e4+&480:64
+show $e4+&4C0:64
+show $e4+&500:64
+show $e4+&540:64
+show $e4+&580:64
+show $e4+&5C0:64
+show $e4+&600:64
+show $e4+&640:64
+show $e4+&680:64
+show $e4+&6C0:64
+show $e4+&700:64
+show $e4+&740:64
+show $e4+&780:64
+show $e4+&7C0:64
+show $e4+&800:64
+show $e4+&840:64
+show $e4+&880:64
+show $e4+&8C0:64
+show $e4+&900:64
+show $e4+&940:64
+show $e4+&980:64
+show $e4+&9C0:64
+show $e4+&A00:64
+show $e4+&A40:64
+show $e4+&A80:64
+show $e4+&AC0:64
+show $e4+&B00:64
+show $e4+&B40:64
+show $e4+&B80:64
+show $e4+&BC0:64
+show $e4+&C00:64
+show $e4+&C40:64
+show $e4+&C80:64
+show $e4+&CC0:64
+show $e4+&D00:64
+show $e4+&D40:64
+show $e4+&D80:64
+show $e4+&DC0:64
+show $e4+&E00:64
+show $e4+&E40:64
+show $e4+&E80:64
+show $e4+&EC0:64
+show $e4+&F00:64
+show $e4+&F40:64
+show $e4+&F80:64
+show $e4+&FC0:64
+block g1 8192
+write $rec+&0 b=10 b=5 b=2 b=2 b=15 b=7 b=1 b=0 b=0 b=1 b=32 b=5 w=&203 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&40000 w=&40C00 w=&20000000
+call XFileCore_FloppyStructure r0=$g1 r1=$rec r2=&0 r3=$dl
+show r3 v
+show $g1+&1:3
+show $g1+&40:64
+show $g1+&80:64
+show $g1+&C0:64
+show $g1+&100:64
+show $g1+&140:64
+show $g1+&180:64
+show $g1+&1C0:64
+show $g1+&200:64
+show $g1+&240:64
+show $g1+&280:64
+show $g1+&2C0:64
+show $g1+&300:64
+show $g1+&340:64
+show $g1+&380:64
+show $g1+&3C0:64
+show $g1+&401:3
+show $g1+&440:64
+show $g1+&480:64
+show $g1+&4C0:64
+show $g1+&500:64
+show $g1+&540:64
+show $g1+&580:64
+show $g1+&5C0:64
+show $g1+&600:64
+show $g1+&640:64
+show $g1+&680:64
+show $g1+&6C0:64
+show $g1+&700:64
+show $g1+&740:64
+show $g1+&780:64
+show $g1+&7C0:64
+show $g1+&800:64
+show $g1+&840:64
+show $g1+&880:64
+show $g1+&8C0:64
+show $g1+&900:64
+show $g1+&940:64
+show $g1+&980:64
+show $g1+&9C0:64
+show $g1+&A00:64
+show $g1+&A40:64
+show $g1+&A80:64
+show $g1+&AC0:64
+show $g1+&B00:64
+show $g1+&B40:64
+show $g1+&B80:64
+show $g1+&BC0:64
+show $g1+&C00:64
+show $g1+&C40:64
+show $g1+&C80:64
+show $g1+&CC0:64
+show $g1+&D00:64
+show $g1+&D40:64
+show $g1+&D80:64
+show $g1+&DC0:64
+show $g1+&E00:64
+show $g1+&E40:64
+show $g1+&E80:64
+show $g1+&EC0:64
+show $g1+&F00:64
+show $g1+&F40:64
+show $g1+&F80:64
+show $g1+&FC0:64
+block g2 8192
+write $rec+&0 b=10 b=5 b=2 b=2 b=15 b=7 b=1 b=0 b=0 b=1 b=32 b=5 w=&203 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&40000 w=&41000 w=&20000000
+call XFileCore_FloppyStructure r0=$g2 r1=$rec r2=&0 r3=$dl
+show r3 v
+show $g2+&1:3
+show $g2+&40:64
+show $g2+&80:64
+show $g2+&C0:64
+show $g2+&100:64
+show $g2+&140:64
+show $g2+&180:64
+show $g2+&1C0:64
+show $g2+&200:64
+show $g2+&240:64
+show $g2+&280:64
+show $g2+&2C0:64
+show $g2+&300:64
+show $g2+&340:64
+show $g2+&380:64
+show $g2+&3C0:64
+show $g2+&401:3
+show $g2+&440:64
+show $g2+&480:64
+show $g2+&4C0:64
+show $g2+&500:64
+show $g2+&540:64
+show $g2+&580:64
+show $g2+&5C0:64
+show $g2+&600:64
+show $g2+&640:64
+show $g2+&680:64
+show $g2+&6C0:64
+show $g2+&700:64
+show $g2+&740:64
+show $g2+&780:64
+show $g2+&7C0:64
+show $g2+&800:64
+show $g2+&840:64
+show $g2+&880:64
+show $g2+&8C0:64
+show $g2+&900:64
+show $g2+&940:64
+show $g2+&980:64
+show $g2+&9C0:64
+show $g2+&A00:64
+show $g2+&A40:64
+show $g2+&A80:64
+show $g2+&AC0:64
+show $g2+&B00:64
+show $g2+&B40:64
+show $g2+&B80:64
+show $g2+&BC0:64
+show $g2+&C00:64
+show $g2+&C40:64
+show $g2+&C80:64
+show $g2+&CC0:64
+show $g2+&D00:64
+show $g2+&D40:64
+show $g2+&D80:64
+show $g2+&DC0:64
+show $g2+&E00:64
+show $g2+&E40:64
+show $g2+&E80:64
+show $g2+&EC0:64
+show $g2+&F00:64
+show $g2+&F40:64
+show $g2+&F80:64
+show $g2+&FC0:64
+block g3 8192
+write $rec+&0 b=10 b=5 b=2 b=2 b=15 b=7 b=1 b=0 b=0 b=1 b=32 b=5 w=&203 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&40C00 w=&40000 w=&20000000
+call XFileCore_FloppyStructure r0=$g3 r1=$rec r2=&0 r3=$dl
+show r3 v
+show $g3+&1:3
+show $g3+&40:64
+show $g3+&80:64
+show $g3+&C0:64
+show $g3+&100:64
+show $g3+&140:64
+show $g3+&180:64
+show $g3+&1C0:64
+show $g3+&200:64
+show $g3+&240:64
+show $g3+&280:64
+show $g3+&2C0:64
+show $g3+&300:64
+show $g3+&340:64
+show $g3+&380:64
+show $g3+&3C0:64
+show $g3+&401:3
+show $g3+&440:64
+show $g3+&480:64
+show $g3+&4C0:64
+show $g3+&500:64
+show $g3+&540:64
+show $g3+&580:64
+show $g3+&5C0:64
+show $g3+&600:64
+show $g3+&640:64
+show $g3+&680:64
+show $g3+&6C0:64
+show $g3+&700:64
+show $g3+&740:64
+show $g3+&780:64
+show $g3+&7C0:64
+show $g3+&800:64
+show $g3+&840:64
+show $g3+&880:64
+show $g3+&8C0:64
+show $g3+&900:64
+show $g3+&940:64
+show $g3+&980:64
+show $g3+&9C0:64
+show $g3+&A00:64
+show $g3+&A40:64
+show $g3+&A80:64
+show $g3+&AC0:64
+show $g3+&B00:64
+show $g3+&B40:64
+show $g3+&B80:64
+show $g3+&BC0:64
+show $g3+&C00:64
+show $g3+&C40:64
+show $g3+&C80:64
+show $g3+&CC0:64
+show $g3+&D00:64
+show $g3+&D40:64
+show $g3+&D80:64
+show $g3+&DC0:64
+show $g3+&E00:64
+show $g3+&E40:64
+show $g3+&E80:64
+show $g3+&EC0:64
+show $g3+&F00:64
+show $g3+&F40:64
+show $g3+&F80:64
+show $g3+&FC0:64
+block f 8192
+write $rec+&0 b=10 b=10 b=2 b=4 b=15 b=6 b=1 b=0 b=0 b=4 b=64 b=6 w=&33801 w=&190000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&20000000
+call XFileCore_FloppyStructure r0=$f r1=$rec r2=&0 r3=$dl
+show r3 v
+show $f+&1:3
+show $f+&40:64
+show $f+&80:64
+show $f+&C0:64
+show $f+&100:64
+show $f+&140:64
+show $f+&180:64
+show $f+&1C0:64
+show $f+&200:64
+show $f+&240:64
+show $f+&280:64
+show $f+&2C0:64
+show $f+&300:64
+show $f+&340:64
+show $f+&380:64
+show $f+&3C0:64
+show $f+&401:3
+show $f+&440:64
+show $f+&480:64
+show $f+&4C0:64
+show $f+&500:64
+show $f+&540:64
+show $f+&580:64
+show $f+&5C0:64
+show $f+&600:64
+show $f+&640:64
+show $f+&680:64
+show $f+&6C0:64
+show $f+&700:64
+show $f+&740:64
+show $f+&780:64
+show $f+&7C0:64
+show $f+&800:64
+show $f+&840:64
+show $f+&880:64
+show $f+&8C0:64
+show $f+&900:64
+show $f+&940:64
+show $f+&980:64
+show $f+&9C0:64
+show $f+&A00:64
+show $f+&A40:64
+show $f+&A80:64
+show $f+&AC0:64
+show $f+&B00:64
+show $f+&B40:64
+show $f+&B80:64
+show $f+&BC0:64
+show $f+&C00:64
+show $f+&C40:64
+show $f+&C80:64
+show $f+&CC0:64
+show $f+&D00:64
+show $f+&D40:64
+show $f+&D80:64
+show $f+&DC0:64
+show $f+&E00:64
+show $f+&E40:64
+show $f+&E80:64
+show $f+&EC0:64
+show $f+&F00:64
+show $f+&F40:64
+show $f+&F80:64
+show $f+&FC0:64
+block f1 8192
+write $rec+&0 b=10 b=10 b=2 b=4 b=15 b=6 b=1 b=0 b=0 b=4 b=64 b=6 w=&33801 w=&190000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&10000 w=&20000000
+call XFileCore_FloppyStructure r0=$f1 r1=$rec r2=&0 r3=$dl
+show r3 v
+show $f1+&1:3
+show $f1+&40:64
+show $f1+&80:64
+show $f1+&C0:64
+show $f1+&100:64
+show $f1+&140:64
+show $f1+&180:64
+show $f1+&1C0:64
+show $f1+&200:64
+show $f1+&240:64
+show $f1+&280:64
+show $f1+&2C0:64
+show $f1+&300:64
+show $f1+&340:64
+show $f1+&380:64
+show $f1+&3C0:64
+show $f1+&401:3
+show $f1+&440:64
+show $f1+&480:64
+show $f1+&4C0:64
+show $f1+&500:64
+show $f1+&540:64
+show $f1+&580:64
+show $f1+&5C0:64
+show $f1+&600:64
+show $f1+&640:64
+show $f1+&680:64
+show $f1+&6C0:64
+show $f1+&700:64
+show $f1+&740:64
+show $f1+&780:64
+show $f1+&7C0:64
+show $f1+&800:64
+show $f1+&840:64
+show $f1+&880:64
+show $f1+&8C0:64
+show $f1+&900:64
+show $f1+&940:64
+show $f1+&980:64
+show $f1+&9C0:64
+show $f1+&A00:64
+show $f1+&A40:64
+show $f1+&A80:64
+show $f1+&AC0:64
+show $f1+&B00:64
+show $f1+&B40:64
+show $f1+&B80:64
+show $f1+&BC0:64
+show $f1+&C00:64
+show $f1+&C40:64
+show $f1+&C80:64
+show $f1+&CC0:64
+show $f1+&D00:64
+show $f1+&D40:64
+show $f1+&D80:64
+show $f1+&DC0:64
+show $f1+&E00:64
+show $f1+&E40:64
+show $f1+&E80:64
+show $f1+&EC0:64
+show $f1+&F00:64
+show $f1+&F40:64
+show $f1+&F80:64
+show $f1+&FC0:64
+block l 8192
+write $rec+&0 b=8 b=16 b=2 b=2 b=0 b=0 b=0 b=0 b=0 b=0 b=0 b=0 w=&0 w=&A0000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&20000000
+call XFileCore_FloppyStructure r0=$l r1=$rec r2=&C0 r3=$dl
+show r3 v
+show $l+&0:64
+show $l+&40:64
+show $l+&80:64
+show $l+&C0:64
+show $l+&100:59
+show $l+&13B:59
+show $l+&176:59
+show $l+&1B1:59
+show $l+&1EC:15
+show $l+&1FD:2
+show $l+&200:64
+show $l+&240:64
+show $l+&280:64
+show $l+&2C0:64
+show $l+&300:64
+show $l+&340:64
+show $l+&380:64
+show $l+&3C0:64
+show $l+&400:64
+show $l+&440:64
+show $l+&480:64
+show $l+&4C0:64
+show $l+&500:64
+show $l+&540:64
+show $l+&580:64
+show $l+&5C0:64
+show $l+&600:64
+show $l+&640:64
+show $l+&680:64
+show $l+&6C0:64
+block l1 8192
+write $rec+&0 b=8 b=16 b=2 b=2 b=0 b=0 b=0 b=0 b=0 b=0 b=0 b=0 w=&0 w=&A0000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&20000 w=&20000000
+call XFileCore_FloppyStructure r0=$l1 r1=$rec r2=&C0 r3=$dl
+show r3 v
+show $l1+&0:64
+show $l1+&40:64
+show $l1+&80:64
+show $l1+&C0:64
+show $l1+&100:59
+show $l1+&13B:59
+show $l1+&176:59
+show $l1+&1B1:59
+show $l1+&1EC:15
+show $l1+&1FD:2
+show $l1+&200:64
+show $l1+&240:64
+show $l1+&280:64
+show $l1+&2C0:64
+show $l1+&300:64
+show $l1+&340:64
+show $l1+&380:64
+show $l1+&3C0:64
+show $l1+&400:64
+show $l1+&440:64
+show $l1+&480:64
+show $l1+&4C0:64
+show $l1+&500:64
+show $l1+&540:64
+show $l1+&580:64
+show $l1+&5C0:64
+show $l1+&600:64
+show $l1+&640:64
+show $l1+&680:64
+show $l1+&6C0:64
+block d 8192
+write $rec+&0 b=10 b=5 b=2 b=2 b=0 b=0 b=0 b=0 b=0 b=0 b=0 b=0 w=&0 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&20000000
+call XFileCore_FloppyStructure r0=$d r1=$rec r2=&40 r3=$dl
+show r3 v
+show $d+&0:64
+show $d+&40:64
+show $d+&80:64
+show $d+&C0:64
+show $d+&100:59
+show $d+&13B:59
+show $d+&176:59
+show $d+&1B1:59
+show $d+&1EC:15
+show $d+&1FD:2
+show $d+&400:64
+show $d+&440:64
+show $d+&480:64
+show $d+&4C0:64
+show $d+&500:64
+show $d+&540:64
+show $d+&580:64
+show $d+&5C0:64
+show $d+&600:64
+show $d+&640:64
+show $d+&680:64
+show $d+&6C0:64
+show $d+&700:64
+show $d+&740:64
+show $d+&780:64
+show $d+&7C0:64
+show $d+&800:64
+show $d+&840:64
+show $d+&880:64
+show $d+&8C0:64
+show $d+&900:64
+show $d+&940:64
+show $d+&980:64
+show $d+&9C0:64
+show $d+&A00:64
+show $d+&A40:64
+show $d+&A80:64
+show $d+&AC0:64
+show $d+&B00:64
+show $d+&B40:64
+show $d+&B80:64
+show $d+&BC0:64
+block d1 8192
+write $rec+&0 b=10 b=5 b=2 b=2 b=0 b=0 b=0 b=0 b=0 b=0 b=0 b=0 w=&0 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&40000 w=&20000000
+call XFileCore_FloppyStructure r0=$d1 r1=$rec r2=&40 r3=$dl
+show r3 v
+show $d1+&0:64
+show $d1+&40:64
+show $d1+&80:64
+show $d1+&C0:64
+show $d1+&100:59
+show $d1+&13B:59
+show $d1+&176:59
+show $d1+&1B1:59
+show $d1+&1EC:15
+show $d1+&1FD:2
+show $d1+&400:64
+show $d1+&440:64
+show $d1+&480:64
+show $d1+&4C0:64
+show $d1+&500:64
+show $d1+&540:64
+show $d1+&580:64
+show $d1+&5C0:64
+show $d1+&600:64
+show $d1+&640:64
+show $d1+&680:64
+show $d1+&6C0:64
+show $d1+&700:64
+show $d1+&740:64
+show $d1+&780:64
+show $d1+&7C0:64
+show $d1+&800:64
+show $d1+&840:64
+show $d1+&880:64
+show $d1+&8C0:64
+show $d1+&900:64
+show $d1+&940:64
+show $d1+&980:64
+show $d1+&9C0:64
+show $d1+&A00:64
+show $d1+&A40:64
+show $d1+&A80:64
+show $d1+&AC0:64
+show $d1+&B00:64
+show $d1+&B40:64
+show $d1+&B80:64
+show $d1+&BC0:64
+block eo 8192
+write $rec+&0 b=10 b=5 b=2 b=2 b=15 b=7 b=1 b=0 b=0 b=1 b=32 b=5 w=&203 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&20000000
+call XFileCore_FloppyStructure r0=$eo r1=$rec r2=&80 r3=$dl
+show r3 v
+show $eo+&0:64
+show $eo+&40:64
+show $eo+&80:64
+show $eo+&C0:64
+show $eo+&100:59
+show $eo+&13B:59
+show $eo+&176:59
+show $eo+&1B1:59
+show $eo+&1EC:15
+show $eo+&1FD:2
+show $eo+&200:64
+show $eo+&240:64
+show $eo+&280:64
+show $eo+&2C0:64
+show $eo+&300:64
+show $eo+&340:64
+show $eo+&380:64
+show $eo+&3C0:64
+show $eo+&400:64
+show $eo+&440:64
+show $eo+&480:64
+show $eo+&4C0:64
+show $eo+&500:64
+show $eo+&540:64
+show $eo+&580:64
+show $eo+&5C0:64
+show $eo+&600:64
+show $eo+&640:64
+show $eo+&680:64
+show $eo+&6C0:64
+block z2 8192
+write $rec+&0 b=10 b=10 b=2 b=4 b=15 b=6 b=1 b=0 b=0 b=2 b=64 b=6 w=&33801 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&20000000
+call XFileCore_FloppyStructure r0=$z2 r1=$rec r2=0 r3=$dl
+show r3 v
+show $z2+&1:3
+show $z2+&40:64
+show $z2+&80:64
+show $z2+&C0:64
+show $z2+&100:64
+show $z2+&140:64
+show $z2+&180:64
+show $z2+&1C0:64
+show $z2+&200:64
+show $z2+&240:64
+show $z2+&280:64
+show $z2+&2C0:64
+show $z2+&300:64
+show $z2+&340:64
+show $z2+&380:64
+show $z2+&3C0:64
+show $z2+&1000:64
+show $z2+&1040:64
+show $z2+&1080:64
+show $z2+&10C0:64
+show $z2+&1100:64
+show $z2+&1140:64
+show $z2+&1180:64
+show $z2+&11C0:64
+show $z2+&1200:64
+show $z2+&1240:64
+show $z2+&1280:64
+show $z2+&12C0:64
+show $z2+&1300:64
+show $z2+&1340:64
+show $z2+&1380:64
+show $z2+&13C0:64
+show $z2+&1400:64
+show $z2+&1440:64
+show $z2+&1480:64
+show $z2+&14C0:64
+show $z2+&1500:64
+show $z2+&1540:64
+show $z2+&1580:64
+show $z2+&15C0:64
+show $z2+&1600:64
+show $z2+&1640:64
+show $z2+&1680:64
+show $z2+&16C0:64
+show $z2+&1700:64
+show $z2+&1740:64
+show $z2+&1780:64
+show $z2+&17C0:64
+show $z2+&1800:64
+show $z2+&1840:64
+show $z2+&1880:64
+show $z2+&18C0:64
+show $z2+&1900:64
+show $z2+&1940:64
+show $z2+&1980:64
+show $z2+&19C0:64
+show $z2+&1A00:64
+show $z2+&1A40:64
+show $z2+&1A80:64
+show $z2+&1AC0:64
+show $z2+&1B00:64
+show $z2+&1B40:64
+show $z2+&1B80:64
+show $z2+&1BC0:64
+block z3 8192
+write $rec+&0 b=10 b=10 b=2 b=4 b=15 b=6 b=1 b=0 b=0 b=3 b=64 b=6 w=&33801 w=&12C000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&20000000
+call XFileCore_FloppyStructure r0=$z3 r1=$rec r2=0 r3=$dl
+show r3 v
+show $z3+&1:3
+show $z3+&40:64
+show $z3+&80:64
+show $z3+&C0:64
+show $z3+&100:64
+show $z3+&140:64
+show $z3+&180:64
+show $z3+&1C0:64
+show $z3+&200:64
+show $z3+&240:64
+show $z3+&280:64
+show $z3+&2C0:64
+show $z3+&300:64
+show $z3+&340:64
+show $z3+&380:64
+show $z3+&3C0:64
+show $z3+&1000:64
+show $z3+&1040:64
+show $z3+&1080:64
+show $z3+&10C0:64
+show $z3+&1100:64
+show $z3+&1140:64
+show $z3+&1180:64
+show $z3+&11C0:64
+show $z3+&1200:64
+show $z3+&1240:64
+show $z3+&1280:64
+show $z3+&12C0:64
+show $z3+&1300:64
+show $z3+&1340:64
+show $z3+&1380:64
+show $z3+&13C0:64
+show $z3+&1400:64
+show $z3+&1440:64
+show $z3+&1480:64
+show $z3+&14C0:64
+show $z3+&1500:64
+show $z3+&1540:64
+show $z3+&1580:64
+show $z3+&15C0:64
+show $z3+&1600:64
+show $z3+&1640:64
+show $z3+&1680:64
+show $z3+&16C0:64
+show $z3+&1700:64
+show $z3+&1740:64
+show $z3+&1780:64
+show $z3+&17C0:64
+show $z3+&1800:64
+show $z3+&1840:64
+show $z3+&1880:64
+show $z3+&18C0:64
+show $z3+&1900:64
+show $z3+&1940:64
+show $z3+&1980:64
+show $z3+&19C0:64
+show $z3+&1A00:64
+show $z3+&1A40:64
+show $z3+&1A80:64
+show $z3+&1AC0:64
+show $z3+&1B00:64
+show $z3+&1B40:64
+show $z3+&1B80:64
+show $z3+&1BC0:64
+block z5 8192
+write $rec+&0 b=10 b=10 b=2 b=4 b=15 b=6 b=1 b=0 b=0 b=5 b=64 b=6 w=&33801 w=&1F4000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&20000000
+call XFileCore_FloppyStructure r0=$z5 r1=$rec r2=0 r3=$dl
+show r3 v
+show $z5+&1:3
+show $z5+&40:64
+show $z5+&80:64
+show $z5+&C0:64
+show $z5+&100:64
+show $z5+&140:64
+show $z5+&180:64
+show $z5+&1C0:64
+show $z5+&200:64
+show $z5+&240:64
+show $z5+&280:64
+show $z5+&2C0:64
+show $z5+&300:64
+show $z5+&340:64
+show $z5+&380:64
+show $z5+&3C0:64
+show $z5+&1000:64
+show $z5+&1040:64
+show $z5+&1080:64
+show $z5+&10C0:64
+show $z5+&1100:64
+show $z5+&1140:64
+show $z5+&1180:64
+show $z5+&11C0:64
+show $z5+&1200:64
+show $z5+&1240:64
+show $z5+&1280:64
+show $z5+&12C0:64
+show $z5+&1300:64
+show $z5+&1340:64
+show $z5+&1380:64
+show $z5+&13C0:64
+show $z5+&1400:64
+show $z5+&1440:64
+show $z5+&1480:64
+show $z5+&14C0:64
+show $z5+&1500:64
+show $z5+&1540:64
+show $z5+&1580:64
+show $z5+&15C0:64
+show $z5+&1600:64
+show $z5+&1640:64
+show $z5+&1680:64
+show $z5+&16C0:64
+show $z5+&1700:64
+show $z5+&1740:64
+show $z5+&1780:64
+show $z5+&17C0:64
+show $z5+&1800:64
+show $z5+&1840:64
+show $z5+&1880:64
+show $z5+&18C0:64
+show $z5+&1900:64
+show $z5+&1940:64
+show $z5+&1980:64
+show $z5+&19C0:64
+show $z5+&1A00:64
+show $z5+&1A40:64
+show $z5+&1A80:64
+show $z5+&1AC0:64
+show $z5+&1B00:64
+show $z5+&1B40:64
+show $z5+&1B80:64
+show $z5+&1BC0:64
+block z6 8192
+write $rec+&0 b=10 b=10 b=2 b=4 b=15 b=6 b=1 b=0 b=0 b=6 b=64 b=6 w=&33801 w=&258000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&20000000
+call XFileCore_FloppyStructure r0=$z6 r1=$rec r2=0 r3=$dl
+show r3 v
+show $z6+&1:3
+show $z6+&40:64
+show $z6+&80:64
+show $z6+&C0:64
+show $z6+&100:64
+show $z6+&140:64
+show $z6+&180:64
+show $z6+&1C0:64
+show $z6+&200:64
+show $z6+&240:64
+show $z6+&280:64
+show $z6+&2C0:64
+show $z6+&300:64
+show $z6+&340:64
+show $z6+&380:64
+show $z6+&3C0:64
+show $z6+&1000:64
+show $z6+&1040:64
+show $z6+&1080:64
+show $z6+&10C0:64
+show $z6+&1100:64
+show $z6+&1140:64
+show $z6+&1180:64
+show $z6+&11C0:64
+show $z6+&1200:64
+show $z6+&1240:64
+show $z6+&1280:64
+show $z6+&12C0:64
+show $z6+&1300:64
+show $z6+&1340:64
+show $z6+&1380:64
+show $z6+&13C0:64
+show $z6+&1400:64
+show $z6+&1440:64
+show $z6+&1480:64
+show $z6+&14C0:64
+show $z6+&1500:64
+show $z6+&1540:64
+show $z6+&1580:64
+show $z6+&15C0:64
+show $z6+&1600:64
+show $z6+&1640:64
+show $z6+&1680:64
+show $z6+&16C0:64
+show $z6+&1700:64
+show $z6+&1740:64
+show $z6+&1780:64
+show $z6+&17C0:64
+show $z6+&1800:64
+show $z6+&1840:64
+show $z6+&1880:64
+show $z6+&18C0:64
+show $z6+&1900:64
+show $z6+&1940:64
+show $z6+&1980:64
+show $z6+&19C0:64
+show $z6+&1A00:64
+show $z6+&1A40:64
+show $z6+&1A80:64
+show $z6+&1AC0:64
+show $z6+&1B00:64
+show $z6+&1B40:64
+show $z6+&1B80:64
+show $z6+&1BC0:64
+block e5 8192
+write $rec+&0 b=10 b=5 b=2 b=2 b=15 b=7 b=1 b=0 b=0 b=1 b=32 b=5 w=&203 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&400 w=&20000000
+call XFileCore_FloppyStructure r0=$e5 r1=$rec r2=0 r3=$dl
+show r3 v
+show $e5+&1:3
+show $e5+&40:64
+show $e5+&80:64
+show $e5+&C0:64
+show $e5+&100:64
+show $e5+&140:64
+show $e5+&180:64
+show $e5+&1C0:64
+show $e5+&200:64
+show $e5+&240:64
+show $e5+&280:64
+show $e5+&2C0:64
+show $e5+&300:64
+show $e5+&340:64
+show $e5+&380:64
+show $e5+&3C0:64
+show $e5+&401:3
+show $e5+&440:64
+show $e5+&480:64
+show $e5+&4C0:64
+show $e5+&500:64
+show $e5+&540:64
+show $e5+&580:64
+show $e5+&5C0:64
+show $e5+&600:64
+show $e5+&640:64
+show $e5+&680:64
+show $e5+&6C0:64
+show $e5+&700:64
+show $e5+&740:64
+show $e5+&780:64
+show $e5+&7C0:64
+
+scenario filecore-layout-structure
+block rec 64
+block dl 64
+block img 4096
+call XOS_ChangeDynamicArea r0=5 r1=&200000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+write $rec+&0 b=10 b=5 b=2 b=2 b=15 b=7 b=1 b=0 b=0 b=1 b=32 b=5 w=&203 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&20000000
+call XOS_Find r0=&80 r1="RAM:$.Img"
+keep r0 h
+call XFileCore_LayoutStructure r0=$rec r1=$dl r2="PROBEDISC" r3=$h
+show v
+call XOS_Args r0=2 r1=$h
+show r2 v
+call XOS_GBPB r0=3 r1=$h r2=$img r3=&800 r4=&800
+show r3 v
+show $img+&0:64
+show $img+&40:64
+show $img+&80:64
+show $img+&C0:64
+show $img+&100:64
+show $img+&140:64
+show $img+&180:64
+show $img+&1C0:64
+show $img+&200:64
+show $img+&240:64
+show $img+&280:64
+show $img+&2C0:64
+show $img+&300:64
+show $img+&340:64
+show $img+&380:64
+show $img+&3C0:64
+show $img+&400:64
+show $img+&440:64
+show $img+&480:64
+show $img+&4C0:64
+show $img+&500:64
+show $img+&540:64
+show $img+&580:64
+show $img+&5C0:64
+show $img+&600:64
+show $img+&640:64
+show $img+&680:64
+show $img+&6C0:64
+show $img+&700:64
+show $img+&740:64
+show $img+&780:64
+show $img+&7C0:64
+call XOS_Find r0=0 r1=$h
+show v
+call XOS_File r0=6 r1="RAM:$.Img"
+show v
+write $rec+&0 b=10 b=5 b=2 b=2 b=15 b=7 b=1 b=0 b=0 b=1 b=32 b=5 w=&203 w=&C8000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&1 w=&800 w=0 w=0 w=0
+write $dl+&0 w=&20000000
+call XOS_Find r0=&80 r1="RAM:$.Img"
+keep r0 h
+call XFileCore_LayoutStructure r0=$rec r1=$dl r2="PROBEDISC" r3=$h
+show v
+call XOS_Args r0=2 r1=$h
+show r2 v
+call XOS_GBPB r0=3 r1=$h r2=$img r3=&800 r4=&800
+show r3 v
+show $img+&0:24
+show $img+&1C:64
+show $img+&5C:64
+show $img+&9C:64
+show $img+&DC:64
+show $img+&11C:64
+show $img+&15C:64
+show $img+&19C:64
+show $img+&1DC:64
+show $img+&21C:64
+show $img+&25C:64
+show $img+&29C:64
+show $img+&2DC:64
+show $img+&31C:64
+show $img+&35C:64
+show $img+&39C:64
+show $img+&3DC:64
+show $img+&41C:64
+show $img+&45C:64
+show $img+&49C:64
+show $img+&4DC:64
+show $img+&51C:64
+show $img+&55C:64
+show $img+&59C:64
+show $img+&5DC:64
+show $img+&61C:64
+show $img+&65C:64
+show $img+&69C:64
+show $img+&6DC:64
+show $img+&71C:64
+show $img+&75C:64
+show $img+&79C:64
+show $img+&7DC:35
+call XOS_Find r0=0 r1=$h
+show v
+call XOS_File r0=6 r1="RAM:$.Img"
+show v
+write $rec+&0 b=10 b=10 b=2 b=4 b=15 b=6 b=1 b=0 b=0 b=4 b=64 b=6 w=&33801 w=&190000 b=0 b=0 s="PROBEDISC " w=0 w=0 b=0 b=0 b=0 b=0 w=&0 w=&0 w=0 w=0 w=0
+write $dl+&0 w=&100000 w=&20000000
+call XOS_Find r0=&80 r1="RAM:$.Img"
+keep r0 h
+call XFileCore_LayoutStructure r0=$rec r1=$dl r2="PROBEDISC" r3=$h
+show v
+call XOS_Args r0=2 r1=$h
+show r2 v
+call XOS_GBPB r0=3 r1=$h r2=$img r3=&400 r4=&C6C00
+show r3 v
+show $img+&40:64
+show $img+&80:64
+show $img+&C0:64
+show $img+&100:64
+show $img+&140:64
+show $img+&180:64
+show $img+&1C0:64
+show $img+&200:64
+show $img+&240:64
+show $img+&280:64
+show $img+&2C0:64
+show $img+&300:64
+show $img+&340:64
+show $img+&380:64
+show $img+&3C0:64
+call XOS_GBPB r0=3 r1=$h r2=$img r3=&400 r4=&C7400
+show r3 v
+show $img+&40:64
+show $img+&80:64
+show $img+&C0:64
+show $img+&100:64
+show $img+&140:64
+show $img+&180:64
+show $img+&1C0:64
+show $img+&200:64
+show $img+&240:64
+show $img+&280:64
+show $img+&2C0:64
+show $img+&300:64
+show $img+&340:64
+show $img+&380:64
+show $img+&3C0:64
+call XOS_GBPB r0=3 r1=$h r2=$img r3=&400 r4=&C7C00
+show r3 v
+show $img+&40:64
+show $img+&80:64
+show $img+&C0:64
+show $img+&100:64
+show $img+&140:64
+show $img+&180:64
+show $img+&1C0:64
+show $img+&200:64
+show $img+&240:64
+show $img+&280:64
+show $img+&2C0:64
+show $img+&300:64
+show $img+&340:64
+show $img+&380:64
+show $img+&3C0:64
+call XOS_GBPB r0=3 r1=$h r2=$img r3=&400 r4=&C8400
+show r3 v
+show $img+&40:64
+show $img+&80:64
+show $img+&C0:64
+show $img+&100:64
+show $img+&140:64
+show $img+&180:64
+show $img+&1C0:64
+show $img+&200:64
+show $img+&240:64
+show $img+&280:64
+show $img+&2C0:64
+show $img+&300:64
+show $img+&340:64
+show $img+&380:64
+show $img+&3C0:64
+call XOS_GBPB r0=3 r1=$h r2=$img r3=&800 r4=&C8800
+show r3 v
+show $img+&0:64
+show $img+&40:64
+show $img+&80:64
+show $img+&C0:64
+show $img+&100:64
+show $img+&140:64
+show $img+&180:64
+show $img+&1C0:64
+show $img+&200:64
+show $img+&240:64
+show $img+&280:64
+show $img+&2C0:64
+show $img+&300:64
+show $img+&340:64
+show $img+&380:64
+show $img+&3C0:64
+show $img+&400:64
+show $img+&440:64
+show $img+&480:64
+show $img+&4C0:64
+show $img+&500:64
+show $img+&540:64
+show $img+&580:64
+show $img+&5C0:64
+show $img+&600:64
+show $img+&640:64
+show $img+&680:64
+show $img+&6C0:64
+show $img+&700:64
+show $img+&740:64
+show $img+&780:64
+show $img+&7C0:64
+call XOS_Find r0=0 r1=$h
+show v
+call XOS_File r0=6 r1="RAM:$.Img"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&200000
+show r1 v
+
+scenario filecore-big-directory-rename
+block data 64
+call XOS_ChangeDynamicArea r0=5 r1=&40000
+show r1 v
+call XOS_ReadDynamicArea r0=5
+keep r0 da
+call XOS_CLI r0="RAM"
+show v
+call XOS_CLI r0="NameDisc :0 Probe"
+show v
+call XOS_CLI r0="CDir RAM:$.Ab"
+show v
+call XOS_File r0=0 r1="RAM:$.Ab.One" r2=&FFFFFD00 r3=0 r4=$data r5=$data+&10
+show v
+call XOS_File r0=0 r1="RAM:$.Ab.Two" r2=&FFFFFD00 r3=0 r4=$data r5=$data+&10
+show v
+call XOS_File r0=0 r1="RAM:$.Ab.Three" r2=&FFFFFD00 r3=0 r4=$data r5=$data+&10
+show v
+show $da+&1000:64
+show $da+&1040:64
+show $da+&1080:64
+show $da+&10C0:64
+show $da+&17C0:64
+call XOS_CLI r0="Rename RAM:$.Ab RAM:$.Abcdefgh"
+show v
+show $da+&1000:64
+show $da+&1040:64
+show $da+&1080:64
+show $da+&10C0:64
+show $da+&17C0:64
+call XOS_CLI r0="Rename RAM:$.Abcdefgh RAM:$.X"
+show v
+show $da+&1000:64
+show $da+&1040:64
+show $da+&1080:64
+show $da+&10C0:64
+show $da+&17C0:64
+call XOS_CLI r0="Rename RAM:$.X RAM:$.x"
+show v
+show $da+&1000:64
+show $da+&1040:64
+show $da+&1080:64
+show $da+&10C0:64
+show $da+&17C0:64
+call XOS_File r0=6 r1="RAM:$.x.One"
+show v
+call XOS_File r0=6 r1="RAM:$.x.Two"
+show v
+call XOS_File r0=6 r1="RAM:$.x.Three"
+show v
+call XOS_File r0=6 r1="RAM:$.x"
+show v
+call XOS_ChangeDynamicArea r0=5 r1=-&40000
+show r1 v
+call XOS_FSControl r0=14 r1="HostFS"
+

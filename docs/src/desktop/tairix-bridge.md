@@ -1483,7 +1483,35 @@ none.
   an error, while saving, making or moving to it is FileCore's "not found".
 - **Errors** are numbered beside the client's filing system,
   `&10000 + number × &100 + code`, where its descriptor asks, as RamFS's does:
-  "Locked" is `&117C3` on `RAM:`.
+  "Locked" is `&117C3` on `RAM:`. FileCore's own, of its SWIs that name no
+  client, are numbered beside its module, `&108xx`.
+- **What holds a disc offset** (`OS_FSControl` 52): R2 answers 0 for free
+  space or a defect, 1 for space no entry holds — the map, the root — and 2
+  for an object, the first entry met whose fragment holds the offset. The
+  name goes to R3's buffer as RISC OS 5 writes it: the root's path,
+  `RAM::Probe.$`, unterminated; then, searching depth first, each directory's
+  path as the search enters it, and the object's terminated, every write from
+  the buffer's start, so what lies past a shorter one is an earlier one's.
+  A byte of the root's path needs two more bytes of room past it, else "Buffer
+  overflow"; one of the search's needs one more, and a separator or
+  terminator without it is FileCore's "Buffer", `&A5`, while a name running
+  out of room ends the search there, answering 2. Each directory is entered
+  once, so a broken disc naming one from within itself is searched once
+  rather than round its loop.
+- **Defects** (`*Defect`, `OS_FSControl` 41, 42, 56 and 57). A defective
+  sector is recorded as `lib/filecore` records one: listed in the boot block
+  where the disc has one, and mapped out of free space. `*Defect` takes a hex
+  sector start within the disc, else "Bad parameters", and leaves a sector an
+  object or the disc's structures hold, saying what holds it;
+  `OS_FSControl` 42 and 57 round the address down to its sector and refuse
+  such a sector as FileCore's "Defect", `&94`. `OS_FSControl` 41 writes a word
+  for each — the boot block's byte address, or, on a disc without one, the
+  map's sector number — then `&20000000`; 56 each address in two words, with
+  no end. One that does not fit is "Too many defects", what fits written. An
+  old map records no defect, and refuses one.
+- **Compacting a new map** (`*Compact`) moves fragments as RISC OS 5 moves
+  them (`lib/filecore`'s `compact`); an old map's files slide down into the
+  free space below each, but for one held open.
 - **SWIs.** `DiscOp`, `SectorDiscOp` and `DiscOp64`, `Drives`, `FreeSpace` and
   `FreeSpace64`, `DescribeDisc`, `MiscOp` (reason 6 answered by FileCore
   itself), `Create`, `Features` (3), `DiscardReadSectorsCache`,
@@ -1495,13 +1523,34 @@ none.
   may follow and a name FileSwitch would not hand on is its bad name, `&CC`;
   the rest read it as FileCore does, a colon or full stop within it FileCore's
   bad name, as RISC OS 5's commands read theirs.
+- **Structures.** `DiscFormat` fills in each format's layout — sector size,
+  gaps, sectors a track, density, options, skews, fill and tracks — before its
+  vetting SWI adjusts it. `FloppyStructure` lays a floppy's start out as RISC
+  OS 5 does, whatever the record's zones: an old map where R2's bit 6 or 7
+  asks, the root in the old layout where bit 7 does and marked `Hugo` where
+  bit 6 does, and a new map laid as one zone's, its fragments run through the
+  map's bits as one stream and the defects R3 lists swept in order.
+  `LayoutStructure` lays an empty new-map disc out in an image file with no
+  boot block, its fixed root named after the disc, its defects mapped out.
+  A record describing more disc than its zones, to `FloppyStructure`, or
+  more than an image file's 32-bit offsets reach, to `LayoutStructure`, is
+  "Bad parameters".
 
-What is not yet RISC OS 5's: `FloppyStructure` lays out only discs of one
-zone, `LayoutStructure` only new-map records, `*Compact` slides only an old
-map's files, `*Defect` is refused, `DiscFormat` leaves the gaps between
-sectors to its vetting SWI, `OS_FSControl` 52 answers only whether an offset
-is in use, and `DiscOp64`'s block is read as a drive, then the address's low
-and high words.
+Where RISC OS 5 itself goes wrong, the bridge does not follow it:
+`LayoutStructure` lays out zone 0 of the map, which RISC OS 5 5.30 leaves
+without a fragment, and refuses an old-map record, which it lays out as a
+malformed new map; a defect list past the 111 a boot block holds is "Too many
+defects", where RISC OS 5 writes on over the boot record; and a 64-bit
+`OS_FSControl` 57 address past 512 MB, a FloppyStructure defect at or past the
+disc's end, and `OS_FSControl` 52's search running out of room while it
+searches the map's own space are answered as the rest are, where RISC OS 5
+aborts or lays out free space past the disc. `DiscOp64`'s block is read as a
+drive, then the address's low and high words: no guest can reach a FileCore
+instance to record it. `filecore.scenarios` in the same corpus holds the rest
+to RISC OS 5: object names at offsets and their buffer's bounds, both kinds of
+defect list, defects mapped out against what bounds them, compaction over
+nine layouts, the floppy structures, the parts of a laid-out structure RISC OS
+5 lays out soundly, and a big directory's stored name through renames.
 
 ### RamFS
 

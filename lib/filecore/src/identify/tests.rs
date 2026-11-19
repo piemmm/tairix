@@ -49,7 +49,7 @@ fn a_ram_disc_is_named_by_its_map_though_its_boot_block_names_nothing() {
     let mut record = new_map_record(Variant::RamDisc, 0x10_0000).expect("a record");
     record.disc_name = *b"RamDisc0\0\0";
     let mut disc = MemDisc::new(0x10_0000);
-    let laid = lay_out(&mut disc, record, BootRecord::Blank).expect("laid out");
+    let laid = lay_out(&mut disc, record, BootRecord::Blank, b"$").expect("laid out");
     let found = identify(&mut disc).expect("no fault").expect("found");
     let Layout::NewMap { record, boot } = &found else {
         panic!("a new map: {found:?}");

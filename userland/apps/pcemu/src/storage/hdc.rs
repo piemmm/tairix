@@ -14,7 +14,7 @@
 //! zeros and is not kept.
 
 use super::{BlockDevice, SECTOR};
-use crate::chips::dma::{Dma, DmaMemory};
+use crate::chips::dma::{Cycle, Dma, DmaMemory};
 use crate::snapshot::{check, restore_fitted, save_fitted, In, Out, State, Torn};
 use crate::time::{Hertz, Nanos, NANOS_PER_MILLISECOND as MS, NANOS_PER_SECOND};
 use alloc::boxed::Box;
@@ -277,14 +277,30 @@ enum Step {
     /// has passed under the head by this instant.
     Media(Nanos),
     /// The buffer's first `len` bytes move to or from the host, `done` so
-    /// far. Over DMA a burst moves byte `first` at `start` and one more each
-    /// transfer after, stalling when the channel does not answer; through
-    /// the data port the host paces it.
+    /// far, the controller asking for each in turn.
     Host {
         len: usize,
         done: usize,
-        burst: Option<(Nanos, usize)>,
+        request: Request,
     },
+}
+
+/// What the adapter's request flip-flop holds for the byte the controller
+/// asks for. The controller's request clocks it, DRQ 3 only while the mask
+/// register enables DMA, and any acknowledge clears it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Request {
+    /// DRQ 3, which the channel serves at its pace: byte `first` at `start`
+    /// and one more each transfer after.
+    Dma { start: Nanos, first: usize },
+    /// DRQ 3, which the channel has not answered: it waits for the DMA
+    /// controller to be reprogrammed.
+    Unanswered,
+    /// No DRQ 3, so the host moves the byte through the data port: DMA was
+    /// off when the controller asked, or a verify cycle cleared the request
+    /// without the acknowledge only a strobe gives.
+    #[default]
+    Port,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -410,8 +426,13 @@ pub struct Hdc {
     mask: u8,
     phase: Phase,
     interrupt: bool,
-    /// What the data port last held.
+    /// What the read latch holds: the last byte the controller sent the
+    /// host.
     last: u8,
+    /// What the write latch holds: the last byte the host wrote the data
+    /// port, which the controller takes at an acknowledge however the strobe
+    /// came.
+    written: u8,
     now: Nanos,
     buffer: Buffer,
 }
@@ -433,6 +454,7 @@ impl Hdc {
             phase: Phase::Idle,
             interrupt: false,
             last: 0,
+            written: 0,
             now: 0,
             buffer: Buffer {
                 sector: [0; SECTOR],
@@ -519,32 +541,33 @@ impl Hdc {
             Step::Wait(at) | Step::Media(at) => Some(at),
             Step::Host {
                 done,
-                burst: Some((start, first)),
+                request: Request::Dma { start, first },
                 ..
             } => Some(start + self.transfers.time_of((done - first) as u64)),
-            Step::Host { burst: None, .. } => None,
+            Step::Host { .. } => None,
         }
     }
 
     /// Advances the adapter to `t`, acting on everything due by then. A DMA
-    /// transfer the channel had stalled tries again, so the board calls this
-    /// once more after the DMA controller is reprogrammed.
+    /// request the channel had not answered is served again, so the board
+    /// calls this once more after the DMA controller is reprogrammed.
     pub fn advance<M: DmaMemory>(&mut self, t: Nanos, dma: &mut Dma, memory: &mut M) {
         if let Phase::Busy(mut job) = self.phase {
             if let Step::Host {
                 len,
                 done,
-                burst: None,
+                request: Request::Unanswered,
             } = job.step
             {
-                if self.mask & mask::DMA != 0 {
-                    job.step = Step::Host {
-                        len,
-                        done,
-                        burst: Some((t.max(self.now), done)),
-                    };
-                    self.phase = Phase::Busy(job);
-                }
+                job.step = Step::Host {
+                    len,
+                    done,
+                    request: Request::Dma {
+                        start: t.max(self.now),
+                        first: done,
+                    },
+                };
+                self.phase = Phase::Busy(job);
             }
         }
         while let Some(at) = self.next_event().filter(|&at| at <= t) {
@@ -601,6 +624,9 @@ impl Hdc {
             }
             _ => {
                 self.mask = value & (mask::DMA | mask::IRQ);
+                if self.mask & mask::DMA == 0 {
+                    self.drop_request();
+                }
                 self.advance(t, dma, memory);
             }
         }
@@ -612,16 +638,18 @@ impl Hdc {
             Phase::Idle => 0,
             Phase::Command { .. } => status::BUSY | status::CONTROL | status::REQ,
             Phase::Busy(Job {
-                step: Step::Host { .. },
+                step: Step::Host { request, .. },
                 command,
                 ..
-            }) if self.mask & mask::DMA == 0 => {
-                status::BUSY | status::REQ | if command.to_host() { status::IO } else { 0 }
+            }) => {
+                let io = if command.to_host() { status::IO } else { 0 };
+                let drq = if request == Request::Port {
+                    0
+                } else {
+                    status::DRQ
+                };
+                status::BUSY | status::REQ | io | drq
             }
-            Phase::Busy(Job {
-                step: Step::Host { .. },
-                ..
-            }) => status::BUSY | status::DRQ,
             Phase::Busy(_) => status::BUSY,
             Phase::Status(_) => status::BUSY | status::CONTROL | status::IO | status::REQ,
         }
@@ -634,15 +662,10 @@ impl Hdc {
                 self.interrupt = false;
                 self.last = byte;
             }
-            Phase::Busy(mut job) if self.mask & mask::DMA == 0 && job.command.to_host() => {
-                if let Step::Host { len, done, burst } = job.step {
-                    self.last = self.buffer.byte(done);
-                    job.step = Step::Host {
-                        len,
-                        done: done + 1,
-                        burst,
-                    };
-                    self.hosted_byte(job, self.now);
+            Phase::Busy(job) => {
+                if let Step::Host { len, done, .. } = job.step {
+                    let next = self.request_for(self.now, done + 1);
+                    self.acknowledged(job, len, done, next, self.now);
                 }
             }
             _ => {}
@@ -651,6 +674,7 @@ impl Hdc {
     }
 
     fn write_data(&mut self, value: u8, t: Nanos) {
+        self.written = value;
         match self.phase {
             Phase::Command { mut bytes, len } => {
                 bytes[len] = value;
@@ -663,18 +687,55 @@ impl Hdc {
                     self.start(bytes, t);
                 }
             }
-            Phase::Busy(mut job) if self.mask & mask::DMA == 0 && !job.command.to_host() => {
-                if let Step::Host { len, done, burst } = job.step {
-                    *self.buffer.byte_mut(done) = value;
-                    job.step = Step::Host {
-                        len,
-                        done: done + 1,
-                        burst,
-                    };
-                    self.hosted_byte(job, t);
+            Phase::Busy(job) => {
+                if let Step::Host { len, done, .. } = job.step {
+                    let next = self.request_for(t, done + 1);
+                    self.acknowledged(job, len, done, next, t);
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The acknowledge a data strobe gives the controller, the data port's
+    /// or a DMA cycle's, whichever latch the strobe reached: the byte it
+    /// sends leaves through the read latch, and the one it takes is the write
+    /// latch's. It asks for the next byte with `next`.
+    fn acknowledged(&mut self, mut job: Job, len: usize, done: usize, next: Request, at: Nanos) {
+        if job.command.to_host() {
+            self.last = self.buffer.byte(done);
+        } else {
+            *self.buffer.byte_mut(done) = self.written;
+        }
+        job.step = Step::Host {
+            len,
+            done: done + 1,
+            request: next,
+        };
+        self.hosted_byte(job, at);
+    }
+
+    /// The request flip-flop as the controller asks for byte `next` at `at`.
+    fn request_for(&self, at: Nanos, next: usize) -> Request {
+        if self.mask & mask::DMA == 0 {
+            Request::Port
+        } else {
+            Request::Dma {
+                start: at,
+                first: next,
+            }
+        }
+    }
+
+    /// DMA disabled holds the request flip-flop clear, and enabling it again
+    /// does not set it: only the controller's next request does.
+    fn drop_request(&mut self) {
+        if let Phase::Busy(Job {
+            step: Step::Host { request, .. },
+            ..
+        }) = &mut self.phase
+        {
+            *request = Request::Port;
         }
     }
 
@@ -816,35 +877,39 @@ impl Hdc {
             Step::Host {
                 len,
                 done,
-                burst: Some(burst),
+                request: request @ Request::Dma { .. },
             } => {
-                let moved = if self.mask & mask::DMA == 0 {
-                    0
-                } else if job.command.to_host() {
-                    dma.to_memory(DMA_CHANNEL, memory, &[self.buffer.byte(done)])
-                        .bytes
+                let driven = if job.command.to_host() {
+                    self.buffer.byte(done)
                 } else {
-                    let mut byte = [0];
-                    let moved = dma.from_memory(DMA_CHANNEL, memory, &mut byte).bytes;
-                    *self.buffer.byte_mut(done) = byte[0];
-                    moved
+                    self.last
                 };
-                job.step = if moved == 0 {
-                    Step::Host {
+                let Some(served) = dma.serve(DMA_CHANNEL, memory, driven) else {
+                    job.step = Step::Host {
                         len,
                         done,
-                        burst: None,
-                    }
-                } else {
-                    Step::Host {
-                        len,
-                        done: done + 1,
-                        burst: Some(burst),
-                    }
+                        request: Request::Unanswered,
+                    };
+                    self.phase = Phase::Busy(job);
+                    return;
                 };
-                self.hosted_byte(job, at);
+                match served.cycle {
+                    Cycle::Verify => {
+                        job.step = Step::Host {
+                            len,
+                            done,
+                            request: Request::Port,
+                        };
+                        self.phase = Phase::Busy(job);
+                    }
+                    Cycle::Read(byte) => {
+                        self.written = byte;
+                        self.acknowledged(job, len, done, request, at);
+                    }
+                    Cycle::Write => self.acknowledged(job, len, done, request, at),
+                }
             }
-            Step::Host { burst: None, .. } => {}
+            Step::Host { .. } => {}
         }
     }
 
@@ -887,11 +952,10 @@ impl Hdc {
     }
 
     fn begin_host(&mut self, mut job: Job, at: Nanos) {
-        let burst = (self.mask & mask::DMA != 0).then_some((at, 0));
         job.step = Step::Host {
             len: job.command.host_bytes(),
             done: 0,
-            burst,
+            request: self.request_for(at, 0),
         };
         self.phase = Phase::Busy(job);
     }
@@ -1136,7 +1200,13 @@ impl Default for Step {
 crate::snapshot::state_enum!(Step {
     0 => Wait(at),
     1 => Media(at),
-    2 => Host { len, done, burst },
+    2 => Host { len, done, request },
+});
+
+crate::snapshot::state_enum!(Request {
+    0 => Dma { start, first },
+    1 => Unanswered,
+    2 => Port,
 });
 
 crate::snapshot::state!(Job {
@@ -1214,12 +1284,15 @@ fn possible(phase: &Phase, now: Nanos, sectors: u8) -> bool {
                 && job.address.sector < sectors
                 && match job.step {
                     Step::Wait(_) | Step::Media(_) => true,
-                    Step::Host { len, done, burst } => {
+                    Step::Host { len, done, request } => {
                         done <= len
                             && len <= SECTOR + ECC
-                            && burst.is_none_or(|(start, first)| {
-                                first <= done && start <= now.saturating_add(NANOS_PER_SECOND)
-                            })
+                            && match request {
+                                Request::Dma { start, first } => {
+                                    first <= done && start <= now.saturating_add(NANOS_PER_SECOND)
+                                }
+                                Request::Unanswered | Request::Port => true,
+                            }
                     }
                 }
         }
@@ -1239,6 +1312,7 @@ impl State for Hdc {
             phase,
             interrupt,
             last,
+            written,
             now,
             buffer,
         } = self;
@@ -1251,6 +1325,7 @@ impl State for Hdc {
         phase.save(out);
         interrupt.save(out);
         last.save(out);
+        written.save(out);
         now.save(out);
         buffer.save(out);
     }
@@ -1268,6 +1343,7 @@ impl State for Hdc {
             phase,
             interrupt,
             last,
+            written,
             now,
             buffer,
         } = self;
@@ -1283,6 +1359,7 @@ impl State for Hdc {
         phase.restore(input)?;
         interrupt.restore(input)?;
         last.restore(input)?;
+        written.restore(input)?;
         now.restore(input)?;
         buffer.restore(input)?;
         check(possible(phase, *now, sectors))

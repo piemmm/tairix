@@ -424,6 +424,42 @@ fn an_archive_is_write_protected() {
 }
 
 #[test]
+fn a_read_over_verify_or_a_channel_reading_memory_is_served_and_moves_nothing() {
+    for mode in [0x42, 0x4A] {
+        let mut rig = Rig::ready(Interface::Standard, DriveKind::Dd525, raw(360));
+        rig.wait_until(SPIN_UP);
+        rig.memory.0[0x1000..0x1200].fill(0x5A);
+        program(&mut rig.dma, 2, mode, 0x1000, 512 - 1);
+        rig.read(0, 0, 3, 9);
+        assert_eq!(
+            rig.finish(),
+            [0x00, 0x00, 0x00, 0, 0, 4, 2],
+            "{mode:02X}h: each request served, so no overrun"
+        );
+        assert_eq!(rig.dma.take_transfers(), 512);
+        assert!(rig.memory.0[0x1000..0x1200].iter().all(|&b| b == 0x5A));
+    }
+}
+
+#[test]
+fn a_write_over_verify_or_a_channel_writing_memory_records_the_data_register() {
+    for mode in [0x42, 0x46] {
+        let mut rig = Rig::ready(Interface::Standard, DriveKind::Dd525, raw(360));
+        rig.wait_until(SPIN_UP);
+        program(&mut rig.dma, 2, mode, 0x5000, 512 - 1);
+        rig.command(&[0x45, 0x00, 0, 0, 4, 2, 9, 0x2A, 0xFF]);
+        assert_eq!(rig.finish(), [0x00, 0x00, 0x00, 0, 0, 5, 2], "{mode:02X}h");
+        to_memory(&mut rig, 0x6000, 512);
+        rig.read(0, 0, 4, 9);
+        rig.finish();
+        assert!(
+            rig.memory.0[0x6000..0x6200].iter().all(|&b| b == 0xFF),
+            "{mode:02X}h: the sector holds the command's last byte"
+        );
+    }
+}
+
+#[test]
 fn a_write_reads_back_and_terminal_count_pads_its_sector() {
     let mut rig = Rig::ready(Interface::Standard, DriveKind::Dd525, raw(360));
     rig.wait_until(SPIN_UP);

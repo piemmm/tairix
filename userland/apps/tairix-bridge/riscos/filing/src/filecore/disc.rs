@@ -116,7 +116,7 @@ pub(crate) fn with_volume<T>(
     release(os, workspace, slot, kept)?;
     match result {
         Some(Ok(done)) => Ok(done),
-        Some(Err(error)) => Err(refused(os, &client, error)),
+        Some(Err(error)) => Err(refused(os, Some(&client), error)),
         None => Err(fail(os, Some(&client), code::IN_USE)),
     }
 }
@@ -441,7 +441,7 @@ pub(crate) fn mount(os: &mut Os<'_>, workspace: u32, drive: u8) -> Result<Mounte
     let found = match identify(&mut disc) {
         Ok(Some(found)) => found,
         Ok(None) => return Err(fail(disc.os, Some(&client), code::DISC_NOT_FILE_CORE)),
-        Err(error) => return Err(refused(disc.os, &client, error)),
+        Err(error) => return Err(refused(disc.os, Some(&client), error)),
     };
     let (backing, boot, record) = match found {
         Layout::NewMap { record, boot } => match NewMap::open(&mut disc, record) {
@@ -456,7 +456,7 @@ pub(crate) fn mount(os: &mut Os<'_>, workspace: u32, drive: u8) -> Result<Mounte
                     record,
                 )
             }
-            Err(error) => return Err(refused(disc.os, &client, error)),
+            Err(error) => return Err(refused(disc.os, Some(&client), error)),
         },
         Layout::OldMap {
             large_directories,
@@ -484,6 +484,6 @@ pub(crate) fn mount(os: &mut Os<'_>, workspace: u32, drive: u8) -> Result<Mounte
             sector,
             capacity,
         }),
-        Err(error) => Err(refused(os, &client, error)),
+        Err(error) => Err(refused(os, Some(&client), error)),
     }
 }

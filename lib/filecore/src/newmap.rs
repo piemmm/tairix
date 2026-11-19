@@ -14,15 +14,30 @@
 //!
 //! Reference: the RISC OS PRM `FileCore` formats chapter.
 
+use alloc::vec::Vec;
+
 use crate::record::{
     link_bits, seal_boot_block, zone_check, zone_start_bit, DiscRecord, MapCopy, BOOT_BLOCK_OFFSET,
-    BOOT_BLOCK_SIZE, CROSS_CHECK_BYTE, CROSS_CHECK_SUM, DISC_RECORD_SIZE, FRAG_ROOT, FREELINK_BIT,
-    NAME_LEN, ZONE_CHECK_BYTE, ZONE_HEADER_SIZE,
+    BOOT_BLOCK_SIZE, CROSS_CHECK_BYTE, CROSS_CHECK_SUM, DISC_RECORD_SIZE, FRAG_BAD, FRAG_ROOT,
+    FREELINK_BIT, NAME_LEN, ZONE_CHECK_BYTE, ZONE_HEADER_SIZE,
 };
 use crate::{Disc, Error, Fault, Result, Structure};
 
 /// What a map failing its checks is.
 const BROKEN: Fault = Fault::Broken(Structure::Map);
+
+/// What an address naming the disc's own structures as an object is: only a
+/// broken directory hands one over.
+const NOT_AN_OBJECT: Fault = Fault::Broken(Structure::Directory);
+
+/// Refuses `frag_id` as a fragment an object may grow, shrink or free.
+fn own_fragment(frag_id: u32) -> core::result::Result<(), Fault> {
+    if NewMap::is_object_fragment(frag_id) {
+        Ok(())
+    } else {
+        Err(NOT_AN_OBJECT)
+    }
+}
 
 /// Largest map sector (zone) size: `log2secsize` is at most 10.
 pub const MAX_ZONE_BYTES: usize = 1024;
@@ -41,6 +56,44 @@ pub struct NewMap {
     /// object the copy read lacks is looked for there, and the disc is
     /// never written, which could allocate over what only it records.
     recovers: Option<MapCopy>,
+}
+
+/// What mapping a defect out found.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MappedOut {
+    /// It is mapped out now.
+    Done,
+    /// A defect held it already, or no zone describes it.
+    Already,
+    /// The disc's own structures or an object hold it.
+    InUse,
+}
+
+/// Where compaction may move a fragment.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Moves {
+    /// A file's: down or up.
+    Anywhere,
+    /// A directory's: up only.
+    Up,
+}
+
+/// The most of a disc copied at once while a fragment moves.
+const COPY_CHUNK: usize = 4096;
+
+/// `length` bytes of `disc` copied from `from` to `to`, which do not
+/// overlap, a chunk at a time.
+fn copy_bytes<D: Disc>(disc: &mut D, from: u64, to: u64, length: u64) -> Result<(), D> {
+    let mut chunk = [0u8; COPY_CHUNK];
+    let mut done = 0;
+    while done < length {
+        let take = usize::try_from((length - done).min(COPY_CHUNK as u64)).unwrap_or(COPY_CHUNK);
+        disc.read(from + done, &mut chunk[..take])
+            .map_err(Error::Disc)?;
+        disc.write(to + done, &chunk[..take]).map_err(Error::Disc)?;
+        done += take as u64;
+    }
+    Ok(())
 }
 
 /// One zone staged in memory.
@@ -138,6 +191,8 @@ struct FragmentRun {
     disc_byte: u64,
     /// Fragment length in bytes.
     len: u64,
+    /// The map bits of the fragment ahead of where it was looked up.
+    into: u64,
 }
 
 /// One map fragment yielded by [`Walker`].
@@ -218,7 +273,8 @@ impl NewMap {
     /// # Errors
     ///
     /// * The map broken if the record is inconsistent or leaves
-    ///   no room for both copies, or neither copy checks.
+    ///   no room for both copies, or neither copy checks, or the map
+    ///   describes anything but a defect past the disc's end.
     /// * The disc's failure for a zone of the copy past the end of a short
     ///   disc.
     /// * The disc's failure.
@@ -253,7 +309,35 @@ impl NewMap {
             Err(err) => return Err(err),
         }
         map.adopt_zone_record(disc)?;
+        map.check_past_disc(disc)?;
         Ok(map)
+    }
+
+    /// Refuses a map that leaves anything but a defect where the disc ends,
+    /// which would give out space no sector holds. The block the end falls
+    /// in counts as the disc's.
+    fn check_past_disc<D: Disc>(&self, disc: &mut D) -> Result<(), D> {
+        let end = self
+            .record
+            .disc_size
+            .div_ceil(self.record.bytes_per_map_bit());
+        for zone in 0..u32::from(self.record.nzones) {
+            let (start_bit, end_bit, start_block) = self.zone_geometry(zone);
+            let within = end.saturating_sub(start_block);
+            if within >= u64::from(end_bit - start_bit) {
+                continue;
+            }
+            // Below the zone's stream, so it fits the bit numbering.
+            let limit = start_bit + u32::try_from(within).unwrap_or(0);
+            let staged = self.load_zone(disc, zone)?;
+            let mut walker = self.walker(&staged);
+            while let Some(frag) = walker.next(&staged)? {
+                if frag.end >= limit && (frag.is_free || frag.id != FRAG_BAD) {
+                    return Err(BROKEN.into());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The disc record as zone 0 of the copy read holds it, which `FileCore`
@@ -328,6 +412,32 @@ impl NewMap {
         link_bits(self.record.idlen)
     }
 
+    /// Whether an object may grow, shrink or free fragment `frag_id`: free
+    /// space, the defects and the map's fragment are no entry's.
+    #[must_use]
+    pub const fn is_object_fragment(frag_id: u32) -> bool {
+        frag_id > FRAG_ROOT
+    }
+
+    /// Whether `indaddr` may address an object at all: never the defects,
+    /// nor the whole of the map's fragment, which the map begins.
+    #[must_use]
+    pub const fn may_address_object(indaddr: u32) -> bool {
+        match indaddr >> 8 {
+            FRAG_BAD => false,
+            FRAG_ROOT => indaddr & 0xFF != 0,
+            _ => true,
+        }
+    }
+
+    /// The zone the object at `indaddr` is homed in; the central zone, the
+    /// map's, for one the map cannot place.
+    #[must_use]
+    pub fn zone_of(&self, indaddr: u32) -> u32 {
+        self.home_zone(indaddr >> 8)
+            .unwrap_or(u32::from(self.record.nzones) >> 1)
+    }
+
     /// Home zone of `frag_id` (the root fragment lives in the middle
     /// zone alongside the map).
     fn home_zone(&self, frag_id: u32) -> core::result::Result<u32, Fault> {
@@ -395,6 +505,7 @@ impl NewMap {
                 return Ok(Some(FragmentRun {
                     disc_byte: block * self.record.bytes_per_map_bit(),
                     len: (length - *map_offset) * self.record.bytes_per_map_bit(),
+                    into: *map_offset,
                 }));
             }
             *map_offset -= length;
@@ -416,6 +527,9 @@ impl NewMap {
     ///
     /// * The map broken if the fragment id is unknown, the
     ///   offset is past the object's allocation, or the map is corrupt.
+    /// * The directory broken for an address in the disc's own structures:
+    ///   the defects, or the map's fragment anywhere but from the root on,
+    ///   in the piece the root begins in.
     /// * The disc's failure.
     pub fn locate<D: Disc>(
         &self,
@@ -424,6 +538,9 @@ impl NewMap {
         byte_offset: u64,
     ) -> Result<(u64, u64), D> {
         let frag_id = indaddr >> 8;
+        if !Self::may_address_object(indaddr) {
+            return Err(NOT_AN_OBJECT.into());
+        }
         let total = self
             .record
             .share_base(indaddr)
@@ -432,6 +549,15 @@ impl NewMap {
         let bpmb = self.record.bytes_per_map_bit();
         let sub = total % bpmb;
         let run = self.lookup_run(disc, frag_id, total / bpmb)?;
+        if frag_id == FRAG_ROOT {
+            // The map, and on a disc with a boot block the boot area, share
+            // the root's fragment.
+            let root = self.record.share_base(self.record.root);
+            let piece = (total / bpmb - run.into) * bpmb;
+            if self.record.root >> 8 != FRAG_ROOT || total < root || piece > root {
+                return Err(NOT_AN_OBJECT.into());
+            }
+        }
         Ok((run.disc_byte + sub, run.len - sub))
     }
 
@@ -611,6 +737,7 @@ impl NewMap {
     /// # Errors
     ///
     /// * [`Fault::NoFragment`] if the map carries no such fragment.
+    /// * The directory broken for a fragment no object owns.
     /// * The map broken on map corruption.
     /// * The disc's failure.
     pub fn extend_object<D: Disc>(
@@ -619,6 +746,7 @@ impl NewMap {
         frag_id: u32,
         new_bytes: u64,
     ) -> Result<bool, D> {
+        own_fragment(frag_id)?;
         let needed_bits = self.record.allocation_bits(new_bytes);
         let nzones = u32::from(self.record.nzones);
         let home = self.home_zone(frag_id)?;
@@ -700,6 +828,7 @@ impl NewMap {
     /// # Errors
     ///
     /// * [`Fault::NoFragment`] if the map carries no such fragment.
+    /// * The directory broken for a fragment no object owns.
     /// * The map broken on map corruption.
     /// * The disc's failure.
     pub fn shrink_object<D: Disc>(
@@ -708,6 +837,7 @@ impl NewMap {
         frag_id: u32,
         new_bytes: u64,
     ) -> Result<(), D> {
+        own_fragment(frag_id)?;
         let needed = self.record.allocation_bits(new_bytes);
         let nzones = u32::from(self.record.nzones);
         let home = self.home_zone(frag_id)?;
@@ -851,30 +981,312 @@ impl NewMap {
         self.store_record(disc, boot_block, record)
     }
 
-    /// Whether the disc block `block` lies in a fragment: in the map, an
-    /// object or a defect rather than free space. `None` for a block past
-    /// the map's.
+    /// The id of the fragment holding map block `block`: `None` for free
+    /// space and for a block past the map's last zone.
     ///
     /// # Errors
     ///
-    /// The map broken, or the disc's failure.
-    pub fn allocated_at<D: Disc>(&self, disc: &mut D, block: u64) -> Result<Option<bool>, D> {
-        for zone in 0..u32::from(self.record.nzones) {
-            let (start_bit, end_bit, start_block) = self.zone_geometry(zone);
-            let covered = u64::from(end_bit - start_bit);
-            if block < start_block || block - start_block >= covered {
-                continue;
-            }
-            let bit = start_bit + u32::try_from(block - start_block).unwrap_or(u32::MAX);
-            let staged = self.load_zone(disc, zone)?;
-            let mut walker = self.walker(&staged);
-            while let Some(frag) = walker.next(&staged)? {
-                if bit >= frag.bit && bit <= frag.end {
-                    return Ok(Some(!frag.is_free));
-                }
+    /// The disc's failure, or the map broken.
+    pub fn id_at<D: Disc>(&self, disc: &mut D, block: u64) -> Result<Option<u32>, D> {
+        let Some((zone, bit)) = self.place(block) else {
+            return Ok(None);
+        };
+        let staged = self.load_zone(disc, zone)?;
+        let mut walker = self.walker(&staged);
+        while let Some(frag) = walker.next(&staged)? {
+            if bit <= frag.end {
+                return Ok((!frag.is_free).then_some(frag.id));
             }
         }
         Ok(None)
+    }
+
+    /// The zone describing map block `block`, and the bit there that does.
+    fn place(&self, block: u64) -> Option<(u32, u32)> {
+        (0..u32::from(self.record.nzones)).find_map(|zone| {
+            let (start_bit, end_bit, start_block) = self.zone_geometry(zone);
+            let into = block.checked_sub(start_block)?;
+            let into = u32::try_from(into)
+                .ok()
+                .filter(|&into| into < end_bit - start_bit)?;
+            Some((zone, start_bit + into))
+        })
+    }
+
+    /// Map blocks `[block, block + blocks)` out of use as a defect, as RISC
+    /// OS 5 maps one out of free space: widened to the least fragment,
+    /// forward where the free space runs on and backward where it ends,
+    /// unless it meets a defect, which it joins; and taking with it any
+    /// sliver of free space left either side too small to stand alone.
+    ///
+    /// # Errors
+    ///
+    /// The disc's failure, or the map broken.
+    pub fn map_out<D: Disc>(&self, disc: &mut D, block: u64, blocks: u64) -> Result<MappedOut, D> {
+        let Some((zone, bit)) = self.place(block) else {
+            return Ok(MappedOut::Already);
+        };
+        let mut staged = self.load_zone(disc, zone)?;
+        let mut walker = self.walker(&staged);
+        let mut before = None;
+        let mut holder = None;
+        while let Some(frag) = walker.next(&staged)? {
+            if bit <= frag.end {
+                holder = Some(frag);
+                break;
+            }
+            before = Some(frag);
+        }
+        let Some(free) = holder.filter(|frag| frag.is_free) else {
+            return Ok(match holder {
+                Some(frag) if frag.id != FRAG_BAD => MappedOut::InUse,
+                _ => MappedOut::Already,
+            });
+        };
+        let after = walker.next(&staged)?;
+        let is_defect = |frag: Option<Frag>| frag.is_some_and(|f| !f.is_free && f.id == FRAG_BAD);
+        let fewest = self.record.least_fragment_bits();
+        let stop = free.end + 1;
+        let span = u32::try_from(blocks).unwrap_or(u32::MAX).max(1);
+        let end = bit.saturating_add(span).min(stop);
+        let (mut lo, mut hi) = (bit, end);
+        let meets = (bit == free.bit && is_defect(before)) || (end == stop && is_defect(after));
+        if !meets {
+            // Whole sectors, as every allocation is.
+            let want = span.max(fewest).next_multiple_of(span);
+            if bit + want <= stop {
+                hi = bit + want;
+            } else {
+                lo = end.saturating_sub(want).max(free.bit);
+                hi = (lo + want).min(stop);
+            }
+        }
+        if lo > free.bit && lo - free.bit < fewest {
+            lo = free.bit;
+        }
+        if hi < stop && stop - hi < fewest {
+            hi = stop;
+        }
+        let first = match before {
+            Some(frag) if lo == free.bit && is_defect(before) => frag.bit,
+            _ => lo,
+        };
+        let last = match after {
+            Some(frag) if hi == stop && is_defect(after) => frag.end + 1,
+            _ => hi,
+        };
+        self.take_from(&mut staged, &free, lo..hi, first..last, FRAG_BAD);
+        self.store_zone(disc, zone, &mut staged)?;
+        Ok(MappedOut::Done)
+    }
+
+    /// `taken` of the free fragment `free` made part of a fragment of `id`
+    /// spanning `fragment`, which runs past `taken` only into neighbours it
+    /// joins; what is left of `free` either side stays on the free list.
+    fn take_from(
+        &self,
+        staged: &mut Zone,
+        free: &Frag,
+        taken: core::ops::Range<u32>,
+        fragment: core::ops::Range<u32>,
+        id: u32,
+    ) {
+        let link = staged.field(free.bit, self.link_bits());
+        let next_free = if link == 0 { 0 } else { free.bit + link };
+        let left = taken.start > free.bit;
+        let right = taken.end <= free.end;
+        self.write_allocated_fragment(staged, fragment.start, fragment.end - fragment.start, id);
+        match (left, right) {
+            (true, true) => {
+                self.write_free_fragment(staged, free.bit, taken.start - 1, taken.end);
+                self.write_free_fragment(staged, taken.end, free.end, next_free);
+            }
+            (true, false) => {
+                self.write_free_fragment(staged, free.bit, taken.start - 1, next_free);
+            }
+            (false, true) => {
+                self.write_free_fragment(staged, taken.end, free.end, next_free);
+                self.set_pred_link(staged, free.prev_free, taken.end);
+            }
+            (false, false) => self.set_pred_link(staged, free.prev_free, next_free),
+        }
+    }
+
+    /// Each zone's free space gathered together as RISC OS 5's `*Compact`
+    /// gathers it: whether anything moved. Only a fragment of one piece
+    /// moves, keeping its id, so no directory changes, and a directory never
+    /// moves down. Until a zone's free space is one run, `H` its lowest: the
+    /// topmost file between `H` and the last free run moves to `H`'s start
+    /// where it fits leaving no sliver; else the file just above `H` slides down into it where it
+    /// fits; else the fragment just above `H`, unless it is that topmost
+    /// file, moves to the end of the zone's last free run where it fits
+    /// there; else the zone is left. `directories` holds, ascending, every
+    /// fragment id a directory lies in.
+    ///
+    /// # Errors
+    ///
+    /// [`Fault::NoMemory`] where the host has no room to list the map's
+    /// fragments; the disc's failure, or the map broken.
+    pub fn compact<D: Disc>(&self, disc: &mut D, directories: &[u32]) -> Result<bool, D> {
+        let pieces = self.piece_counts(disc)?;
+        let kind = |frag: &Frag| {
+            let alone = pieces
+                .binary_search_by_key(&frag.id, |&(id, _)| id)
+                .is_ok_and(|at| pieces[at].1 == 1);
+            (!frag.is_free && frag.id > FRAG_ROOT && alone).then(|| {
+                if directories.binary_search(&frag.id).is_ok() {
+                    Moves::Up
+                } else {
+                    Moves::Anywhere
+                }
+            })
+        };
+        let mut frags = Vec::new();
+        let mut moved = false;
+        for zone in 0..u32::from(self.record.nzones) {
+            loop {
+                let staged = self.load_zone(disc, zone)?;
+                frags.clear();
+                let mut walker = self.walker(&staged);
+                while let Some(frag) = walker.next(&staged)? {
+                    frags.try_reserve(1).map_err(|_| Fault::NoMemory)?;
+                    frags.push(frag);
+                }
+                let Some((piece, to)) = self.compaction_move(&frags, &kind) else {
+                    break;
+                };
+                self.relocate(disc, zone, staged, &piece, to)?;
+                moved = true;
+            }
+        }
+        Ok(moved)
+    }
+
+    /// The next move [`Self::compact`] makes in a zone of `frags`, in bit
+    /// order: the fragment and the bit it moves to; none once the zone's
+    /// free space is one run or nothing can move.
+    fn compaction_move(
+        &self,
+        frags: &[Frag],
+        kind: &impl Fn(&Frag) -> Option<Moves>,
+    ) -> Option<(Frag, u32)> {
+        let lowest = frags.iter().position(|frag| frag.is_free)?;
+        let hole = frags[lowest];
+        let last = *frags.iter().rev().find(|frag| frag.is_free)?;
+        if last.bit == hole.bit {
+            return None;
+        }
+        let size = |frag: &Frag| frag.end + 1 - frag.bit;
+        let fewest = self.record.least_fragment_bits();
+        let leaves = |room: u32, taking: u32, joins: bool| {
+            taking <= room && (room == taking || room - taking >= fewest || joins)
+        };
+        // A file moved past the last free run has been moved for good.
+        let topmost = frags[lowest + 1..]
+            .iter()
+            .rev()
+            .find(|frag| frag.bit < last.bit && kind(frag) == Some(Moves::Anywhere))
+            .copied();
+        if let Some(top) = topmost {
+            if leaves(size(&hole), size(&top), top.bit == hole.end + 1) {
+                return Some((top, hole.bit));
+            }
+        }
+        let next = *frags.get(lowest + 1)?;
+        match kind(&next) {
+            Some(Moves::Anywhere) if size(&next) <= size(&hole) => Some((next, hole.bit)),
+            Some(_)
+                if topmost.is_none_or(|top| top.bit != next.bit)
+                    && leaves(size(&last), size(&next), next.end + 1 == last.bit) =>
+            {
+                Some((next, last.end + 1 - size(&next)))
+            }
+            _ => None,
+        }
+    }
+
+    /// The one-piece fragment `piece` of zone `zone`, staged as `staged`,
+    /// moved to start at bit `to` of free space: its bytes copied, then the
+    /// map rewritten, its id kept.
+    fn relocate<D: Disc>(
+        &self,
+        disc: &mut D,
+        zone: u32,
+        mut staged: Zone,
+        piece: &Frag,
+        to: u32,
+    ) -> Result<(), D> {
+        let bpmb = self.record.bytes_per_map_bit();
+        let bits = piece.end + 1 - piece.bit;
+        let byte = |bit: u32| (staged.start_block + u64::from(bit - staged.start_bit)) * bpmb;
+        copy_bytes(disc, byte(piece.bit), byte(to), u64::from(bits) * bpmb)?;
+        self.free_one(&mut staged, piece)?;
+        let mut walker = self.walker(&staged);
+        let free = loop {
+            match walker.next(&staged)? {
+                Some(frag) if frag.is_free && to >= frag.bit && to + bits <= frag.end + 1 => {
+                    break frag;
+                }
+                Some(_) => {}
+                None => return Err(BROKEN.into()),
+            }
+        };
+        self.take_from(&mut staged, &free, to..to + bits, to..to + bits, piece.id);
+        self.store_zone(disc, zone, &mut staged)
+    }
+
+    /// Each fragment id the map holds, ascending, with how many pieces it
+    /// has.
+    fn piece_counts<D: Disc>(&self, disc: &mut D) -> Result<Vec<(u32, u32)>, D> {
+        let mut ids = Vec::new();
+        for zone in 0..u32::from(self.record.nzones) {
+            let staged = self.load_zone(disc, zone)?;
+            let mut walker = self.walker(&staged);
+            while let Some(frag) = walker.next(&staged)? {
+                if !frag.is_free {
+                    ids.try_reserve(1).map_err(|_| Fault::NoMemory)?;
+                    ids.push(frag.id);
+                }
+            }
+        }
+        ids.sort_unstable();
+        let mut counts: Vec<(u32, u32)> = Vec::new();
+        for id in ids {
+            match counts.last_mut() {
+                Some((held, pieces)) if *held == id => *pieces += 1,
+                _ => {
+                    counts.try_reserve(1).map_err(|_| Fault::NoMemory)?;
+                    counts.push((id, 1));
+                }
+            }
+        }
+        Ok(counts)
+    }
+
+    /// Each defect the map holds, as its first map block and how many it
+    /// spans, in disc order, until `visit` declines another.
+    ///
+    /// # Errors
+    ///
+    /// The disc's failure, or the map broken.
+    pub fn defects<D: Disc>(
+        &self,
+        disc: &mut D,
+        mut visit: impl FnMut(u64, u64) -> bool,
+    ) -> Result<(), D> {
+        for zone in 0..u32::from(self.record.nzones) {
+            let staged = self.load_zone(disc, zone)?;
+            let mut walker = self.walker(&staged);
+            while let Some(frag) = walker.next(&staged)? {
+                if !frag.is_free && frag.id == FRAG_BAD {
+                    let block = staged.start_block + u64::from(frag.bit - staged.start_bit);
+                    if !visit(block, u64::from(frag.end + 1 - frag.bit)) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Rewrite the disc record's disc name, as [`Self::set_root_size`]
@@ -959,9 +1371,9 @@ impl NewMap {
         Ok(None)
     }
 
-    /// Allocate a fresh object of `bytes`, fragmenting across zones
-    /// where no single free fragment is large enough, and return its
-    /// indirect disc address (share offset 0).
+    /// Allocate a fresh object of `bytes`, from zone `home` on, fragmenting
+    /// across zones where no single free fragment is large enough, and
+    /// return its indirect disc address (share offset 0).
     ///
     /// # Errors
     ///
@@ -969,10 +1381,10 @@ impl NewMap {
     ///   if it has no free fragment id.
     /// * The disc's failure, or the map broken, from
     ///   the underlying zone access.
-    pub fn allocate_object<D: Disc>(&self, disc: &mut D, bytes: u64) -> Result<u32, D> {
+    pub fn allocate_object<D: Disc>(&self, disc: &mut D, bytes: u64, home: u32) -> Result<u32, D> {
         let need = self.record.allocation_bits(bytes);
         let nzones = u32::from(self.record.nzones);
-        for zone in 0..nzones {
+        for zone in (0..nzones).map(|i| (home + i) % nzones) {
             let Some(frag_id) = self.unused_id_in_zone(disc, zone)? else {
                 continue;
             };
@@ -1000,9 +1412,11 @@ impl NewMap {
     /// # Errors
     ///
     /// * [`Fault::NoFragment`] if the map carries no such fragment.
+    /// * The directory broken for a fragment no object owns.
     /// * The map broken on map corruption.
     /// * The disc's failure.
     pub fn free_object<D: Disc>(&self, disc: &mut D, frag_id: u32) -> Result<(), D> {
+        own_fragment(frag_id)?;
         let mut freed_any = false;
         for zone in 0..u32::from(self.record.nzones) {
             // Convert one fragment per pass; rescan until none remain.
@@ -1076,18 +1490,17 @@ impl NewMap {
     }
 
     /// Zone-stream geometry for `zone`: where its stream starts and ends in
-    /// the sector, and the first disc block it describes.
+    /// the sector, and the first disc block it describes. The last zone's
+    /// stream runs on past the disc, through the defect that covers what
+    /// lies beyond it, which the defect at the disc's end may join.
     fn zone_geometry(&self, zone: u32) -> (u32, u32, u64) {
         let start_bit = zone_start_bit(zone);
-        let start_block = self.record.zone_start_block(zone);
-        let mut stream = self.record.zone_stream_bits(zone);
-        // The last zone covers only what remains of the disc.
-        if zone == u32::from(self.record.nzones) - 1 {
-            let remaining =
-                (self.record.disc_size >> self.record.log2bpmb).saturating_sub(start_block);
-            stream = u32::try_from(remaining).map_or(stream, |remaining| remaining.min(stream));
-        }
-        (start_bit, start_bit + stream, start_block)
+        let stream = self.record.zone_stream_bits(zone);
+        (
+            start_bit,
+            start_bit + stream,
+            self.record.zone_start_block(zone),
+        )
     }
 
     /// Load and verify zone `zone` of the copy the engine reads.

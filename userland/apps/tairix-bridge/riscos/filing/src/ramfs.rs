@@ -228,7 +228,7 @@ fn format(os: &mut Os<'_>, size: u32) -> Result<(), Fail> {
         os,
         capacity: u64::from(size),
     };
-    match lay_out(&mut disc, record, BootRecord::Blank) {
+    match lay_out(&mut disc, record, BootRecord::Blank, b"$") {
         Ok(_) => Ok(()),
         Err(tairix_filecore::Error::Disc(failure)) => Err(failure),
         Err(_) => Err(fail(disc.os, EMPTY)),

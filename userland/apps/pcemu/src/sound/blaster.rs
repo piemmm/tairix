@@ -20,7 +20,7 @@
 //! them, and the ROM checksum and RAM test report a passing card.
 
 use super::{Mixer, Source};
-use crate::chips::dma::{Dma, DmaMemory};
+use crate::chips::dma::{Cycle, Dma, DmaMemory};
 use crate::time::{Hertz, Nanos};
 use alloc::collections::VecDeque;
 
@@ -158,16 +158,6 @@ enum Identifying {
     /// to read it.
     #[default]
     Sent,
-}
-
-/// The way the transfer under way moves its bytes, so the way the controller
-/// answers a request.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Way {
-    /// Memory to the input latch.
-    In,
-    /// The output latch to memory.
-    Out,
 }
 
 /// The speaker's ramp in progress.
@@ -476,40 +466,22 @@ impl Dsp {
     }
 
     /// The controller's acknowledge of the request latch, once DMA is
-    /// enabled and the channel answers, in the way the transfer under way
-    /// moves: memory's next byte into the input latch, or the output latch's
-    /// byte to memory.
+    /// enabled and the channel answers, in the way its mode register moves
+    /// the byte: memory's into the input latch, the output latch's to
+    /// memory, or with verify neither.
     fn serve<M: DmaMemory>(&mut self, t: Nanos, dma: &mut Dma, memory: &mut M) {
         if !self.drq || !self.dma_enabled {
             return;
         }
-        match self.way() {
-            Some(Way::In) => {
-                let mut byte = [0u8; 1];
-                if dma.from_memory(DMA_CHANNEL, memory, &mut byte).bytes == 1 {
-                    self.drq = false;
-                    self.latch_in(byte[0], t);
-                }
-            }
-            Some(Way::Out) => {
-                let byte = self.out.front().copied().unwrap_or(self.register);
-                if dma.to_memory(DMA_CHANNEL, memory, &[byte]).bytes == 1 {
-                    self.drq = false;
-                    self.read_out();
-                }
-            }
-            None => {}
-        }
-    }
-
-    fn way(&self) -> Option<Way> {
-        if self.identifying.is_some() {
-            return Some(Way::Out);
-        }
-        match self.stream {
-            Stream::Pcm { input: true, .. } => Some(Way::Out),
-            Stream::Pcm { input: false, .. } | Stream::Adpcm(_) => Some(Way::In),
-            Stream::Idle | Stream::Silence | Stream::Tone | Stream::RamPlayback => None,
+        let driven = self.out.front().copied().unwrap_or(self.register);
+        let Some(served) = dma.serve(DMA_CHANNEL, memory, driven) else {
+            return;
+        };
+        self.drq = false;
+        match served.cycle {
+            Cycle::Read(byte) => self.latch_in(byte, t),
+            Cycle::Write => self.read_out(),
+            Cycle::Verify => {}
         }
     }
 

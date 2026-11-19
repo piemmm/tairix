@@ -1,7 +1,11 @@
 //! FileCore's SWIs: an instance made for a client, and each of a client's
 //! discs reached through it, by the private word `FileCore_Create` answered.
 
-use tairix_filecore::format::{format_volume, lay_out, BootRecord, Variant};
+use alloc::vec::Vec;
+
+use tairix_filecore::defect::FIRST_END;
+use tairix_filecore::format::{lay_out, BootRecord};
+use tairix_filecore::newmap::{MappedOut, NewMap};
 use tairix_filecore::record::{DiscRecord, DISC_RECORD_SIZE, LOG2SECSIZE, NAME_LEN};
 use tairix_filecore::volume::Backing;
 use tairix_filecore::Disc;
@@ -10,10 +14,9 @@ use tairix_riscos_kernel::swi::os::MODULE;
 use tairix_riscos_kernel::swi::X;
 
 use super::disc::{enter_client, op, with_volume};
-use super::names;
 use super::{
-    capped, code, described_at, fail, handed, record_at, space_of, split64, with, Client, DRIVES,
-    FIRST_HARD_DISC, RECORD_ROOM,
+    capped, code, described_at, fail, handed, names, record_at, space_of, split64, structure, with,
+    Client, DRIVES, FIRST_HARD_DISC, RECORD_ROOM,
 };
 
 /// Its SWIs, by their offset in its chunk.
@@ -51,6 +54,7 @@ pub(super) fn swi(os: &mut Os<'_>, offset: u32, regs: &mut Regs) -> Result<(), F
         offset::DISCARD_READ_SECTORS_CACHE => Ok(()),
         offset::FLOPPY_STRUCTURE => floppy_structure(os, regs),
         offset::DISC_FORMAT => disc_format(os, regs),
+        offset::LAYOUT_STRUCTURE => layout_structure(os, regs),
         _ => {
             let (workspace, client) = instance_of(os, regs.r[8])?;
             match offset {
@@ -66,7 +70,6 @@ pub(super) fn swi(os: &mut Os<'_>, offset: u32, regs: &mut Regs) -> Result<(), F
                     free_space(os, workspace, regs, offset == offset::FREE_SPACE_64)
                 }
                 offset::DESCRIBE_DISC => describe_disc(os, workspace, regs),
-                offset::LAYOUT_STRUCTURE => layout_structure(os, &client, regs),
                 offset::MISC_OP => misc_op(os, workspace, &client, regs),
                 offset::DISC_OP_64 => disc_op_64(os, workspace, &client, regs),
                 _ => Err(fail(os, Some(&client), code::BAD_PARMS)),
@@ -336,168 +339,223 @@ fn record_read(os: &mut Os<'_>, at: u32) -> Result<DiscRecord, Fail> {
 }
 
 /// `FileCore_FloppyStructure`: the start of the floppy whose record is at
-/// R1 — its map and root directory, laid out as on the disc — in R0's
-/// buffer; R2's bit 6 an old map, bit 7 old directories too; R3 how much of
-/// the buffer they fill. A floppy whose map lies in its middle, past the
-/// buffer's reach — the F class — is refused.
+/// R1, laid out in R0's buffer as [`structure`] lays it, the defects listed
+/// at R3 mapped out of a new map; R3 how much of the buffer it fills.
 fn floppy_structure(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let record = record_read(os, regs.r[1])?;
-    let old_map = regs.r[2] & 1 << 6 != 0;
-    let old_directories = regs.r[2] & 1 << 7 != 0;
-    let variant = match (old_map, old_directories) {
-        (true, true) => match record.disc_size {
-            0x2_8000 => Some(Variant::S),
-            0x5_0000 => Some(Variant::M),
-            _ => Some(Variant::L),
-        },
-        (true, false) => Some(Variant::D),
-        (false, _) if record.nzones == 1 => None,
-        (false, _) => return Err(fail(os, None, code::BAD_PARMS)),
+    let defects = defect_list(os, regs.r[3])?;
+    let [low, high, ..] = os.real_time().to_le_bytes();
+    let laid = match structure::floppy(
+        &record,
+        regs.r[2],
+        &defects,
+        u16::from_le_bytes([low, high]),
+    ) {
+        Ok(laid) => laid,
+        Err(tairix_filecore::Fault::NoMemory) => return Err(os.no_memory()),
+        Err(_) => return Err(fail(os, None, code::BAD_PARMS)),
     };
-    let capacity = variant
-        .and_then(Variant::fixed_size)
-        .unwrap_or(record.disc_size);
-    let mut buffer = GuestDisc {
-        os,
-        base: regs.r[0],
-        reach: u64::from(STRUCTURE_REACH),
-        capacity,
-        end: 0,
-    };
-    let laid = match variant {
-        Some(variant) => format_volume(&mut buffer, variant).map(|()| buffer.end),
-        None => lay_out(&mut buffer, record, BootRecord::Whole).map(|_| buffer.end),
-    };
-    let os = buffer.os;
-    match laid {
-        Ok(end) => {
-            regs.r[3] = u32::try_from(end).unwrap_or(STRUCTURE_REACH);
-            Ok(())
-        }
-        Err(tairix_filecore::Error::Disc(fail)) => Err(fail),
-        Err(_) => Err(fail(os, None, code::BAD_PARMS)),
+    for (at, bytes) in laid.image.written_runs() {
+        os.write_bytes(regs.r[0].wrapping_add(len32(at)), bytes)?;
     }
+    if let Some(at) = laid.cleared {
+        let at = regs.r[0].wrapping_add(at);
+        let byte = os.read_byte(at)?;
+        os.write_byte(at, byte & !(1 << 1))?;
+    }
+    regs.r[3] = laid.size;
+    if laid.refused {
+        return Err(fail(os, None, code::DEFECT));
+    }
+    Ok(())
 }
 
-/// The buffer `FileCore_FloppyStructure` lays a floppy's start out in.
-const STRUCTURE_REACH: u32 = 4096;
+/// The defects listed at `at`, up to the first list's end; none at a list
+/// of none.
+fn defect_list(os: &mut Os<'_>, at: u32) -> Result<Vec<u32>, Fail> {
+    let mut defects = Vec::new();
+    for n in 0..DEFECTS_READ {
+        let word = os.read_word(at.wrapping_add(4 * n))?;
+        if word >= FIRST_END {
+            break;
+        }
+        if defects.try_reserve(1).is_err() {
+            return Err(os.no_memory());
+        }
+        defects.push(word);
+    }
+    Ok(defects)
+}
 
-/// `FileCore_DiscFormat`: R0's block filled with format R3's ideal geometry
-/// — the L, D, E or F floppy — then handed to the vetting SWI R1 with R2 in
-/// its R1, which may change it.
+/// The most defects a structure's list is read for: more than any boot
+/// block holds.
+const DEFECTS_READ: u32 = 1024;
+
+/// A floppy's track layout as `FileCore_DiscFormat` describes it, before the
+/// controller's vetting adjusts it.
+struct TrackLayout {
+    sector: u32,
+    /// The first gap on each side.
+    gap1: [u32; 2],
+    gap3: u32,
+    per_track: u8,
+    density: u8,
+    options: u8,
+    side_skew: u8,
+    track_skew: u8,
+}
+
+/// Every format R3 may name, as RISC OS 5 lays each out: L, D, E, F and the
+/// 20-sector octal-density format.
+fn track_layout(format: u32) -> Option<TrackLayout> {
+    let double = TrackLayout {
+        sector: 1024,
+        gap1: [303, 32],
+        gap3: 90,
+        per_track: 5,
+        density: 2,
+        options: 0,
+        side_skew: 0,
+        track_skew: 0,
+    };
+    Some(match format {
+        0x80 => TrackLayout {
+            sector: 256,
+            gap1: [42, 42],
+            gap3: 57,
+            per_track: 16,
+            options: 3 << 2,
+            ..double
+        },
+        0x81 | 0x82 => double,
+        0x83 => TrackLayout {
+            gap1: [50, 50],
+            per_track: 10,
+            density: 4,
+            side_skew: 1,
+            track_skew: 3,
+            ..double
+        },
+        0x84 => TrackLayout {
+            gap1: [50, 50],
+            per_track: 20,
+            density: 8,
+            side_skew: 1,
+            track_skew: 5,
+            ..double
+        },
+        _ => return None,
+    })
+}
+
+/// The byte a floppy format fills its sectors with.
+const SECTOR_FILL: u8 = 0xA5;
+/// The tracks a floppy format formats: eighty on each side.
+const FORMAT_TRACKS: u32 = 160;
+
+/// `FileCore_DiscFormat`: R0's block filled with format R3's layout, then
+/// handed to the vetting SWI R1 with R2 in its R1, which may change it.
 fn disc_format(os: &mut Os<'_>, regs: &Regs) -> Result<(), Fail> {
-    let (sector, per_track, density): (u32, u8, u8) = match regs.r[3] {
-        0x80 => (256, 16, 2),
-        0x81 | 0x82 => (1024, 5, 2),
-        0x83 => (1024, 10, 4),
-        _ => return Err(fail(os, None, code::BAD_PARMS)),
+    let Some(layout) = track_layout(regs.r[3]) else {
+        return Err(fail(os, None, code::BAD_PARMS));
     };
     let block = regs.r[0];
     os.fill(block, 64, 0)?;
-    os.write_word(block, sector)?;
-    os.write_byte(block + 16, per_track)?;
-    os.write_byte(block + 17, density)?;
-    // Both sides, sequenced by side as ADFS lays its floppies out.
-    os.write_byte(block + 18, 3 << 2)?;
-    os.write_byte(block + 23, 0xE5)?;
-    os.write_word(block + 24, 80)?;
+    os.write_word(block, layout.sector)?;
+    os.write_word(block + 4, layout.gap1[0])?;
+    os.write_word(block + 8, layout.gap1[1])?;
+    os.write_word(block + 12, layout.gap3)?;
+    os.write_byte(block + 16, layout.per_track)?;
+    os.write_byte(block + 17, layout.density)?;
+    os.write_byte(block + 18, layout.options)?;
+    os.write_byte(block + 21, layout.side_skew)?;
+    os.write_byte(block + 22, layout.track_skew)?;
+    os.write_byte(block + 23, SECTOR_FILL)?;
+    os.write_word(block + 24, FORMAT_TRACKS)?;
     let mut vet = Regs::default();
     vet.r[0] = block;
     vet.r[1] = regs.r[2];
     os.perform(X | regs.r[1], &mut vet)
 }
 
-/// `FileCore_LayoutStructure`: the empty disc the record at R0 describes,
-/// named R2, laid out in the image file open on R3.
-fn layout_structure(os: &mut Os<'_>, client: &Client, regs: &Regs) -> Result<(), Fail> {
+/// `FileCore_LayoutStructure`: the empty new-map disc the record at R0
+/// describes, named R2, laid out in the image file open on R3 with no boot
+/// block, its fixed root named and titled after the disc, and the defects
+/// listed at R1 mapped out. RISC OS 5 lays out no fragment in zone 0, which
+/// leaves no disc FileCore could mount, and lays an old-map record out as a
+/// malformed new map; zone 0 is laid out here, and an old-map record refused,
+/// as is a disc past what an image file's 32-bit offsets reach.
+fn layout_structure(os: &mut Os<'_>, regs: &Regs) -> Result<(), Fail> {
     let mut record = record_read(os, regs.r[0])?;
+    if record.nzones == 0 || record.disc_size > IMAGE_REACH {
+        return Err(fail(os, None, code::BAD_PARMS));
+    }
     let (name, _) = os.read_until(regs.r[2], NAME_LEN + 1, |b| b <= b' ')?;
+    let name = &name[..name.len().min(NAME_LEN)];
     let mut padded = [b' '; NAME_LEN];
-    padded[..name.len().min(NAME_LEN)].copy_from_slice(&name[..name.len().min(NAME_LEN)]);
+    padded[..name.len()].copy_from_slice(name);
     record.disc_name = padded;
+    let defects = defect_list(os, regs.r[1])?;
+    let root_name: &[u8] = if record.format_version == 0 {
+        name
+    } else {
+        b"$"
+    };
+    let buffer = os.rma_claim(TRANSFER)?;
     let mut image = ImageDisc {
         os,
         handle: regs.r[3],
         capacity: record.disc_size,
+        buffer,
     };
-    let laid = lay_out(&mut image, record, BootRecord::Whole);
+    let laid = lay_out(&mut image, record, BootRecord::Omitted, root_name)
+        .and_then(|record| map_out_all(&mut image, record, &defects));
     let os = image.os;
+    os.rma_free(buffer)?;
     match laid {
-        Ok(_) => Ok(()),
-        Err(error) => Err(super::refused(os, client, error)),
+        Ok(()) => Ok(()),
+        Err(error) => Err(super::refused(os, None, error)),
     }
 }
 
-/// The first `reach` bytes of a disc of `capacity` bytes, held in the
-/// guest's memory from `base`: what is written past them is refused, what is
-/// read there is zero. How far the writes went is `end`.
-struct GuestDisc<'o, 'w> {
-    os: &'o mut Os<'w>,
-    base: u32,
-    reach: u64,
-    capacity: u64,
-    end: u64,
-}
-
-impl GuestDisc<'_, '_> {
-    /// `length` bytes at `at`, inside the reach.
-    fn within(&mut self, at: u64, length: u64) -> Result<u32, Fail> {
-        match at.checked_add(length).filter(|&end| end <= self.reach) {
-            Some(end) => {
-                self.end = self.end.max(end);
-                Ok(self
-                    .base
-                    .wrapping_add(u32::try_from(at).unwrap_or(u32::MAX)))
-            }
-            None => Err(self.os.error(tairix_riscos_kernel::error::BAD_PARAMETERS)),
+/// Each of `defects` mapped out of the fresh disc `record` describes.
+fn map_out_all(
+    image: &mut ImageDisc<'_, '_>,
+    record: DiscRecord,
+    defects: &[u32],
+) -> Result<(), tairix_filecore::Error<Fail>> {
+    let map = NewMap::open(image, record)?;
+    let sector = record.sector_size();
+    let bpmb = record.bytes_per_map_bit();
+    for &defect in defects {
+        let start = u64::from(defect) - u64::from(defect) % sector;
+        if start >= record.disc_size {
+            continue;
+        }
+        if map.map_out(image, start / bpmb, sector.div_ceil(bpmb))? == MappedOut::InUse {
+            return Err(tairix_filecore::Fault::DefectInUse.into());
         }
     }
+    Ok(())
 }
 
-impl Disc for GuestDisc<'_, '_> {
-    type Error = Fail;
-
-    fn capacity(&self) -> u64 {
-        self.capacity
-    }
-
-    fn read(&mut self, at: u64, out: &mut [u8]) -> Result<(), Fail> {
-        if at >= self.reach {
-            out.fill(0);
-            return Ok(());
-        }
-        let end = self.end;
-        let from = self.within(at, out.len() as u64)?;
-        self.end = end;
-        self.os.read_bytes(from, out)
-    }
-
-    fn write(&mut self, at: u64, bytes: &[u8]) -> Result<(), Fail> {
-        let to = self.within(at, bytes.len() as u64)?;
-        self.os.write_bytes(to, bytes)
-    }
-
-    fn zero(&mut self, at: u64, length: u64) -> Result<(), Fail> {
-        let to = self.within(at, length)?;
-        self.os
-            .fill(to, u32::try_from(length).unwrap_or(u32::MAX), 0)
-    }
-
-    fn flush(&mut self) -> Result<(), Fail> {
-        Ok(())
-    }
-}
-
-/// An image file open on `handle` as a disc, through `OS_GBPB`.
+/// An image file open on `handle` as a disc, through `OS_GBPB` and the
+/// transfer buffer `buffer`, [`TRANSFER`] bytes of the RMA.
 struct ImageDisc<'o, 'w> {
     os: &'o mut Os<'w>,
     handle: u32,
     capacity: u64,
+    buffer: u32,
 }
 
+/// The most of an image moved through its buffer at once.
+const TRANSFER: u32 = 1024;
+
+/// The bytes an image file's offsets reach.
+const IMAGE_REACH: u64 = 1 << 32;
+
 impl ImageDisc<'_, '_> {
-    /// `length` bytes moved at `at` through the instance-free scratch below
-    /// the supervisor stack, a piece at a time.
+    /// `length` bytes moved at `at`, a buffer's worth at a time.
     fn gbpb(
         &mut self,
         reason: u32,
@@ -505,24 +563,20 @@ impl ImageDisc<'_, '_> {
         length: usize,
         mut piece: impl FnMut(&mut Os<'_>, u32, usize, usize) -> Result<(), Fail>,
     ) -> Result<(), Fail> {
-        const PIECE: usize = 1024;
-        let handle = self.handle;
         let mut done = 0;
         while done < length {
-            let take = (length - done).min(PIECE);
+            let take = (length - done).min(TRANSFER as usize);
             let offset = u32::try_from(at + done as u64).unwrap_or(u32::MAX);
-            self.os.below_supervisor_stack(len32(PIECE), |os, frame| {
-                if reason == 1 {
-                    piece(os, frame, done, take)?;
-                }
-                let mut regs = Regs::default();
-                regs.r[..5].copy_from_slice(&[reason, handle, frame, len32(take), offset]);
-                os.perform(X | tairix_riscos_kernel::swi::os::GBPB, &mut regs)?;
-                if reason == 3 {
-                    piece(os, frame, done, take)?;
-                }
-                Ok(())
-            })?;
+            if reason == 1 {
+                piece(self.os, self.buffer, done, take)?;
+            }
+            let mut regs = Regs::default();
+            regs.r[..5].copy_from_slice(&[reason, self.handle, self.buffer, len32(take), offset]);
+            self.os
+                .perform(X | tairix_riscos_kernel::swi::os::GBPB, &mut regs)?;
+            if reason == 3 {
+                piece(self.os, self.buffer, done, take)?;
+            }
             done += take;
         }
         Ok(())

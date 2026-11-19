@@ -221,6 +221,8 @@ pub mod os {
         pub const BOUNDED: u32 = 1 << 29;
         /// The base a reading with flags is most often in.
         pub const DECIMAL: u32 = 10;
+        /// The base a disc address is given in.
+        pub const HEXADECIMAL: u32 = 16;
     }
 
     /// `OS_Find`'s reason: its kind, the flags that refuse a directory and

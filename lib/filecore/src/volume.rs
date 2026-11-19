@@ -10,13 +10,17 @@
 use alloc::vec::Vec;
 use core::cmp::Ordering;
 
+use tairix_collections::OrderedSet;
 use tairix_fsmeta::preset::acorn;
 
 use crate::bigdir::{self, BigDir, BigHeader, DirStore};
-use crate::dir::{self, FixedDir, FixedFormat, Object};
-use crate::newmap::NewMap;
+use crate::defect::{Defects, FIRST_END};
+use crate::dir::{self, FixedDir, FixedFormat, NameEnd, Object};
+use crate::newmap::{MappedOut, NewMap};
 use crate::oldmap::OldMap;
-use crate::record::{NAME_LEN, OLD_SECTOR_SIZE};
+use crate::record::{
+    BOOT_BLOCK_OFFSET, BOOT_BLOCK_SIZE, FRAG_BAD, NAME_LEN, OLD_SECTOR_SIZE, OLD_SECTOR_SIZE_U32,
+};
 use crate::{Disc, Error, Fault, Result, Structure};
 
 /// A disc's objects and directories.
@@ -40,6 +44,63 @@ pub struct Mount {
     changes: u64,
     stranded: bool,
     moved_on: bool,
+}
+
+/// What holds a byte of a disc.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Holder {
+    /// Free space, or nothing: past the disc.
+    Free,
+    /// Space mapped out as defective.
+    Defect,
+    /// The new-map fragment of this id.
+    Fragment(u32),
+    /// This old-map sector, which the map does not hold free.
+    Sector(u32),
+}
+
+impl Holder {
+    /// Whether `object` lies in what this holds: its fragment, or the run of
+    /// sectors an old map gives it.
+    #[must_use]
+    pub fn holds(self, object: &Object) -> bool {
+        match self {
+            Self::Free | Self::Defect => false,
+            Self::Fragment(id) => object.indaddr >> 8 == id,
+            Self::Sector(sector) => sector
+                .checked_sub(object.indaddr)
+                .is_some_and(|into| into < object.size.div_ceil(OLD_SECTOR_SIZE_U32)),
+        }
+    }
+}
+
+/// One defect a disc records.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Defect {
+    /// The defective sector's byte address.
+    pub address: u64,
+    /// Where the disc records it.
+    pub recorded: Recorded,
+}
+
+/// Where a disc records a defect.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Recorded {
+    /// The boot block's first list, which counts in bytes.
+    First,
+    /// A big disc's second list, which counts in sectors.
+    Second,
+    /// The map alone: a disc with no boot block records its defects there.
+    Map,
+}
+
+/// The defect lists `disc`'s boot block opens with, a second list read where
+/// the disc is `big`.
+fn boot_defects<D: Disc>(disc: &mut D, big: bool) -> Result<Defects, D> {
+    let mut block = [0u8; BOOT_BLOCK_SIZE];
+    disc.read(BOOT_BLOCK_OFFSET, &mut block)
+        .map_err(Error::Disc)?;
+    Ok(Defects::read(&block, big)?)
 }
 
 /// Free and total space, in the units its map counts.
@@ -273,24 +334,139 @@ impl<D: Disc> Volume<D> {
         }
     }
 
-    /// Whether the byte `offset` into the disc is allocated — to the disc's
-    /// own structures, an object or a defect — rather than free; `false`
-    /// past the disc.
+    /// Each defect the disc records, in its order, until `visit` declines
+    /// another: its boot block's lists where it has one, else each sector of
+    /// its map's defects. An old map records none.
+    ///
+    /// # Errors
+    ///
+    /// The defect lists or the map broken, or the disc's failure.
+    pub fn defects(&mut self, mut visit: impl FnMut(Defect) -> bool) -> Result<(), D> {
+        let Backing::New { map, boot_block } = &self.backing else {
+            return Ok(());
+        };
+        let sector = map.record.sector_size();
+        if *boot_block {
+            let lists = boot_defects(&mut self.disc, map.record.big_flag)?;
+            let first = lists.first().iter().map(|&address| Defect {
+                address: u64::from(address),
+                recorded: Recorded::First,
+            });
+            let second = lists.second().iter().map(|&number| Defect {
+                address: u64::from(number) * sector,
+                recorded: Recorded::Second,
+            });
+            for defect in first.chain(second) {
+                if !visit(defect) {
+                    break;
+                }
+            }
+            return Ok(());
+        }
+        let bpmb = map.record.bytes_per_map_bit();
+        map.defects(&mut self.disc, |block, blocks| {
+            let end = (block + blocks) * bpmb;
+            let mut address = block * bpmb;
+            while address < end {
+                if !visit(Defect {
+                    address,
+                    recorded: Recorded::Map,
+                }) {
+                    return false;
+                }
+                address += sector;
+            }
+            true
+        })
+    }
+
+    /// The sector holding byte `address` recorded as a defect, as RISC OS 5
+    /// records one: in the boot block's first list, where the disc has one,
+    /// and mapped out of the free space it lies in, unless it lies past the
+    /// disc, where it is only listed. Nothing changes for a sector recorded
+    /// already, nor for a refusal.
+    ///
+    /// # Errors
+    ///
+    /// * [`Fault::BadDefect`] for a sector past the first list's reach, or on
+    ///   an old map.
+    /// * [`Fault::DefectInUse`] where an object or the disc's own
+    ///   structures hold the sector.
+    /// * [`Fault::TooManyDefects`] where the lists are full.
+    /// * The defect lists or the map broken, or the disc's failure.
+    pub fn add_defect(&mut self, address: u64) -> Result<(), D> {
+        let Backing::New { map, boot_block } = &self.backing else {
+            return Err(Fault::BadDefect.into());
+        };
+        let sector = map.record.sector_size();
+        let start = address - address % sector;
+        let listed = u32::try_from(start)
+            .ok()
+            .filter(|&start| start < FIRST_END)
+            .ok_or(Fault::BadDefect)?;
+        let mut lists = if *boot_block {
+            let mut lists = boot_defects(&mut self.disc, map.record.big_flag)?;
+            if !lists.insert(listed)? {
+                return Ok(());
+            }
+            Some(lists)
+        } else {
+            None
+        };
+        if start < map.record.disc_size {
+            let bpmb = map.record.bytes_per_map_bit();
+            match map.map_out(&mut self.disc, start / bpmb, sector.div_ceil(bpmb))? {
+                MappedOut::InUse => return Err(Fault::DefectInUse.into()),
+                MappedOut::Already => {}
+                MappedOut::Done => self.map_changing()?,
+            }
+        }
+        if let Some(lists) = lists.as_mut() {
+            self.map_changing()?;
+            let mut block = [0u8; BOOT_BLOCK_SIZE];
+            self.disc
+                .read(BOOT_BLOCK_OFFSET, &mut block)
+                .map_err(Error::Disc)?;
+            lists.write(&mut block);
+            self.disc
+                .write(BOOT_BLOCK_OFFSET, &block)
+                .map_err(Error::Disc)?;
+        }
+        Ok(())
+    }
+
+    /// The disc's sector size, in bytes.
+    #[must_use]
+    pub fn sector_size(&self) -> u64 {
+        match &self.backing {
+            Backing::Old { .. } => OLD_SECTOR_SIZE,
+            Backing::New { map, .. } => map.record.sector_size(),
+        }
+    }
+
+    /// What holds the byte `offset` into the disc.
     ///
     /// # Errors
     ///
     /// The map broken, or the disc's failure.
-    pub fn allocated_at(&mut self, offset: u64) -> Result<bool, D> {
+    pub fn holder_at(&mut self, offset: u64) -> Result<Holder, D> {
         match &self.backing {
             Backing::Old { .. } => {
                 let map = OldMap::load(&mut self.disc)?;
-                let sector = offset / OLD_SECTOR_SIZE;
-                Ok(u32::try_from(sector)
-                    .is_ok_and(|sector| sector < map.disc_sectors() && !map.is_free(sector)))
+                Ok(match u32::try_from(offset / OLD_SECTOR_SIZE) {
+                    Ok(sector) if sector < map.disc_sectors() && !map.is_free(sector) => {
+                        Holder::Sector(sector)
+                    }
+                    _ => Holder::Free,
+                })
             }
             Backing::New { map, .. } => {
                 let block = offset >> map.record.log2bpmb;
-                Ok(map.allocated_at(&mut self.disc, block)? == Some(true))
+                Ok(match map.id_at(&mut self.disc, block)? {
+                    None => Holder::Free,
+                    Some(FRAG_BAD) => Holder::Defect,
+                    Some(id) => Holder::Fragment(id),
+                })
             }
         }
     }
@@ -353,9 +529,37 @@ impl<D: Disc> Volume<D> {
         }
     }
 
+    /// Refuses `indaddr` as an object's address where it lies in the disc's
+    /// own structures, before anything is changed: an old map's map and root
+    /// sectors, among which only the root starts, or what a new map
+    /// refuses ([`NewMap::may_address_object`]). Only a broken directory
+    /// names one.
+    fn clear_of_structures(&self, indaddr: u32) -> core::result::Result<(), Fault> {
+        let clear = match &self.backing {
+            Backing::Old {
+                format,
+                root_sector,
+            } => {
+                let root_end =
+                    root_sector.saturating_add(format.bytes().div_ceil(OLD_SECTOR_SIZE_U32));
+                indaddr == *root_sector || indaddr >= root_end
+            }
+            Backing::New { .. } => NewMap::may_address_object(indaddr),
+        };
+        if clear {
+            Ok(())
+        } else {
+            Err(Fault::Broken(Structure::Directory))
+        }
+    }
+
     /// Read exactly `buf.len()` bytes at `offset` within the object at
     /// `indaddr` (which must be allocated that far).
     pub fn object_read(&mut self, indaddr: u32, offset: u64, buf: &mut [u8]) -> Result<(), D> {
+        if buf.is_empty() {
+            return Ok(());
+        }
+        self.clear_of_structures(indaddr)?;
         match &self.backing {
             Backing::Old { .. } => {
                 let at = u64::from(indaddr) * OLD_SECTOR_SIZE + offset;
@@ -383,6 +587,10 @@ impl<D: Disc> Volume<D> {
     /// Write `data` at `offset` within the object at `indaddr` (which
     /// must be allocated that far).
     pub fn object_write(&mut self, indaddr: u32, offset: u64, data: &[u8]) -> Result<(), D> {
+        if data.is_empty() {
+            return Ok(());
+        }
+        self.clear_of_structures(indaddr)?;
         match &self.backing {
             Backing::Old { .. } => {
                 let at = u64::from(indaddr) * OLD_SECTOR_SIZE + offset;
@@ -596,8 +804,28 @@ impl<D: Disc> Volume<D> {
 
 impl<D: Disc> Volume<D> {
     /// Allocate a fresh object of `bytes`, returning its indirect disc
-    /// address (old map: start sector).
+    /// address (old map: start sector); a new map's from its central zone
+    /// on, as `FileCore` places a directory.
     pub fn allocate(&mut self, bytes: u64) -> Result<u32, D> {
+        let home = match &self.backing {
+            Backing::New { map, .. } => u32::from(map.record.nzones) >> 1,
+            Backing::Old { .. } => 0,
+        };
+        self.allocate_from(bytes, home)
+    }
+
+    /// As [`Self::allocate`], for a file of the directory at `parent`: from
+    /// the zone the directory lies in on, as `FileCore` places one.
+    pub fn allocate_near(&mut self, parent: u32, bytes: u64) -> Result<u32, D> {
+        let home = match &self.backing {
+            Backing::New { map, .. } => map.zone_of(parent),
+            Backing::Old { .. } => 0,
+        };
+        self.allocate_from(bytes, home)
+    }
+
+    /// A fresh object of `bytes`, a new map's taken from zone `home` on.
+    fn allocate_from(&mut self, bytes: u64, home: u32) -> Result<u32, D> {
         self.map_changing()?;
         match &self.backing {
             Backing::Old { .. } => {
@@ -608,7 +836,7 @@ impl<D: Disc> Volume<D> {
                 map.store(&mut self.disc)?;
                 Ok(start)
             }
-            Backing::New { map, .. } => map.allocate_object(&mut self.disc, bytes),
+            Backing::New { map, .. } => map.allocate_object(&mut self.disc, bytes, home),
         }
     }
 
@@ -618,6 +846,12 @@ impl<D: Disc> Volume<D> {
     pub fn free(&mut self, indaddr: u32, size: u32) -> Result<(), D> {
         if self.holds_nothing(indaddr) {
             return Ok(());
+        }
+        self.clear_of_structures(indaddr)?;
+        // The root's fragment is never let go: what shares it stays with it.
+        if matches!(self.backing, Backing::New { .. }) && !NewMap::is_object_fragment(indaddr >> 8)
+        {
+            return Err(Fault::Broken(Structure::Directory).into());
         }
         self.map_changing()?;
         self.directories_changing();
@@ -668,6 +902,9 @@ impl<D: Disc> Volume<D> {
     ) -> Result<u32, D> {
         if new_size <= u64::from(size) && !self.holds_nothing(indaddr) {
             return Ok(indaddr);
+        }
+        if !self.holds_nothing(indaddr) {
+            self.clear_of_structures(indaddr)?;
         }
         self.map_changing()?;
         match &self.backing {
@@ -725,6 +962,7 @@ impl<D: Disc> Volume<D> {
         if self.holds_nothing(indaddr) || new_size >= u64::from(size) {
             return Ok(());
         }
+        self.clear_of_structures(indaddr)?;
         self.map_changing()?;
         match &self.backing {
             Backing::Old { .. } => {
@@ -802,13 +1040,13 @@ impl<D: Disc> Volume<D> {
             return Ok(self.nothing());
         }
         let Some(granules) = self.sharing_granules(bytes) else {
-            return self.allocate(bytes);
+            return self.allocate_near(parent, bytes);
         };
         if let Some(indaddr) = self.room_in_shared(parent, granules)? {
             return Ok(indaddr);
         }
         let fragment = self.shared_fragment_bytes();
-        Ok(self.allocate(fragment)? | 1)
+        Ok(self.allocate_near(parent, fragment)? | 1)
     }
 
     /// Where the object at `indaddr`, an entry of the directory at `parent`
@@ -909,7 +1147,9 @@ impl<D: Disc> Volume<D> {
     }
 
     /// The first room for `granules` whole share granules in a fragment the
-    /// directory at `parent` — or its objects — shares, lowest fragment first.
+    /// directory at `parent` — or its objects — shares, lowest fragment
+    /// first: never the map's, nor one the directory shares from past its
+    /// start.
     fn room_in_shared(&mut self, parent: u32, granules: u64) -> Result<Option<u32>, D> {
         let Backing::New { map, .. } = &self.backing else {
             return Ok(None);
@@ -934,6 +1174,13 @@ impl<D: Disc> Volume<D> {
             note(object.indaddr, object.size)?;
         }
         held.sort_unstable();
+        // What lies in the map's fragment ahead of a root sharing it is the
+        // map, and what shares a fragment with a directory that does not
+        // begin it is more than its own entries show.
+        let foreign = |fragment: u32| {
+            !NewMap::is_object_fragment(fragment)
+                || share_place(parent).is_some_and(|(own, first)| own == fragment && first > 0)
+        };
         let mut start = 0;
         while start < held.len() {
             let fragment = held[start].0;
@@ -941,6 +1188,10 @@ impl<D: Disc> Volume<D> {
                 .iter()
                 .position(|&(id, _, _)| id != fragment)
                 .map_or(held.len(), |run| start + run);
+            if foreign(fragment) {
+                start = end;
+                continue;
+            }
             let Backing::New { map, .. } = &self.backing else {
                 return Ok(None);
             };
@@ -994,9 +1245,9 @@ impl<D: Disc> Volume<D> {
         let size = u64::from(object.size);
         let fresh = if self.sharing_granules(size).is_some() {
             let fragment = self.shared_fragment_bytes();
-            self.allocate(fragment)? | 1
+            self.allocate_near(to, fragment)? | 1
         } else {
-            self.allocate(size)?
+            self.allocate_near(to, size)?
         };
         if let Err(err) = self.copy_object(object.indaddr, fresh, u64::from(object.size)) {
             // The copy's failure is the one to report.
@@ -1286,7 +1537,7 @@ impl<D: Disc> Volume<D> {
         } else {
             let format = self.fixed_format();
             self.fixed_marker(parent).and_then(|marker| {
-                let fresh = FixedDir::initialise(format, marker, name, parent);
+                let fresh = FixedDir::initialise(format, marker, name, parent, NameEnd::Return);
                 self.store_fixed_dir(child, &fresh)
             })
         };
@@ -1318,6 +1569,93 @@ impl<D: Disc> Volume<D> {
                 big.set_parent(&mut store, parent)
             }
         }
+    }
+
+    /// The directory at `dir_addr`, loaded as `directory`, renamed `name`
+    /// inside `parent`. A big directory keeps its own name and is rewritten
+    /// to follow; a fixed one keeps only its parent.
+    ///
+    /// # Errors
+    ///
+    /// * [`Fault::NameTooLong`] or [`Fault::DirectoryFull`] from the big
+    ///   directory's rename.
+    /// * The disc's failure.
+    pub fn rename_dir(
+        &mut self,
+        dir_addr: u32,
+        directory: Directory,
+        name: &[u8],
+        parent: u32,
+    ) -> Result<(), D> {
+        match directory {
+            Directory::Fixed(_) => self.reparent(dir_addr, directory, parent),
+            Directory::Big(mut big) => {
+                let mut store = ObjectStore {
+                    volume: self,
+                    indaddr: dir_addr,
+                    size: u32::MAX,
+                };
+                big.rename(&mut store, name, parent)
+            }
+        }
+    }
+
+    /// A new map's free space gathered together as [`NewMap::compact`]
+    /// gathers it: whether anything moved. An old map's is its caller's to
+    /// gather, object by object.
+    ///
+    /// # Errors
+    ///
+    /// * [`Fault::Unsupported`] for an old map.
+    /// * [`Fault::NoMemory`] where the host has no room for the walk.
+    /// * A directory or the map broken, or the disc's failure.
+    pub fn compact(&mut self) -> Result<bool, D> {
+        if !matches!(self.backing, Backing::New { .. }) {
+            return Err(Fault::Unsupported.into());
+        }
+        let directories = self.directory_ids()?;
+        let Backing::New { map, .. } = &self.backing else {
+            return Err(Fault::Unsupported.into());
+        };
+        let moved = map.compact(&mut self.disc, &directories)?;
+        if moved {
+            self.map_changing()?;
+        }
+        Ok(moved)
+    }
+
+    /// Every fragment id a directory lies in, ascending: the root's and each
+    /// beneath it, each directory entered once however many entries name it.
+    fn directory_ids(&mut self) -> Result<Vec<u32>, D> {
+        let root = self.root_addr();
+        let mut entered = OrderedSet::new();
+        let mut pending = Vec::new();
+        let mut ids = Vec::new();
+        let mut enter = |addr: u32, pending: &mut Vec<u32>, ids: &mut Vec<u32>| {
+            if !entered.try_insert(addr).map_err(|_| Fault::NoMemory)? {
+                return Ok(());
+            }
+            pending.try_reserve(1).map_err(|_| Fault::NoMemory)?;
+            ids.try_reserve(1).map_err(|_| Fault::NoMemory)?;
+            pending.push(addr);
+            ids.push(addr >> 8);
+            Ok::<(), Fault>(())
+        };
+        enter(root, &mut pending, &mut ids)?;
+        while let Some(addr) = pending.pop() {
+            let dir = self.load_dir(addr)?;
+            for index in 0..Self::dir_len(&dir) {
+                let object = self
+                    .dir_entry(&dir, addr, index)?
+                    .ok_or(Fault::Broken(Structure::Directory))?;
+                if object.is_dir() {
+                    enter(object.indaddr, &mut pending, &mut ids)?;
+                }
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(ids)
     }
 
     /// Whether the directory at `dir_addr` has no entries.

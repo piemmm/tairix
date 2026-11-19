@@ -7,14 +7,14 @@ use tairix_filecore::dir::Object;
 use tairix_filecore::newmap::NewMap;
 use tairix_filecore::record::NAME_LEN;
 use tairix_filecore::volume::{Backing, Volume};
-use tairix_filecore::Error;
+use tairix_filecore::{Error, Fault};
 use tairix_fsmeta::preset::acorn;
 use tairix_riscos_kernel::module::{Command, CommandKind, Help};
-use tairix_riscos_kernel::os::{Fail, Os, Regs};
+use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
+use tairix_riscos_kernel::swi::os::read_unsigned::HEXADECIMAL;
 
 use super::disc::{op, with_volume, ClientDisc, Seen};
-use super::names;
-use super::{code, fail, own, with_instance, Client};
+use super::{code, fail, located, names, own, with_instance, Client};
 
 /// Its commands, in RISC OS 5's order.
 pub(super) static COMMANDS: [Command; 13] = [
@@ -284,22 +284,37 @@ fn check_map(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     })
 }
 
-/// `*Compact`: an old map's files slid down into the free space below each,
-/// first fit, so its free areas run together; a new map, which finds room
-/// in scattered space, is checked and left as it is.
+/// `*Compact`: a new map's free space gathered as RISC OS 5 gathers it
+/// (`Volume::compact`); an old map's files slid down into the free space
+/// below each, first fit, so its free areas run together, but for a file
+/// held open, whose handle reaches it where it lies.
 fn compact(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let (workspace, client) = instance(os, regs)?;
     let given = parameters(os, regs)?;
     let drive = drive_of(os, workspace, &client, given.first())?;
+    let open = with_instance(os, workspace, |instance| {
+        let mut open = Vec::new();
+        let held = instance
+            .files
+            .iter()
+            .flatten()
+            .filter(|file| file.drive == drive);
+        for file in held {
+            open.try_reserve(1).ok()?;
+            open.push(file.indaddr);
+        }
+        Some(open)
+    })?
+    .ok_or_else(|| os.no_memory())?;
     with_volume(os, workspace, drive, |volume, _| {
         if matches!(volume.backing(), Backing::New { .. }) {
-            return Ok(());
+            return volume.compact().map(drop);
         }
         let mut files = Vec::new();
         collect_files(volume, volume.root_addr(), &mut files, 0)?;
         files.sort_unstable_by_key(|(_, object)| object.indaddr);
         for (parent, object) in files {
-            if volume.holds_nothing(object.indaddr) {
+            if volume.holds_nothing(object.indaddr) || open.contains(&object.indaddr) {
                 continue;
             }
             let fresh = volume.allocate(u64::from(object.size))?;
@@ -363,11 +378,64 @@ fn collect_files(
     Ok(())
 }
 
-/// `*Defect`: refused on every disc FileCore holds here, none of which keeps
-/// a defect list a RAM disc or floppy could add to.
+/// `*Defect`: the sector at the disc address given in hex — a sector's
+/// start, within the disc — recorded as a defect as `OS_FSControl` 42
+/// records one. A sector an object or the disc's own structures hold is
+/// left as it is, and what holds it reported, for it to be moved first.
 fn defect(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    let (_, client) = instance(os, regs)?;
-    Err(fail(os, Some(&client), code::BAD_PARMS))
+    let (workspace, client) = instance(os, regs)?;
+    let given = parameters(os, regs)?;
+    let drive = drive_of(os, workspace, &client, given.first())?;
+    let Some(at) = word_start(os, regs.r[0], 1)? else {
+        return Err(fail(os, Some(&client), code::BAD_PARMS));
+    };
+    let address = u64::from(os.number_at(at, HEXADECIMAL, 0)?.0);
+    let in_use = with_volume(os, workspace, drive, |volume, _| {
+        let space = volume.space()?;
+        if address % volume.sector_size() != 0 || address >= u64::from(space.unit) * space.total {
+            return Err(Error::Fault(Fault::BadDefect));
+        }
+        match volume.add_defect(address) {
+            Err(Error::Fault(Fault::DefectInUse)) => Ok(true),
+            added => added.map(|()| false),
+        }
+    })?;
+    if !in_use {
+        return Ok(());
+    }
+    let (system, _) = os.read_until(client.title, names::NAME_MOST, |b| b <= b' ')?;
+    let mut name = located::Name::new(u32::MAX);
+    let answer = with_volume(os, workspace, drive, |volume, _| {
+        located::find(volume, &system, address, &mut name)
+    })?;
+    match answer {
+        located::Answer::Kind(located::OBJECT) => {
+            let held = name.written().split(|&b| b == 0).next().unwrap_or_default();
+            say(os, "DefectObject", &[held])
+        }
+        _ => say(os, "DefectStructure", &[]),
+    }
+}
+
+/// Where the `index`th of the words of the command tail at `tail` starts.
+fn word_start(os: &mut Os<'_>, tail: u32, index: usize) -> Result<Option<u32>, Fail> {
+    let (text, _) = os.read_until(tail, names::NAME_MOST, |b| b < b' ')?;
+    let mut words = 0;
+    let mut at = 0;
+    while at < text.len() {
+        if text[at] == b' ' {
+            at += 1;
+            continue;
+        }
+        if words == index {
+            return Ok(Some(tail.wrapping_add(len32(at))));
+        }
+        words += 1;
+        while text.get(at).is_some_and(|&b| b != b' ') {
+            at += 1;
+        }
+    }
+    Ok(None)
 }
 
 /// `*Dismount`: the disc's files closed and the disc forgotten.

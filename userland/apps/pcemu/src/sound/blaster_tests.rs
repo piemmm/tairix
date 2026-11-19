@@ -574,3 +574,27 @@ fn a_recording_told_to_exit_waits_for_its_last_sample_to_be_taken() {
         }
     }
 }
+
+#[test]
+fn a_channel_set_against_the_transfer_serves_it_its_own_way() {
+    let mut rig = Rig::new();
+    rig.memory.0[BUFFER as usize] = 0x5A;
+    program(&mut rig.dma, 1, 0x44, BUFFER, 9);
+    rig.command(&[0x14, 9, 0]);
+    rig.wait(2 * PERIOD);
+    assert_eq!(
+        rig.memory.0[BUFFER as usize], READY,
+        "a write cycle took the output latch's last byte"
+    );
+    assert_ne!(rig.dsp.input(0x0C) & 0x80, 0, "held: no sample came");
+    let mut rig = Rig::new();
+    program(&mut rig.dma, 1, 0x40, BUFFER, 9);
+    rig.command(&[0x14, 9, 0]);
+    rig.wait(2 * PERIOD);
+    assert_eq!(
+        rig.dma.take_transfers(),
+        1,
+        "verify clears the request once"
+    );
+    assert_ne!(rig.dsp.input(0x0C) & 0x80, 0, "held: no sample came");
+}

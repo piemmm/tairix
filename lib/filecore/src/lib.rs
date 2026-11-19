@@ -7,6 +7,7 @@
 //!   checksums, and the old map's checks.
 //! - [`oldmap`], [`newmap`]: allocation in each map.
 //! - [`dir`], [`bigdir`]: the fixed and the big directories.
+//! - [`defect`]: the boot block's defect lists.
 //! - [`format`]: a new disc's layout.
 //! - [`identify`]: where a disc's structures lie.
 //! - [`volume`]: a disc's objects and directories.
@@ -26,6 +27,7 @@ extern crate alloc;
 
 pub mod bigdir;
 mod bytes;
+pub mod defect;
 pub mod dir;
 pub mod format;
 pub mod identify;
@@ -64,6 +66,14 @@ pub enum Fault {
     Broken(Structure),
     /// A disc or a layout the format cannot describe.
     Unsupported,
+    /// A defect a disc cannot record: past what its lists count, or on a map
+    /// that records none.
+    BadDefect,
+    /// A defect where the disc's own structures or an object lie, which
+    /// must be moved first.
+    DefectInUse,
+    /// A defect past as many as the boot block's lists hold.
+    TooManyDefects,
     /// The host had no memory for the work.
     NoMemory,
 }
@@ -79,6 +89,8 @@ pub enum Structure {
     Directory,
     /// An object, read past what its map allocates.
     Object,
+    /// The boot block's defect lists.
+    DefectList,
 }
 
 /// A failure on a disc: what the format refused, or what the disc failed
@@ -170,9 +182,11 @@ impl From<Fault> for DriverError {
             | Fault::Compaction
             | Fault::MapFull
             | Fault::DirectoryFull
-            | Fault::TooLarge => Self::NoSpace,
+            | Fault::TooLarge
+            | Fault::TooManyDefects => Self::NoSpace,
             Fault::NameTooLong => Self::LengthOutOfRange,
-            Fault::BadName => Self::OutOfRange,
+            Fault::BadName | Fault::BadDefect => Self::OutOfRange,
+            Fault::DefectInUse => Self::Busy,
             Fault::Exists => Self::AlreadyExists,
             Fault::NoFragment => Self::NotFound,
             Fault::Broken(_) => Self::BadMagic,

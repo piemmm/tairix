@@ -3,7 +3,8 @@
 //! directory in the format's directory form.
 
 use crate::bigdir::{BigDir, DirStore, BIG_DIR_GRAIN};
-use crate::dir::{FixedDir, FixedFormat, NEW_DIR_SIZE, NEW_DIR_SIZE_U32};
+use crate::defect::{Defects, FIRST_END};
+use crate::dir::{FixedDir, FixedFormat, NameEnd, NEW_DIR_SIZE, NEW_DIR_SIZE_U32};
 use crate::newmap::{bits_set, bits_set_field, MAX_ZONE_BYTES};
 use crate::oldmap::OldMap;
 use crate::record::{
@@ -210,6 +211,8 @@ pub fn new_map_record(
         disc_size -= record.sector_size();
     }
     record.disc_size = disc_size;
+    // A disc past what the first defect list addresses keeps a second.
+    record.big_flag = disc_size > u64::from(FIRST_END);
     Ok(record)
 }
 
@@ -264,7 +267,7 @@ fn format_old_map<D: Disc>(disc: &mut D, variant: Variant) -> Result<(), D> {
         .map_err(Error::Disc)?;
     let mut map = OldMap::initialise(disc_sectors, root_sector + root_sectors, FORMAT_DISC_ID);
     map.store(disc)?;
-    let root = FixedDir::initialise(format, *DIR_MARKERS[1], b"$", root_sector);
+    let root = FixedDir::initialise(format, *DIR_MARKERS[0], b"$", root_sector, NameEnd::Return);
     disc.write(root_offset, &root.data[..format.size()])
         .map_err(Error::Disc)
 }
@@ -278,7 +281,7 @@ fn format_new_map<D: Disc>(disc: &mut D, variant: Variant) -> Result<(), D> {
     } else {
         BootRecord::Whole
     };
-    lay_out(disc, record, boot).map(drop)
+    lay_out(disc, record, boot, b"$").map(drop)
 }
 
 /// What a multi-zone disc's boot block holds of the disc record.
@@ -289,13 +292,16 @@ pub enum BootRecord {
     /// The map's record with no identity — no id, name or root size — which
     /// finds the map as well: RISC OS 5's RAM disc writes it so.
     Blank,
+    /// No boot block at all, as `FileCore_LayoutStructure` lays a disc out.
+    Omitted,
 }
 
 /// Lay out an empty new-map disc described by `record` on `disc`: the map
 /// in the middle zone, twice, behind a boot block on a multi-zone disc; and
 /// the root directory, which shares the map's fragment in the fixed format
 /// and in the big one is an object of its own, numbered as the first id the
-/// map's zone homes. The record laid out, its root placed.
+/// map's zone homes, named and titled `root_name`. The record laid out, its
+/// root placed.
 ///
 /// # Errors
 ///
@@ -306,6 +312,7 @@ pub fn lay_out<D: Disc>(
     disc: &mut D,
     mut record: DiscRecord,
     boot: BootRecord,
+    root_name: &[u8],
 ) -> Result<DiscRecord, D> {
     let big = record.format_version != 0;
     let map_offset = record.map_offset();
@@ -369,15 +376,18 @@ pub fn lay_out<D: Disc>(
     write_fresh_map(disc, &record, &layout)?;
     if record.nzones > 1 {
         let copy = match boot {
-            BootRecord::Whole => record,
-            BootRecord::Blank => DiscRecord {
+            BootRecord::Whole => Some(record),
+            BootRecord::Blank => Some(DiscRecord {
                 disc_id: 0,
                 disc_name: [0; NAME_LEN],
                 root_size: 0,
                 ..record
-            },
+            }),
+            BootRecord::Omitted => None,
         };
-        write_boot_block(disc, &copy)?;
+        if let Some(copy) = copy {
+            write_boot_block(disc, &copy)?;
+        }
     }
     if big {
         let mut window = VolumeWindow {
@@ -385,9 +395,15 @@ pub fn lay_out<D: Disc>(
             base: root_offset,
             len: root_size,
         };
-        BigDir::initialise(&mut window, root_size, b"$", record.root)?;
+        BigDir::initialise(&mut window, root_size, root_name, record.root)?;
     } else {
-        let root = FixedDir::initialise(FixedFormat::New, *DIR_MARKERS[1], b"$", record.root);
+        let root = FixedDir::initialise(
+            FixedFormat::New,
+            *DIR_MARKERS[1],
+            root_name,
+            record.root,
+            NameEnd::Return,
+        );
         disc.write(root_offset, &root.data[..NEW_DIR_SIZE])
             .map_err(Error::Disc)?;
     }
@@ -555,9 +571,11 @@ fn link_free(buf: &mut [u8; MAX_ZONE_BYTES], record: &DiscRecord, prev: Option<u
     }
 }
 
-/// Write the checksummed boot block embedding the disc record.
+/// Write the checksummed boot block embedding the disc record, its defect
+/// lists empty.
 fn write_boot_block<D: Disc>(disc: &mut D, record: &DiscRecord) -> Result<(), D> {
     let mut block = [0u8; BOOT_BLOCK_SIZE];
+    Defects::none(record.big_flag).write(&mut block);
     seal_boot_block(&mut block, record);
     disc.write(BOOT_BLOCK_OFFSET, &block).map_err(Error::Disc)
 }

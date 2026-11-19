@@ -104,6 +104,13 @@ impl BigHeader {
         self.size - BIG_TAIL_SIZE
     }
 
+    /// Offset of the table just below the tail that holds, in entry order,
+    /// each entry's disc address, as RISC OS 5 keeps it.
+    #[must_use]
+    pub fn table_offset(&self) -> u32 {
+        self.tail_offset().saturating_sub(4 * self.entries)
+    }
+
     fn encode(&self) -> [u8; BIG_HEADER_SIZE as usize] {
         let mut raw = [0u8; BIG_HEADER_SIZE as usize];
         raw[0] = self.masseq;
@@ -310,24 +317,38 @@ impl BigDir {
         }
         // The name was validated against `MAX_NAME_LEN`, so it fits.
         let name_len = u32::try_from(object.name_len).unwrap_or(u32::MAX);
-        let grown = BIG_ENTRY_SIZE + pad_name(name_len);
-        if self.header.used_end() + grown > self.header.tail_offset() {
+        let grown = BIG_ENTRY_SIZE + pad_name(name_len) + 4;
+        if self.header.used_end() + grown > self.header.table_offset() {
             return Err(Fault::DirectoryFull.into());
         }
         let index = self.place_of(store, object.name())?;
-        // Open a 28-byte gap at the insertion point (moves the later
-        // entries and the whole heap up).
+        // The name joins the heap where the entry it goes before keeps its
+        // own, so the heap stays in the entries' order, as RISC OS 5 keeps it.
+        let name_ptr = if index < self.header.entries {
+            self.name_ptr(store, index)?
+        } else {
+            self.header.names_size
+        };
+        let padded_len = pad_name(name_len);
         let gap_at = self.header.entries_offset() + index * BIG_ENTRY_SIZE;
         let used = self.header.used_end();
         move_region(store, gap_at, gap_at + BIG_ENTRY_SIZE, used - gap_at)?;
-        // Append the name to the (shifted) heap.
         let heap_offset = self.header.heap_offset() + BIG_ENTRY_SIZE;
-        let name_ptr = self.header.names_size;
+        let name_at = heap_offset + name_ptr;
+        move_region(
+            store,
+            name_at,
+            name_at + padded_len,
+            self.header.names_size - name_ptr,
+        )?;
         let mut padded = [0u8; MAX_NAME_LEN + 4];
-        let padded_len = pad_name(name_len) as usize;
         padded[..object.name_len].copy_from_slice(object.name());
         padded[object.name_len] = 0x0D;
-        store.write_at(heap_offset + name_ptr, &padded[..padded_len])?;
+        store.write_at(name_at, &padded[..padded_len as usize])?;
+        let entries_at = self.header.entries_offset();
+        let moved = |ptr: u32| (ptr >= name_ptr).then(|| ptr + padded_len);
+        rebase_names(store, entries_at, 0..index, moved)?;
+        rebase_names(store, entries_at, index + 1..self.header.entries + 1, moved)?;
         // Write the new entry.
         let mut raw = [0u8; BIG_ENTRY_SIZE as usize];
         put_u32(&mut raw, 0, object.load);
@@ -342,16 +363,30 @@ impl BigDir {
         put_u32(&mut raw, 20, name_len);
         put_u32(&mut raw, 24, name_ptr);
         store.write_at(gap_at, &raw)?;
+        let table = self.header.table_offset();
+        move_region(store, table, table - 4, 4 * index)?;
+        store.write_at(table - 4 + 4 * index, &object.indaddr.to_le_bytes())?;
         self.header.entries += 1;
-        self.header.names_size += pad_name(name_len);
+        self.header.names_size += padded_len;
         self.seal(store)
+    }
+
+    /// Where the entry at `index` keeps its name in the heap.
+    fn name_ptr<S: DirStore>(&self, store: &mut S, index: u32) -> Result<u32, Error<S::Error>> {
+        let mut raw = [0u8; 4];
+        store.read_at(
+            self.header.entries_offset() + index * BIG_ENTRY_SIZE + 24,
+            &mut raw,
+        )?;
+        Ok(get_u32(&raw, 0))
     }
 
     /// Remove the entry at `index`, compacting the name heap.
     ///
     /// # Errors
     ///
-    /// The directory broken if `index` is not a live entry.
+    /// The directory broken if `index` is not a live entry, or its name's
+    /// padding runs past the heap.
     pub fn remove<S: DirStore>(
         &mut self,
         store: &mut S,
@@ -365,6 +400,12 @@ impl BigDir {
         store.read_at(at, &mut raw)?;
         let name_ptr = get_u32(&raw, 24);
         let padded = pad_name(u32::try_from(object.name_len).unwrap_or(u32::MAX));
+        if name_ptr
+            .checked_add(padded)
+            .is_none_or(|end| end > self.header.names_size)
+        {
+            return Err(BROKEN.into());
+        }
         // Close the entry gap (moves later entries and the heap down).
         let used = self.header.used_end();
         let after = at + BIG_ENTRY_SIZE;
@@ -379,19 +420,17 @@ impl BigDir {
             name_at,
             heap_end - (name_at + padded),
         )?;
+        let table = self.header.table_offset();
+        move_region(store, table, table + 4, 4 * index)?;
+        store.write_at(table, &[0; 4])?;
         self.header.entries -= 1;
         self.header.names_size -= padded;
-        // Rebase every name pointer past the removed name.
-        for i in 0..self.header.entries {
-            let entry_at = self.header.entries_offset() + i * BIG_ENTRY_SIZE;
-            let mut ptr_raw = [0u8; 4];
-            store.read_at(entry_at + 24, &mut ptr_raw)?;
-            let ptr = get_u32(&ptr_raw, 0);
-            if ptr > name_ptr {
-                put_u32(&mut ptr_raw, 0, ptr - padded);
-                store.write_at(entry_at + 24, &ptr_raw)?;
-            }
-        }
+        rebase_names(
+            store,
+            self.header.entries_offset(),
+            0..self.header.entries,
+            |ptr| (ptr > name_ptr).then(|| ptr - padded),
+        )?;
         self.seal(store)
     }
 
@@ -430,12 +469,8 @@ impl BigDir {
         if !acorn::names_match(stored.name(), object.name()) {
             return Err(BROKEN.into());
         }
-        let mut ptr = [0u8; 4];
-        store.read_at(
-            self.header.entries_offset() + index * BIG_ENTRY_SIZE + 24,
-            &mut ptr,
-        )?;
-        store.write_at(self.header.heap_offset() + get_u32(&ptr, 0), object.name())?;
+        let ptr = self.name_ptr(store, index)?;
+        store.write_at(self.header.heap_offset() + ptr, object.name())?;
         self.put_fields(store, index, object)?;
         self.seal(store)
     }
@@ -461,7 +496,58 @@ impl BigDir {
             16,
             u32::from(acorn::attr_to_filecore(object.attr)),
         );
-        store.write_at(at, &raw)
+        store.write_at(at, &raw)?;
+        store.write_at(
+            self.header.table_offset() + 4 * index,
+            &object.indaddr.to_le_bytes(),
+        )
+    }
+
+    /// Rename the directory itself, as renaming or moving its entry does on
+    /// RISC OS 5: the stored name rewritten over the old one with a NUL
+    /// terminator, the entries and heap moved to follow it, what they vacate
+    /// cleared, and `parent` taken as its parent, all in one sealing.
+    ///
+    /// # Errors
+    ///
+    /// * [`Fault::NameTooLong`] if `name` is empty or exceeds
+    ///   [`MAX_NAME_LEN`].
+    /// * [`Fault::DirectoryFull`] if the directory cannot hold the longer
+    ///   name.
+    /// * The store's failure.
+    pub fn rename<S: DirStore>(
+        &mut self,
+        store: &mut S,
+        name: &[u8],
+        parent: u32,
+    ) -> Result<(), Error<S::Error>> {
+        if name.is_empty() || name.len() > MAX_NAME_LEN {
+            return Err(Fault::NameTooLong.into());
+        }
+        let name_len = u32::try_from(name.len()).unwrap_or(u32::MAX);
+        let old_field = pad_name(self.header.name_len);
+        let new_field = pad_name(name_len);
+        let body = self.header.used_end() - self.header.entries_offset();
+        if BIG_HEADER_SIZE + new_field + body > self.header.table_offset() {
+            return Err(Fault::DirectoryFull.into());
+        }
+        move_region(
+            store,
+            BIG_HEADER_SIZE + old_field,
+            BIG_HEADER_SIZE + new_field,
+            body,
+        )?;
+        let mut field = [0u8; MAX_NAME_LEN + 4];
+        field[..name.len()].copy_from_slice(name);
+        store.write_at(BIG_HEADER_SIZE, &field[..new_field as usize])?;
+        if new_field < old_field {
+            let vacated = (old_field - new_field) as usize;
+            let end = BIG_HEADER_SIZE + new_field + body;
+            store.write_at(end, &[0u8; MAX_NAME_LEN + 4][..vacated])?;
+        }
+        self.header.name_len = name_len;
+        self.header.parent = parent;
+        self.seal(store)
     }
 
     /// Repoint the directory's parent.
@@ -495,14 +581,16 @@ impl BigDir {
         if new_size <= self.header.size || !new_size.is_multiple_of(BIG_DIR_GRAIN) {
             return Err(Fault::Unsupported.into());
         }
-        let old_tail = self.header.tail_offset();
+        let old_table = self.header.table_offset();
+        let table_len = 4 * self.header.entries;
         self.header.size = new_size;
-        // Zero from the old tail up to the new tail position.
+        let new_table = self.header.table_offset();
+        move_region(store, old_table, new_table, table_len)?;
+        // Zero what the old table and tail held, up to the new table.
         let zeroes = [0u8; 512];
-        let mut offset = old_tail;
-        let new_tail = self.header.tail_offset();
-        while offset < new_tail {
-            let take = (new_tail - offset).min(512);
+        let mut offset = old_table;
+        while offset < new_table {
+            let take = (new_table - offset).min(512);
             store.write_at(offset, &zeroes[..take as usize])?;
             offset += take;
         }
@@ -575,6 +663,38 @@ impl BigDir {
         let check = dir.check_byte(store)?;
         store.write_at(header.tail_offset() + 7, &[check])
     }
+}
+
+/// The name pointer of each entry in `slots`, the entries starting at
+/// `entries_at`, rewritten where `moved` gives it a new value, a buffer of
+/// entries read and written at a time.
+fn rebase_names<S: DirStore>(
+    store: &mut S,
+    entries_at: u32,
+    slots: core::ops::Range<u32>,
+    moved: impl Fn(u32) -> Option<u32>,
+) -> Result<(), Error<S::Error>> {
+    const CHUNK: u32 = 512 / BIG_ENTRY_SIZE;
+    let mut buf = [0u8; (CHUNK * BIG_ENTRY_SIZE) as usize];
+    let mut slot = slots.start;
+    while slot < slots.end {
+        let count = (slots.end - slot).min(CHUNK);
+        let at = entries_at + slot * BIG_ENTRY_SIZE;
+        let raw = &mut buf[..(count * BIG_ENTRY_SIZE) as usize];
+        store.read_at(at, raw)?;
+        let mut changed = false;
+        for entry in raw.as_chunks_mut::<{ BIG_ENTRY_SIZE as usize }>().0 {
+            if let Some(ptr) = moved(get_u32(entry, 24)) {
+                put_u32(entry, 24, ptr);
+                changed = true;
+            }
+        }
+        if changed {
+            store.write_at(at, raw)?;
+        }
+        slot += count;
+    }
+    Ok(())
 }
 
 /// Move `len` bytes from `src` to `dst` within the store, handling

@@ -284,3 +284,28 @@ fn the_disc_is_named_and_given_a_boot_option() {
     let option = call(&mut os, FS_CONTROL, &[fs_control::READ_BOOT_OPTION, ram]).expect("read");
     assert_eq!(option.r[2], 3);
 }
+
+#[test]
+fn a_new_file_keeps_what_is_written_to_it_a_buffer_at_a_time() {
+    let mut kernel = with_disc(0x4_0000);
+    let mut os = kernel.os();
+    let name = text(&mut os, b"RAM:$.Written");
+    let handle = call(&mut os, FIND, &[0x80, name]).expect("made").r[0];
+    let pattern: Vec<u8> = (0..0x800u32)
+        .map(|i| (i * 7 + 1).to_le_bytes()[0])
+        .collect();
+    let data = block(&mut os, &pattern);
+    for at in [0u32, 0x400] {
+        let left = call(&mut os, GBPB, &[1, handle, data + at, 0x400, at])
+            .expect("written")
+            .r[3];
+        assert_eq!(left, 0, "all of it at {at:#X}");
+    }
+    let back = block(&mut os, &[0; 0x800]);
+    call(&mut os, GBPB, &[3, handle, back, 0x800, 0]).expect("read");
+    assert_eq!(read(&mut os, back, 0x800), pattern, "read back while open");
+    call(&mut os, FIND, &[0, handle]).expect("closed");
+    let again = block(&mut os, &[0; 0x800]);
+    call(&mut os, FILE, &[255, name, again, 0]).expect("loaded");
+    assert_eq!(read(&mut os, again, 0x800), pattern, "kept once closed");
+}

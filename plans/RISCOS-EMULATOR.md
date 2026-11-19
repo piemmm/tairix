@@ -59,7 +59,7 @@ an application's own documents folder, the reference harness);
 | RO19.5 | FileCore and RamFS: FileCore's disc format moved out of the ADFS driver into `lib/filecore`; FileCore's SWIs, commands and client entry points over it; RamFS's disc in a dynamic area within the memory policy | done |
 | RO19.6 | Running files: `*Run` and each executable type's run action, the Obey module | done |
 | RO19.7 | The user's own RISC OS disc: the documents folder as the shared session's own disc, `!Boot`'s skeleton, `Choices:`, the boot sequence's command-line half; BootCommands; MessageTrans reading files through FileSwitch | done |
-| RO19.8 | FileCore's facilities RamFS does not reach, each recorded first: `FloppyStructure` for multi-zone floppies, `LayoutStructure` for old maps, `*Compact` on a new map, `*Defect` and the defect lists, `DiscFormat`'s gaps, `OS_FSControl` 52's object names, `DiscOp64`'s block | planned |
+| RO19.8 | FileCore's facilities RamFS does not reach, each recorded first: `FloppyStructure` for multi-zone floppies, `LayoutStructure` for old maps, `*Compact` on a new map, `*Defect` and the defect lists, `DiscFormat`'s gaps, `OS_FSControl` 52's object names, `DiscOp64`'s block | done |
 | RO20 | BBC BASIC V and VI: workspace in guest memory, the language, numbers, the machine interface, the assembler, errors, the editor | planned |
 | RO21 | The VDU drivers: modes, the VDU stream, `OS_Plot`, palettes, screen banks, screen memory | planned |
 | RO22 | Sprites and JPEGs: `OS_SpriteOp`, SpriteExtend, output to sprites | planned |
@@ -881,8 +881,35 @@ is fuzzed.
   many handles to be read but on no other while one may write, a locked file
   opened for update only to be read, an open object never renamed while the
   directory holding it may be, a path through a missing directory or a file
-  read as nothing there; `open-files.scenarios` holds them. RO19.8 is what is
-  left, with whether a renamed directory's own stored name follows it.
+  read as nothing there; `open-files.scenarios` holds them. FileCore's own
+  facilities are RISC OS 5's too, `filecore.scenarios` holding them:
+  `OS_FSControl` 52's depth-first search and the two ways its buffer runs
+  out; the defect lists, the boot block's sorted under their check byte or a
+  disc's map's sector by sector, and a defect mapped out in whole sectors to
+  the least fragment, joining a defect it meets and taking a sliver beside
+  it; `*Compact` moving only one-piece fragments, the topmost file into the
+  lowest gap, the file above the gap sliding into it, or the fragment above
+  it to the last gap's end, a directory never down; `FloppyStructure`'s
+  flags, its one-zone stream across a disc of more zones and its defect
+  sweep; `LayoutStructure`'s root named after the disc, with no boot block;
+  `DiscFormat`'s layouts; a big directory's name heap in entry order, the
+  disc-address table below its tail, and its stored name rewritten when it
+  is renamed. Where RISC OS 5 5.30 is itself faulty the bridge is sound:
+  `LayoutStructure` lays out zone 0, which RISC OS 5 leaves without a
+  fragment, and refuses an old-map record; a defect list is held to what the
+  boot block holds; and the inputs on which RISC OS 5 aborts are answered.
+  A record describing more disc than its zones or an image file reaches is
+  refused, and `OS_FSControl` 52 enters each directory once, so a broken
+  disc naming one from within itself is searched once. Under all of them,
+  `lib/filecore` never lets an object reach the disc's own structures: no
+  small file shares the map's fragment, an address in the defects or ahead
+  of the root in the map's fragment is refused, and a map giving out space
+  past the disc's end is refused when opened.
+  Two facts no guest can record stand as designed: `DiscOp64`'s block, which
+  needs a FileCore instance, and an old map's defects, which no RAM disc has
+  (the lists are empty and a defect refused). A fixed directory renamed
+  keeps the name it was made with, its parent rewritten when it moves:
+  RamFS's directories are big, so no rename of a fixed one was recorded.
 - **Its corpus.** The scenarios that need a filing system join the corpus
   with FileSwitch, holding what genuine RISC OS 5 was recorded giving through
   a file of type `&123` registered with ResourceFS: `*Load` with no

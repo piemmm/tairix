@@ -15,5 +15,7 @@ workspace = true
 # The block device a TAIRiX volume's disc is, and the errors its driver reports.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 tairix-bytedev = { path = "../bytedev", version = "=0.0.0" }
+# The fallible ordered set a walk of a disc's directories keeps where it has been.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
 # RISC OS's attribute bits and names as TAIRiX keeps them.
 tairix-fsmeta = { path = "../fsmeta", version = "=0.0.0" }

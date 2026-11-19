@@ -509,41 +509,52 @@ impl FixedDir {
         fold_check(check)
     }
 
-    /// Build an empty directory named `name` with parent `parent`.
-    ///
-    /// `marker` selects `Hugo`/`Nick` for new-format directories; old
-    /// directories are always `Hugo`.
+    /// Build an empty directory named and titled `name`, with parent
+    /// `parent`, marked `marker`, a name or title shorter than its field
+    /// ended as `end` says.
     #[must_use]
-    pub fn initialise(format: FixedFormat, marker: [u8; 4], name: &[u8], parent: u32) -> Self {
+    pub fn initialise(
+        format: FixedFormat,
+        marker: [u8; 4],
+        name: &[u8],
+        parent: u32,
+        end: NameEnd,
+    ) -> Self {
         let mut dir = Self {
             data: [0; NEW_DIR_SIZE],
             format,
             stranded: false,
         };
         let size = format.size();
-        let marker = match format {
-            FixedFormat::Old => *DIR_MARKERS[0],
-            FixedFormat::New => marker,
-        };
         dir.data[1..5].copy_from_slice(&marker);
         dir.data[size - 5..size - 1].copy_from_slice(&marker);
-        let name_at = format.name_at();
-        let title_at = format.title_at();
-        let name_len = name.len().min(FIXED_NAME_LEN);
-        dir.data[name_at..name_at + name_len].copy_from_slice(&name[..name_len]);
-        if name_len < FIXED_NAME_LEN {
-            dir.data[name_at + name_len] = 0x0D;
-        }
-        let title_len = name.len().min(19);
-        dir.data[title_at..title_at + title_len].copy_from_slice(&name[..title_len]);
-        if title_len < 19 {
-            dir.data[title_at + title_len] = 0x0D;
+        for (at, field) in [
+            (format.name_at(), FIXED_NAME_LEN),
+            (format.title_at(), TITLE_LEN),
+        ] {
+            let len = name.len().min(field);
+            dir.data[at..at + len].copy_from_slice(&name[..len]);
+            if len < field && end == NameEnd::Return {
+                dir.data[at + len] = 0x0D;
+            }
         }
         put_u24(&mut dir.data, format.parent_at(), parent & 0x00FF_FFFF);
         dir.data[size - 1] = dir.check_byte();
         dir
     }
 }
+
+/// What follows a directory's name or title shorter than its field.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NameEnd {
+    /// A carriage return, then zeros.
+    Return,
+    /// Zeros alone, as `FileCore_FloppyStructure` leaves its root's.
+    Zeros,
+}
+
+/// The bytes a fixed directory's title holds.
+const TITLE_LEN: usize = 19;
 
 /// Rotate `value` right by 13 bits — the directory check accumulator.
 fn ror13(value: u32) -> u32 {
@@ -591,4 +602,28 @@ pub fn bcd_increment(value: u8) -> u8 {
     }
     // Both digits are below ten, so the byte can never truncate.
     u8::try_from((next / 10) << 4 | (next % 10)).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FixedDir, FixedFormat, NameEnd};
+    use crate::record::DIR_MARKERS;
+
+    #[test]
+    fn a_directory_is_marked_and_named_as_its_maker_asks() {
+        let dir = FixedDir::initialise(
+            FixedFormat::Old,
+            *DIR_MARKERS[1],
+            b"$",
+            0x203,
+            NameEnd::Zeros,
+        );
+        assert_eq!(&dir.data[1..5], b"Nick");
+        assert_eq!(&dir.data[0x4CC..0x4CE], b"$\0", "zero padded");
+        assert_eq!(dir.parent(), 0x203);
+        let dir = FixedDir::initialise(FixedFormat::New, *DIR_MARKERS[0], b"$", 2, NameEnd::Return);
+        assert_eq!(&dir.data[1..5], b"Hugo");
+        assert_eq!(&dir.data[0x7F0..0x7F2], b"$\r", "ended with a return");
+        assert_eq!(&dir.data[0x7DD..0x7DF], b"$\r");
+    }
 }

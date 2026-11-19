@@ -10,13 +10,17 @@
 //! - `disc`: a drive's disc as `lib/filecore` reaches it, through the
 //!   client's entries.
 //! - `entries`: the filing system's entries, FileSwitch's calls.
+//! - `located`: what holds a byte of a disc, named.
+//! - `structure`: what `FileCore_FloppyStructure` lays out.
 //! - `swis`: FileCore's SWIs.
 //! - `commands`: its commands.
 
 mod commands;
 mod disc;
 mod entries;
+mod located;
 mod names;
+mod structure;
 mod swis;
 
 use alloc::vec::Vec;
@@ -293,14 +297,18 @@ pub(crate) fn with_instance<T>(
 
 /// FileCore's errors, by the number each has in its filing system's range.
 pub(crate) mod code {
+    pub(crate) const DEFECT: u8 = 0x94;
+    pub(crate) const TOO_MANY_DEFECTS: u8 = 0x95;
     pub(crate) const COMPACT_REQ: u8 = 0x98;
     pub(crate) const MAP_FULL: u8 = 0x99;
     pub(crate) const BAD_DISC: u8 = 0x9A;
     pub(crate) const AMBIG_DISC: u8 = 0x9E;
     pub(crate) const IN_USE: u8 = 0xA0;
     pub(crate) const BAD_PARMS: u8 = 0xA1;
+    pub(crate) const BUFFER: u8 = 0xA5;
     pub(crate) const BROKEN_DIR: u8 = 0xA8;
     pub(crate) const BAD_FS_MAP: u8 = 0xA9;
+    pub(crate) const BAD_DEFECT_LIST: u8 = 0xAB;
     pub(crate) const BAD_DRIVE: u8 = 0xAC;
     pub(crate) const BAD_RENAME: u8 = 0xB0;
     pub(crate) const DIR_FULL: u8 = 0xB3;
@@ -322,13 +330,17 @@ pub(crate) mod code {
 /// The token of FileCore's error `code`.
 fn token(code: u8) -> &'static str {
     match code {
+        code::DEFECT => "Defect",
+        code::TOO_MANY_DEFECTS => "TooManyDefects",
         code::COMPACT_REQ => "CompactReq",
         code::MAP_FULL => "MapFull",
         code::BAD_DISC => "BadDisc",
         code::AMBIG_DISC => "AmbigDisc",
         code::IN_USE => "InUse",
+        code::BUFFER => "Buffer",
         code::BROKEN_DIR => "BrokenDir",
         code::BAD_FS_MAP => "BadFsMap",
+        code::BAD_DEFECT_LIST => "BadDefectList",
         code::BAD_DRIVE => "BadDrive",
         code::BAD_RENAME => "BadRename",
         code::DIR_FULL => "DirFull",
@@ -356,13 +368,15 @@ pub(crate) const fn numbered(system: u32, code: u8) -> u32 {
 }
 
 /// FileCore's error `code` for `client`, numbered as the client's
-/// descriptor asks: beside its filing system's number, or plain.
+/// descriptor asks: beside its filing system's number, or plain; and one of
+/// FileCore's own, for no client, beside FileCore's module number.
 pub(crate) fn fail(os: &mut Os<'_>, client: Option<&Client>, code: u8) -> Fail {
     let number = match client {
         Some(client) if client.flags & flag::NEW_ERRORS != 0 => {
             numbered(u32::from(client.number), code)
         }
-        _ => u32::from(code),
+        Some(_) => u32::from(code),
+        None => numbered(MODULE_NUMBER, code),
     };
     os.own_error(
         own,
@@ -374,11 +388,11 @@ pub(crate) fn fail(os: &mut Os<'_>, client: Option<&Client>, code: u8) -> Fail {
     )
 }
 
-/// What `lib/filecore` refused, as FileCore reports it for `client`; a
-/// disc's own failure passes through.
+/// What `lib/filecore` refused, as FileCore reports it for `client`, or as
+/// its own for none; a disc's own failure passes through.
 pub(crate) fn refused(
     os: &mut Os<'_>,
-    client: &Client,
+    client: Option<&Client>,
     error: tairix_filecore::Error<Fail>,
 ) -> Fail {
     use tairix_filecore::{Fault, Structure};
@@ -392,13 +406,20 @@ pub(crate) fn refused(
             Fault::NameTooLong | Fault::BadName => code::BAD_NAME,
             Fault::Exists => code::EXISTS,
             Fault::Broken(Structure::Directory) => code::BROKEN_DIR,
+            Fault::Broken(Structure::DefectList) => code::BAD_DEFECT_LIST,
             Fault::NoFragment | Fault::Broken(_) => code::BAD_FS_MAP,
+            Fault::BadDefect => code::BAD_PARMS,
+            Fault::DefectInUse => code::DEFECT,
+            Fault::TooManyDefects => code::TOO_MANY_DEFECTS,
             Fault::Unsupported => code::DISC_NOT_FILE_CORE,
             Fault::NoMemory => return os.no_memory(),
         },
     };
-    fail(os, Some(client), code)
+    fail(os, client, code)
 }
+
+/// The number FileCore's own errors are numbered beside: its module's.
+const MODULE_NUMBER: u32 = 0x08;
 
 /// Its initialisation, for each incarnation: the first is FileCore's own,
 /// which keeps its messages; a later one is the instance `FileCore_Create`

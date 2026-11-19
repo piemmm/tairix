@@ -9,7 +9,9 @@ write FileCore discs through it, so the format has one definition.
 - `record` — the disc record, its geometry and zones, the boot block and the
   checksums; the least fragment and the whole sectors an object is
   allocated.
-- `oldmap`, `newmap` — allocation in each map.
+- `defect` — the boot block's defect lists and their check bytes.
+- `oldmap`, `newmap` — allocation in each map; a defect mapped out of a new
+  map, and a new map compacted as RISC OS 5's `*Compact` compacts one.
 - `dir`, `bigdir` — the fixed and the big directories.
 - `format` — a new disc's layout, the RAM disc's among them as RISC OS 5's
   RamFS lays one out.
@@ -18,7 +20,8 @@ write FileCore discs through it, so the format has one definition.
   object small enough shares a fragment, an open one grows as far as the
   disc's free space reaches and is settled when it closes, and a file moved
   out of a fragment it shares takes a fragment of its own, each as RISC OS 5
-  does them.
+  does them; what holds a byte of the disc, and its defects listed and
+  added.
 
 `no_std`, with no `unsafe`. Every decoder is total: a structure that breaks
 the format is refused as a `Fault`, never trusted. The ADFS driver's mount

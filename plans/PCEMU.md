@@ -227,8 +227,10 @@ of items is finished.
   fully nested, MCS-80 vectors); the 8253 (six modes, BCD, latch, no
   read-back; modes 2 and 3 reload at the period or half-period end; held to
   a clock-by-clock data-sheet oracle); the 8237 (auto-init, the 64 KiB page
-  wrap, and the PC/XT's write-only 4 × 4-bit page register file, channels 0
-  and 1 sharing `83h`); the 8255 (reset to all inputs; the 5150's SW1-on-port-A
+  wrap, the PC/XT's write-only 4 × 4-bit page register file, channels 0
+  and 1 sharing `83h`, and each request served with one cycle in the
+  direction its mode register asks, verify acknowledging with neither
+  strobe); the 8255 (reset to all inputs; the 5150's SW1-on-port-A
   and SW2 wiring, the 5160's SW1 nibbles); the 83-key keyboard (scan code set
   1, its own typematic, the 20 ms clock-low reset and self-test, a 16-byte
   buffer with overrun); and DRAM refresh, timer 1's rises requesting DMA
@@ -302,13 +304,21 @@ of items is finished.
   and status. Disks turn from their motor's start at the drive's exact speed;
   sectors are found where they pass the head and each data byte moves as it
   passes, over DMA channel 2 or through the data register in non-DMA mode;
-  events are processed in the order they fall due. Statuses are per unit,
+  the acknowledge serves its request whatever the cycle (data sheet: DACK
+  resets DRQ), a write it serves without writing taking the byte the host
+  last wrote the data register; events are processed in the order they fall
+  due. Statuses are per unit,
   sensed lowest first. The high-density adapter adds the CCR and disk-change
   line at `3F7h`.
 - **The fixed-disk adapter** (`storage::hdc`): the IBM command block and the
   controller's command set on DMA 3 and IRQ 5, one sector buffer handed to the
   host at the DMA controller's pace, MFM or RLL tracks at 3600 RPM with the
-  drive's interleave, and seeks on the drive's own profile when buffered. The
+  drive's interleave, and seeks on the drive's own profile when buffered.
+  As the adapter's logic diagram has it: the controller's request clocks a
+  flip-flop that drives DRQ 3 while the mask register enables DMA and that
+  any acknowledge clears, and either data-port strobe, the host's or a DMA
+  cycle's, acknowledges the controller through the latch it reached, so a
+  verify cycle leaves the controller asking. The
   interleave and bad tracks are the drive's `LowLevel` format, kept by the
   application beside the image (§3).
 - **DMA's cost.** Each 8237 transfer holds the CPU off the bus for five

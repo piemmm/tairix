@@ -358,11 +358,91 @@ fn a_stalled_dma_channel_holds_the_transfer_until_it_answers() {
         rig.now = rig.hdc.next_event().unwrap();
         rig.hdc.advance(rig.now, &mut rig.dma, &mut rig.memory);
     }
-    assert_eq!(rig.status(), 0x18, "busy, requesting DMA");
+    assert_eq!(rig.status(), 0x1B, "busy, the controller asking, DRQ 3 up");
     rig.dma.write_port(0x0A, 0x03);
     rig.hdc.advance(rig.now, &mut rig.dma, &mut rig.memory);
     assert_eq!(rig.finish(), 0x00);
     assert_eq!(lba_at(&rig.memory, 0), 0);
+}
+
+/// Runs the adapter until it has nothing due of its own.
+fn settle(rig: &mut Rig) {
+    while let Some(at) = rig.hdc.next_event() {
+        rig.now = at;
+        rig.hdc.advance(rig.now, &mut rig.dma, &mut rig.memory);
+    }
+}
+
+#[test]
+fn a_read_over_a_channel_reading_memory_is_acknowledged_and_moves_nothing() {
+    let mut rig = Rig::new(3);
+    rig.memory.0[0x1000..0x1200].fill(0x5A);
+    program(&mut rig.dma, 3, 0x4B, 0x1000, 512 - 1);
+    rig.command(dcb(0x08, 0, 0, 1, 1, BUFFERED));
+    assert_eq!(rig.finish(), 0x00);
+    assert_eq!(rig.dma.take_transfers(), 512);
+    assert!(rig.memory.0[0x1000..0x1200].iter().all(|&b| b == 0x5A));
+}
+
+#[test]
+fn a_write_over_a_channel_writing_memory_records_the_write_latch() {
+    let mut rig = Rig::new(3);
+    rig.memory.0[0x2000..0x2200].fill(0x5A);
+    program(&mut rig.dma, 3, 0x47, 0x2000, 512 - 1);
+    rig.command(dcb(0x0A, 0, 3, 2, 1, BUFFERED));
+    assert_eq!(rig.finish(), 0x00);
+    assert!(
+        rig.memory.0[0x2000..0x2200].iter().all(|&b| b == 0),
+        "memory gets the read latch's byte"
+    );
+    program(&mut rig.dma, 3, 0x47, 0x6000, 512 - 1);
+    rig.command(dcb(0x08, 0, 3, 2, 1, BUFFERED));
+    assert_eq!(rig.finish(), 0x00);
+    assert!(
+        rig.memory.0[0x6000..0x6200].iter().all(|&b| b == BUFFERED),
+        "the sector holds the write latch's: the command's last byte"
+    );
+}
+
+#[test]
+fn a_verify_cycle_clears_the_request_and_leaves_the_controller_asking() {
+    let mut rig = Rig::new(3);
+    program(&mut rig.dma, 3, 0x43, 0, 512 - 1);
+    rig.command(dcb(0x08, 0, 0, 1, 1, BUFFERED));
+    settle(&mut rig);
+    assert_eq!(rig.dma.take_transfers(), 1, "one verify cycle, then none");
+    assert_eq!(rig.status(), 0x0B, "the controller asking, no DRQ 3");
+    assert_eq!(
+        rig.input(0),
+        Some(0x01),
+        "the data port's strobe answers it"
+    );
+    settle(&mut rig);
+    assert_eq!(
+        rig.dma.take_transfers(),
+        1,
+        "its next request is DMA's again"
+    );
+    assert_eq!(rig.status(), 0x0B);
+}
+
+#[test]
+fn dma_turned_back_on_waits_for_the_controller_s_next_request() {
+    let mut rig = Rig::new(3);
+    program(&mut rig.dma, 3, 0x47, 0, 512 - 1);
+    rig.dma.write_port(0x0A, 0x07);
+    rig.command(dcb(0x08, 0, 0, 1, 1, BUFFERED));
+    settle(&mut rig);
+    assert_eq!(rig.status(), 0x1B, "DRQ 3 unanswered");
+    rig.out(3, 0x02);
+    assert_eq!(rig.status(), 0x0B, "DMA off drops it");
+    rig.out(3, 0x03);
+    rig.dma.write_port(0x0A, 0x03);
+    rig.hdc.advance(rig.now, &mut rig.dma, &mut rig.memory);
+    assert_eq!(rig.status(), 0x0B, "and DMA on does not raise it again");
+    assert_eq!(rig.input(0), Some(0x01), "the data port takes byte 0");
+    assert_eq!(rig.finish(), 0x00);
+    assert_eq!(rig.dma.take_transfers(), 511, "DMA takes the rest");
 }
 
 #[test]

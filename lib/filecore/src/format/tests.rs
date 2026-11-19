@@ -25,7 +25,7 @@ fn ram_disc(size: u64) -> DiscRecord {
 /// `record` laid out on a disc of its size, opened.
 fn laid_out(record: DiscRecord) -> (DiscRecord, Volume<MemDisc>) {
     let mut disc = MemDisc::new(usize::try_from(record.disc_size).expect("a test size"));
-    let record = lay_out(&mut disc, record, BootRecord::Blank).expect("laid out");
+    let record = lay_out(&mut disc, record, BootRecord::Blank, b"$").expect("laid out");
     let map = NewMap::open(&mut disc, record).expect("its map");
     let boot_block = record.nzones > 1;
     let volume = Volume::open(disc, Backing::New { map, boot_block }).expect("its root");
@@ -172,7 +172,7 @@ fn a_hard_disc_of_any_size_the_format_describes_is_laid_out_whole() {
             "{size:#X}: every fragment numbered"
         );
         let mut disc = SparseDisc::new(size);
-        let record = lay_out(&mut disc, record, BootRecord::Whole)
+        let record = lay_out(&mut disc, record, BootRecord::Whole, b"$")
             .unwrap_or_else(|error| panic!("{size:#X} laid out: {error:?} {record:?}"));
         let map = NewMap::open(&mut disc, record).expect("its map");
         let mut volume = Volume::open(
@@ -215,4 +215,44 @@ fn map_copies_agree<D: Disc>(
         }
     }
     Ok(true)
+}
+
+/// An 800K E floppy's record as `FileCore_LayoutStructure` is handed one.
+fn e_floppy() -> DiscRecord {
+    let mut raw = [0u8; DISC_RECORD_SIZE];
+    raw[..12].copy_from_slice(&[10, 5, 2, 2, 15, 7, 1, 0, 0, 1, 0x20, 0x05]);
+    raw[12..16].copy_from_slice(&0x203u32.to_le_bytes());
+    raw[16..20].copy_from_slice(&0xC_8000u32.to_le_bytes());
+    raw[22..32].copy_from_slice(b"PROBEDISC ");
+    DiscRecord::parse(&raw)
+}
+
+#[test]
+fn an_e_floppy_laid_out_without_a_boot_block_opens() {
+    let record = e_floppy();
+    let mut disc = MemDisc::new(0xC_8000);
+    let record = lay_out(&mut disc, record, BootRecord::Omitted, b"PROBEDISC").expect("laid out");
+    NewMap::open(&mut disc, record).expect("its map");
+}
+
+#[test]
+fn a_boot_block_holds_empty_defect_lists_a_second_past_512_mb() {
+    for (bytes, big, lists) in [
+        (0x1000_0000u64, false, &[0x2000_0000u32][..]),
+        (0x4000_0000, true, &[0x2000_0000, 0x4000_0000][..]),
+    ] {
+        let record = new_map_record(Variant::HardDisc, bytes).expect("a record");
+        assert_eq!(record.big_flag, big, "{bytes:#X}");
+        let mut disc = SparseDisc::new(bytes);
+        lay_out(&mut disc, record, BootRecord::Whole, b"$").expect("laid out");
+        let mut block = [0u8; BOOT_BLOCK_SIZE];
+        disc.read(BOOT_BLOCK_OFFSET, &mut block).expect("read");
+        for (n, &word) in lists.iter().enumerate() {
+            let at = 4 * n;
+            assert_eq!(
+                u32::from_le_bytes([block[at], block[at + 1], block[at + 2], block[at + 3]]),
+                word
+            );
+        }
+    }
 }

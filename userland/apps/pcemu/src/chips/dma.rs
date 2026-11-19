@@ -1,11 +1,14 @@
 //! The Intel 8237A DMA controller and the PC's page registers.
 //!
-//! Devices move their data through [`Dma::to_memory`] and
-//! [`Dma::from_memory`], which tell them at once when a transfer reaches
-//! terminal count, as the end-of-process line does. The 8237's address
-//! counter is 16 bits and the page register supplies the rest, so a transfer
-//! wraps within its 64 KiB page exactly as software that crosses one
-//! discovers on the hardware.
+//! A device's request is served through [`Dma::serve`]: one cycle in the
+//! direction the channel's mode register asks for, whatever the device
+//! wanted, as the 8237 runs it. A read cycle writes memory's byte to the
+//! device's port, a write cycle reads the port into memory, and a verify
+//! cycle moves nothing but still counts and acknowledges. Each says at once
+//! whether it reached terminal count, as the end-of-process line does. The
+//! 8237's address counter is 16 bits and the page register supplies the rest,
+//! so a transfer wraps within its 64 KiB page exactly as software that
+//! crosses one discovers on the hardware.
 //!
 //! The page registers are the PC and XT's 4 × 4-bit register file, written at
 //! ports 80h–83h (aliased through 9Fh) and never read back. Each channel's
@@ -90,12 +93,25 @@ pub fn channel_setup(n: usize, mode: u8, address: u32, count: u16) -> [(u16, u8)
     ]
 }
 
-/// What a device's transfer over a channel did.
+/// The cycle a channel served a device's request with, as its mode register
+/// asks: the acknowledge comes with each, a strobe with all but verify.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Moved {
-    /// Bytes that moved.
-    pub bytes: usize,
-    /// The last of them reached terminal count.
+pub enum Cycle {
+    /// Memory to the device: the byte memory gave, which the device's port
+    /// was written with.
+    Read(u8),
+    /// The device to memory: its port was read for the byte it drove.
+    Write,
+    /// Neither strobe: the acknowledge alone.
+    Verify,
+}
+
+/// A request a channel served.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Served {
+    /// How the byte moved.
+    pub cycle: Cycle,
+    /// The cycle reached terminal count.
     pub terminal: bool,
 }
 
@@ -300,52 +316,23 @@ impl Dma {
         (made, ended)
     }
 
-    /// Moves device bytes into memory over channel `n`, until terminal count
-    /// or the bytes run out. A verify transfer advances the channel without
-    /// writing.
-    pub fn to_memory<M: DmaMemory>(&mut self, n: usize, memory: &mut M, bytes: &[u8]) -> Moved {
-        let mut moved = Moved {
-            bytes: 0,
-            terminal: false,
+    /// Serves a request on channel `n` with one cycle, if the channel
+    /// answers: `driven` is what the device's port gives a read of it.
+    pub fn serve<M: DmaMemory>(&mut self, n: usize, memory: &mut M, driven: u8) -> Option<Served> {
+        if !self.enabled(n) {
+            return None;
+        }
+        let cycle = match self.channels[n & 3].direction() {
+            Direction::Write => {
+                memory.dma_write(self.physical(n), driven);
+                Cycle::Write
+            }
+            Direction::Read => Cycle::Read(memory.dma_read(self.physical(n))),
+            Direction::Verify => Cycle::Verify,
         };
-        let direction = self.channels[n & 3].direction();
-        if !self.enabled(n) || direction == Direction::Read {
-            return moved;
-        }
-        for &byte in bytes {
-            if direction == Direction::Write {
-                memory.dma_write(self.physical(n), byte);
-            }
-            moved.bytes += 1;
-            moved.terminal = self.advance(n, 1).1;
-            if moved.terminal {
-                break;
-            }
-        }
-        self.transfers += moved.bytes as u64;
-        moved
-    }
-
-    /// Moves memory bytes to a device over channel `n`, filling `out` until
-    /// terminal count.
-    pub fn from_memory<M: DmaMemory>(&mut self, n: usize, memory: &mut M, out: &mut [u8]) -> Moved {
-        let mut moved = Moved {
-            bytes: 0,
-            terminal: false,
-        };
-        if !self.enabled(n) || self.channels[n & 3].direction() != Direction::Read {
-            return moved;
-        }
-        for slot in out.iter_mut() {
-            *slot = memory.dma_read(self.physical(n));
-            moved.bytes += 1;
-            moved.terminal = self.advance(n, 1).1;
-            if moved.terminal {
-                break;
-            }
-        }
-        self.transfers += moved.bytes as u64;
-        moved
+        let terminal = self.advance(n, 1).1;
+        self.transfers += 1;
+        Some(Served { cycle, terminal })
     }
 
     /// Runs `transfers` cycles on channel `n` that no device takes data
@@ -397,6 +384,7 @@ mod tests {
     use super::testing::{program, Flat};
     use super::*;
     use alloc::vec;
+    use alloc::vec::Vec;
 
     fn address(dma: &mut Dma, n: u8) -> u16 {
         dma.write(0x0C, 0);
@@ -404,25 +392,32 @@ mod tests {
         crate::bits::word(low, dma.read(n * 2))
     }
 
+    /// Serves a request for each byte a device drives, while the channel
+    /// answers: the cycles served.
+    fn serve_all(dma: &mut Dma, n: usize, memory: &mut Flat, driven: &[u8]) -> Vec<Served> {
+        driven
+            .iter()
+            .map_while(|&byte| dma.serve(n, memory, byte))
+            .collect()
+    }
+
     #[test]
     fn a_floppy_read_fills_memory_and_reaches_terminal_count() {
         let mut dma = Dma::new();
         let mut memory = Flat(vec![0; 1 << 20]);
         program(&mut dma, 2, 0x46, 0x12000, 3);
-        let moved = dma.to_memory(2, &mut memory, &[1, 2, 3, 4, 5, 6]);
+        let served = serve_all(&mut dma, 2, &mut memory, &[1, 2, 3, 4, 5, 6]);
+        assert_eq!(served.len(), 4, "count 3 moves four bytes");
+        assert!(served.iter().all(|s| s.cycle == Cycle::Write));
         assert_eq!(
-            moved,
-            Moved {
-                bytes: 4,
-                terminal: true
-            },
-            "count 3 moves four bytes"
+            served.iter().map(|s| s.terminal).collect::<Vec<_>>(),
+            [false, false, false, true]
         );
         assert_eq!(&memory.0[0x1_2000..0x1_2005], &[1, 2, 3, 4, 0]);
         assert_eq!(dma.read(0x08) & 0x04, 0x04, "the status register shows it");
         assert!(!dma.enabled(2), "a single-shot channel masks itself");
         assert_eq!(dma.take_transfers(), 4);
-        assert_eq!(dma.to_memory(2, &mut memory, &[7]).bytes, 0);
+        assert_eq!(dma.serve(2, &mut memory, 7), None);
         assert_eq!(dma.take_transfers(), 0);
     }
 
@@ -431,7 +426,7 @@ mod tests {
         let mut dma = Dma::new();
         let mut memory = Flat(vec![0; 1 << 20]);
         program(&mut dma, 2, 0x46, 0x3FFFF, 1);
-        dma.to_memory(2, &mut memory, &[0xAA, 0xBB]);
+        serve_all(&mut dma, 2, &mut memory, &[0xAA, 0xBB]);
         assert_eq!(memory.0[0x3_FFFF], 0xAA);
         assert_eq!(memory.0[0x3_0000], 0xBB, "no carry into the page register");
         assert_eq!(memory.0[0x4_0000], 0);
@@ -443,11 +438,11 @@ mod tests {
         let mut memory = Flat(vec![0; 1 << 20]);
         program(&mut dma, 1, 0x44, 0x50010, 0);
         dma.write_page(0x07, 0x02);
-        dma.to_memory(1, &mut memory, &[0x5A]);
+        dma.serve(1, &mut memory, 0x5A);
         assert_eq!(memory.0[0x2_0010], 0x5A, "87h aliases 83h");
         dma.write_page(0x00, 0x09);
         program(&mut dma, 2, 0x44, 0x60020, 0);
-        dma.to_memory(2, &mut memory, &[0xA5]);
+        dma.serve(2, &mut memory, 0xA5);
         assert_eq!(
             memory.0[0x6_0020], 0xA5,
             "80h is a register no channel reads"
@@ -459,19 +454,56 @@ mod tests {
         let mut dma = Dma::new();
         let mut memory = Flat((0..=255u8).cycle().take(1 << 20).collect());
         program(&mut dma, 1, 0x58, 0x10, 1);
-        let mut out = [0u8; 4];
-        let moved = dma.from_memory(1, &mut memory, &mut out[..2]);
+        let pass = |dma: &mut Dma, memory: &mut Flat| serve_all(dma, 1, memory, &[0, 0]);
+        let first = pass(&mut dma, &mut memory);
         assert_eq!(
-            moved,
-            Moved {
-                bytes: 2,
-                terminal: true
-            }
+            first,
+            [
+                Served {
+                    cycle: Cycle::Read(0x10),
+                    terminal: false
+                },
+                Served {
+                    cycle: Cycle::Read(0x11),
+                    terminal: true
+                }
+            ]
         );
-        assert_eq!(&out[..2], &[0x10, 0x11]);
         assert!(dma.enabled(1), "auto-init stays unmasked");
-        assert_eq!(dma.from_memory(1, &mut memory, &mut out[..2]).bytes, 2);
-        assert_eq!(&out[..2], &[0x10, 0x11]);
+        assert_eq!(pass(&mut dma, &mut memory), first);
+    }
+
+    #[test]
+    fn a_channel_runs_its_own_direction_whatever_the_device_drives() {
+        let mut dma = Dma::new();
+        let mut memory = Flat(vec![0x33; 1 << 20]);
+        program(&mut dma, 1, 0x48, 0x2000, 0);
+        assert_eq!(
+            dma.serve(1, &mut memory, 0x77).map(|s| s.cycle),
+            Some(Cycle::Read(0x33)),
+            "a read cycle writes memory's byte to the device"
+        );
+        assert_eq!(memory.0[0x2000], 0x33, "and leaves memory as it was");
+        program(&mut dma, 1, 0x44, 0x2000, 0);
+        assert_eq!(
+            dma.serve(1, &mut memory, 0x77).map(|s| s.cycle),
+            Some(Cycle::Write)
+        );
+        assert_eq!(memory.0[0x2000], 0x77);
+    }
+
+    #[test]
+    fn verify_moves_nothing_but_counts_acknowledges_and_ends() {
+        let mut dma = Dma::new();
+        let mut memory = Flat(vec![0x33; 1 << 20]);
+        program(&mut dma, 2, 0x42, 0x2000, 2);
+        let served = serve_all(&mut dma, 2, &mut memory, &[0x77; 5]);
+        assert_eq!(served.len(), 3);
+        assert!(served.iter().all(|s| s.cycle == Cycle::Verify));
+        assert_eq!(served.last().map(|s| s.terminal), Some(true));
+        assert!(memory.0[0x2000..0x2003].iter().all(|&b| b == 0x33));
+        assert_eq!(dma.take_transfers(), 3, "each cycle holds the bus");
+        assert!(!dma.enabled(2));
     }
 
     #[test]

@@ -15,7 +15,7 @@
 //! other than its own.
 
 use super::floppy::{Density, Encoding, Floppy, Sector, SectorId, Track, MAX_SECTORS};
-use crate::chips::dma::{Dma, DmaMemory};
+use crate::chips::dma::{Cycle, Dma, DmaMemory};
 use crate::cpu::OPEN_BUS;
 use crate::snapshot::{restore_bytes, save_bytes, In, Out, State, Torn};
 use crate::time::{Nanos, NANOS_PER_MILLISECOND as MS, NANOS_PER_SECOND};
@@ -480,6 +480,9 @@ pub struct Fdc {
     /// What the data register last held, which a read finds when nothing is
     /// ready.
     last: u8,
+    /// What the host last wrote to the data register, which a request a
+    /// cycle answers without writing takes as its byte.
+    written: u8,
     now: Nanos,
     buffer: Buffer,
 }
@@ -612,6 +615,7 @@ impl Fdc {
             loaded_until: 0,
             pio: None,
             last: 0,
+            written: 0,
             now: 0,
             buffer: Buffer([0; MAX_DATA]),
         }
@@ -960,6 +964,7 @@ impl Fdc {
     }
 
     fn write_data(&mut self, value: u8, t: Nanos) {
+        self.written = value;
         let (mut bytes, len) = match self.phase {
             Phase::Idle => ([0; 9], 0),
             Phase::Command { bytes, len } => (bytes, len),
@@ -1476,7 +1481,9 @@ impl Fdc {
     }
 
     /// Hands the host a byte as it passes: whether terminal count came with
-    /// it, or nothing when the host missed it.
+    /// it, or nothing when the host missed it. The acknowledge serves the
+    /// request whatever the cycle, so the byte is lost to a read cycle, which
+    /// writes the data register instead, or to verify.
     fn give<M: DmaMemory>(&mut self, byte: u8, dma: &mut Dma, memory: &mut M) -> Option<bool> {
         if self.specify.non_dma {
             if self.pio.is_some() {
@@ -1485,15 +1492,20 @@ impl Fdc {
             self.pio = Some(byte);
             return Some(false);
         }
+        self.last = byte;
         if self.dor & dor::DMA_IRQ == 0 {
             return None;
         }
-        let moved = dma.to_memory(DMA_CHANNEL, memory, &[byte]);
-        (moved.bytes == 1).then_some(moved.terminal)
+        let served = dma.serve(DMA_CHANNEL, memory, byte)?;
+        if let Cycle::Read(written) = served.cycle {
+            self.written = written;
+        }
+        Some(served.terminal)
     }
 
     /// Takes the byte the host has ready, and whether terminal count came
-    /// with it.
+    /// with it. A write cycle or verify serves the request without writing
+    /// the data register, so the controller takes what it already held.
     fn take<M: DmaMemory>(&mut self, dma: &mut Dma, memory: &mut M) -> Option<(u8, bool)> {
         if self.specify.non_dma {
             return self.pio.take().map(|byte| (byte, false));
@@ -1501,9 +1513,11 @@ impl Fdc {
         if self.dor & dor::DMA_IRQ == 0 {
             return None;
         }
-        let mut byte = [0];
-        let moved = dma.from_memory(DMA_CHANNEL, memory, &mut byte);
-        (moved.bytes == 1).then_some((byte[0], moved.terminal))
+        let served = dma.serve(DMA_CHANNEL, memory, self.last)?;
+        if let Cycle::Read(written) = served.cycle {
+            self.written = written;
+        }
+        Some((self.written, served.terminal))
     }
 
     /// Moves the next byte of the data field passing the head. After
@@ -1943,6 +1957,7 @@ crate::snapshot::state!(
         loaded_until,
         pio,
         last,
+        written,
         now,
         buffer,
     }

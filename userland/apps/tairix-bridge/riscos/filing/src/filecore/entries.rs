@@ -4,8 +4,9 @@
 
 use alloc::vec::Vec;
 
+use tairix_filecore::defect::FIRST_END;
 use tairix_filecore::dir::Object;
-use tairix_filecore::volume::{Volume, EMPTY_OBJECT};
+use tairix_filecore::volume::{Directory, Recorded, Volume, EMPTY_OBJECT};
 use tairix_filecore::{Error, Fault};
 use tairix_fsmeta::preset::acorn;
 use tairix_riscos_kernel::filing::fs::{
@@ -16,7 +17,7 @@ use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 
 use super::disc::{with_volume, ClientDisc, Seen};
 use super::names::{self, Found, Named};
-use super::{capped, code, fail, space_of, split64, with_instance, Client, OpenFile};
+use super::{capped, code, fail, located, space_of, split64, with_instance, Client, OpenFile};
 use crate::fileswitch::file::stamp_now;
 
 /// What a new file is given: read and write for its owner.
@@ -627,12 +628,15 @@ fn root_object(volume: &Volume<ClientDisc<'_, '_>>, seen: Seen) -> Result<Object
     Ok(root)
 }
 
-/// `FSEntry_GetBytes`: R3 bytes of the file on R1 from R4 into R2.
+/// `FSEntry_GetBytes`: R3 bytes of the file on R1 from R4 into R2, as its
+/// allocation holds them; zeros past it.
 pub(super) fn get_bytes(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let (workspace, client) = context(os, regs)?;
     let (_, file) = opened(os, workspace, &client, regs.r[1])?;
     let (to, count, offset) = (regs.r[2], regs.r[3], regs.r[4]);
-    let held = file.extent.saturating_sub(offset).min(count);
+    // What was put lies in the allocation before FileSwitch next tells the
+    // extent; FileSwitch bounds a read by the extent itself.
+    let held = file.allocated.saturating_sub(offset).min(count);
     if held > 0 && !file.directory {
         with_volume(os, workspace, file.drive, |volume, _| {
             transfer(volume, file.indaddr, u64::from(offset), to, held, false)
@@ -844,22 +848,13 @@ pub(super) fn func(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
             regs.r[2] = with_volume(os, workspace, drive, |volume, _| boot_option(volume))?;
             Ok(())
         }
-        DEFECT_LIST | DEFECT_LIST_64 => {
-            // A disc FileCore lays out records no defect: the list is its
-            // terminators alone.
-            let terminators: &[u32] = if regs.r[0] == DEFECT_LIST {
-                &[0x2000_0000]
-            } else {
-                &[0x2000_0000, 0x4000_0000]
-            };
-            for (n, &word) in (0..).zip(terminators) {
-                if 4 * (n + 1) <= regs.r[5] {
-                    os.write_word(regs.r[2].wrapping_add(4 * n), word)?;
-                }
-            }
-            Ok(())
+        DEFECT_LIST => defect_list(os, workspace, &client, regs, false),
+        DEFECT_LIST_64 => defect_list(os, workspace, &client, regs, true),
+        ADD_DEFECT => add_defect(os, workspace, &client, regs, u64::from(regs.r[2])),
+        ADD_DEFECT_64 => {
+            let address = u64::from(regs.r[2]) | u64::from(regs.r[3]) << 32;
+            add_defect(os, workspace, &client, regs, address)
         }
-        ADD_DEFECT | ADD_DEFECT_64 => Err(fail(os, Some(&client), code::BAD_PARMS)),
         WRITE_BOOT_OPTION => {
             let (_, drive) = resolve(os, workspace, &client, regs.r[1])?;
             let option = regs.r[2].to_le_bytes()[0];
@@ -886,6 +881,93 @@ const OBJECT_AT_OFFSET: u32 = 33;
 const FREE_SPACE_64: u32 = 35;
 const DEFECT_LIST_64: u32 = 36;
 const ADD_DEFECT_64: u32 = 37;
+
+/// `FSEntry_Func` 25 and 36: the defects the disc R1 names records, written
+/// to the R5 bytes at R2 as RISC OS 5 writes them. For 25, a word each — the
+/// boot block's byte address, or, on a disc without one, the map's sector
+/// number — then the list's end, a big disc's defects past 512 MB left out
+/// as past what its end lets a word hold; for 36, each byte address in two
+/// words, with no end. What does not fit is FileCore's "Too many defects",
+/// what fits before it written.
+fn defect_list(
+    os: &mut Os<'_>,
+    workspace: u32,
+    client: &Client,
+    regs: &Regs,
+    wide: bool,
+) -> Result<(), Fail> {
+    let (_, drive) = resolve(os, workspace, client, regs.r[1])?;
+    let mut list = Listed {
+        bytes: Vec::new(),
+        room: usize::try_from(regs.r[5]).unwrap_or(usize::MAX),
+        stopped: None,
+    };
+    with_volume(os, workspace, drive, |volume, _| {
+        let sector = volume.sector_size().trailing_zeros();
+        volume.defects(|defect| {
+            if wide {
+                return list.add(&defect.address.to_le_bytes());
+            }
+            let word = match defect.recorded {
+                Recorded::First => defect.address,
+                Recorded::Map => defect.address >> sector,
+                Recorded::Second => return true,
+            };
+            list.add(&u32::try_from(word).unwrap_or(u32::MAX).to_le_bytes())
+        })
+    })?;
+    if !wide && list.stopped.is_none() {
+        list.add(&FIRST_END.to_le_bytes());
+    }
+    os.write_bytes(regs.r[2], &list.bytes)?;
+    match list.stopped {
+        None => Ok(()),
+        Some(Stop::Full) => Err(fail(os, Some(client), code::TOO_MANY_DEFECTS)),
+        Some(Stop::NoMemory) => Err(os.no_memory()),
+    }
+}
+
+/// A defect list as written so far.
+struct Listed {
+    bytes: Vec<u8>,
+    room: usize,
+    stopped: Option<Stop>,
+}
+
+/// Why a defect list stopped.
+enum Stop {
+    /// Its buffer had no room for the next.
+    Full,
+    /// The host had no memory for it.
+    NoMemory,
+}
+
+impl Listed {
+    /// `item` added where it fits: whether the list may go on.
+    fn add(&mut self, item: &[u8]) -> bool {
+        if self.bytes.len() + item.len() > self.room {
+            self.stopped = Some(Stop::Full);
+        } else if self.bytes.try_reserve(item.len()).is_err() {
+            self.stopped = Some(Stop::NoMemory);
+        } else {
+            self.bytes.extend_from_slice(item);
+        }
+        self.stopped.is_none()
+    }
+}
+
+/// `FSEntry_Func` 26 and 37: the sector holding byte `address` of the disc
+/// R1 names recorded as a defect, as `lib/filecore` records one.
+fn add_defect(
+    os: &mut Os<'_>,
+    workspace: u32,
+    client: &Client,
+    regs: &Regs,
+    address: u64,
+) -> Result<(), Fail> {
+    let (_, drive) = resolve(os, workspace, client, regs.r[1])?;
+    with_volume(os, workspace, drive, |volume, _| volume.add_defect(address))
+}
 
 /// The boot option `volume`'s disc records.
 fn boot_option(volume: &mut Volume<ClientDisc<'_, '_>>) -> Result<u32, Error<Fail>> {
@@ -974,7 +1056,8 @@ fn rename(os: &mut Os<'_>, workspace: u32, client: &Client, regs: &mut Regs) -> 
                 tairix_filecore::Structure::Directory,
             )))?;
         if from_parent == to_parent && acorn::names_match(object.name(), to_leaf) {
-            return volume.dir_respell_at(from_parent, index, &object.renamed(to_leaf)?);
+            volume.dir_respell_at(from_parent, index, &object.renamed(to_leaf)?)?;
+            return follow_rename(volume, &object, to_leaf, from_parent, to_parent);
         }
         let copy = volume.copy_for_move(&object, from_parent, to_parent)?;
         let mut moving = object.renamed(to_leaf)?;
@@ -993,14 +1076,34 @@ fn rename(os: &mut Os<'_>, workspace: u32, client: &Client, regs: &mut Regs) -> 
         if copy.is_some() {
             volume.release_maybe_shared(object.indaddr, object.size, from_parent)?;
         }
-        if object.is_dir() && from_parent != to_parent {
-            let directory = volume.load_dir(object.indaddr)?;
-            volume.reparent(object.indaddr, directory, to_parent)?;
-        }
-        Ok(())
+        follow_rename(volume, &moving, to_leaf, from_parent, to_parent)
     })?;
     regs.r[1] = 0;
     Ok(())
+}
+
+/// A renamed or moved directory's own record of itself: a big directory
+/// rewrites its stored name and parent, a fixed one only its parent when it
+/// moves.
+fn follow_rename(
+    volume: &mut Volume<ClientDisc<'_, '_>>,
+    object: &Object,
+    leaf: &[u8],
+    from_parent: u32,
+    to_parent: u32,
+) -> Result<(), Error<Fail>> {
+    if !object.is_dir() {
+        return Ok(());
+    }
+    match volume.load_dir(object.indaddr)? {
+        directory @ Directory::Big(_) => {
+            volume.rename_dir(object.indaddr, directory, leaf, to_parent)
+        }
+        directory @ Directory::Fixed(_) if from_parent != to_parent => {
+            volume.reparent(object.indaddr, directory, to_parent)
+        }
+        Directory::Fixed(_) => Ok(()),
+    }
 }
 
 /// `FSEntry_Func` 11: the name of the disc R1 names, after its length, and
@@ -1185,8 +1288,9 @@ fn name_disc(os: &mut Os<'_>, workspace: u32, client: &Client, regs: &Regs) -> R
     with_volume(os, workspace, drive, |volume, _| volume.set_disc_name(name))
 }
 
-/// `FSEntry_Func` 33: what lies at R2, a byte offset into the disc R1 names:
-/// R2 zero for free space and one for the disc's own structures or an
+/// `FSEntry_Func` 33: what holds R2, a byte offset into the disc R1 names,
+/// its name written to the R4 bytes at R3 as [`located`] writes it: R2 zero
+/// for free space or a defect, one for space no object holds, two for an
 /// object.
 fn object_at_offset(
     os: &mut Os<'_>,
@@ -1195,10 +1299,19 @@ fn object_at_offset(
     regs: &mut Regs,
 ) -> Result<(), Fail> {
     let (_, drive) = resolve(os, workspace, client, regs.r[1])?;
+    let (system, _) = os.read_until(client.title, names::NAME_MOST, |b| b <= b' ')?;
     let offset = u64::from(regs.r[2]);
-    let held = with_volume(os, workspace, drive, |volume, _| {
-        volume.allocated_at(offset)
+    let mut name = located::Name::new(regs.r[4]);
+    let answer = with_volume(os, workspace, drive, |volume, _| {
+        located::find(volume, &system, offset, &mut name)
     })?;
-    regs.r[2] = u32::from(held);
-    Ok(())
+    os.write_bytes(regs.r[3], name.written())?;
+    match answer {
+        located::Answer::Kind(kind) => {
+            regs.r[2] = kind;
+            Ok(())
+        }
+        located::Answer::RootOverflow => Err(os.buffer_overflow()),
+        located::Answer::Overflow => Err(fail(os, Some(client), code::BUFFER)),
+    }
 }
