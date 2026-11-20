@@ -7,10 +7,12 @@
 //! boots from. The command writes the harness there: a BASIC program, built
 //! with `lib/openbasic`, that runs every corpus scenario's calls and records
 //! what each answered, then `lib/obey`'s cases ([`obey`]); and a `!Boot` that
-//! first has BASIC V type `lib/openbasic`'s programs ([`basic`]), then runs
-//! it. Where `<dir>` holds RPCEmu it is run headless until the harness is
-//! done: the harness ends by opening `Done`, which here is a named pipe the
-//! command waits on. Otherwise the harness is left for the developer to run,
+//! first has BASIC V type `lib/openbasic`'s programs ([`basic`]), then has
+//! BASIC V and BASIC VI answer `tairix-riscos-basic`'s cases ([`numbers`]),
+//! run its programs ([`language`]), assemble its assembler's lines
+//! ([`assembler`]) and type its sessions ([`session`]), then runs it. Where `<dir>` holds RPCEmu it is run
+//! headless until the harness is done: the harness ends by opening `Done`,
+//! which here is a named pipe the command waits on. Otherwise the harness is left for the developer to run,
 //! and a later run imports what it recorded. Each recorded observation
 //! becomes its scenario's fixture; a scenario marked `ours`, whose fixture
 //! is the emulator's own, is not run, so nothing it does to genuine RISC OS
@@ -32,6 +34,7 @@ use std::time::{Duration, SystemTime};
 use tairix_openbasic::program::{self, Line};
 use tairix_openbasic::tokenise::{tokenise, Start};
 use tairix_openbasic::Dialect;
+use tairix_riscos_basic::corpus::quoted as quote;
 use tairix_riscos_kernel::corpus::{
     check_observation, format_observations, parse_observations, parse_scenarios, At, Item, Kind,
     Observation, Scenario, Step, Value, REGISTERS, UNWRITTEN,
@@ -40,8 +43,12 @@ use tairix_riscos_kernel::corpus::{
 use crate::commands::rom_runs::{runs, windows, Runs, ROM_RUN};
 use crate::Context;
 
+mod assembler;
 mod basic;
+mod language;
+mod numbers;
 mod obey;
+mod session;
 mod sprites;
 
 pub use sprites::check as check_sprites;
@@ -53,8 +60,9 @@ const CORPORA: [&str; 2] = [
 ];
 /// The emulator `<dir>` may hold, run headless.
 const EMULATOR: &str = "rpcemu-recompiler";
-/// The longest a recording may take.
-const DEADLINE: Duration = Duration::from_secs(300);
+/// The longest a recording may take: every BASIC run of every part, each
+/// dialect's, then the scenarios, with room over.
+const DEADLINE: Duration = Duration::from_mins(20);
 /// What each fixtures file's header says after its provenance.
 const OURS: &str = "A scenario marked `ours` holds this emulator's own observation.";
 const REFERENCE: &str =
@@ -114,46 +122,118 @@ fn groups(ctx: &Context) -> Result<Vec<Group>, String> {
         .collect()
 }
 
+/// The corpora a recording runs, as read and as parsed.
+struct Corpora {
+    cases: String,
+    programs_text: String,
+    programs: Vec<basic::Program>,
+    language_text: String,
+    language: Vec<tairix_riscos_basic::corpus::language::Program>,
+    assembler_text: String,
+    assembler: Vec<tairix_riscos_basic::corpus::assembler::Line>,
+    session_text: String,
+    sessions: Vec<tairix_riscos_basic::corpus::session::Session>,
+    numbers: Vec<(&'static str, Vec<u8>)>,
+}
+
+impl Corpora {
+    fn read(ctx: &Context) -> Result<Self, String> {
+        let read = |path: &str| {
+            std::fs::read_to_string(ctx.workspace_root.join(path))
+                .map_err(|e| format!("riscos: {path}: {e}"))
+        };
+        let programs_text = read(basic::PROGRAMS)?;
+        let language_text = read(language::PROGRAMS)?;
+        let assembler_text = read(assembler::LINES)?;
+        let session_text = read(session::SESSIONS)?;
+        Ok(Self {
+            cases: read(obey::CASES)?,
+            programs: basic::programs(&programs_text)?,
+            language: language::programs(&language_text)?,
+            assembler: assembler::lines(&assembler_text)?,
+            sessions: session::sessions(&session_text)?,
+            numbers: numbers::staged(),
+            programs_text,
+            language_text,
+            assembler_text,
+            session_text,
+        })
+    }
+
+    /// What a run of the harness leaves in HostFS.
+    fn left(&self) -> Vec<String> {
+        left()
+            .map(String::from)
+            .chain(basic::left(&self.programs))
+            .chain(numbers::LEFT.map(String::from))
+            .chain(language::left(&self.language))
+            .chain(assembler::left(&self.assembler))
+            .chain(session::left(&self.sessions))
+            .collect()
+    }
+}
+
 fn reference(ctx: &Context, dir: &Path) -> Result<(), String> {
     let groups = groups(ctx)?;
-    let read = |path: &str| {
-        std::fs::read_to_string(ctx.workspace_root.join(path))
-            .map_err(|e| format!("riscos: {path}: {e}"))
-    };
-    let cases = read(obey::CASES)?;
-    let programs_text = read(basic::PROGRAMS)?;
-    let programs = basic::programs(&programs_text)?;
-    let staged = [
-        (obey::STAGED, cases.as_bytes().to_vec()),
-        (basic::TYPED, basic::typed(&programs)),
+    let corpora = Corpora::read(ctx)?;
+    let mut staged = vec![
+        (obey::STAGED, corpora.cases.as_bytes().to_vec()),
+        (basic::TYPED, basic::typed(&corpora.programs)),
     ];
+    staged.extend(corpora.numbers.iter().cloned());
+    let language_staged = language::staged(&corpora.language);
+    let assembler_staged = assembler::staged(&corpora.assembler);
+    let session_staged = session::staged(&corpora.sessions);
+    staged.extend(
+        language_staged
+            .iter()
+            .chain(&assembler_staged)
+            .chain(&session_staged)
+            .map(|(name, bytes)| (name.as_str(), bytes.clone())),
+    );
+    let mut commands = language::run(&corpora.language);
+    commands.extend(assembler::run(&corpora.assembler));
+    commands.extend(session::run(&corpora.sessions));
+    let ours = boot(&commands);
     let hostfs = dir.join("hostfs");
     let harness = hostfs.join("Harness,ffb");
-    let left: Vec<String> = left()
-        .map(String::from)
-        .chain(basic::left(&programs))
-        .collect();
+    let left = corpora.left();
     let left = || left.iter().map(String::as_str);
     let (observed, answers) = if dir.join(EMULATOR).exists() {
-        write_harness(&groups, &staged, left(), &hostfs, &harness)?;
+        write_harness(&groups, &staged, left(), &hostfs, &harness, &ours)?;
         let ran = run_emulator(ctx, dir, &hostfs);
-        remove_harness(&hostfs, &harness)?;
+        remove_harness(&hostfs, &harness, &ours)?;
         ran?;
         (
             recorded(&hostfs, "Observed")?,
             recorded(&hostfs, obey::RECORDED)?,
         )
     } else if let Some(texts) = recording(&hostfs, &harness)? {
-        remove_harness(&hostfs, &harness)?;
+        remove_harness(&hostfs, &harness, &ours)?;
         texts
     } else {
-        write_harness(&groups, &staged, left(), &hostfs, &harness)?;
+        write_harness(&groups, &staged, left(), &hostfs, &harness, &ours)?;
         return outln!(
             "riscos: the harness is in {}: boot the machine from it, then run this again to import what it records",
             hostfs.display()
         );
     };
-    let observations = parse_observations(&observed)
+    import(ctx, dir, &groups, &corpora, &observed, &answers)
+}
+
+/// What a recording holds, `observed` and `lib/obey`'s `answers` among it,
+/// checked for runs of ROM bytes and written out as the fixtures and each
+/// corpus's answers.
+fn import(
+    ctx: &Context,
+    dir: &Path,
+    groups: &[Group],
+    corpora: &Corpora,
+    observed: &str,
+    answers: &str,
+) -> Result<(), String> {
+    let hostfs = dir.join("hostfs");
+    let observations = parse_observations(observed)
         .map_err(|e| format!("riscos: the recording:{}: {}", e.line, e.reason))?;
     if let Some(failed) = observations
         .iter()
@@ -166,49 +246,85 @@ fn reference(ctx: &Context, dir: &Path) -> Result<(), String> {
         return Err(format!("riscos: the lib/obey probe stopped: {failed}"));
     }
     let images = images(&dir.join("roms"))?;
-    let provenance = provenance(&observed, &images)?;
-    let listed = basic::answers(&provenance, &programs, &hostfs)?;
-    let mut ours: Vec<Vec<u8>> = groups
-        .iter()
-        .map(|group| group.source.as_bytes().to_vec())
-        .collect();
-    for text in [&cases, &programs_text] {
-        ours.push(text.as_bytes().to_vec());
-        ours.extend(quoted(text));
-    }
-    let held = runs(&ours);
+    let provenance = provenance(observed, &images)?;
+    let listed = basic::answers(&provenance, &corpora.programs, &hostfs)?;
+    let counted = numbers::answers(&provenance, &hostfs)?;
+    let printed = language::answers(&provenance, &corpora.language, &hostfs)?;
+    let assembled = assembler::answers(&provenance, &corpora.assembler, &hostfs)?;
+    let typed = session::answers(&provenance, &corpora.sessions, &hostfs)?;
+    let texts = [
+        corpora.cases.as_str(),
+        &corpora.programs_text,
+        &corpora.language_text,
+        &corpora.assembler_text,
+        &corpora.session_text,
+    ];
+    let held = held_runs(groups, &texts, &corpora.numbers);
     let mut streams = vec![
         observed.as_bytes().to_vec(),
         answers.as_bytes().to_vec(),
         listed.as_bytes().to_vec(),
+        counted.as_bytes().to_vec(),
+        printed.as_bytes().to_vec(),
+        assembled.as_bytes().to_vec(),
+        typed.as_bytes().to_vec(),
     ];
-    streams.extend(register_streams(&observed));
-    streams.extend(memory_streams(&observed));
-    streams.extend(obey::written(&answers));
+    streams.extend(register_streams(observed));
+    streams.extend(memory_streams(observed));
+    streams.extend(obey::written(answers));
     streams.extend(quoted(&listed));
+    streams.extend(quoted(&counted));
+    streams.extend(quoted(&printed));
+    streams.extend(quoted(&typed));
+    streams.extend(assembler::laid(&assembled));
     refuse_rom_runs(&images, &streams, &held)?;
     let mut header: Vec<&str> = provenance.iter().map(String::as_str).collect();
     header.extend([OURS, REFERENCE]);
-    for group in &groups {
+    for group in groups {
         write_fixtures(group, &observations, &header)?;
     }
     for (path, text) in [
-        (obey::ANSWERS, obey::answers(&provenance, &answers)),
+        (obey::ANSWERS, obey::answers(&provenance, answers)),
         (basic::ANSWERS, listed),
+        (numbers::ANSWERS, counted),
+        (language::ANSWERS, printed),
+        (assembler::ANSWERS, assembled),
+        (session::ANSWERS, typed),
     ] {
         let path = ctx.workspace_root.join(path);
         std::fs::write(&path, text).map_err(|e| format!("riscos: {}: {e}", path.display()))?;
     }
-    remove_found(&hostfs, left())?;
+    remove_found(&hostfs, corpora.left().iter().map(String::as_str))?;
     outln!(
-        "riscos: {} observations, {} lib/obey answers and {} BASIC programs recorded",
+        "riscos: {} observations, {} lib/obey answers, {} typed BASIC programs, {} run ones, {} assembler lines and {} sessions recorded",
         observations.len(),
         answers
             .lines()
             .filter(|line| line.starts_with("= "))
             .count(),
-        programs.len()
+        corpora.programs.len(),
+        corpora.language.len(),
+        corpora.assembler.len(),
+        corpora.sessions.len()
     )
+}
+
+/// The runs the corpus's own files hold: every group's scenarios, `texts`
+/// and the numbers' programs, each with the strings they quote.
+fn held_runs(groups: &[Group], texts: &[&str], programs: &[(&str, Vec<u8>)]) -> Runs {
+    let mut ours: Vec<Vec<u8>> = groups
+        .iter()
+        .map(|group| group.source.as_bytes().to_vec())
+        .collect();
+    for text in texts {
+        ours.push(text.as_bytes().to_vec());
+        ours.extend(quoted(text));
+    }
+    for (_, program) in programs {
+        ours.push(program.clone());
+        ours.extend(quoted(&String::from_utf8_lossy(program)));
+    }
+    runs(&ours)
 }
 
 /// The text a harness run recorded under `name`.
@@ -260,23 +376,30 @@ fn find(hostfs: &Path, name: &str) -> Option<PathBuf> {
         })
 }
 
-/// The `!Boot` that types `lib/openbasic`'s programs into BASIC, then runs
-/// the harness.
-fn boot() -> String {
-    format!(
-        "| The TAIRiX reference harness.\n{}\nRun HostFS:$.Harness\n",
-        basic::RUN
-    )
+/// The `!Boot` that types `lib/openbasic`'s programs into BASIC, has BASIC
+/// answer the numbers' cases, runs `commands`, then runs the harness.
+fn boot(commands: &[String]) -> String {
+    let mut boot = format!(
+        "| The TAIRiX reference harness.\n{}\n{}\n",
+        basic::RUN,
+        numbers::RUN.join("\n")
+    );
+    for command in commands {
+        boot.push_str(command);
+        boot.push('\n');
+    }
+    boot.push_str("Run HostFS:$.Harness\n");
+    boot
 }
 
 /// The harness's `!Boot` in `hostfs`, if one is there; refused where the
 /// machine has a `!Boot` of its own, which the harness never replaces.
-fn harness_boot(hostfs: &Path) -> Result<Option<PathBuf>, String> {
+fn harness_boot(hostfs: &Path, ours: &str) -> Result<Option<PathBuf>, String> {
     let Some(boot) = find(hostfs, "!Boot") else {
         return Ok(None);
     };
     match std::fs::read(&boot) {
-        Ok(text) if text == self::boot().as_bytes() => Ok(Some(boot)),
+        Ok(text) if text == ours.as_bytes() => Ok(Some(boot)),
         _ => Err(format!(
             "riscos: {} is the machine's own: move it aside to run the harness",
             boot.display()
@@ -290,17 +413,18 @@ fn left() -> impl Iterator<Item = &'static str> {
     ["Done", "Observed"].into_iter().chain(obey::LEFT)
 }
 
-/// Writes the harness, the files it and BASIC read beside it, and the `!Boot`
-/// that runs them, clearing what an earlier run left.
+/// Writes the harness, the files it and BASIC read beside it, and `ours`, the
+/// `!Boot` that runs them, clearing what an earlier run left.
 fn write_harness<'a>(
     groups: &[Group],
     staged: &[(&str, Vec<u8>)],
     left: impl IntoIterator<Item = &'a str>,
     hostfs: &Path,
     harness: &Path,
+    ours: &str,
 ) -> Result<(), String> {
     std::fs::create_dir_all(hostfs).map_err(|e| format!("riscos: {}: {e}", hostfs.display()))?;
-    harness_boot(hostfs)?;
+    harness_boot(hostfs, ours)?;
     remove_found(hostfs, left)?;
     let program = harness_program(groups.iter().flat_map(|group| &group.scenarios))?;
     std::fs::write(harness, program).map_err(|e| format!("riscos: {}: {e}", harness.display()))?;
@@ -309,13 +433,13 @@ fn write_harness<'a>(
         std::fs::write(&path, bytes).map_err(|e| format!("riscos: {}: {e}", path.display()))?;
     }
     let boot = hostfs.join("!Boot,feb");
-    std::fs::write(&boot, self::boot()).map_err(|e| format!("riscos: {}: {e}", boot.display()))
+    std::fs::write(&boot, ours).map_err(|e| format!("riscos: {}: {e}", boot.display()))
 }
 
-/// Removes the harness and the `!Boot` that runs it, so the machine boots as
-/// it did before.
-fn remove_harness(hostfs: &Path, harness: &Path) -> Result<(), String> {
-    if let Some(boot) = harness_boot(hostfs)? {
+/// Removes the harness and `ours`, the `!Boot` that runs it, so the machine
+/// boots as it did before.
+fn remove_harness(hostfs: &Path, harness: &Path, ours: &str) -> Result<(), String> {
+    if let Some(boot) = harness_boot(hostfs, ours)? {
         std::fs::remove_file(&boot).map_err(|e| format!("riscos: {}: {e}", boot.display()))?;
     }
     match std::fs::remove_file(harness) {
@@ -803,21 +927,6 @@ fn write_fixtures(
         .map_err(|e| format!("riscos: {}: {e}", group.fixtures.display()))
 }
 
-/// `bytes` quoted as the harness writes a field: printable ASCII but for
-/// `"` and `\\`, every other byte `\\xHH`.
-fn quote(bytes: &[u8]) -> String {
-    let mut out = String::from("\"");
-    for &b in bytes {
-        if (0x20..=0x7E).contains(&b) && b != b'"' && b != b'\\' {
-            out.push(char::from(b));
-        } else {
-            let _ = write!(out, "\\x{b:02X}");
-        }
-    }
-    out.push('"');
-    out
-}
-
 /// The bytes of every quoted string in `text`, a case's fields or an
 /// answer's buffers, `\xHH` read as its byte; a string left open ends with
 /// its line.
@@ -883,19 +992,23 @@ mod tests {
         let cases = "cli \"Echo\"\n";
         let staged = [(obey::STAGED, cases.as_bytes().to_vec())];
         let left = || ["Done", obey::RECORDED];
-        let refused =
-            write_harness(&[], &staged, left(), &hostfs, &harness).expect_err("the machine's own");
+        let ours = boot(&[]);
+        let refused = write_harness(&[], &staged, left(), &hostfs, &harness, &ours)
+            .expect_err("the machine's own");
         assert!(refused.contains("move it aside"), "{refused}");
         assert!(!harness.exists());
-        assert!(remove_harness(&hostfs, &harness).is_err(), "never removed");
+        assert!(
+            remove_harness(&hostfs, &harness, &ours).is_err(),
+            "never removed"
+        );
         assert_eq!(
             std::fs::read_to_string(hostfs.join("!Boot,feb")).unwrap(),
             "Run Mine\n"
         );
         std::fs::remove_file(hostfs.join("!Boot,feb")).unwrap();
         std::fs::write(hostfs.join(format!("{},fff", obey::RECORDED)), "= stale\n").unwrap();
-        write_harness(&[], &staged, left(), &hostfs, &harness).unwrap();
-        write_harness(&[], &staged, left(), &hostfs, &harness).unwrap();
+        write_harness(&[], &staged, left(), &hostfs, &harness, &ours).unwrap();
+        write_harness(&[], &staged, left(), &hostfs, &harness, &ours).unwrap();
         assert!(find(&hostfs, "!Boot").is_some() && harness.exists());
         assert!(
             find(&hostfs, obey::RECORDED).is_none(),
@@ -905,7 +1018,7 @@ mod tests {
             std::fs::read_to_string(hostfs.join(format!("{},fff", obey::STAGED))).unwrap(),
             cases
         );
-        remove_harness(&hostfs, &harness).unwrap();
+        remove_harness(&hostfs, &harness, &ours).unwrap();
         assert!(find(&hostfs, "!Boot").is_none() && !harness.exists());
     }
 

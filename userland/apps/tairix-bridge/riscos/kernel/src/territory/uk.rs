@@ -196,6 +196,7 @@ pub(crate) static UK: Builtin = Builtin {
         file_type: 0xFFF,
         data: MESSAGES,
     }],
+    code: None,
 };
 
 /// The UK territory's state: its workspace, and its messages.

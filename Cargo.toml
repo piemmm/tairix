@@ -349,6 +349,7 @@ members = [
     "userland/apps/tairix-bridge/riscos/arm",
     "userland/apps/tairix-bridge/riscos/kernel",
     "userland/apps/tairix-bridge/riscos/filing",
+    "userland/apps/tairix-bridge/riscos/basic",
     "userland/apps/seq",
     "userland/apps/setcap",
     "userland/apps/settings",

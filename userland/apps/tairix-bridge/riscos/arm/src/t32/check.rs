@@ -231,6 +231,7 @@ fn wide(row: &Row, op: &Op) -> bool {
         | Op::Hint { .. }
         | Op::Barrier { .. }
         | Op::ClearExclusive
+        | Op::ExceptionReturn
         | Op::Swap { .. }
         | Op::SetEndian { .. }
         | Op::SaveState { .. }

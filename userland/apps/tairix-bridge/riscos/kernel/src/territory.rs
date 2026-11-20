@@ -293,6 +293,7 @@ pub(crate) static TERRITORY_MANAGER: Builtin = Builtin {
         file_type: 0xFFF,
         data: MESSAGES,
     }],
+    code: None,
 };
 
 /// A territory registered: its number, its R12 and its entries.

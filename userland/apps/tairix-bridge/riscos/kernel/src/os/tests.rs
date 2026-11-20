@@ -559,6 +559,33 @@ fn an_error_handler_s_buffer_is_written_no_further_than_256_bytes() {
 }
 
 #[test]
+fn an_error_reaching_the_error_handler_ends_redirection_and_closes_its_file() {
+    let mut s = session();
+    let file = s.one_file(b"");
+    let handler = CODE + 0x40;
+    s.poke(handler, &[asm::b(handler, handler)]);
+    s.user_swi(
+        X | CHANGE_ENVIRONMENT,
+        registers(&[6, handler, 0, DATA + 0x200]),
+    );
+    s.write(DATA + 0x400, b"out\r");
+    let (opened, _) = s.user_swi(X | 0x0D, registers(&[0x80, DATA + 0x400]));
+    let handle = opened.r[0];
+    s.user_swi(X | 0x5E, registers(&[handle, handle]));
+    s.poke(DATA + 0x800, &[0x99]);
+    s.write(DATA + 0x804, b"m\0");
+    s.start_swi(0x2B, registers(&[DATA + 0x800]));
+    assert_eq!(s.kernel.state().pc, handler, "the handler entered");
+    let (now, _) = s.user_swi(X | 0x5E, registers(&[u32::MAX, u32::MAX]));
+    assert_eq!(now.r[..2], [0, 0], "neither direction redirected");
+    assert_eq!(
+        file.word(&mut s, crate::testkit::OneFile::HANDLE),
+        0,
+        "the file closed"
+    );
+}
+
+#[test]
 fn guest_code_has_its_stacks_before_any_application_starts() {
     let mut s = crate::testkit::boot(&RISC_OS_5);
     let memory = s.kernel.memory();
@@ -586,4 +613,21 @@ fn guest_code_has_its_stacks_before_any_application_starts() {
         matches!(called, Err(Fail::Error(_))),
         "the SWI's error returned, not a fault: {called:?}"
     );
+}
+
+#[test]
+fn a_copy_between_overlapping_ranges_moves_the_bytes_whole_either_way() {
+    let mut s = session();
+    let length: u32 = 10_000;
+    let pattern: alloc::vec::Vec<u8> = (0..length).map(|i| (i % 251) as u8).collect();
+    for (shift, up) in [(100, true), (5000, true), (100, false), (5000, false)] {
+        let (from, to) = if up {
+            (DATA, DATA + shift)
+        } else {
+            (DATA + shift, DATA)
+        };
+        s.write(from, &pattern);
+        s.kernel.os().copy_bytes(from, to, length).expect("copied");
+        assert_eq!(s.read(to, length as usize), pattern, "{shift} {up}");
+    }
 }

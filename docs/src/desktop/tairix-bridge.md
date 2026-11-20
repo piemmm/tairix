@@ -24,7 +24,10 @@ clear.
 
 - `a32` holds every A32 integer and system encoding from ARMv2 to ARMv7-A,
   with ARMv8-A's AArch32 integer additions (load-acquire and store-release,
-  `SEVL`, `CSDB`, `SSBB`, `PSSBB`, `CRC32`).
+  `SEVL`, `CSDB`, `SSBB`, `PSSBB`, `CRC32`) and the Security and
+  Virtualization Extensions' `SMC`, `HVC` and `ERET`, which BASIC's
+  assembler lays down. No profile has those extensions, so the three are
+  undefined on every profile and decode only on `Isa::ALL`.
 - `t32` holds Thumb's 16-bit encodings from ARMv4T and Thumb-2's 32-bit
   encodings from ARMv6T2, through the same additions. Its encodings cut
   across one another, a register field holding the PC naming another
@@ -1578,6 +1581,176 @@ holds open files and paths that reach nothing to it too. `fuzz_ramfs`
 scribbles on the disc's map, root and pages and drives the filing calls over
 it.
 
+## BASIC
+
+BBC BASIC V and VI are the `userland/apps/tairix-bridge/riscos/basic` crate:
+the BASIC and BASIC64 modules, each started as the application by `*BASIC`
+or `*BASIC64` with `-help`, `-chain`, `-load` or `-quit`.
+
+- **A resumable machine.** The program, the variables, the heap and the
+  BASIC stack lie in guest memory as BASIC V lays them out, the workspace at
+  the offsets `CALL`'s routine table gives, its exception word holding the
+  Escape flag (`&80`) and the trace flag (`&8000`). Every value an
+  expression is working on and every statement waiting on one is on that
+  stack, so BASIC never recurses on the host and can stop at any statement.
+- **Its memory is the program's to overwrite.** A workspace word or stack
+  record a program writes over meets an error where BASIC next uses it — a
+  stack it did not leave is "Corruption of stack", a wild address a data
+  abort — or wraps as ARM arithmetic does; it never ends the session.
+- **Errors** carry BASIC V's numbers, each message the BBC BASIC Reference
+  Manual's text where it gives one and TAIRiX Bridge's own words otherwise.
+  An untrapped error's report opens a line of its own in an immediate line;
+  a program's follows whatever it printed last, then gives the line.
+- **The machine interface.** `CALL` and `USR` enter code with A% to H% in
+  R0 to R7 and the routine table at R14; `SYS` takes a SWI by number or
+  name, an unknown name raised through the OS.
+
+### BASIC V's reals
+
+A real is five bytes: a 32-bit mantissa, little-endian, its top bit standing
+for the sign, then an excess-128 exponent. Only the all-zero pattern is zero,
+so there is no negative zero and 2^-129 has no form of its own.
+
+- **Arithmetic** rounds each exact result once, to nearest with ties to odd,
+  but for a subtraction whose result keeps the larger operand's exponent,
+  which BASIC V truncates; an operand more than 32 places below the other is
+  ignored. A result past the exponent's range is `Number too big`; one below
+  it is zero.
+- **Conversions.** An assignment to an integer truncates and takes −2^31;
+  `INT` floors and refuses any magnitude of 2^31. An integer product that
+  overflows becomes a real, rounded as arithmetic rounds.
+- **Powers.** An integer exponent from −64 to 63 — or a real one holding
+  such an integer — is taken by squares, multiplied from the highest set
+  bit down, after the reciprocal for a negative one. Any other is a real
+  power, whose faults follow BASIC V's two parts: below 64 in magnitude its
+  integer part by squares first, then the logarithm of the base.
+- **Functions.** `SIN`, `COS`, `TAN`, `ATN`, `ASN`, `ACS`, `EXP`, `LN`, `LOG`
+  and the real power are rounded correctly, from `lib/softfloat`'s elementary
+  functions, where BASIC V's own are a place or two off and further near a
+  multiple of π/2. Each refuses where BASIC V does: `Accuracy lost` from
+  2^23, `Exponent range` from 89.5, `Number too big` past one for an
+  arcsine or arccosine, `Logarithm range` at or below zero. `RAD` and `DEG`
+  multiply by BASIC V's own `PI`/180 and 180/`PI`, exactly.
+
+### BASIC VI's reals
+
+A real is a double kept as the FPA transfers one, the high word first. Every
+operation and function is the FPA's instruction in double precision (see
+[The FPA](#the-fpa)), run in an FPA of BASIC VI's own whose status the
+program's is carried in and out of: an exception that status traps is the
+floating-point emulator's error, and only a division by zero is BASIC's own.
+Its unary minus is zero less the value, so it gives no negative zero.
+
+### Numbers as text
+
+- **Reading.** `VAL` skips spaces, takes a sign, then digits with perhaps a
+  point and an exponent: an upper-case `E`, perhaps a sign, and two digits
+  in BASIC V or three in BASIC VI. BASIC V reads every digit, rounded
+  correctly; BASIC V's own reading keeps a little less than every bit, and a
+  value at or just above a tie it reads a place low. BASIC VI reads the
+  first 19 through the FPA's packed decimal load, rounded to a double.
+- **Writing.** BASIC V's digits are its exact value rounded half up; BASIC
+  VI's are the FPA's packed decimal store's 17, rounded half up again to
+  fewer. `@%`'s byte 2 chooses the layout — 1 exponent, 2 fixed, anything
+  else general — its top bit a decimal comma; byte 1 gives the digits, none
+  or too many meaning the most, 11 or 18. The general layout is fixed
+  notation from 0.01 to the digits' reach; the exponent layout keeps every
+  digit and left-justifies the exponent in three places, four in BASIC VI; a
+  fixed layout whose places would pass the most digits is the general one.
+  `STR$` takes `@%`'s layout only where its bit 24 is set.
+- **`@%` as a string.** `@%="+G10.9"` is read as genuine BASIC reads it: a
+  leading `+` sets bit 24 and its absence clears it; then `G`, `E` or `F` in
+  either case the form, keeping the decimal comma; the field width; and after
+  `.` or `,`, which clear or set the comma, the digits, each a byte and each
+  only where given. The first byte out of place ends it, keeping what it had
+  not reached.
+
+### The prompt and its commands
+
+The prompt reads a line from the keyboard: a numbered one is stored, any
+other run. It starts a line of its own only where the VDU drivers report the
+cursor mid-line, never by `COUNT`, so under output redirection it never does.
+`LISTO` starts at 0. Every command is a syntax error in a running program;
+at the prompt:
+
+- **`AUTO [start][,step]`** prompts with each line's number, right-aligned in
+  five places, and stores what is typed under it, an empty line deleting it.
+  It ends past line 65279, at Escape or at an error.
+- **`RENUMBER [start][,step]`** renumbers every line and line reference,
+  reporting a reference to a missing line by the line's new number. A step
+  of nought, a number past 65279 or numbers that would pass it are refused,
+  as **`DELETE first,last`** refuses a number past 65279.
+- **`LISTO n`** takes 0 to 31; **`CRUNCH n`** strips as its bits ask.
+- **`LVAR`** lists `@%` as the string that would set it and the resident
+  integers, then the variables with their values or bounds, the procedures
+  and functions known and each library's first line: four columns of 20, an
+  item at the next column past the one before, numbers in nine digits'
+  general form whatever `@%` says.
+- **`HELP`** gives a keyword's topic, every keyword (`HELP .`) or those a
+  letter begins in rows of eight, `@%`'s topic, the assembler's (`HELP [`),
+  or for anything else the general text and the program's sizes, all in
+  TAIRiX Bridge's own words; a keyword it has no topic for, such as `TWIN`,
+  is reported in the manual's words. `TWIN` and `TWINO` are `Mistake`, as
+  RISC OS 5 has no Twin.
+- **`EDIT`** issues the two commands RISC OS 5's BASIC does: `RMEnsure
+  ARMBasicEditor 0 RMLoad System:Modules.BasicEdit`, then `ARMBE`, which
+  starts the separate ARM BASIC Editor module. RISC OS 5 provides no such
+  module and neither does TAIRiX Bridge; without one the OS reports what it
+  lacks.
+
+### The assembler
+
+`[` … `]` assembles what RISC OS 5's BASIC assembler accepts — ARMv2 to
+ARMv8's AArch32 with the FPA, VFP and Advanced SIMD, but not the
+Cryptographic Extension — encoding each instruction through `arm`'s tables.
+
+- **A statement is parsed afresh** each time an operand's value arrives, from
+  its text and the values read so far, so an operand may call a function that
+  runs BASIC. `OPT`'s bits list (1), report errors (2), lay code at `O%` (4)
+  and stop at `L%` (8).
+- **Its quirks are genuine BASIC's**, among them: a stem followed by a
+  condition wins over a longer stem (`BLE` is `B` with `LE`); instructions
+  align `P%` and `O%`, data never; with errors suppressed an unknown variable
+  is `P%`, a bad immediate lays down its word ORed with the value, and a bad
+  offset becomes nought; `SMC` and `HVC` refuse a number past their field, and
+  `HVC` any condition but `AL`; a bitfield must lie within the word, and an
+  insertion or a clear of no bits may not start at bit nought, errors
+  suppressed or not.
+- **The listing** under `OPT` 1 gives each statement's address, up to four
+  bytes as a number, and its text as `LIST` spells it, a label in a field of
+  ten; only the text counts toward `COUNT` and `WIDTH`.
+- **One divergence**: a nested `[` inside a function an operand calls
+  assembles as it would anywhere, where genuine BASIC corrupts the outer
+  instruction.
+
+### The replays
+
+Each corpus in the crate's `tests/riscos5/` is recorded from genuine BASIC V
+and BASIC VI by the reference harness and replayed against both dialects:
+
+- `numbers.txt` holds what they answered the harness's cases, replayed by
+  `tests/riscos5.rs` exactly, but for a transcendental, held to two places
+  and those its condition number magnifies an argument's last into; a reading
+  at a tie, held to BASIC V's place within 2^-6 of a place above it; and
+  BASIC VI's functions and packed decimal conversions, held to FPEmulator's
+  error.
+- `programs.txt` and `printed.txt` hold programs run with `-quit` and what
+  each printed, byte for byte (`tests/riscos5_language.rs`).
+- `assembler.txt` and `assembled.txt` hold assembler lines, each assembled
+  alone at `P%`, at `O%` as at `&10000`, or with errors suppressed, and the
+  bytes each laid down or the error it met (`tests/riscos5_assembler.rs`).
+- `sessions.txt` and `typed.txt` hold lines typed at the prompt and what was
+  printed, each message told by the kind a calibration session shows it to
+  be, so neither BASIC's messages nor the emulator's own words for them are
+  compared (`tests/riscos5_sessions.rs`).
+
+`fuzz_numbers` reads any text as a number, runs every operation on any
+operands, and holds `STR$`'s own layout to reading back as the value it
+wrote. `fuzz_basic` runs programs of BASIC's keywords and operands, or any
+text, in both dialects, and holds any assembler statement under any `OPT` to
+raising an error or moving `P%` and `O%` on by no more than a string after an
+alignment.
+
 ## The reference harness
 
 `cargo xtask riscos --reference <dir>` records each crate's corpus —
@@ -1614,9 +1787,25 @@ directory the machine boots from (`*Configure FileSystem HostFS`,
   (`tools/xtask/src/commands/riscos/basic.rs`). A calibration program gives
   each message BASIC prints, and every later one is recorded by the kind it
   matches, never as its text.
+- **BASIC's numbers.** Then BASIC V and BASIC VI evaluate the cases
+  `tools/xtask/src/commands/riscos/numbers.rs` draws from a fixed seed —
+  arithmetic, conversions, powers, functions and their refusals, `VAL`,
+  literals and `STR$` under `@%` — each answer written as the bytes of its
+  value, its text or its error's number, BASIC VI's `STR$` with the words of
+  the packed decimal store behind it. An operand given as text is recorded as
+  the bytes BASIC read it as.
+- **BASIC's language, assembler and prompt.** Then each dialect runs the
+  crate's programs with `-quit`, each printing only its own text and numbers
+  (`tools/xtask/src/commands/riscos/language.rs`); assembles its assembler
+  lines in programs of a thousand built by the crate's own probe program,
+  writing each line's bytes or error (`riscos/assembler.rs`); and types its
+  sessions at the prompt after a calibration session, telling every message
+  by the kind the calibration shows it to be (`riscos/session.rs`). The
+  formats are the crate's `corpus` module's, so the harness and the replays
+  read them alike.
 - **Running.** Where `<dir>` holds RPCEmu, it runs headless, as one of the
   command's own children, until the harness opens a named pipe once it is
-  done, the emulator exits, or five minutes pass. Otherwise the harness is
+  done, the emulator exits, or twenty minutes pass. Otherwise the harness is
   left in `hostfs/`; boot the machine from it and run the command again to
   import what it recorded. Every scenario runs on the one machine in the
   corpus's order, but one marked `lasting`, which changes the machine in a

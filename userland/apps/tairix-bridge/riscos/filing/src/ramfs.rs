@@ -98,6 +98,7 @@ pub static RAM_FS: Builtin = Builtin {
         file_type: 0xFFF,
         data: MESSAGES,
     }],
+    code: None,
 };
 
 /// What RamFS holds while it is active.

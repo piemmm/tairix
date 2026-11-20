@@ -19,8 +19,8 @@ use crate::instruction::{
     SaturateOp, SwapOp, TransferOp as T, UnaryOp, WideOp,
 };
 use crate::isa::Feature::{
-    self, Crc32, Divide, Fpa, Jazelle, LongMultiply, Mp, Swp, V2, V3, V4, V4T, V5, V5TE, V6, V6K,
-    V6T2, V7, V8,
+    self, Crc32, Divide, Fpa, Jazelle, LongMultiply, Mp, Security, Swp, Virtualization, V2, V3, V4,
+    V4T, V5, V5TE, V6, V6K, V6T2, V7, V8,
 };
 
 /// One encoding: what it decodes to, the feature it needs and its layout.
@@ -299,6 +299,21 @@ const GROUP_000: &[Row] = &[
         "1110 0001 0010 iiii iiii iiii 0111 iiii",
         Kind::Call(CallOp::Bkpt),
         V5,
+    ),
+    row(
+        "1110 0001 0100 iiii iiii iiii 0111 iiii",
+        Kind::Call(CallOp::Hvc),
+        Virtualization,
+    ),
+    row(
+        "cccc 0001 0110 ---- ---- ---- 0111 iiii",
+        Kind::Call(CallOp::Smc),
+        Security,
+    ),
+    row(
+        "cccc 0001 0110 ---- ---- ---- 0110 1110",
+        Kind::ExceptionReturn,
+        Virtualization,
     ),
     // Swaps, exclusives, load-acquires and store-releases.
     row(

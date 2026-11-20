@@ -13,6 +13,9 @@ mod float;
 pub(crate) mod simd;
 
 pub use float::{Comparison, Unit};
+/// Advanced SIMD's modified immediate expanded to 64 bits, as an assembler
+/// searches it for a value's encoding.
+pub use simd::expand_immediate as expand_modified_immediate;
 
 use crate::isa::{Feature, Isa};
 

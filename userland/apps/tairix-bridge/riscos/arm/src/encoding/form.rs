@@ -41,6 +41,7 @@ pub(crate) enum Kind {
     Hint(HintOp),
     Barrier(BarrierOp),
     ClearExclusive,
+    ExceptionReturn,
     Transfer(TransferOp),
     Dual(DualOp),
     Preload(PreloadOp),
@@ -314,6 +315,7 @@ impl Kind {
                 option: f.byte(Field::Imm),
             },
             Self::ClearExclusive => Op::ClearExclusive,
+            Self::ExceptionReturn => Op::ExceptionReturn,
             Self::Transfer(op) => Op::Transfer {
                 op,
                 rt: r(Field::Rt),
@@ -584,6 +586,7 @@ impl Op {
             Self::Hint { op, .. } => Kind::Hint(op),
             Self::Barrier { op, .. } => Kind::Barrier(op),
             Self::ClearExclusive => Kind::ClearExclusive,
+            Self::ExceptionReturn => Kind::ExceptionReturn,
             Self::Transfer { op, .. } => Kind::Transfer(op),
             Self::Dual { op, .. } => Kind::Dual(op),
             Self::Preload { op, .. } => Kind::Preload(op),
@@ -802,7 +805,7 @@ impl Op {
             Self::Call { value, .. } => f.set(Field::Imm, value),
             Self::Hint { value, .. } => f.set(Field::Imm, u32::from(value)),
             Self::Barrier { option, .. } => f.set(Field::Imm, u32::from(option)),
-            Self::ClearExclusive => {}
+            Self::ClearExclusive | Self::ExceptionReturn => {}
             Self::Transfer {
                 op,
                 rt,

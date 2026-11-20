@@ -49,6 +49,7 @@ pub static BOOT_COMMANDS: Builtin = Builtin {
     routines: &[],
     vectors: &[],
     resources: &[],
+    code: None,
 };
 
 /// A command of `BootCommands`: `translate` the parameters the kernel

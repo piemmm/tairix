@@ -6,8 +6,8 @@ use core::fmt::{self, Display, Formatter, Write as _};
 
 use super::{Buffer, Number, Signed};
 use crate::instruction::{
-    BlockMode, ConvertRounding, SimdFp, SimdImmediateOp, SimdLongOp, SimdMiscOp, SimdScalarOp,
-    SimdShiftOp, SimdThreeOp, StructureLanes, Width,
+    BlockMode, ConvertRounding, SimdFp, SimdImmediateOp, SimdLongOp, SimdMiscOp, SimdShiftOp,
+    SimdThreeOp, StructureLanes, Typing, Width,
 };
 use crate::reg::Reg;
 
@@ -57,25 +57,6 @@ const fn float(double: bool) -> &'static str {
     }
 }
 
-/// How an operation's lanes are typed in its mnemonic.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Typing {
-    /// No type: the bitwise operations.
-    Untyped,
-    /// A size alone: `.8`.
-    Size,
-    /// Integers of either sign: `.I8`.
-    Integer,
-    /// Signed or unsigned as the instruction says: `.S8`, `.U8`.
-    Signed,
-    /// Signed always: `.S16`.
-    SignedOnly,
-    /// Polynomials: `.P8`.
-    Polynomial,
-    /// Single precision: `.F32`.
-    Float,
-}
-
 fn data_type(out: &mut Buffer, typing: Typing, unsigned: bool, bits: u32) -> fmt::Result {
     match typing {
         Typing::Untyped => Ok(()),
@@ -85,108 +66,6 @@ fn data_type(out: &mut Buffer, typing: Typing, unsigned: bool, bits: u32) -> fmt
         Typing::Signed | Typing::SignedOnly => write!(out, ".S{bits}"),
         Typing::Polynomial => write!(out, ".P{bits}"),
         Typing::Float => out.push(".F32"),
-    }
-}
-
-const fn three_typing(op: SimdThreeOp) -> Typing {
-    use SimdThreeOp as O;
-    match op {
-        O::Vhadd
-        | O::Vqadd
-        | O::Vrhadd
-        | O::Vhsub
-        | O::Vqsub
-        | O::Vcgt
-        | O::Vcge
-        | O::Vshl
-        | O::Vqshl
-        | O::Vrshl
-        | O::Vqrshl
-        | O::Vmax
-        | O::Vmin
-        | O::Vabd
-        | O::Vaba
-        | O::Vpmax
-        | O::Vpmin => Typing::Signed,
-        O::Vand | O::Vbic | O::Vorr | O::Vorn | O::Veor | O::Vbsl | O::Vbit | O::Vbif => {
-            Typing::Untyped
-        }
-        O::Vadd | O::Vsub | O::Vceq | O::Vmla | O::Vmls | O::Vmul | O::Vpadd => Typing::Integer,
-        O::Vtst
-        | O::Sha1c
-        | O::Sha1p
-        | O::Sha1m
-        | O::Sha1su0
-        | O::Sha256h
-        | O::Sha256h2
-        | O::Sha256su1 => Typing::Size,
-        O::Vmulp => Typing::Polynomial,
-        O::Vqdmulh | O::Vqrdmulh => Typing::SignedOnly,
-        _ => Typing::Float,
-    }
-}
-
-const fn long_typing(op: SimdLongOp) -> Typing {
-    use SimdLongOp as O;
-    match op {
-        O::Vaddhn | O::Vraddhn | O::Vsubhn | O::Vrsubhn => Typing::Integer,
-        O::Vqdmlal | O::Vqdmlsl | O::Vqdmull => Typing::SignedOnly,
-        O::Vmullp | O::Vmullp64 => Typing::Polynomial,
-        _ => Typing::Signed,
-    }
-}
-
-const fn scalar_typing(op: SimdScalarOp) -> Typing {
-    use SimdScalarOp as O;
-    match op {
-        O::Vmla | O::Vmls | O::Vmul => Typing::Integer,
-        O::VmlaF | O::VmlsF | O::VmulF => Typing::Float,
-        O::Vmlal | O::Vmlsl | O::Vmull => Typing::Signed,
-        _ => Typing::SignedOnly,
-    }
-}
-
-const fn shift_typing(op: SimdShiftOp) -> Typing {
-    use SimdShiftOp as O;
-    match op {
-        O::Vsri | O::Vsli => Typing::Size,
-        O::Vshl | O::Vshrn | O::Vrshrn => Typing::Integer,
-        O::Vqshlu | O::Vqshrun | O::Vqrshrun => Typing::SignedOnly,
-        _ => Typing::Signed,
-    }
-}
-
-const fn misc_typing(op: SimdMiscOp) -> Typing {
-    use SimdMiscOp as O;
-    match op {
-        O::Vmvn | O::Vswp => Typing::Untyped,
-        O::Vrev64
-        | O::Vrev32
-        | O::Vrev16
-        | O::Vcnt
-        | O::Vtrn
-        | O::Vuzp
-        | O::Vzip
-        | O::Aese
-        | O::Aesd
-        | O::Aesmc
-        | O::Aesimc
-        | O::Sha1h
-        | O::Sha1su1
-        | O::Sha256su0 => Typing::Size,
-        O::Vpaddl | O::Vpadal | O::Vqmovn => Typing::Signed,
-        O::Vcls
-        | O::Vqabs
-        | O::Vqneg
-        | O::Vcgt0
-        | O::Vcge0
-        | O::Vcle0
-        | O::Vclt0
-        | O::Vabs
-        | O::Vneg
-        | O::Vqmovun => Typing::SignedOnly,
-        O::Vclz | O::Vceq0 | O::Vmovn | O::Vshll => Typing::Integer,
-        _ => Typing::Float,
     }
 }
 
@@ -599,7 +478,7 @@ pub(super) fn write(op: &SimdFp, c: &str, m: &mut Buffer, operands: &mut Buffer)
             let copy = op == SimdThreeOp::Vorr && n == rm;
             m.push(if copy { "VMOV" } else { op.name() })?;
             m.push(c)?;
-            data_type(m, three_typing(op), unsigned, bits(8, size))?;
+            data_type(m, op.typing(), unsigned, bits(8, size))?;
             let reg = |d| Vector { q, d };
             // A shift by register names the value before the shifts.
             let by_register = matches!(
@@ -629,7 +508,7 @@ pub(super) fn write(op: &SimdFp, c: &str, m: &mut Buffer, operands: &mut Buffer)
                 _ if op.width() == Width::Narrow => bits(16, size),
                 _ => bits(8, size),
             };
-            data_type(m, long_typing(op), unsigned, bits)?;
+            data_type(m, op.typing(), unsigned, bits)?;
             match op.width() {
                 Width::Long => write!(operands, "{},{},{}", qq(d), dq(n), dq(rm))?,
                 Width::Wide => write!(operands, "{},{},{}", qq(d), qq(n), dq(rm))?,
@@ -648,7 +527,7 @@ pub(super) fn write(op: &SimdFp, c: &str, m: &mut Buffer, operands: &mut Buffer)
         } => {
             m.push(op.name())?;
             m.push(c)?;
-            data_type(m, scalar_typing(op), unsigned, bits(8, size))?;
+            data_type(m, op.typing(), unsigned, bits(8, size))?;
             let (dest, first) = if op.long() {
                 (qq(d), dq(n))
             } else {
@@ -682,7 +561,7 @@ pub(super) fn write(op: &SimdFp, c: &str, m: &mut Buffer, operands: &mut Buffer)
                     } else {
                         bits(8, size)
                     };
-                    data_type(m, shift_typing(op), unsigned, bits)?;
+                    data_type(m, op.typing(), unsigned, bits)?;
                 }
             }
             if op.narrow() {
@@ -809,9 +688,9 @@ fn misc(
         }
         O::Vrecpe | O::Vrsqrte => m.push(".U32")?,
         O::Vmovn | O::Vqmovun | O::Vqmovn => {
-            data_type(m, misc_typing(op), unsigned, bits(16, size))?;
+            data_type(m, op.typing(), unsigned, bits(16, size))?;
         }
-        _ => data_type(m, misc_typing(op), unsigned, bits(8, size))?,
+        _ => data_type(m, op.typing(), unsigned, bits(8, size))?,
     }
     let reg = |d| Vector { q, d };
     match op {

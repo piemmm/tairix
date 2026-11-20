@@ -86,7 +86,15 @@ pub struct Builtin {
     pub vectors: &'static [VectorDefault],
     /// The files it keeps in ResourceFS, which the Messages module registers.
     pub resources: &'static [Resource],
+    /// The code the guest runs or reads in its image, after its routines'
+    /// entries: a table the guest branches through, a stub it returns by.
+    pub code: Option<Emit>,
 }
+
+/// A built-in's guest code: its words, given its first routine's entry as an
+/// offset from the code's start, each entry two words after the last. The
+/// words are relative to the image, so a copy of it works as the original.
+pub type Emit = fn(i32) -> Result<Vec<u32>, crate::memory::MemoryError>;
 
 /// A vector whose default a built-in module is.
 #[derive(Debug)]
@@ -528,6 +536,15 @@ impl Os<'_> {
         Some(code.wrapping_add(offset).wrapping_add(8 * index))
     }
 
+    /// The address of `builtin`'s guest code in its active module; none
+    /// while it is not active, or where it has none.
+    #[must_use]
+    pub fn guest_code_of(&self, builtin: &'static Builtin) -> Option<u32> {
+        builtin.code?;
+        let (code, place) = self.builtin_active(builtin)?;
+        Some(code.wrapping_add(self.world.modules.roms.get(place)?.code))
+    }
+
     /// The title of the module at `code`, to its first control character
     /// or space.
     pub(crate) fn title_at(&mut self, code: u32, header: &Header) -> Result<Vec<u8>, Fail> {
@@ -654,5 +671,7 @@ impl Os<'_> {
     }
 }
 
+#[cfg(test)]
+mod code_tests;
 #[cfg(test)]
 pub(crate) mod tests;

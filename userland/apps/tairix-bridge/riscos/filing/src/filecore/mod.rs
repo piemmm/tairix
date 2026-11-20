@@ -162,6 +162,7 @@ pub static FILE_CORE: Builtin = Builtin {
         file_type: 0xFFF,
         data: MESSAGES,
     }],
+    code: None,
 };
 
 /// A client: the module that moves a drive's sectors, and what its

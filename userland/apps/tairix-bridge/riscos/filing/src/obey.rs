@@ -50,6 +50,7 @@ pub static OBEY: Builtin = Builtin {
     routines: &[],
     vectors: &[],
     resources: &[],
+    code: None,
 };
 
 /// What `*Obey`'s options ask.

@@ -374,6 +374,9 @@ impl Os<'_> {
         mut budget: Option<&mut u64>,
     ) -> Result<Option<Returned>, Unwind> {
         loop {
+            if let Some(left) = budget.as_deref_mut() {
+                *left = left.saturating_sub(core::mem::take(&mut self.world.charged));
+            }
             let slice = budget.as_deref().map_or(SLICE, |&left| left.min(SLICE));
             if slice == 0 {
                 return Ok(None);
@@ -409,10 +412,16 @@ impl Os<'_> {
         }
     }
 
-    /// A step of a loop in a SWI's Rust that runs as long as the guest
-    /// asks: counted with the processor's work, so the host has its word as
-    /// often and a guest asking for endless work can be stopped.
-    pub(crate) fn yield_point(&mut self) -> Result<(), Unwind> {
+    /// A step of a loop in a SWI's or a host routine's Rust that runs as long
+    /// as the guest asks: counted with the processor's work toward the host's
+    /// word and the context's run, so a guest asking for endless work can be
+    /// stopped and shares the processor as one running instructions does.
+    ///
+    /// # Errors
+    ///
+    /// The host stopping the run.
+    pub fn yield_point(&mut self) -> Result<(), Unwind> {
+        self.world.charged = self.world.charged.saturating_add(STEP);
         self.world.since_word += STEP;
         if self.world.since_word < SLICE {
             return Ok(());
@@ -476,6 +485,8 @@ impl Os<'_> {
     /// Runs the current context for at most `budget` instructions, loading
     /// each transfer it unwinds to, one a host call left first.
     pub(crate) fn run(&mut self, budget: u64) -> Outcome {
+        // Host work done between runs is not this run's.
+        self.world.charged = 0;
         // The clock may have moved on while the host had the context.
         self.tick();
         if self.world.transfer.is_some() {

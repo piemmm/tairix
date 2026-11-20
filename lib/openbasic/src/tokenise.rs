@@ -17,6 +17,9 @@ pub enum Start {
     Statement,
     /// The middle of a statement: an expression, as `EVAL` reads one.
     Expression,
+    /// The middle of a statement where numbers are line numbers: an
+    /// expression after `GOTO`, as BASIC V's `MATCH` reads one.
+    LineNumbers,
 }
 
 /// What BASIC V warns of once a typed line is tokenised.
@@ -65,8 +68,8 @@ pub fn tokenise(
         text,
         at: 0,
         out: &mut *out,
-        start: !matches!(start, Start::Expression),
-        numbers: start == Start::Line,
+        start: !matches!(start, Start::Expression | Start::LineNumbers),
+        numbers: matches!(start, Start::Line | Start::LineNumbers),
     };
     let tokenised = line
         .out

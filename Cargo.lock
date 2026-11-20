@@ -4665,6 +4665,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-riscos-basic"
+version = "0.0.0"
+dependencies = [
+ "tairix-fscopy",
+ "tairix-fuzzseed",
+ "tairix-log",
+ "tairix-openbasic",
+ "tairix-reclaim",
+ "tairix-riscos-arm",
+ "tairix-riscos-filing",
+ "tairix-riscos-kernel",
+ "tairix-softfloat",
+ "tairix-tz",
+]
+
+[[package]]
 name = "tairix-riscos-filing"
 version = "0.0.0"
 dependencies = [
@@ -10138,6 +10154,7 @@ dependencies = [
  "tairix-raster",
  "tairix-reclaim",
  "tairix-riscos-arm",
+ "tairix-riscos-basic",
  "tairix-riscos-kernel",
  "tairix-sandbox",
  "tairix-settings",

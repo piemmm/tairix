@@ -98,36 +98,167 @@ impl Decimal {
     pub fn exact(self) -> Result<Exact, Beyond> {
         let s = self.significand;
         if s == 0 {
+            return Ok(zero(self.negative));
+        }
+        if let Some(x) = small(s, self.exponent) {
             return Ok(Exact {
                 negative: self.negative,
-                exp: 0,
-                sig: 0,
-                sticky: false,
+                ..x
             });
         }
-        let first = i64::from(self.exponent) + i64::from(digits_of(s) - 1);
-        if first > *PLACES.end() {
-            return Err(Beyond::Above);
-        }
-        if first < *PLACES.start() {
-            return Err(Beyond::Below);
-        }
-        let x = match u32::try_from(self.exponent) {
-            Ok(k) => multiplied(s, k).ok_or(Beyond::Above)?,
-            Err(_) => divided(s, self.exponent.unsigned_abs()).ok_or(Beyond::Below)?,
-        };
-        Ok(Exact {
-            negative: self.negative,
-            ..x
-        })
+        scaled(
+            self.negative,
+            Big::from_u128(s),
+            digits_of(s),
+            self.exponent,
+        )
     }
 }
 
-/// `s × 10^k`, `s` not zero, exactly enough to round, positive; `None`
+/// The value `digits` (each 0 to 9, the most significant first) times ten
+/// to `exponent` read as [`Decimal::exact`] reads one, however many digits
+/// there are: every one of them counts, so a value lying exactly on a tie
+/// is read as one.
+///
+/// # Errors
+///
+/// [`Beyond`] for a value past double-extended's range, or with more
+/// digits than conversion has room for, which no value in its range needs.
+pub fn exact_digits(
+    negative: bool,
+    digits: impl IntoIterator<Item = u8>,
+    exponent: i32,
+) -> Result<Exact, Beyond> {
+    let mut digits = digits.into_iter().skip_while(|&d| d == 0).peekable();
+    // As many digits as a significand holds go to one, which most numbers
+    // need no more than.
+    let mut significand = 0u128;
+    let mut count = 0u32;
+    while count < MAX_DIGITS {
+        let Some(digit) = digits.next() else {
+            return Decimal {
+                negative,
+                significand,
+                exponent,
+            }
+            .exact();
+        };
+        significand = significand * 10 + u128::from(digit.min(9));
+        count += 1;
+    }
+    if digits.peek().is_none() {
+        return Decimal {
+            negative,
+            significand,
+            exponent,
+        }
+        .exact();
+    }
+    let mut big = Big::from_u128(significand);
+    let (mut chunk, mut place) = (0, 1);
+    for digit in digits {
+        chunk = chunk * 10 + u32::from(digit.min(9));
+        place *= 10;
+        count = count.checked_add(1).ok_or(Beyond::Above)?;
+        if place == CHUNK {
+            if !big.mul(CHUNK) || !big.add(chunk) {
+                return Err(Beyond::Above);
+            }
+            (chunk, place) = (0, 1);
+        }
+    }
+    if place > 1 && (!big.mul(place) || !big.add(chunk)) {
+        return Err(Beyond::Above);
+    }
+    scaled(negative, big, count, exponent)
+}
+
+/// `n × 10^exponent`, `n` not zero, exactly enough to round and positive,
+/// where plain integers hold the work: a product that fits 128 bits, or a
+/// quotient of a 64-bit `n` by a power of five that fits 64. `None` leaves
+/// the value to [`scaled`], which gives the same answer for any.
+fn small(n: u128, exponent: i32) -> Option<Exact> {
+    if let Ok(k) = u32::try_from(exponent) {
+        return Some(integral(n.checked_mul(10u128.checked_pow(k)?)?));
+    }
+    let m = exponent.unsigned_abs();
+    fraction(u64::try_from(n).ok()?, 5u64.checked_pow(m)?, m)
+}
+
+/// The integer `v`, not zero.
+fn integral(v: u128) -> Exact {
+    let top = v.ilog2();
+    let (sig, sticky) = match POINT.checked_sub(top) {
+        Some(up) => (v << up, false),
+        None => (v >> 1, v & 1 != 0),
+    };
+    Exact {
+        negative: false,
+        exp: step(top),
+        sig,
+        sticky,
+    }
+}
+
+/// `n / (five × 2^m)`, `n` not zero and `five` five to the `m`.
+fn fraction(n: u64, five: u64, m: u32) -> Option<Exact> {
+    // n is taken to the top of a word, and a word more of places below it,
+    // so the quotient has 64 bits at least; the remainder gives it the rest
+    // a significand needs.
+    let lead = n.leading_zeros();
+    let divisor = u128::from(five);
+    let dividend = u128::from(n << lead) << 64;
+    let (mut quotient, mut rest) = (dividend / divisor, dividend % divisor);
+    let more = POINT.saturating_sub(quotient.ilog2());
+    if more > 0 {
+        let extended = rest << more;
+        quotient = (quotient << more) | (extended / divisor);
+        rest = extended % divisor;
+    }
+    let top = quotient.ilog2();
+    let (sig, sticky) = match POINT.checked_sub(top) {
+        Some(up) => (quotient << up, rest != 0),
+        None => (quotient >> 1, quotient & 1 != 0 || rest != 0),
+    };
+    let below = 64 + lead + m + more;
+    Some(Exact {
+        negative: false,
+        exp: step(top).checked_sub(step(below))?,
+        sig,
+        sticky,
+    })
+}
+
+/// A zero of sign `negative`.
+const fn zero(negative: bool) -> Exact {
+    Exact {
+        negative,
+        exp: 0,
+        sig: 0,
+        sticky: false,
+    }
+}
+
+/// `significand`, not zero, of `count` digits, times ten to `exponent`.
+fn scaled(negative: bool, significand: Big, count: u32, exponent: i32) -> Result<Exact, Beyond> {
+    let first = i64::from(exponent) + i64::from(count - 1);
+    if first > *PLACES.end() {
+        return Err(Beyond::Above);
+    }
+    if first < *PLACES.start() {
+        return Err(Beyond::Below);
+    }
+    let x = match u32::try_from(exponent) {
+        Ok(k) => multiplied(significand, k).ok_or(Beyond::Above)?,
+        Err(_) => divided(significand, exponent.unsigned_abs()).ok_or(Beyond::Below)?,
+    };
+    Ok(Exact { negative, ..x })
+}
+
+/// `big × 10^k`, `big` not zero, exactly enough to round, positive; `None`
 /// where it passes what `Big` holds, which no value in `PLACES` does.
-fn multiplied(s: u128, k: u32) -> Option<Exact> {
-    // s × 10^k is s × 5^k, exactly, times 2^k.
-    let mut big = Big::from_u128(s);
+fn multiplied(mut big: Big, k: u32) -> Option<Exact> {
+    // big × 10^k is big × 5^k, exactly, times 2^k.
     if !big.mul_pow5(k) {
         return None;
     }
@@ -140,24 +271,29 @@ fn multiplied(s: u128, k: u32) -> Option<Exact> {
     })
 }
 
-/// `s / 10^m`, `s` not zero and `m` at least one, likewise.
-fn divided(s: u128, m: u32) -> Option<Exact> {
-    // s / 10^m is s × 2^t / 5^m times 2^(−t−m), t chosen so the quotient has
-    // 127 or 128 bits.
+/// `big / 10^m`, `big` not zero and `m` at least one, likewise.
+fn divided(big: Big, m: u32) -> Option<Exact> {
+    // big / 10^m is big × 2^t / (5^m × 2^u) times 2^(u−t−m), t or u chosen so
+    // the quotient has 127 or 128 bits: u where big is the longer.
     let mut five = Big::from_u128(1);
     if !five.mul_pow5(m) {
         return None;
     }
-    let t = POINT + 1 + five.bit_len() - (128 - s.leading_zeros());
-    let mut rest = Big::from_u128(s);
-    if !rest.shl(t) {
+    let (want, have) = (POINT + 1 + five.bit_len(), big.bit_len());
+    let (t, u) = if have <= want {
+        (want - have, 0)
+    } else {
+        (0, have - want)
+    };
+    let mut rest = big;
+    if !rest.shl(t) || !five.shl(u) {
         return None;
     }
     let mut sig = (0..128u32).rev().fold(0u128, |sig, bit| {
         sig | u128::from(rest.sub_shifted(&five, bit)) << bit
     });
     let mut sticky = !rest.is_zero();
-    let mut scale = step(t) + step(m);
+    let mut scale = step(t) + step(m) - step(u);
     if sig >> (POINT + 1) != 0 {
         sticky |= sig & 1 != 0;
         sig >>= 1;

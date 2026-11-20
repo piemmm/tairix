@@ -11,6 +11,8 @@
 
 use alloc::vec::Vec;
 
+use tairix_riscos_arm::fpa::Exception;
+
 use crate::msgtrans::scan;
 use crate::os::{len32, Ended, Fail, Os, Regs, Unwind};
 
@@ -22,6 +24,26 @@ pub struct Error {
     /// The token the kernel's message file holds its text under.
     pub token: &'static str,
 }
+
+/// The error FPEmulator raises for an FPA exception its trap is enabled
+/// for.
+#[must_use]
+pub const fn floating_point(exception: Exception) -> Error {
+    let (offset, token) = match exception {
+        Exception::InvalidOperation => (0, "FloatingInvalidOperation"),
+        Exception::Overflow => (1, "FloatingOverflow"),
+        Exception::DivisionByZero => (2, "FloatingDivideByZero"),
+        Exception::Underflow => (3, "FloatingUnderflow"),
+        Exception::Inexact => (4, "FloatingInexact"),
+    };
+    Error {
+        number: FLOATING_POINT + offset,
+        token,
+    }
+}
+
+/// The floating-point errors' first number.
+const FLOATING_POINT: u32 = 0x8000_0200;
 
 /// The kernel's message file, its texts the emulator's own.
 pub(crate) const MESSAGES: &[u8] = include_bytes!("../resources/Kernel/Messages");

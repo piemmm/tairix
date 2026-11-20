@@ -78,7 +78,7 @@ const STOPPING: u16 = 5;
 const NO_NUMBERS: u8 = 8;
 
 /// How BASIC ends an error's report: the line it was met in.
-const AT_LINE: &[u8] = b" at line ";
+pub(super) const AT_LINE: &[u8] = b" at line ";
 
 /// A program to type.
 pub(super) struct Program {

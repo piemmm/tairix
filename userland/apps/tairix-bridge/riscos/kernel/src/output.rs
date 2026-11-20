@@ -137,6 +137,18 @@ impl Os<'_> {
         self.write_text(b"\n\r")
     }
 
+    /// `OS_Plot`: `VDU 25` with R0's code at R1 and R2, through `WrchV` as
+    /// RISC OS 5's goes, so redirection and spooling take it; a code past a
+    /// byte plots nothing.
+    pub(crate) fn plot(&mut self, regs: &mut Regs) -> Result<(), Fail> {
+        let Ok(code) = u8::try_from(regs.r[0]) else {
+            return Ok(());
+        };
+        let [x0, x1, ..] = regs.r[1].to_le_bytes();
+        let [y0, y1, ..] = regs.r[2].to_le_bytes();
+        self.write_text(&[25, code, x0, x1, y0, y1])
+    }
+
     /// `OS_WriteN`: R1 bytes from R0.
     pub(crate) fn write_n(&mut self, regs: &mut Regs) -> Result<(), Fail> {
         for i in 0..regs.r[1] {

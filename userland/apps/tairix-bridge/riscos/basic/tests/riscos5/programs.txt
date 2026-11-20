@@ -1,0 +1,473 @@
+# BASIC's language: each program run by genuine RISC OS 5's BASIC V and
+# BASIC VI and what it printed recorded, which the replay holds the
+# interpreter to. A program opens `program NAME`; its lines follow; `input
+# "TEXT"` gives what the keyboard types for it, `\xHH` for any byte. A
+# program prints only its own text and numbers: an error is caught and its
+# number printed, never its message, which is the ROM's. Each runs with its
+# output redirected to a HostFS file, so what follows an error that reaches
+# the error handler through the OS is not recorded; a file a program makes
+# is named `Lang...` and deleted by it.
+
+program print_fields
+10 PRINT 1;2;3
+20 PRINT 1,2,3
+30 PRINT "a",1;"b";2
+40 PRINT ;1;
+50 PRINT
+60 PRINT "x";TAB(5);"y";TAB(2);"z"
+70 PRINT "abc";TAB(3);"d"
+80 PRINT SPC(3);"q";SPC(0);"r"
+90 PRINT ~255;~-1;" ";~0
+100 PRINT 1'2''3
+110 PRINT "e",
+120 PRINT "f"
+130 PRINT 12345678901,1E10,0.5
+140 PRINT -0.000001234,123456789,-7
+
+program at_percent_integers
+10 @%=&20209:PRINT 5;" ";-5;" ";5.5
+20 @%=&10208:PRINT 5;" ";123456
+30 @%=&1000A:PRINT STR$(5);" ";STR$(2.5)
+40 @%=&01020209:PRINT STR$(5);" ";STR$(2.5)
+50 @%=&90A:PRINT 7
+
+program count_width
+10 PRINT "abc";COUNT
+20 WIDTH 5:PRINT "abcdefghij";:WIDTH 0:PRINT
+30 PRINT "xy";COUNT;COUNT
+
+program precedence
+10 PRINT -2^2;" ";2^-1;" ";2^3^2
+20 PRINT NOT 1=1;" ";NOT 0=1
+30 PRINT 1+2*3-4/2;" ";7 MOD 3*2;" ";7 DIV 2
+40 PRINT 3>2 AND 2>1;" ";1 OR 2 EOR 3
+50 ON ERROR PRINT "E";ERR:GOTO 70
+60 PRINT 1<2<3
+70 ON ERROR OFF
+80 PRINT (1<2)<3
+
+program literals
+10 PRINT 2147483647+1
+20 PRINT 2147483648
+30 PRINT &FFFFFFFF;" ";%1010;" ";&7F
+40 ON ERROR PRINT "E";ERR:GOTO 60
+50 PRINT &123456789
+60 ON ERROR OFF
+70 PRINT 1E3;" ";1.5E-2;" ";.25
+80 PRINT VAL("2147483647")+1
+90 PRINT VAL("3")/2;" ";VAL(" 12abc")
+
+program strings
+10 PRINT LEFT$("abc",-1);"|";LEFT$("abc",0);"|";LEFT$("abc",9)
+20 PRINT MID$("abcde",0);"|";MID$("abcde",5);"|";MID$("abcde",6);"|";MID$("abcde",2,0)
+30 PRINT RIGHT$("abc",10);"|";RIGHT$("abc",0);"|";LEFT$("abc");"|";RIGHT$("abc")
+40 PRINT INSTR("abc","");INSTR("abc","",3);INSTR("abc","",4);INSTR("abc","b",0)
+50 PRINT STRING$(0,"x");"|";STRING$(3,"ab");"|";STRING$(-1,"x")
+60 PRINT ASC("");ASC("A");LEN("");LEN("hello")
+70 PRINT CHR$(65);CHR$(256+66)
+80 a$="hi":a$+="there":PRINT a$
+90 PRINT "a"<"b";"b"<"a";"ab">"a";""<"a"
+100 ON ERROR PRINT "E";ERR:END
+110 b$=STRING$(200,"x"):b$=b$+b$
+
+program string_slices
+10 a$="hello"
+20 LEFT$(a$,2)="HEY":PRINT a$
+30 MID$(a$,3,2)="XYZ":PRINT a$
+40 RIGHT$(a$,2)="QR":PRINT a$
+50 MID$(a$,4)="WXYZ":PRINT a$
+60 LEFT$(a$)="!!!!!!!!":PRINT a$
+
+program for_loops
+10 FOR I=1 TO 0:PRINT "once";I:NEXT
+20 FOR I=1 TO 2 STEP 0.5:PRINT I;:NEXT:PRINT
+30 FOR I%=5 TO 1 STEP -2:PRINT I%;:NEXT:PRINT
+40 FOR I%=1 TO 2:FOR J%=1 TO 2:PRINT I%*10+J%;:NEXT J%,I%:PRINT
+50 FOR K=0.1 TO 0.5 STEP 0.1:PRINT K;:NEXT:PRINT
+60 ON ERROR PRINT "E";ERR:GOTO 80
+70 FOR Z=1 TO 2 STEP 0:NEXT
+80 ON ERROR PRINT "F";ERR:GOTO 100
+90 NEXT
+100 ON ERROR OFF
+110 FOR Q%=2147483646 TO 2147483647:PRINT Q%;:NEXT:PRINT
+
+program repeat_while
+10 N%=0:REPEAT:N%+=1:UNTIL N%>=3:PRINT N%
+20 REPEAT UNTIL TRUE
+30 W%=0:WHILE W%<3:W%+=1:ENDWHILE:PRINT W%
+40 WHILE FALSE:PRINT "never":ENDWHILE:PRINT "after"
+50 X%=0:WHILE X%<2
+60 Y%=0:WHILE Y%<2:Y%+=1:ENDWHILE
+70 X%+=1:ENDWHILE:PRINT X%;Y%
+80 ON ERROR PRINT "E";ERR:END
+90 UNTIL 1
+
+program gosub_on
+10 GOSUB 100:PRINT "back"
+20 FOR I%=1 TO 3:ON I% GOSUB 110,120,130:NEXT
+30 ON 5 GOSUB 110,120 ELSE PRINT "else"
+40 ON 2 PROCa,PROCb:PRINT "after"
+50 ON ERROR PRINT "E";ERR:END
+60 ON 9 GOTO 110
+70 END
+100 PRINT "sub":RETURN
+110 PRINT "one":RETURN
+120 PRINT "two":RETURN
+130 PRINT "three":RETURN
+140 DEF PROCa:PRINT "A":ENDPROC
+150 DEF PROCb:PRINT "B":ENDPROC
+
+program case_when
+10 FOR I%=1 TO 4
+20 CASE I% OF
+30 WHEN 1:PRINT "one"
+40 WHEN 2,3:PRINT "two or three"
+50 OTHERWISE PRINT "other"
+60 ENDCASE
+70 NEXT
+80 a$="b":CASE a$ OF
+90 WHEN "a":PRINT "A"
+100 WHEN "b":PRINT "B"
+110 ENDCASE
+120 CASE 5 OF
+130 WHEN 1:PRINT "no"
+140 ENDCASE:PRINT "done"
+
+program routines
+10 a=1:b%=2:c$="c"
+20 PROCchange(a,b%,c$):PRINT a;b%;c$
+30 PROCret(a,b%,c$):PRINT a;b%;c$
+40 PRINT FNs("x")+FNs("y")
+50 PROCl:PRINT l
+60 DIM arr(2):arr(1)=5:PROCarr(arr()):PRINT arr(1)
+70 PRINT FNdepth(50)
+80 END
+90 DEF PROCchange(a,b%,c$):a=9:b%=9:c$="z":ENDPROC
+100 DEF PROCret(RETURN a,RETURN b%,RETURN c$):a=7:b%=8:c$="w":ENDPROC
+110 DEF FNs(x$)=x$+x$
+120 DEF PROCl:LOCAL l:l=5:PRINT l:ENDPROC
+130 DEF PROCarr(q()):q(1)=q(1)*2:ENDPROC
+140 DEF FNdepth(n):IF n=0 THEN =0
+150 =1+FNdepth(n-1)
+
+program routine_errors
+10 ON ERROR PRINT "E";ERR:GOTO 30
+20 PROCnone
+30 ON ERROR PRINT "F";ERR:GOTO 50
+40 PROCtwo(1)
+50 ON ERROR PRINT "G";ERR:GOTO 70
+60 ENDPROC
+70 ON ERROR PRINT "H";ERR:GOTO 90
+80 X=FNtwo
+90 ON ERROR PRINT "I";ERR:END
+100 LOCAL z
+110 DEF PROCtwo(a,b):ENDPROC
+120 DEF FNtwo(a,b)=1
+
+program locals
+10 x=1:PROCa:PRINT x
+20 END
+30 DEF PROCa:LOCAL x:x=2:PROCb:PRINT x:ENDPROC
+40 DEF PROCb:PRINT x:x=3:ENDPROC
+
+program errors
+10 ON ERROR PRINT "E";ERR;" ";ERL:GOTO 30
+20 X=1/0
+30 ON ERROR PRINT "F";ERR;" ";ERL:GOTO 50
+40 Y=SQR(-1)
+50 ON ERROR PRINT "G";ERR;" ";ERL;" ";REPORT$:GOTO 70
+60 ERROR 99,"my message"
+70 ON ERROR PRINT "H";ERR;" ";ERL:GOTO 90
+80 Z=undefined
+90 ON ERROR PRINT "I";ERR;" ";ERL:GOTO 110
+100 DIM a(2):a(3)=1
+110 ON ERROR PRINT "J";ERR:GOTO 130
+120 X$=1
+130 ON ERROR PRINT "K";ERR:GOTO 150
+140 X=LOG(0)
+150 ON ERROR OFF
+160 PRINT "end"
+
+program on_error_local
+10 PROCp:PRINT "main"
+20 END
+30 DEF PROCp
+40 LOCAL ERROR
+50 ON ERROR LOCAL PRINT "local";ERR:ENDPROC
+60 X=1/0
+70 ENDPROC
+
+program data_read
+10 READ a,b$,c,d$,e$
+20 PRINT a;"|";b$;"|";c;"|";d$;"|";e$;"|"
+30 RESTORE 100:READ f:PRINT f
+40 RESTORE +1:READ g:PRINT g
+50 ON ERROR PRINT "E";ERR:END
+60 READ h,i,j,k,l,m
+80 DATA 1, two ,3,"four, with comma"," five "
+100 DATA 10
+110 DATA 20
+
+program dim_blocks
+10 DIM a% 10,b% 0
+20 PRINT b%-a%
+30 ON ERROR PRINT "E";ERR:GOTO 50
+40 DIM c(2):DIM c(3)
+50 ON ERROR PRINT "F";ERR:GOTO 70
+60 DIM d(-1)
+70 ON ERROR PRINT "G";ERR:GOTO 90
+80 DIM e% -2
+90 ON ERROR OFF
+100 DIM f$(1,2):PRINT DIM(f$());DIM(f$(),1);DIM(f$(),2)
+
+program whole_arrays
+10 DIM a(3),b(3),c(3),m(1,2),n(2,1),p(1,1)
+20 a()=1,2,3,4:b()=10
+30 c()=a()+b():PRINT c(0);c(1);c(2);c(3)
+40 c()=a()*2:PRINT c(3);:c()=2*a():PRINT c(3);:c()=-a():PRINT c(3)
+50 c()+=1:PRINT c(3);:c()-=1:PRINT c(3)
+60 PRINT SUM(a());" ";MOD(a())
+70 DIM s$(2):s$()="a","bc","def":PRINT SUM(s$());SUMLEN(s$())
+80 m()=1,2,3,4,5,6:n()=1,0,0,1,1,1
+90 p()=m().n():PRINT p(0,0);p(0,1);p(1,0);p(1,1)
+100 ON ERROR PRINT "E";ERR:END
+110 c()=m()
+
+program eval_rnd
+10 PRINT EVAL("2+3*4");" ";EVAL("""a""+""b""")
+20 X=RND(-1):PRINT RND(10);RND(10);RND(10);RND(100)
+30 X=RND(-1):A%=RND:B%=RND:PRINT ~A%;" ";~B%
+40 X=RND(-12345):PRINT RND(1000000)
+
+program resident_heap
+10 PRINT ~PAGE;" ";~TOP;" ";~LOMEM;" ";~END
+20 A%=5:CLEAR:PRINT A%
+30 x=1:CLEAR
+40 ON ERROR PRINT "E";ERR:END
+50 PRINT x
+
+program shifts_logic
+10 PRINT 1<<4;" ";-16>>2;" ";-16>>>28;" ";1<<32
+20 PRINT 6 AND 3;" ";6 OR 3;" ";6 EOR 3;" ";NOT 0
+30 PRINT TRUE;FALSE;TRUE=-1
+
+program trace_output
+10 TRACE ON
+20 X=1
+30 TRACE OFF
+40 PRINT
+50 PRINT "x"
+
+program rnd_values
+10 X=RND(-1):PRINT ~RND;" ";~RND;" ";RND(2);" ";RND(1000);" ";RND(65536)
+20 X=RND(-1):PRINT RND(1):PRINT RND(0):X=RND(-1):PRINT RND(0)
+30 X=RND(-12345):PRINT ~RND;" ";RND(-5);" ";RND(-5.7)
+40 X=RND(-1):Y=RND(1):PRINT RND(&7FFFFFFF)
+
+program literal_types
+10 PRINT 999999999+&7FFFFFFF;" ";213909503+&7FFFFFFF;" ";213909504+&7FFFFFFF
+20 PRINT 1E0+&7FFFFFFF;" ";1E1+&7FFFFFFF;" ";&7FFFFFFF+1E;" ";0E0-&7FFFFFFF-2
+30 PRINT VAL("1E0")+&7FFFFFFF;" ";VAL("213909504")+&7FFFFFFF;" ";EVAL("1000000000")+&7FFFFFFF
+40 PRINT 2147483647;" ";2147483648;" ";1000000000;" ";5.0+&7FFFFFFF
+
+program graphics_vdu
+10 MOVE 100,200:DRAW 300,400:PLOT 69,10,20:POINT 1,2:PLOT 255,1,2:PLOT 256,1,2:PLOT 4.7,1,2
+20 CIRCLE 640,512,100:CIRCLE FILL 640,512,100:CIRCLE 100.5,100.5,10.5
+30 ELLIPSE 640,512,200,100:ELLIPSE FILL 640,512,200,100,1:ELLIPSE 640,512,200,100,0.5
+40 RECTANGLE 100,100,200,300:RECTANGLE FILL 100,100,200:RECTANGLE 100,100,200,300 TO 400,400
+50 RECTANGLE FILL 1,2,3,4 TO 5,6:FILL 500,500:FILL BY 1,2:ORIGIN 100,200:GCOL 3:GCOL 1,2
+60 COLOUR 3:COLOUR 129:COLOUR 1,255,0,0:COLOUR 1,2:LINE 1,2,3,4:MOVE BY 10,20:DRAW BY 30,40
+70 POINT BY 3,4:OFF:ON:TINT 1,2:VDU 1,2;3|:VDU 65,66;:VDU 256+65,-1;-1|
+80 COLOUR 1 TINT 64:GCOL 1,2 TINT 128:COLOUR 129 TINT 128:GCOL 0,129 TINT 192:GCOL 4 TINT 64
+90 MOVE 1.7,-2.5:DRAW 32767.9,-32768.9:MOVE 65536.5,-65536.5:CIRCLE 1,2,1E9:RECTANGLE 10,20,-5,-6
+100 PRINT "abc";:CLS:PRINT COUNT:PRINT "abc";:CLG:PRINT COUNT:PRINT "abc";:VDU 7:PRINT COUNT
+110 PRINT "abc";:MODE 12:PRINT COUNT
+
+program input_fields
+10 INPUT a$:PRINT "[";a$;"]"
+20 INPUT "num",n:PRINT n
+30 INPUT LINE l$:PRINT "[";l$;"]"
+40 INPUT x,y:PRINT x+y
+50 A%=GET:PRINT A%:B$=GET$:PRINT B$
+60 INPUT "q? " a$:PRINT "[";a$;"]"
+70 INPUT "r";b$,c:PRINT b$;c
+80 INPUT LINE "s" d$:PRINT "[";d$;"]"
+90 INPUT e%:PRINT e%
+100 INPUT a$,b$:PRINT "[";a$;"][";b$;"]"
+110 INPUT a,b:PRINT a;"|";b
+120 INPUT ""f$:PRINT "[";f$;"]"
+130 INPUT "x"'g$:PRINT "[";g$;"]"
+140 INPUT TAB(3)"p"h$:PRINT "[";h$;"]"
+150 INPUT i$,j$:PRINT "[";i$;"][";j$;"]"
+160 INPUT LINE k$,m$:PRINT "[";k$;"][";m$;"]"
+170 PRINT "end"
+input "hello\x0D3.5\x0D  spaced, line\x0D1,2\x0DAB\x0Dquery\x0Dxy,7\x0D line two \x0D12.7\x0D"
+input "\x22a,b\x22,c\x0D1,,3\x0Dempty\x0Dnext\x0Dtab\x0D  \x22q\x22\x22r\x22 , \x22x\x22y\x0Dline one, a\x0Dline two, b\x0D"
+
+program files
+10 F%=OPENOUT"HostFS:$.LangF":PRINT#F%,1.5,7,"abc",-2,0,-1.25,1E20,"":CLOSE#F%
+20 F%=OPENIN"HostFS:$.LangF":B$="":WHILE NOT EOF#F%:B$+=" "+STR$~BGET#F%:ENDWHILE:PRINT B$;" ";EXT#F%:CLOSE#F%
+30 F%=OPENIN"HostFS:$.LangF":INPUT#F%,p,q%,r$,s%,t,u%,v,w$:CLOSE#F%
+40 PRINT p;" ";q%;" ";r$;" ";s%;" ";t;" ";u%;" ";v;" [";w$;"]"
+50 PRINT OPENIN"HostFS:$.LangNoSuch";" ";OPENUP"HostFS:$.LangNoSuch"
+60 F%=OPENOUT"HostFS:$.LangF":BPUT#F%,&88:BPUT#F%,0:BPUT#F%,0:BPUT#F%,&F8:BPUT#F%,&3F
+70 BPUT#F%,0:BPUT#F%,0:BPUT#F%,0:BPUT#F%,0:BPUT#F%,&41:BPUT#F%,0:BPUT#F%,0:BPUT#F%,0:BPUT#F%,7:CLOSE#F%
+80 F%=OPENIN"HostFS:$.LangF":INPUT#F%,x,y:CLOSE#F%:PRINT x;" ";y
+90 ON ERROR PRINT "E";ERR:CLOSE#F%:GOTO 110
+100 F%=OPENIN"HostFS:$.LangF":INPUT#F%,z$:CLOSE#F%
+110 ON ERROR OFF:F%=OPENIN"HostFS:$.LangF":PTR#F%=9:PRINT PTR#F%;" ";BGET#F%:CLOSE#F%
+120 OSCLI "Delete HostFS:$.LangF"
+
+program sys_registers
+10 SYS "OS_ReadMonotonicTime",1,2,3,4,5,6,7,8,9,10 TO a%,b%,c%,d%,e%,f%,g%,h%,i%,j%
+20 PRINT b%;c%;d%;e%;f%;g%;h%;i%;j%
+30 SYS "OS_ReadMonotonicTime" TO ;F%:PRINT F%
+40 SYS "OS_ReadEscapeState" TO ;F%:PRINT F%
+50 SYS "OS_ReadMonotonicTime",,"str",4 TO ,s$,n%:PRINT s$;" ";n%
+60 ON ERROR PRINT "E";ERR:END
+70 SYS "OS_ReadMonotonicTime",1,2,3,4,5,6,7,8,9,10,11
+
+program libraries_and_locals
+10 F%=OPENOUT"HostFS:$.LangL"
+20 T$=CHR$&DD+" "+CHR$&F2+"lib(a):"+CHR$&F1+" ""lib "";a:"+CHR$&E1:BPUT#F%,CHR$13+CHR$0+CHR$10+CHR$(4+LEN(T$))+T$;
+30 T$=CHR$&DD+" "+CHR$&A4+"lib(b)=b*2":BPUT#F%,CHR$13+CHR$0+CHR$20+CHR$(4+LEN(T$))+T$;
+40 BPUT#F%,CHR$13+CHR$255;:CLOSE#F%
+50 LIBRARY "HostFS:$.LangL":PROClib(3):PRINT FNlib(4)
+60 ON ERROR PRINT "E";ERR:GOTO 80
+70 INSTALL "HostFS:$.LangL"
+80 ON ERROR OFF:PROCarr(3):PROCarr(2)
+90 DIM r(2):PROCret(r()):PRINT r(1)
+100 OSCLI "Delete HostFS:$.LangL":END
+110 DEF PROCarr(n):LOCAL a(),b$():DIM a(n),b$(n-1):a(n)=n*10:b$(n-1)="s"+STR$n
+120 PRINT a(n);b$(n-1);" ";DIM(a(),1):ENDPROC
+130 DEF PROCret(RETURN b()):b(1)=5:ENDPROC
+
+program os_error_ends_redirection
+10 ON ERROR PRINT "trapped";ERR:END
+20 PRINT "before"
+30 SYS "OS_File",255,"HostFS:$.LangNoSuch",0,0
+
+program text_loading
+10 A=1
+40  B=2
+60
+80 P%=PAGE:T$="":WHILE P%<TOP:T$+=RIGHT$("0"+STR$~?P%,2):P%+=1:ENDWHILE:PRINT T$
+
+program print_more
+10 PRINT TAB(5,3);"x";SPC(2);"y"
+20 PRINT ~-1;~255,~16
+30 @%=&0002040A:PRINT 3.14159;" ";-2;" ";1E10
+40 @%=&01010205:PRINT 123.456,7
+50 @%=&90A:PRINT 1/3,2/3
+
+program machine_code
+10 DIM C% 127,M% 63
+20 C%!0=&E0800001:C%!4=&E1A0F00E:SYS "OS_SynchroniseCodeAreas",1,C%,C%+8:A%=5:B%=7:PRINT USR C%
+30 C%!0=&E580A000:C%!4=&E5809004:FOR K%=0 TO 7:C%!(8+8*K%)=&E5992000+4*K%:C%!(12+8*K%)=&E5802008+4*K%:NEXT
+40 C%!72=&E1A0F00E:SYS "OS_SynchroniseCodeAreas",1,C%,C%+76
+50 x%=3:y=2.5:z$="hi":A%=M%:CALL C%,x%,y,z$,X%
+60 PRINT !M%:FOR I%=0 TO 3:PRINT M%!(12+8*I%);" ";M%!(8+8*I%)-LOMEM:NEXT
+70 PRINT &8604+4*23-LOMEM
+
+program eval_swap
+10 PRINT EVAL("1+2*3");" ";EVAL("""a""+""b""")
+20 a=1:b=2:SWAP a,b:PRINT a;b:a$="x":b$="y":SWAP a$,b$:PRINT a$;b$
+
+program local_error
+10 PROCle:PRINT "after"
+20 END
+30 DEF PROCle:LOCAL ERROR:ON ERROR LOCAL PRINT "local";ERR:ENDPROC
+40 X=1/0:ENDPROC
+
+program local_data
+10 RESTORE 100:PROCld:READ q:PRINT q
+20 RESTORE 110:READ q:PRINT q:PROCrd:READ q:PRINT q
+30 END
+40 DEF PROCld:LOCAL DATA
+50 RESTORE 110:READ r:PRINT r:ENDPROC
+60 DEF PROCrd:LOCAL DATA
+70 RESTORE 100:READ r:PRINT r:RESTORE DATA
+80 READ r:PRINT r:RESTORE 100:ENDPROC
+100 DATA 1
+110 DATA 2,3,4
+
+program star_inkey
+10 T%=TIME:PRINT TIME>=T%
+20 *Echo star
+30 OSCLI "Echo oscli"
+40 A%=INKEY(0):PRINT A%:B$=INKEY$(10):PRINT B$
+input "QR"
+
+program commands_in_a_running_program
+10 ON ERROR PRINT "E";ERR:GOTO ERL+10
+20 PRINT "LIST":LIST
+30 PRINT "LIST":LISTO 1
+40 PRINT "LVAR":LVAR
+50 PRINT "CRUN":CRUNCH 0
+60 PRINT "TWIN":TWINO 1
+70 PRINT "TWIN":TWIN
+80 PRINT "HELP":HELP
+90 PRINT "AUTO":AUTO
+100 PRINT "RENU":RENUMBER
+110 PRINT "DELE":DELETE 1,2
+120 PRINT "EDIT":EDIT
+130 PRINT "OLD":OLD
+140 PRINT "NEW":NEW
+150 PRINT "end"
+
+program escword_bits
+10 DIM c% 96,w% 8:FOR I%=0 TO 2 STEP 2:P%=c%:[OPT I%
+20 .flags LDR R0,[R14,#&28]:LDR R0,[R8,R0]:MOV PC,R14
+30 .escape MOV R0,#125:SWI "OS_Byte":LDR R0,[R14,#&28]:LDR R1,[R8,R0]:LDR R3,at:STR R1,[R3]
+40 MOV R0,#124:SWI "OS_Byte":LDR R0,[R14,#&28]:LDR R1,[R8,R0]:STR R1,[R3,#4]:MOV PC,R14
+50 .at EQUD w%:]:NEXT
+60 PRINT ~USR flags:TRACE ON
+70 PRINT ~USR flags:TRACE OFF:PRINT ~USR flags:TRACE PROC:PRINT ~USR flags:TRACE OFF:TRACE 100
+80 PRINT ~USR flags:TRACE OFF:PRINT ~USR flags
+90 CALL escape:PRINT ~!w%;" ";~w%!4
+
+program dollar_reach
+10 DIM a% 600
+20 FOR n%=0 TO 13:FOR i%=0 TO 599:a%?i%=65:NEXT:a%?3=n%:PRINT n%;" ";LEN$a%:NEXT
+30 FOR n%=253 TO 257:FOR i%=0 TO 599:a%?i%=65:NEXT:a%?n%=13:PRINT n%;" ";LEN$a%:NEXT
+
+program at_percent_strings
+10 @%=&01020304:@%="G10.9":PRINT ~@%
+20 @%=&01020304:@%="E10.3":PRINT ~@%
+30 @%=&01020304:@%="F10.2":PRINT ~@%
+40 @%=&01020304:@%="G10,9":PRINT ~@%
+50 @%=&01020304:@%="+G10.9":PRINT ~@%
+60 @%=&01020304:@%="g10.9":PRINT ~@%
+70 @%=&01020304:@%="G":PRINT ~@%
+80 @%=&01020304:@%="G10":PRINT ~@%
+90 @%=&01020304:@%=".5":PRINT ~@%
+100 @%=&01020304:@%="G.5":PRINT ~@%
+110 @%=&01020304:@%="X10.2":PRINT ~@%
+120 @%=&01020304:@%="":PRINT ~@%
+130 @%=&01020304:@%="G300.2":PRINT ~@%
+140 @%=&01020304:@%="G10.30":PRINT ~@%
+150 @%=&01020304:@%="F 10.2":PRINT ~@%
+160 @%=&01020304:@%="E10.3X":PRINT ~@%
+170 @%=&01020304:@%="+":PRINT ~@%
+180 @%=&01020304:@%="10.2":PRINT ~@%
+190 @%=&01020304:@%="5":PRINT ~@%
+200 @%=&01020304:@%=",":PRINT ~@%
+210 @%=&01020304:@%=".":PRINT ~@%
+220 @%=&01020304:@%="F10.":PRINT ~@%
+230 @%=&01020304:@%="E.":PRINT ~@%
+240 @%=&01020304:@%="+F,2":PRINT ~@%
+250 @%=&01020304:@%=" G10.2":PRINT ~@%
+260 @%=&01020304:@%="G10.2 ":PRINT ~@%
+270 @%=&01020304:@%="G-1.2":PRINT ~@%
+280 @%=&01020304:@%="F10.2.3":PRINT ~@%
+290 @%=&01020304:@%="G255.255":PRINT ~@%
+300 @%=&01020304:@%="G256":PRINT ~@%
+310 @%=&01020304:@%="F0.0":PRINT ~@%
+320 @%=&01020304:@%="E99":PRINT ~@%
+330 @%=&01020304:@%="++G":PRINT ~@%
+340 @%=&01020304:@%="G1E1":PRINT ~@%
+350 @%=&800000:@%="G":PRINT ~@%
+360 @%=&800000:@%="F10":PRINT ~@%
+370 @%=&800000:@%="+":PRINT ~@%
+380 @%=&800000:@%="E5.":PRINT ~@%
+390 @%=&90A:A$=STR$PI:@%="+G10.4":B$=STR$PI:@%=&90A:PRINT LEN A$;" ";B$

@@ -13,6 +13,7 @@ use crate::reg::Reg;
 use crate::vfp::System;
 
 operations! {
+    all
     /// A VFP operation on two operands: some also read the destination.
     VfpDyadicOp {
         Vmla = "VMLA",
@@ -42,6 +43,7 @@ impl VfpDyadicOp {
 }
 
 operations! {
+    all
     /// A VFP operation on one operand.
     VfpMonadicOp {
         Vmov = "VMOV",
@@ -67,6 +69,7 @@ impl VfpMonadicOp {
 }
 
 operations! {
+    all
     /// How a conversion to an integer rounds: ARMv7's toward zero and as the
     /// FPSCR says, and ARMv8's four directions, whose mnemonics name them.
     ConvertRounding {
@@ -80,6 +83,7 @@ operations! {
 }
 
 operations! {
+    all
     /// An Advanced SIMD operation on three registers of one length.
     SimdThreeOp {
         Vhadd = "VHADD",
@@ -151,6 +155,7 @@ operations! {
 }
 
 operations! {
+    all
     /// An Advanced SIMD operation whose operands differ in length: a long
     /// result, a wide operand or a narrowed result.
     SimdLongOp {
@@ -172,6 +177,155 @@ operations! {
         Vqdmull = "VQDMULL",
         Vmullp = "VMULL",
         Vmullp64 = "VMULL",
+    }
+}
+
+/// How an Advanced SIMD operation's lanes are typed in its mnemonic.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Typing {
+    /// No type: the bitwise operations.
+    Untyped,
+    /// A size alone: `.8`.
+    Size,
+    /// Integers of either sign: `.I8`.
+    Integer,
+    /// Signed or unsigned as the instruction says: `.S8`, `.U8`.
+    Signed,
+    /// Signed always: `.S16`.
+    SignedOnly,
+    /// Polynomials: `.P8`.
+    Polynomial,
+    /// Single precision: `.F32`.
+    Float,
+}
+
+impl SimdThreeOp {
+    /// How its mnemonic types its lanes.
+    #[must_use]
+    pub const fn typing(self) -> Typing {
+        match self {
+            Self::Vhadd
+            | Self::Vqadd
+            | Self::Vrhadd
+            | Self::Vhsub
+            | Self::Vqsub
+            | Self::Vcgt
+            | Self::Vcge
+            | Self::Vshl
+            | Self::Vqshl
+            | Self::Vrshl
+            | Self::Vqrshl
+            | Self::Vmax
+            | Self::Vmin
+            | Self::Vabd
+            | Self::Vaba
+            | Self::Vpmax
+            | Self::Vpmin => Typing::Signed,
+            Self::Vand
+            | Self::Vbic
+            | Self::Vorr
+            | Self::Vorn
+            | Self::Veor
+            | Self::Vbsl
+            | Self::Vbit
+            | Self::Vbif => Typing::Untyped,
+            Self::Vadd
+            | Self::Vsub
+            | Self::Vceq
+            | Self::Vmla
+            | Self::Vmls
+            | Self::Vmul
+            | Self::Vpadd => Typing::Integer,
+            Self::Vtst
+            | Self::Sha1c
+            | Self::Sha1p
+            | Self::Sha1m
+            | Self::Sha1su0
+            | Self::Sha256h
+            | Self::Sha256h2
+            | Self::Sha256su1 => Typing::Size,
+            Self::Vmulp => Typing::Polynomial,
+            Self::Vqdmulh | Self::Vqrdmulh => Typing::SignedOnly,
+            _ => Typing::Float,
+        }
+    }
+}
+
+impl SimdLongOp {
+    /// How its mnemonic types its lanes.
+    #[must_use]
+    pub const fn typing(self) -> Typing {
+        match self {
+            Self::Vaddhn | Self::Vraddhn | Self::Vsubhn | Self::Vrsubhn => Typing::Integer,
+            Self::Vqdmlal | Self::Vqdmlsl | Self::Vqdmull => Typing::SignedOnly,
+            Self::Vmullp | Self::Vmullp64 => Typing::Polynomial,
+            _ => Typing::Signed,
+        }
+    }
+}
+
+impl SimdScalarOp {
+    /// How its mnemonic types its lanes.
+    #[must_use]
+    pub const fn typing(self) -> Typing {
+        match self {
+            Self::Vmla | Self::Vmls | Self::Vmul => Typing::Integer,
+            Self::VmlaF | Self::VmlsF | Self::VmulF => Typing::Float,
+            Self::Vmlal | Self::Vmlsl | Self::Vmull => Typing::Signed,
+            _ => Typing::SignedOnly,
+        }
+    }
+}
+
+impl SimdShiftOp {
+    /// How its mnemonic types its lanes; the fixed-point conversions name
+    /// theirs in full.
+    #[must_use]
+    pub const fn typing(self) -> Typing {
+        match self {
+            Self::Vsri | Self::Vsli => Typing::Size,
+            Self::Vshl | Self::Vshrn | Self::Vrshrn => Typing::Integer,
+            Self::Vqshlu | Self::Vqshrun | Self::Vqrshrun => Typing::SignedOnly,
+            _ => Typing::Signed,
+        }
+    }
+}
+
+impl SimdMiscOp {
+    /// How its mnemonic types its lanes; the conversions name theirs in
+    /// full.
+    #[must_use]
+    pub const fn typing(self) -> Typing {
+        match self {
+            Self::Vmvn | Self::Vswp => Typing::Untyped,
+            Self::Vrev64
+            | Self::Vrev32
+            | Self::Vrev16
+            | Self::Vcnt
+            | Self::Vtrn
+            | Self::Vuzp
+            | Self::Vzip
+            | Self::Aese
+            | Self::Aesd
+            | Self::Aesmc
+            | Self::Aesimc
+            | Self::Sha1h
+            | Self::Sha1su1
+            | Self::Sha256su0 => Typing::Size,
+            Self::Vpaddl | Self::Vpadal | Self::Vqmovn => Typing::Signed,
+            Self::Vcls
+            | Self::Vqabs
+            | Self::Vqneg
+            | Self::Vcgt0
+            | Self::Vcge0
+            | Self::Vcle0
+            | Self::Vclt0
+            | Self::Vabs
+            | Self::Vneg
+            | Self::Vqmovun => Typing::SignedOnly,
+            Self::Vclz | Self::Vceq0 | Self::Vmovn | Self::Vshll => Typing::Integer,
+            _ => Typing::Float,
+        }
     }
 }
 
@@ -199,6 +353,7 @@ impl SimdLongOp {
 }
 
 operations! {
+    all
     /// An Advanced SIMD operation by a scalar: each lane with one lane of
     /// the last operand.
     SimdScalarOp {
@@ -237,6 +392,7 @@ impl SimdScalarOp {
 }
 
 operations! {
+    all
     /// An Advanced SIMD operation by an immediate shift.
     SimdShiftOp {
         Vshr = "VSHR",
@@ -293,6 +449,7 @@ impl SimdShiftOp {
 }
 
 operations! {
+    all
     /// An Advanced SIMD operation on two registers.
     SimdMiscOp {
         Vrev64 = "VREV64",
@@ -357,6 +514,7 @@ operations! {
 }
 
 operations! {
+    all
     /// An Advanced SIMD operation by a modified immediate.
     SimdImmediateOp {
         Vmov = "VMOV",

@@ -91,6 +91,26 @@ impl Big {
         true
     }
 
+    /// Plus `a`; false, the value then meaningless, where the sum does not
+    /// fit.
+    #[must_use]
+    pub fn add(&mut self, a: u32) -> bool {
+        let mut carry = u64::from(a);
+        let mut at = 0;
+        while carry != 0 {
+            let Some(word) = self.words.get_mut(at) else {
+                return false;
+            };
+            let sum = u64::from(*word) + carry;
+            *word = low(sum);
+            carry = sum >> 32;
+            at += 1;
+        }
+        self.len = self.len.max(at);
+        self.trim();
+        true
+    }
+
     /// Multiplied by `m` as a number `width` words wide, `width` no less
     /// than the words in use: the product within them, and the word carried
     /// out of them.

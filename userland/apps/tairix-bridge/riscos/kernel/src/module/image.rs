@@ -38,9 +38,9 @@ const EMPTY: u32 = 0x0D;
 pub(crate) struct Chain {
     /// Its words, ready for the host pages.
     pub(crate) words: Vec<u32>,
-    /// Each image's offset in the chain, its size word and its first
-    /// routine's offset in it.
-    pub(crate) images: Vec<(u32, u32, u32)>,
+    /// Each image's offset in the chain, its size word and where its
+    /// routines and code are in it.
+    pub(crate) images: Vec<(u32, u32, Placed)>,
     /// Where the empty environment string is.
     pub(crate) empty: u32,
 }
@@ -108,17 +108,25 @@ fn help_string(builtin: &Builtin, rom: &Rom) -> Result<Vec<u8>, MemoryError> {
     Ok(help)
 }
 
+/// Where an image's own routines' entries begin, one after another, and
+/// where its guest code begins, as offsets in it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Placed {
+    pub(crate) routines: u32,
+    pub(crate) code: u32,
+}
+
 /// `builtin`'s image, row `rom`, whose `n`th entry is the routine
-/// `routine(n)`, and where its own routines' entries begin, one after
-/// another; each entry it has is added to `entries`, with `place`, its place
-/// among the session's built-ins.
+/// `routine(n)`, and where its routines' entries and its code are; each entry
+/// it has is added to `entries`, with `place`, its place among the session's
+/// built-ins.
 fn image(
     builtin: &Builtin,
     rom: &Rom,
     place: usize,
     entries: &mut Vec<(usize, EntryKind)>,
     routine: &impl Fn(u32) -> u32,
-) -> Result<(Vec<u8>, u32), MemoryError> {
+) -> Result<(Vec<u8>, Placed), MemoryError> {
     let mut image = Image { bytes: Vec::new() };
     let mut header = [0; WORDS as usize];
     for _ in 0..WORDS {
@@ -162,6 +170,17 @@ fn image(
     for index in 0..builtin.routines.len() {
         entry(&mut image, EntryKind::Routine(index))?;
     }
+    let code = image.at();
+    if let Some(emit) = builtin.code {
+        let first = i32::try_from(routines)
+            .ok()
+            .zip(i32::try_from(code).ok())
+            .and_then(|(routines, code)| routines.checked_sub(code))
+            .ok_or(MemoryError::HostFull)?;
+        for word in emit(first)? {
+            image.word(word)?;
+        }
+    }
     header[12] = image.at();
     image.word(FLAG_32BIT)?;
     header[6] = image.at();
@@ -200,7 +219,7 @@ fn image(
     for (n, word) in (0..).zip(header) {
         image.patch(4 * n, word);
     }
-    Ok((image.bytes, routines))
+    Ok((image.bytes, Placed { routines, code }))
 }
 
 /// The command table: each command's name, then its entry's offset, its
@@ -253,11 +272,11 @@ pub(crate) fn chain(
     let mut images = Vec::new();
     images.try_reserve(builtins.len())?;
     for (place, &(rom, builtin)) in builtins.iter().enumerate() {
-        let (bytes, routines) = image(builtin, rom, place, entries, &routine)?;
+        let (bytes, placed) = image(builtin, rom, place, entries, &routine)?;
         let size = len32(bytes.len()) + 4;
         words.try_reserve(bytes.len() / 4 + 1)?;
         words.push(size);
-        images.push((4 * len32(words.len()), size, routines));
+        images.push((4 * len32(words.len()), size, placed));
         words.extend(
             bytes
                 .as_chunks::<4>()

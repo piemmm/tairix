@@ -96,16 +96,28 @@ pub(crate) fn decode_simdfp(word: u32, isa: Isa) -> Option<SimdFpDecoded> {
     })
 }
 
+/// Whether A32 encodes `op` in its unconditional space, where an
+/// instruction of it carries [`Condition::Nv`] in place of a condition.
+#[must_use]
+pub fn unconditional_op(op: &crate::instruction::Op) -> bool {
+    table::unconditional(op.kind())
+}
+
 /// The encoding of `instruction`, which decodes back to it exactly; an
 /// unconditional instruction's condition is [`Condition::Nv`].
 pub fn encode(instruction: &Instruction) -> Result<u32, EncodeError> {
     encode_among(instruction, decode)
 }
 
-/// The encoding of a generic coprocessor `instruction` that
-/// [`decode_coprocessor`] decodes back to it: T32's, where no unit claims the
-/// coprocessor space as A32's FPA does.
-pub(crate) fn encode_coprocessor(instruction: &Instruction) -> Result<u32, EncodeError> {
+/// The encoding of a generic coprocessor `instruction` that the generic rows
+/// alone decode back to it, whichever unit claims its coprocessor's space:
+/// T32's, and an assembler's `CDP`, `MCR` or `LDC` naming the FPA's
+/// coprocessors.
+///
+/// # Errors
+///
+/// As [`encode`].
+pub fn encode_coprocessor(instruction: &Instruction) -> Result<u32, EncodeError> {
     encode_among(instruction, |word, isa| {
         decode_coprocessor(word, isa).map(|decoded| decoded.instruction)
     })

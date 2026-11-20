@@ -87,6 +87,9 @@ fixed-width integer, so neither approximates and neither allocates.
   that range is `Beyond::Above` the largest finite value or `Beyond::Below`
   10^-4952, under half the FPA's least denormal, for the caller to overflow
   or underflow by its own rules.
+- `decimal::exact_digits` reads the same way from digits of any number, the
+  most significant first, every one of them counting: a value a long run of
+  digits sets on a tie is read as one.
 
 The work grows with the value's distance from one: a few words for ordinary
 values, a few hundred thousand word operations at the far ends of
@@ -167,6 +170,9 @@ A unit keeps only the rules that are its own.
   - 20 000 random decimal values over and past binary64's range are read and
     held to the host's correctly rounded parsing, as doubles and as singles.
   - Decimal ties between doubles break by what follows them.
+  - A significand of any length reads as its short form does, leading and
+    trailing noughts and all, and a 150-digit expansion reads exactly only
+    whole.
   - 3 000 random normal double-extended values come back exactly from
     twenty-one digits.
   - The range's bounds are held to the powers of two where double-extended

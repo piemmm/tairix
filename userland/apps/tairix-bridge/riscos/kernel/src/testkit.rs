@@ -120,6 +120,17 @@ pub(crate) fn boot_in(
     zone: tairix_tz::Zone<'static>,
     seconds: u64,
 ) -> Session {
+    boot_with(layout, zone, seconds, &[])
+}
+
+/// A session as [`boot_in`] makes one, with the built-in `modules` beside the
+/// kernel's own.
+pub(crate) fn boot_with(
+    layout: &'static Layout,
+    zone: tairix_tz::Zone<'static>,
+    seconds: u64,
+    modules: &'static [&'static crate::module::Builtin],
+) -> Session {
     let clock = Rc::new(Cell::new(0));
     let stop_after = Rc::new(Cell::new(None));
     let stop_without_input = Rc::new(Cell::new(false));
@@ -137,7 +148,7 @@ pub(crate) fn boot_in(
         memo_pages: 16,
         host: Box::new(host),
         vdu: None,
-        modules: &[],
+        modules,
         zone,
         pressure: &tairix_reclaim::pressure::Unpressured,
         log: &tairix_log::DiscardSink,

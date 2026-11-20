@@ -28,6 +28,8 @@ pub(crate) struct RomModule {
     /// Where its routines' entries begin in its image, a jump of two words
     /// each.
     pub(crate) routines: u32,
+    /// Where its guest code begins in its image.
+    pub(crate) code: u32,
 }
 
 /// The kernel's own built-in modules.
@@ -166,13 +168,14 @@ pub(crate) fn install(
     let base = memory.install_host(&chain.words)?;
     let mut roms = Vec::new();
     roms.try_reserve(builtins.len())?;
-    for (&(row, builtin), &(offset, size, routines)) in builtins.iter().zip(&chain.images) {
+    for (&(row, builtin), &(offset, size, placed)) in builtins.iter().zip(&chain.images) {
         roms.push(RomModule {
             row,
             builtin,
             image: base + offset,
             size,
-            routines,
+            routines: placed.routines,
+            code: placed.code,
         });
     }
     Ok(Installed {

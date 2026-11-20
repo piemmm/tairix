@@ -140,6 +140,7 @@ pub(super) fn unpredictable(instruction: &Instruction, isa: Isa) -> bool {
         | Op::Hint { .. }
         | Op::Barrier { .. }
         | Op::ClearExclusive
+        | Op::ExceptionReturn
         | Op::SetEndian { .. }
         | Op::SaveState { .. }
         | Op::Coprocessor { .. }

@@ -173,8 +173,9 @@ pub(crate) fn os<'o>(number: u32) -> Option<Handler<'o>> {
         0x7D => Os::read_line32,
         0x7E => Os::substitute_args32,
         0x7F => Os::heap_sort32,
-        0x2F | 0x31 | 0x32 | 0x35 | 0x36 | 0x37 | 0x3F | 0x41 | 0x45 | 0x56 | 0x5A | 0x61
-        | 0x64 | 0x65 => Os::vdu_swi,
+        0x45 => Os::plot,
+        0x2F | 0x31 | 0x32 | 0x35 | 0x36 | 0x37 | 0x3F | 0x41 | 0x56 | 0x5A | 0x61 | 0x64
+        | 0x65 => Os::vdu_swi,
         CONVERT_STANDARD_DATE_AND_TIME => Os::convert_standard_date_and_time,
         CONVERT_DATE_AND_TIME => Os::convert_date_and_time,
         _ => return None,

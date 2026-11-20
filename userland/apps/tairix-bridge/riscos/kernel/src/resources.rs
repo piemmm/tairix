@@ -49,6 +49,7 @@ pub(crate) static MESSAGES: Builtin = Builtin {
     routines: &[],
     vectors: &[],
     resources: &SHARED,
+    code: None,
 };
 
 /// One ResourceFS block of `resources`, in order: each entry its offset to

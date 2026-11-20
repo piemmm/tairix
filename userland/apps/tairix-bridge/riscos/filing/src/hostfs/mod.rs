@@ -109,6 +109,7 @@ pub static HOST_FS: Builtin = Builtin {
         file_type: 0xFFF,
         data: MESSAGES,
     }],
+    code: None,
 };
 
 /// Where a disc's requests are answered.

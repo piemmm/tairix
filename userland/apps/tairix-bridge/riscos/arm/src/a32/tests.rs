@@ -395,6 +395,23 @@ fn an_instruction_a_profile_lacks_is_undefined_there() {
 }
 
 #[test]
+fn the_monitor_and_hypervisor_calls_decode_only_with_their_extensions() {
+    let cases: &[(u32, &str, Feature)] = &[
+        (0xE160_0071, "SMC     #1", Feature::Security),
+        (0x0160_007F, "SMCEQ   #&F", Feature::Security),
+        (0xE14F_FF7F, "HVC     #&FFFF", Feature::Virtualization),
+        (0xE160_006E, "ERET", Feature::Virtualization),
+    ];
+    for &(word, expected, feature) in cases {
+        assert_eq!(text(word, Isa::ALL, 0), expected, "{word:08X}");
+        let instruction = decode(word, Isa::ALL).expect("decodes");
+        assert_eq!(encode(&instruction), Ok(word), "{expected}");
+        assert_eq!(decode(word, Isa::ALL.without(feature)), None, "{expected}");
+    }
+    assert_eq!(decode(0x0140_0071, Isa::ALL), None, "HVC is unconditional");
+}
+
+#[test]
 fn the_unprivileged_halfword_forms_claim_p_clear_with_w_set_only_from_armv6t2() {
     let word = 0xE0F2_10B4; // LDRHT R1,[R2],#4
     assert_eq!(text(word, Isa::ALL, 0), "LDRHT   R1,[R2],#4");

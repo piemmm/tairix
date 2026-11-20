@@ -441,6 +441,9 @@ tairix-softfloat = { path = "../../lib/softfloat", version = "=0.0.0" }
 # harness is written with.
 tairix-riscos-kernel = { path = "../../userland/apps/tairix-bridge/riscos/kernel", version = "=0.0.0" }
 tairix-openbasic = { path = "../../lib/openbasic", version = "=0.0.0" }
+# BASIC's corpora: the language's programs and the assembler's lines, read
+# and probed by the definitions its replays hold it to them with.
+tairix-riscos-basic = { path = "../../userland/apps/tairix-bridge/riscos/basic", version = "=0.0.0" }
 # The emulators' machine library: the Open Micro vertical aims at a card and
 # its menu, and declares the icon-bar menu, through the library's own layout
 # and rows.

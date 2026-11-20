@@ -60,7 +60,12 @@ an application's own documents folder, the reference harness);
 | RO19.6 | Running files: `*Run` and each executable type's run action, the Obey module | done |
 | RO19.7 | The user's own RISC OS disc: the documents folder as the shared session's own disc, `!Boot`'s skeleton, `Choices:`, the boot sequence's command-line half; BootCommands; MessageTrans reading files through FileSwitch | done |
 | RO19.8 | FileCore's facilities RamFS does not reach, each recorded first: `FloppyStructure` for multi-zone floppies, `LayoutStructure` for old maps, `*Compact` on a new map, `*Defect` and the defect lists, `DiscFormat`'s gaps, `OS_FSControl` 52's object names, `DiscOp64`'s block | done |
-| RO20 | BBC BASIC V and VI: workspace in guest memory, the language, numbers, the machine interface, the assembler, errors, the editor | planned |
+| RO20.1 | BASIC's numbers, each recorded first: BASIC V's five-byte real with its arithmetic and conversions held bit for bit to BASIC V and its transcendentals rounded correctly within BASIC V's measured error; BASIC VI's doubles through the FPA's operations; numbers read and written under `@%`, `STR$` and `VAL` in each dialect | done |
+| RO20.2 | The interpreter's frame: the `basic` crate, the BASIC and BASIC64 modules with `*BASIC` and `*BASIC64`; the workspace in guest memory as recorded — PAGE, TOP, LOMEM, HIMEM and END, the resident integers and `@%`, the variable catalogue and every value format, the heap and the BASIC stack; the program store and the prompt; errors, `ON ERROR`, `REPORT`, `ERR`, `ERL` and Escape; `LOAD`, `SAVE`, `CHAIN`, `TEXTLOAD`, `TEXTSAVE`, `CRUNCH`, `LIST`, `LISTO`, `NEW`, `OLD`, `CLEAR`, `LVAR` | done |
+| RO20.3 | The language: every statement, function and operator of RISC OS 5's BASIC V run by the resumable machine — the control structures, `PROC` and `FN` with `LOCAL`, `RETURN` and array parameters, `LOCAL ERROR` and `LOCAL DATA`, whole-array operations, `LIBRARY`, `INSTALL` and `OVERLAY`, `EVAL`, `TRACE`, `QUIT` | done |
+| RO20.4 | The machine interface and the system: `CALL` and `USR` with the routine table on host pages, `SYS`, `OSCLI` and `*` lines; `PRINT`, `INPUT`, `GET` and `INKEY`, files, `TIME` and `TIME$`; the graphics, sound and `MOUSE` statements as the VDU stream and the SWIs they are | done |
+| RO20.5 | The assembler: `[` … `]`, `OPT`, labels, `ADR`, the `EQU` and `DC` directives, `ALIGN`, and every mnemonic RISC OS 5's BASIC assembler accepts, encoded through `arm`'s tables | done |
+| RO20.6 | The remaining commands: `AUTO`, `RENUMBER`, `DELETE`, `HELP`, and `EDIT`, which starts the separate ARM BASIC Editor module as RISC OS 5's BASIC does | done |
 | RO21 | The VDU drivers: modes, the VDU stream, `OS_Plot`, palettes, screen banks, screen memory | planned |
 | RO22 | Sprites and JPEGs: `OS_SpriteOp`, SpriteExtend, output to sprites | planned |
 | RO23 | ColourTrans | planned |
@@ -981,6 +986,20 @@ is fuzzed.
 
 ## 7. BBC BASIC V and VI (RO20)
 
+- **The interpreter.** BASIC is the `basic` crate's two built-in modules,
+  BASIC and BASIC64, each started as the application by `*BASIC` or
+  `*BASIC64`. It is a resumable machine: the program, every variable, every
+  frame, every value an expression is working on and the place it has
+  reached live in guest memory, so it runs on explicit stacks and never
+  recurses on the host. A hostile program's depth therefore ends in BASIC's
+  own "No room", never the host's stack, and every statement boundary is a
+  point it can stop at and be resumed from, which RO27's scheduling takes.
+- **Recording.** Each part is recorded before it is built. The harness's
+  numbers part has genuine BASIC V and BASIC VI evaluate its cases and
+  records the bytes of each answer (`tests/riscos5/numbers.txt`); later parts
+  run fragments and record what each prints, the bytes of the values it leaves
+  and the memory it touches, a message by the kind a calibration line shows
+  it to be (§17). The replay holds the emulator's BASIC to each.
 - **Programs.**
   - Tokenising and listing are `lib/openbasic`'s (RO7). The program text is
     tokenised lines in BASIC V's layout: `&0D`, the line number, the length
@@ -1006,11 +1025,36 @@ is fuzzed.
   - files, `GET$#` and `INPUT#`, `TIME` and `TIME$`; `TRACE`.
 
   BASIC VI is the same language over eight-byte reals.
-- **Numbers.** Integers are 32-bit. BASIC V's reals are five bytes, with its own
-  arithmetic and functions to BASIC V's bits as recorded. BASIC VI's are
-  eight-byte doubles, stored as BASIC VI stores them and computed through
-  `lib/softfloat`. Conversions, `PRINT`, `@%`, `STR$` and `VAL` follow each
-  dialect's observed results.
+- **Numbers.** Integers are 32-bit.
+  - BASIC V's reals are five bytes: a 32-bit mantissa, little-endian, its top
+    bit the sign, then an excess-128 exponent; only the all-zero pattern is
+    zero. Its arithmetic is BASIC V's to the bit: each result rounded once to
+    nearest with ties to odd, but a subtraction keeping the larger operand's
+    exponent truncated and an operand more than 32 places below the other
+    ignored; an integer power from −64 to 63 by squares. `RAD` and `DEG`
+    multiply by its own `PI`/180 and 180/`PI`, `INT` refuses a magnitude of
+    2^31 where an assignment takes −2^31, and every function refuses where
+    BASIC V does: `Accuracy lost` from 2^23, `Exponent range` from 89.5.
+  - Its transcendentals — `SIN`, `COS`, `TAN`, `ATN`, `ASN`, `ACS`, `EXP`,
+    `LN`, `LOG` and a real power — are rounded correctly, where BASIC V's are
+    a place or two off and more near a multiple of π/2. The replay holds them
+    to two places and those an argument's last place is magnified into, as
+    RO11 holds the FPA to FPEmulator. A power whose exact value overflows is
+    `Number too big` where BASIC V's own approximation stays below the
+    largest value.
+  - BASIC VI's reals are doubles kept as the FPA transfers them, the high
+    word first. Its arithmetic and functions are the FPA's (RO11) under the
+    program's own floating-point status, an exception it traps being the
+    floating-point emulator's error; only a division by zero is BASIC's.
+  - Text: `VAL` and a literal read every digit in BASIC V, with two exponent
+    digits, rounded correctly where BASIC V, keeping a little less than
+    every bit, reads a value at or just above a tie a place low; the replay
+    holds it there to 2^-6 of a place. BASIC VI reads the first 19 digits
+    through a packed decimal load, with three exponent digits. `STR$` and `PRINT` write BASIC V's exact value rounded half up,
+    and BASIC VI's packed decimal store's 17 digits rounded half up again,
+    under `@%`: the general, exponent and fixed layouts, digits bounded at
+    11 and 18, the exponent left-justified in three places and four, the
+    decimal comma flag, and `STR$`'s own flag.
 - **The machine interface.**
   - `CALL` and `USR` enter code with the documented registers: A%–H% in R0–R7,
     and BASIC's workspace, parameter list and count in R8–R10. The routine
@@ -1018,18 +1062,43 @@ is fuzzed.
   - `SYS`: names resolve through `OS_SWINumberFromString`, with string and
     number arguments, and `TO` with the flags.
   - `OSCLI` and `*` lines.
+  - `POS` and `VPOS`, and the prompt's choice of opening a line, read the
+    text cursor through `OS_Byte` 134, which the VDU drivers answer (RO21).
+    Until they do, `POS` and `VPOS` meet the OS's error and the prompt takes
+    the cursor to be at a line's start, as genuine BASIC finds it under
+    output redirection.
 - **The assembler.** `[` … `]` with `OPT`, labels, `ADR`, the `EQU` and `DC`
   directives and `ALIGN`, accepting the mnemonics RISC OS 5's BASIC assembler
   accepts. It encodes through `arm`'s tables (§2.2).
 - **Errors and the editor.**
-  - Error numbers and messages are BASIC V's; `REPORT$`, `ERR` and `ERL`;
-    Escape.
+  - Error numbers are BASIC V's, and each message says what BASIC V's says
+    in the emulator's own words, authored in the tree (decision 3);
+    `REPORT$`, `ERR` and `ERL`; Escape.
   - The prompt runs in a screen window (decision 10), with `AUTO`, `RENUMBER`,
-    `DELETE`, `EDIT` (BASIC's full-screen editor), `HELP`, `LVAR`, `NEW` and
-    `OLD`.
+    `DELETE`, `HELP`, `LVAR`, `NEW` and `OLD`; every command is a syntax error
+    in a running program, as recorded. `HELP`'s topics are the emulator's own
+    words.
+  - `EDIT` issues the two commands RISC OS 5's BASIC does, ensuring the
+    separate ARM BASIC Editor module from `System:Modules` and starting it.
+    BASIC holds no editor of its own; RISC OS 5 provides none, and none is
+    planned: a user's own copy of the module is guest code like any other.
+- **Recording.** `tests/riscos5/` holds four corpora the reference harness
+  records from genuine BASIC V and BASIC VI and the replays hold the crate
+  to: the numbers' answers, programs run with `-quit`, assembler lines each
+  assembled alone, and sessions typed at the prompt, whose messages a
+  calibration session tells apart by kind.
 - **Divergences.** Each deliberate divergence is recorded with its test, as in
-  `plans/BEEB.md` §3. Examples are the copyright text and the routine
-  addresses, which are not reproduced; the documented interfaces are.
+  `plans/BEEB.md` §3:
+  - the banner, the copyright text, `HELP`'s topics and the routine
+    addresses are the emulator's own; the documented interfaces are
+    reproduced;
+  - BASIC V's transcendentals and its readings at a tie are rounded
+    correctly (§7, Numbers);
+  - a nested `[` inside a function an assembler operand calls assembles as it
+    would anywhere, where genuine BASIC corrupts the outer instruction;
+  - memory BASIC never wrote reads as nought, where genuine BASIC leaves what
+    was there before: the resident integers at the start, a `DIM` block's
+    unset bytes.
 
 ## 8. Graphics (RO21–RO25)
 

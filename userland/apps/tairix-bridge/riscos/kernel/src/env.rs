@@ -444,8 +444,9 @@ impl Os<'_> {
     }
 
     /// `ErrorV`'s default claimant: the error copied into the error handler's
-    /// buffer, the privileged stacks emptied, and the handler entered in
-    /// User mode with its R12 in R0.
+    /// buffer, redirection ended as RISC OS 5 ends it, so the handler reports
+    /// to the screen, the privileged stacks emptied, and the handler entered
+    /// in User mode with its R12 in R0.
     pub(crate) fn enter_error_handler(&mut self, block: u32) -> Result<(), Fail> {
         if !self.error_handler_sound() {
             self.world.env.reinstate(&ERROR_HANDLERS);
@@ -462,6 +463,8 @@ impl Os<'_> {
         self.write_word(slot.buffer, pc)?;
         self.write_word(slot.buffer.wrapping_add(4), number)?;
         self.write_terminated(slot.buffer.wrapping_add(8), &text, 0, text.len() + 1)?;
+        // After the copy: closing a file may reuse the buffer the block is in.
+        self.end_redirection();
         self.world.env.set_active_object(slot.address);
         let mut registers = [0; 13];
         registers[0] = slot.workspace;
@@ -540,6 +543,49 @@ impl Os<'_> {
     ) -> Fail {
         self.reset_semaphores();
         let transfer = self.user_entry(bits, entry, registers);
+        Fail::Unwind(self.transfer(transfer))
+    }
+
+    /// R0 to R14 as the code running sees them, its mode's R13 and R14
+    /// among them: a routine's caller's, which its Rust is given only to R12.
+    #[must_use]
+    pub fn current_registers(&mut self) -> [u32; 15] {
+        let cpu = self.world.processor.cpu();
+        let mut registers = [0; 15];
+        for (n, slot) in (0..).zip(registers.iter_mut()) {
+            *slot = cpu.reg(Reg::field(n));
+        }
+        registers
+    }
+
+    /// Whether the code running was entered from User mode with nothing
+    /// nested around it — no call into guest code, SWI or interrupt in
+    /// progress — so it can leave for User mode code of its choosing.
+    #[must_use]
+    pub fn at_outermost(&mut self) -> bool {
+        self.world.depth == 0
+            && self.world.frame.is_none()
+            && self.world.kernel_calls == 0
+            && !self.world.in_interrupt
+            && !self.world.processor.cpu().mode().privileged()
+    }
+
+    /// Control carried on in User mode at `pc` under `bits`' profile, R0 to
+    /// R14 `registers` and the condition flags `flags`: the unwind that leaves
+    /// for it, from code [`at_outermost`](Self::at_outermost). Elsewhere a
+    /// caller would be abandoned, so it is refused as "Invalid parameters".
+    pub fn continue_in_user(
+        &mut self,
+        bits: Bits,
+        pc: u32,
+        registers: [u32; 15],
+        flags: u32,
+    ) -> Fail {
+        if !self.at_outermost() {
+            return self.error(crate::error::BAD_PARAMETERS);
+        }
+        let mut transfer = self.user_entry(bits, pc, |user| *user = registers);
+        transfer.state.cpsr |= flags & psr::NZCV;
         Fail::Unwind(self.transfer(transfer))
     }
 
@@ -896,27 +942,49 @@ impl Os<'_> {
         &mut self,
         exception: tairix_riscos_arm::fpa::Exception,
     ) -> Result<(), Unwind> {
-        use tairix_riscos_arm::fpa::Exception as E;
-        let (offset, token) = match exception {
-            E::InvalidOperation => (0, "FloatingInvalidOperation"),
-            E::Overflow => (1, "FloatingOverflow"),
-            E::DivisionByZero => (2, "FloatingDivideByZero"),
-            E::Underflow => (3, "FloatingUnderflow"),
-            E::Inexact => (4, "FloatingInexact"),
-        };
-        let error = Error {
-            number: FLOATING_POINT + offset,
-            token,
-        };
-        match self.error(error) {
+        match self.error(crate::error::floating_point(exception)) {
             Fail::Error(block) => self.raise(block),
             Fail::Unwind(unwind) => Err(unwind),
         }
     }
-}
 
-/// The floating-point errors' first number.
-const FLOATING_POINT: u32 = 0x8000_0200;
+    /// The context's FPA status register, as `RFS` reads it.
+    #[must_use]
+    pub fn fpsr(&mut self) -> u32 {
+        self.world.processor.cpu().fpa().fpsr()
+    }
+
+    /// The context's FPA status register made `value`, as `WFS` writes it,
+    /// its system ID kept.
+    pub fn set_fpsr(&mut self, value: u32) {
+        self.world.processor.cpu().fpa_mut().write_fpsr(value);
+    }
+
+    /// FPA register `n` as a double, as `STFD` stores it.
+    ///
+    /// # Errors
+    ///
+    /// The exception an enabled trap stopped the store with.
+    pub fn fpa_double(&mut self, n: u8) -> Result<u64, tairix_riscos_arm::fpa::Exception> {
+        let fpa = self.world.processor.cpu().fpa_mut();
+        let [high, low, ..] = fpa.store(tairix_riscos_arm::fpa::Format::Double, n)?;
+        Ok(u64::from(high) << 32 | u64::from(low))
+    }
+
+    /// FPA register `n` loaded with the double `bits`, as `LDFD` loads one.
+    pub fn set_fpa_double(&mut self, n: u8, bits: u64) {
+        let fpa = self.world.processor.cpu().fpa_mut();
+        let [h0, h1, h2, h3, l0, l1, l2, l3] = bits.to_be_bytes();
+        let words = [
+            u32::from_be_bytes([h0, h1, h2, h3]),
+            u32::from_be_bytes([l0, l1, l2, l3]),
+            0,
+            0,
+        ];
+        // A double's load raises no exception.
+        let _ = fpa.load(tairix_riscos_arm::fpa::Format::Double, n, words);
+    }
+}
 
 /// "Undefined instruction executed at &%0".
 const UNDEFINED_INSTRUCTION: Error = Error {

@@ -217,6 +217,7 @@ pub(crate) static INTERNATIONAL: Builtin = Builtin {
         file_type: 0xFFF,
         data: MESSAGES,
     }],
+    code: None,
 };
 
 const fn command(

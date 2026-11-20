@@ -181,30 +181,65 @@ fn basic5(
     out.spaces(space)?;
     out.spaces(indent)?;
     let lower = options.has(Options::LOWER_CASE);
+    for (_, piece) in pieces(text) {
+        match piece {
+            Piece::Byte { byte, plain } => {
+                out.put(byte)?;
+                if byte == b':' && plain && options.has(Options::SPLIT) {
+                    out.put(b'\n')?;
+                    out.spaces(space + if numbered { 5 } else { 0 })?;
+                    out.spaces(indent)?;
+                }
+            }
+            Piece::Line(number) => {
+                out.number(number, false)?;
+                if !numbered {
+                    out.put(b'\n')?;
+                    return Err(Error::ReferenceListed);
+                }
+            }
+            Piece::Word(name) => out.text(name.as_bytes(), lower)?,
+        }
+    }
+    out.put(b'\n')
+}
+
+/// A piece of a BASIC V line's tokenised text, as `LIST` spells it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Piece {
+    /// A byte that lists as itself; `plain` where it is outside a string and
+    /// before any `REM`.
+    Byte {
+        /// The byte.
+        byte: u8,
+        /// Whether it is program text rather than a string's or a remark's.
+        plain: bool,
+    },
+    /// A keyword's spelling, upper case.
+    Word(&'static str),
+    /// A line reference's number.
+    Line(u16),
+}
+
+/// The pieces of BASIC V `text`, each with the offset just past its bytes. A
+/// token BASIC V spells nothing for yields no piece.
+pub fn pieces(text: &[u8]) -> impl Iterator<Item = (usize, Piece)> + '_ {
     let (mut quoted, mut remark) = (false, false);
     let mut at = 0;
-    while let Some(&b) = text.get(at) {
+    core::iter::from_fn(move || loop {
+        let &b = text.get(at)?;
         at += 1;
         if quoted || remark || b < 0x7F {
             if b == QUOTE && !remark {
                 quoted = !quoted;
             }
-            out.put(b)?;
-            if b == b':' && !quoted && !remark && options.has(Options::SPLIT) {
-                out.put(b'\n')?;
-                out.spaces(space + if numbered { 5 } else { 0 })?;
-                out.spaces(indent)?;
-            }
-            continue;
+            let plain = !quoted && !remark && b != QUOTE;
+            return Some((at, Piece::Byte { byte: b, plain }));
         }
         if b == lineref::MARKER {
-            out.number(reference(text, at), false)?;
+            let number = reference(text, at);
             at += lineref::ENCODED;
-            if !numbered {
-                out.put(b'\n')?;
-                return Err(Error::ReferenceListed);
-            }
-            continue;
+            return Some((at.min(text.len()), Piece::Line(number)));
         }
         let token = if basic5::PREFIXES.contains(&b) {
             let second = byte(text, at);
@@ -217,10 +252,9 @@ fn basic5(
             remark = true;
         }
         if let Some(name) = basic5::SPELLINGS.of_token(token) {
-            out.text(name.as_bytes(), lower)?;
+            return Some((at.min(text.len()), Piece::Word(name)));
         }
-    }
-    out.put(b'\n')
+    })
 }
 
 /// The line number encoded at `at`, its marker before it.
@@ -308,19 +342,34 @@ impl Out<'_> {
 
     /// `n` in decimal, padded to five columns where `padded`.
     fn number(&mut self, n: u16, padded: bool) -> Result<(), Error> {
-        let mut digits = [b' '; 5];
-        let mut rest = n;
-        let mut at = digits.len();
-        loop {
-            at -= 1;
-            digits[at] = b'0' + (rest % 10).to_le_bytes()[0];
-            rest /= 10;
-            if rest == 0 {
-                break;
-            }
-        }
-        self.text(&digits[if padded { 0 } else { at }..], false)
+        let field = number_field(n);
+        let at = if padded { 0 } else { unpadded(&field) };
+        self.text(&field[at..], false)
     }
+}
+
+/// Line `n`'s number as `LIST` and `AUTO` show it, right-aligned in five
+/// places.
+#[must_use]
+pub fn number_field(n: u16) -> [u8; 5] {
+    let mut digits = [b' '; 5];
+    let mut rest = n;
+    let mut at = digits.len();
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (rest % 10).to_le_bytes()[0];
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    digits
+}
+
+/// Where a [`number_field`]'s digits start.
+#[must_use]
+pub fn unpadded(field: &[u8; 5]) -> usize {
+    field.iter().take_while(|&&b| b == b' ').count()
 }
 
 #[cfg(test)]

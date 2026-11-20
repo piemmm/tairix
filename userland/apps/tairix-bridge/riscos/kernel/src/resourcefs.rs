@@ -131,6 +131,7 @@ pub(crate) static RESOURCE_FS: Builtin = Builtin {
         file_type: 0xFFF,
         data: MESSAGES,
     }],
+    code: None,
 };
 
 /// An entry of a registered block.

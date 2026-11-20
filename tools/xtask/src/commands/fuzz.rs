@@ -155,6 +155,16 @@ pub const TARGETS: &[Target] = &[
         description: "userland/apps/tairix-bridge/riscos/arm: the FPA's every operation, load and store on any register values and FPSR, trapping only where enabled; any FPA program run from any state",
     },
     Target {
+        package: "tairix-riscos-basic",
+        test: "fuzz_numbers",
+        description: "userland/apps/tairix-bridge/riscos/basic: any bytes read as a number by BASIC V and BASIC VI without reading past them; every operation and function on any operands, BASIC VI's under any floating-point status, answering or faulting; any value laid out under any @% in bounded text, STR$'s own layout reading back as the value",
+    },
+    Target {
+        package: "tairix-riscos-basic",
+        test: "fuzz_basic",
+        description: "userland/apps/tairix-bridge/riscos/basic: hostile programs of BASIC's keywords and operands, or any printable text, run by BASIC V and BASIC VI to an end, a wait or their budget; hostile assembler statements under any OPT raising an error or moving P% and O% on by no more than a string after an alignment",
+    },
+    Target {
         package: "tairix-riscos-arm",
         test: "fuzz_simdfp",
         description: "userland/apps/tairix-bridge/riscos/arm: any VFP or Advanced SIMD instruction, A32 or T32, run from any register file, FPSCR and mode with the unit granted or withheld; the FPSCR keeps its reserved bits clear and its flags only gather; any built with hostile numbers encoded, shown and judged without a panic",

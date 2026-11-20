@@ -33,6 +33,36 @@ fn each_output_swi_writes_its_characters_through_wrchv() {
 }
 
 #[test]
+fn plot_is_its_vdu_25_through_wrchv_and_a_code_past_a_byte_plots_nothing() {
+    const PLOT: u32 = 0x45;
+    let mut s = session();
+    s.user_swi(
+        X | PLOT,
+        [
+            5,
+            0x1_0003,
+            (-2_i32).cast_unsigned(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+    );
+    assert_eq!(s.output(), [25, 5, 3, 0, 0xFE, 0xFF]);
+    for code in [256, 0x1_0004, u32::MAX] {
+        let (regs, _) = s.user_swi(X | PLOT, [code, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(!regs.flag(tairix_riscos_arm::psr::V), "no error");
+    }
+    assert!(s.output().is_empty());
+}
+
+#[test]
 fn write_s_writes_the_string_after_it_and_returns_past_it_word_aligned() {
     let mut s = session();
     let after = SWI_AT + 12;

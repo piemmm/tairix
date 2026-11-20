@@ -39,6 +39,7 @@ pub(crate) static UTILITY: Builtin = Builtin {
             data: DICTIONARY,
         },
     ],
+    code: None,
 };
 
 /// The dictionary help text is expanded with: no words, since the kernel's

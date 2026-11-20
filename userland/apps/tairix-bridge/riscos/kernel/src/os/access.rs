@@ -220,20 +220,28 @@ impl Os<'_> {
         self.read_ended(address, most, |b| b == 0)
     }
 
-    /// Copies `bytes` from `from` to `to`, which do not overlap, a chunk at
-    /// a time.
+    /// Copies `bytes` from `from` to `to` a chunk at a time, as if through a
+    /// buffer the whole length: ranges that overlap are copied from the end
+    /// where `to` lies above `from`, so neither chunk overwrites what is yet
+    /// to be read.
     ///
     /// # Errors
     ///
     /// The abort an access gives, or the unwind a long copy's yield meets.
     pub fn copy_bytes(&mut self, from: u32, to: u32, bytes: u32) -> Result<(), Fail> {
         let mut chunk = [0; COPY_CHUNK as usize];
+        let backward = to > from && to - from < bytes;
         let mut done = 0;
         while done < bytes {
             let length = (bytes - done).min(COPY_CHUNK);
+            let offset = if backward {
+                bytes - done - length
+            } else {
+                done
+            };
             let part = &mut chunk[..length as usize];
-            self.read_bytes(from.wrapping_add(done), part)?;
-            self.write_bytes(to.wrapping_add(done), part)?;
+            self.read_bytes(from.wrapping_add(offset), part)?;
+            self.write_bytes(to.wrapping_add(offset), part)?;
             done += length;
             self.yield_point()?;
         }

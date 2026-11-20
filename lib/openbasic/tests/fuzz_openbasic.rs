@@ -33,7 +33,12 @@ const SMOKE_ITERATIONS: u64 = 400;
 const MOST_DRAWN: usize = 300;
 
 const DIALECTS: [Dialect; 2] = [Dialect::BasicII, Dialect::BasicV];
-const STARTS: [Start; 3] = [Start::Line, Start::Statement, Start::Expression];
+const STARTS: [Start; 4] = [
+    Start::Line,
+    Start::Statement,
+    Start::Expression,
+    Start::LineNumbers,
+];
 
 /// Text a tokeniser meets: keywords whole and abbreviated, digits, quotes,
 /// colons and anything else, a CR or LF now and then.

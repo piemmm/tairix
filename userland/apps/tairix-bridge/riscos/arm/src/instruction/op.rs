@@ -236,11 +236,14 @@ operations! {
 
 operations! {
     /// An instruction whose immediate a handler reads: a software interrupt,
-    /// a breakpoint, or the permanently undefined instruction.
+    /// a breakpoint, the permanently undefined instruction, or a call to the
+    /// secure monitor or the hypervisor.
     CallOp {
         Swi = "SWI",
         Bkpt = "BKPT",
         Udf = "UDF",
+        Smc = "SMC",
+        Hvc = "HVC",
     }
 }
 
@@ -1046,6 +1049,8 @@ pub enum Op {
     },
     /// `CLREX`.
     ClearExclusive,
+    /// `ERET`: the return from Hyp mode.
+    ExceptionReturn,
     /// The single loads and stores.
     Transfer {
         /// The operation.

@@ -44,6 +44,10 @@ pub enum Feature {
     /// ARMv8's AArch32 additions: load-acquire and store-release, `SEVL` and
     /// `CSDB`.
     V8,
+    /// The Security Extensions: `SMC`.
+    Security,
+    /// The Virtualization Extensions: `HVC` and `ERET`.
+    Virtualization,
     /// ARMv8's `CRC32` and `CRC32C` instructions.
     Crc32,
     /// The FPA on coprocessors 1 and 2, as FPEmulator implements it: its
@@ -140,6 +144,8 @@ impl Isa {
         Feature::Mp,
         Feature::Divide,
         Feature::V8,
+        Feature::Security,
+        Feature::Virtualization,
         Feature::Crc32,
         Feature::Fpa,
         Feature::Vfp,

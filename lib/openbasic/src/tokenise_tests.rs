@@ -364,3 +364,17 @@ fn basic_v_keeps_edit_s_tail_as_typed() {
         bytes(&[w(crate::basic5::EDIT), Text(" PRINT 10")])
     );
 }
+
+#[test]
+fn line_numbers_mid_expression_are_encoded_where_a_statement_start_is_not_assumed() {
+    let mut bytes = Vec::new();
+    tokenise(Dialect::BasicV, b"10 TIME", Start::LineNumbers, &mut bytes).unwrap();
+    let mut expected = alloc::vec![lineref::MARKER];
+    expected.extend_from_slice(&lineref::encode(10));
+    expected.extend_from_slice(b" ");
+    expected.push(word::TIME.token);
+    assert_eq!(
+        bytes, expected,
+        "a line number, and TIME read, not assigned"
+    );
+}

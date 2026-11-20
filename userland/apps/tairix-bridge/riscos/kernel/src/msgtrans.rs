@@ -179,6 +179,7 @@ pub(crate) static MESSAGE_TRANS: Builtin = Builtin {
         file_type: 0xFFF,
         data: MESSAGES,
     }],
+    code: None,
 };
 
 /// The tokens of a file opened to be indexed, so a token without a `?` is

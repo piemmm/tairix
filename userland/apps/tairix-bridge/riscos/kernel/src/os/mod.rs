@@ -155,6 +155,11 @@ const MEMC: u32 = 0x0360_0400;
 const SYSTEM_HEAP_START: u32 = 32 * 1024;
 /// The RMA's size at reset.
 const RMA_START: u32 = 4 * 1024;
+/// The FPA status programs run under from reset, as recorded on RISC OS 5:
+/// invalid operation, division by zero and overflow trapped.
+pub const APPLICATION_FPSR: u32 = tairix_riscos_arm::fpa::Exception::InvalidOperation.enable()
+    | tairix_riscos_arm::fpa::Exception::DivisionByZero.enable()
+    | tairix_riscos_arm::fpa::Exception::Overflow.enable();
 
 /// A SWI's or a call's failure.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -299,6 +304,8 @@ pub struct World {
     pub(crate) guest_called: bool,
     /// The processor's work since the host last had its word.
     pub(crate) since_word: u64,
+    /// Host work not yet taken from the outermost run's instructions.
+    pub(crate) charged: u64,
     pub(crate) vdu: Option<crate::output::VduDrivers>,
     /// The serial output stream's handle, and the printer stream's.
     pub(crate) serial_out: u32,
@@ -437,6 +444,7 @@ impl Kernel {
             resume: None,
             guest_called: false,
             since_word: 0,
+            charged: 0,
             vdu: config.vdu,
             serial_out: 0,
             printer: 0,
@@ -550,6 +558,7 @@ impl Kernel {
         os.world.keyboard.workspace = keyboard;
         os.world.keyboard.empty = keyboard + crate::keyboard::HANDLER_WORKSPACE;
         os.world.keyboard.exits = os.world.routine_address(crate::host::Routine::KeyExit(0));
+        os.set_fpsr(APPLICATION_FPSR);
         // Before any module's code can run on them.
         let state = os.world.processor.state();
         let state = os.emptied_stacks(state);

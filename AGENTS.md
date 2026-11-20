@@ -822,7 +822,8 @@ tairix/
 │   │           │        #   outside it may depend on them.
 │   │           ├── arm/    #   The ARM processor, its FPA, VFP and NEON, guest MMU.
 │   │           ├── kernel/ #   The RISC OS kernel: address space, slots, areas.
-│   │           └── filing/ #   FileSwitch and the filing systems it calls.
+│   │           ├── filing/ #   FileSwitch and the filing systems it calls.
+│   │           └── basic/  #   BBC BASIC V and VI: their numbers and interpreter.
 │   └── games/           # Games. A leaf subtree: its crates compose each other
 │       │                #   and `lib/*`, and NOTHING outside it may depend on
 │       │                #   them, so game code never enters the OS libraries.

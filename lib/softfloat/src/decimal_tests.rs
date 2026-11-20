@@ -324,3 +324,91 @@ fn the_range_s_bounds_are_where_double_extended_ends() {
         Err(Beyond::Above)
     );
 }
+
+/// The decimal digits of `n`, most significant first.
+fn digits(n: u128) -> Vec<u8> {
+    format!("{n}").bytes().map(|b| b - b'0').collect()
+}
+
+#[test]
+fn a_significand_of_any_length_reads_as_a_short_one_does() {
+    let mut rng = Prng::new(0x5EED_D161);
+    for _ in 0..2_000 {
+        let significand = (u128::from(rng.next_u64()) << (rng.next_u64() % 64)) % 10u128.pow(38);
+        let exponent = i32::try_from(rng.next_u64() % 801).unwrap() - 400;
+        let negative = rng.next_u64() & 1 != 0;
+        let short = Decimal {
+            negative,
+            significand,
+            exponent,
+        }
+        .exact();
+        let mut long = std::vec![0, 0];
+        long.extend(digits(significand));
+        assert_eq!(
+            exact_digits(negative, long.iter().copied(), exponent),
+            short
+        );
+        long.extend([0; 40]);
+        assert_eq!(
+            exact_digits(negative, long.iter().copied(), exponent - 40),
+            short
+        );
+    }
+}
+
+#[test]
+fn every_digit_of_a_long_significand_counts() {
+    // (2^33 + 1) / 2^200: 150 significant digits, every one needed for the
+    // value to read exactly, with nothing below its last bit.
+    let text = "534552942080669282006718710501737016300840618426912261279599169763090894345323060074453485123708337861097986999647790895551224821247160434722900390625";
+    let whole: Vec<u8> = text.bytes().map(|b| b - b'0').collect();
+    let x = exact_digits(false, whole.iter().copied(), -200)
+        .unwrap()
+        .normalized(true);
+    assert_eq!(
+        (x.sig, x.exp, x.sticky),
+        (((1 << 33) + 1) << 93, -167, false)
+    );
+    let short = exact_digits(false, whole[..149].iter().copied(), -199)
+        .unwrap()
+        .normalized(true);
+    assert!(short.sticky, "short of its last digit it is not exact");
+    assert_eq!(exact_digits(true, [0, 0, 0], 7), Ok(zero(true)));
+}
+
+#[test]
+fn plain_integers_read_a_small_value_as_the_general_way_does() {
+    let mut rng = Prng::new(0x5EED_5A11);
+    for _ in 0..20_000 {
+        let digits = 1 + rng.next_u64() % 38;
+        let n = (u128::from(rng.next_u64()) << 64 | u128::from(rng.next_u64()))
+            % 10u128.pow(u32::try_from(digits).unwrap());
+        let n = n.max(1);
+        let exponent = i32::try_from(rng.next_u64() % 81).unwrap() - 40;
+        let general = scaled(false, Big::from_u128(n), digits_of(n), exponent).unwrap();
+        if let Some(fast) = small(n, exponent) {
+            assert_eq!(fast, general, "{n}E{exponent}");
+        }
+    }
+    for (n, exponent) in [
+        (1, -27),
+        (u128::from(u64::MAX), -27),
+        (10u128.pow(38) - 1, 0),
+        (1, 38),
+        (u128::MAX / 11, 1),
+    ] {
+        if let Some(fast) = small(n, exponent) {
+            assert_eq!(
+                fast,
+                scaled(false, Big::from_u128(n), digits_of(n), exponent).unwrap(),
+                "{n}E{exponent}"
+            );
+        }
+    }
+    assert!(small(1, -28).is_none(), "five to the 28th passes a word");
+    assert!(
+        small(u128::from(u64::MAX) + 1, -1).is_none(),
+        "a quotient's dividend passes a word"
+    );
+}

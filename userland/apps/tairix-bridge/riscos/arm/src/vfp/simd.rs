@@ -763,6 +763,7 @@ pub fn permute(op: SimdMiscOp, size: u8, q: bool, d: u128, m: u128) -> (u128, u1
 
 /// Advanced SIMD's modified immediate expanded to 64 bits, from the op bit
 /// above the four cmode bits.
+#[must_use]
 pub const fn expand_immediate(cmode: u8, imm8: u8) -> u64 {
     const fn words(word: u64) -> u64 {
         word << 32 | word

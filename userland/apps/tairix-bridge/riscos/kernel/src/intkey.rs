@@ -291,6 +291,7 @@ pub(crate) static INTERNATIONAL_KEYBOARD: Builtin = Builtin {
     routines: &[handler_init, pending_alt, special_key, select],
     vectors: &[],
     resources: &[],
+    code: None,
 };
 
 /// The number typed in decimal with Alt held: its value so far, whether a

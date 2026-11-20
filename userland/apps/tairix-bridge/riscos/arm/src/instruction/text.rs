@@ -587,6 +587,10 @@ impl Display for Text {
                 }
             }
             Op::ClearExclusive => m.push("CLREX")?,
+            Op::ExceptionReturn => {
+                m.push("ERET")?;
+                m.push(c)?;
+            }
             Op::Transfer {
                 op,
                 rt,

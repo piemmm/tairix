@@ -473,7 +473,8 @@ impl Cpu {
             Op::Call { op, value } => match op {
                 CallOp::Swi => Flow::Stop(Stop::Swi { number: value }),
                 CallOp::Udf if host => Flow::Stop(Stop::HostCall { number: value }),
-                CallOp::Udf => {
+                // No profile has the Security or Virtualization Extensions.
+                CallOp::Udf | CallOp::Smc | CallOp::Hvc => {
                     self.undefined();
                     Flow::Next
                 }
@@ -609,7 +610,8 @@ impl Cpu {
             | Op::Coprocessor { .. }
             | Op::CoprocessorRegister { .. }
             | Op::CoprocessorRegisters { .. }
-            | Op::CoprocessorTransfer { .. } => {
+            | Op::CoprocessorTransfer { .. }
+            | Op::ExceptionReturn => {
                 self.undefined();
                 Flow::Next
             }

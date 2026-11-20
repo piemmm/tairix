@@ -1,0 +1,36 @@
+[package]
+name = "tairix-riscos-basic"
+description = "TAIRiX Bridge's BBC BASIC V and VI: RISC OS 5's BASIC and BASIC64 modules, a resumable interpreter whose program, variables and stacks live in guest memory. no_std, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The processor's encoder, for the code BASIC lays in its module, and the FPA,
+# whose operations BASIC VI's arithmetic is.
+tairix-riscos-arm = { path = "../arm", version = "=0.0.0" }
+# The kernel BASIC's modules join and run their programs through.
+tairix-riscos-kernel = { path = "../kernel", version = "=0.0.0" }
+# The exact arithmetic, decimal conversions and correctly rounded functions
+# BASIC V's numbers rest on.
+tairix-softfloat = { path = "../../../../../lib/softfloat", version = "=0.0.0" }
+# BASIC V's tokens, tokenising and listing.
+tairix-openbasic = { path = "../../../../../lib/openbasic", version = "=0.0.0" }
+
+[dev-dependencies]
+# The fuzz harness's seeded generator and budget.
+tairix-fuzzseed = { path = "../../../../../tests/fuzzseed", version = "=0.0.0" }
+# The filing system a session's programs are loaded and saved through.
+tairix-riscos-filing = { path = "../filing", version = "=0.0.0" }
+# The in-memory tree the replay's HostFS disc is served over.
+tairix-fscopy = { path = "../../../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }
+# What a session is made with.
+tairix-tz = { path = "../../../../../lib/tz", version = "=0.0.0" }
+tairix-reclaim = { path = "../../../../../lib/reclaim", version = "=0.0.0" }
+tairix-log = { path = "../../../../../lib/log", version = "=0.0.0" }

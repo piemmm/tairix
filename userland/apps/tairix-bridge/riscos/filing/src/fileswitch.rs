@@ -110,6 +110,7 @@ pub static FILE_SWITCH: Builtin = Builtin {
         file_type: 0xFFF,
         data: MESSAGES,
     }],
+    code: None,
 };
 
 /// What FileSwitch holds while it is active.
