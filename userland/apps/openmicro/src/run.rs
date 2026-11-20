@@ -2036,17 +2036,24 @@ mod program {
             }
         }
 
-        /// Machine `id`'s start `ticket`'s sound stream, if one opened.
-        fn sounded(&mut self, id: u32, ticket: u64, speaker: Option<Speaker>) {
-            let Some(speaker) = speaker else {
-                return;
-            };
+        /// Machine `id`'s start `ticket`'s sound stream, or why it has none,
+        /// which its window says.
+        fn sounded(&mut self, id: u32, ticket: u64, speaker: Result<Speaker, String>) {
             let Some(n) = self
                 .index(id)
                 .filter(|&n| self.machines[n].ticket == ticket)
             else {
-                speaker.close();
+                if let Ok(speaker) = speaker {
+                    speaker.close();
+                }
                 return;
+            };
+            let speaker = match speaker {
+                Ok(speaker) => speaker,
+                Err(why) => {
+                    self.machines[n].say(why, StatusTone::Warning);
+                    return;
+                }
             };
             let (_, _, token) = machine_tokens(self.machines[n].slot);
             let watched = tairix_rt::waitset_ctl(
@@ -3043,7 +3050,7 @@ mod program {
             while self.files.outstanding() {
                 match self.files.wait_until(deadline) {
                     Some(FileDone::Sound {
-                        speaker: Some(speaker),
+                        speaker: Ok(speaker),
                         ..
                     }) => speaker.close(),
                     Some(_) => {}

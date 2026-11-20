@@ -279,11 +279,12 @@ refused; a change nobody hears — a mute, a choice of default — confirms
 nothing, so it takes no earlier change's confirmation away.
 
 A program supplies that seam with `live` (feature `rt`): `RtAudio` is the
-service's rendezvous and its streams' notify mailboxes — each bound the first
-time a grant names it, and admitted to the audio service alone, so nobody else
-can forge a stream's state into it — and `LiveStream` is an open stream with its
-shared ring, opened and attached in one step that closes the stream again if
-the ring cannot follow. Each stream reads its own mailbox, named by its grant,
+service's rendezvous and its streams' notify mailboxes — each bound when a
+grant names it, admitted to the audio service alone, so nobody else can forge a
+stream's state into it, and let go when its stream closes, so the stream the
+service next hands that slot binds it afresh on whichever transport opens it —
+and `LiveStream` is an open stream with its shared ring, opened and attached in
+one step that closes the stream again if the ring cannot follow. Each stream reads its own mailbox, named by its grant,
 so one process may hold several at once. A program parking on a wait-set of its
 own adds `LiveStream::notify_port` and takes notifications with `take_notify`,
 which never parks.

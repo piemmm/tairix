@@ -359,12 +359,12 @@ mod program {
         }
     }
 
-    /// What starting a machine gave: its disks, its worker, its sound if the
-    /// seat has any, and what it resumes.
+    /// What starting a machine gave: its disks, its worker, its sound or why
+    /// it has none, and what it resumes.
     struct Launched {
         disks: [Option<FileMedium>; 2],
         session: RtSessionChannel,
-        sound: Option<Opened>,
+        sound: Result<Opened, String>,
         resume: Resumable,
     }
 
@@ -594,49 +594,39 @@ mod program {
         })
     }
 
-    /// The sound stream, or none: a machine plays silently on a seat with no
-    /// sound, and says so.
-    fn open_sound() -> Option<Opened> {
+    /// The sound stream, or why there is none: a machine plays silently on a
+    /// seat with no sound, and says so.
+    fn open_sound() -> Result<Opened, String> {
         let mut audio = RtAudio::new();
+        let rate = Rate::new(SOUND_RATE)
+            .map_err(|err| format!("Its sound rate was refused ({err}); it plays silently."))?;
         let params = OpenParams {
             device_id: 0,
             direction: StreamDirection::Playback,
             format: SampleFormat::S16,
-            rate: Rate::new(SOUND_RATE).ok()?,
+            rate,
             channel_map: ChannelMap::STEREO,
             role: StreamRole::Media,
             latency_target_frames: LATENCY_FRAMES,
             tenancy: Tenancy::Caller,
         };
-        let mut stream = match LiveStream::open(&mut audio, &params) {
-            Ok(stream) => stream,
-            Err(why) => {
-                app::report(
-                    APP_NAME,
-                    format_args!("no sound ({why:?}); the machine is silent"),
-                );
-                return None;
-            }
-        };
+        let mut stream = LiveStream::open(&mut audio, &params)
+            .map_err(|why| format!("No sound: {why}. It plays silently."))?;
         let grant = stream.client().grant();
         if grant.format != SampleFormat::S16 || grant.channel_map != ChannelMap::STEREO {
-            app::report(
-                APP_NAME,
-                "the sound stream is not 16-bit stereo; the machine is silent",
-            );
             let _ = stream.close(&mut audio);
-            return None;
+            return Err(String::from(
+                "Its sound stream is not 16-bit stereo; it plays silently.",
+            ));
         }
         let rate = grant.rate.hz();
         if let Err(err) = stream.client_mut().start(&mut audio, Frames::new(0)) {
-            app::report(
-                APP_NAME,
-                format_args!("the sound stream would not start ({err})"),
-            );
             let _ = stream.close(&mut audio);
-            return None;
+            return Err(format!(
+                "Its sound stream would not start ({err}); it plays silently."
+            ));
         }
-        Some(Opened {
+        Ok(Opened {
             stream,
             audio,
             rate,
@@ -3092,6 +3082,27 @@ mod program {
         }
 
         /// Machine `id`'s disks, worker and sound, or why there are none:
+        /// Machine `n` playing on `opened`, the loop woken under `token` by its
+        /// notices.
+        fn sounding(&mut self, n: usize, mut opened: Opened, token: u64) {
+            let watched = tairix_rt::waitset_ctl(
+                self.set,
+                WaitSetOp::Add,
+                WaitSourceKind::Port,
+                opened.stream.notify_port(),
+                token,
+            );
+            if watched < 0 {
+                let err = Errno::from_syscall(watched);
+                app::report(
+                    APP_NAME,
+                    format_args!("the sound's wake was refused ({err}); it plays as frames arrive"),
+                );
+            }
+            let _ = opened.stream.take_notify(&mut opened.audio);
+            self.machines[n].sound = Some((opened, Sound::new(SOUND_WAITING_FRAMES)));
+        }
+
         /// run it.
         fn started(&mut self, id: u32, ticket: u64, launched: Result<Launched, String>) {
             let current = self
@@ -3100,7 +3111,7 @@ mod program {
             let Some(n) = current else {
                 // Its window closed while it was starting.
                 if let Ok(launched) = launched {
-                    if let Some(sound) = launched.sound {
+                    if let Ok(sound) = launched.sound {
                         sound.close();
                     }
                 }
@@ -3126,25 +3137,12 @@ mod program {
             let sectors = [machine.disk_sectors(0), machine.disk_sectors(1)];
             let [read, write, sounding] = machine_tokens(self.machines[n].slot);
             let rate = sound.as_ref().map_or(SOUND_RATE, |opened| opened.rate);
-            if let Some(mut opened) = sound {
-                let watched = tairix_rt::waitset_ctl(
-                    self.set,
-                    WaitSetOp::Add,
-                    WaitSourceKind::Port,
-                    opened.stream.notify_port(),
-                    sounding,
-                );
-                if watched < 0 {
-                    let err = Errno::from_syscall(watched);
-                    app::report(
-                        APP_NAME,
-                        format_args!(
-                            "the sound's wake was refused ({err}); it plays as frames arrive"
-                        ),
-                    );
+            match sound {
+                Ok(opened) => self.sounding(n, opened, sounding),
+                Err(why) => {
+                    let window = self.machines[n].window.pane.id();
+                    self.warn_over(Some(window), "The machine has no sound", &why);
                 }
-                let _ = opened.stream.take_notify(&mut opened.audio);
-                self.machines[n].sound = Some((opened, Sound::new(SOUND_WAITING_FRAMES)));
             }
             for (drive, file) in disks.into_iter().enumerate() {
                 let Some(file) = file else { continue };
@@ -4436,7 +4434,7 @@ mod program {
             let mut damage = Region::new();
             let machine = &mut machines[n];
             let (id, name, ticket) = (machine.id, machine.name.as_str(), machine.ticket);
-            let run = machine.run.as_mut()?;
+            let (run, sound_at) = (machine.run.as_mut()?, (set, machine.slot));
             let mut settled = Settled::default();
             let mut leave = None;
             let target = blocks.as_ref().map(|blocks| blocks.target);
@@ -4471,7 +4469,7 @@ mod program {
                         }
                     }
                     HostEvent::Audio(pcm) => {
-                        if let Some(fill) = play(&mut machine.sound, pcm, (set, machine.slot)) {
+                        if let Some(fill) = play(&mut machine.sound, pcm, sound_at, notes) {
                             run.host.fill(fill);
                         }
                     }
@@ -4939,7 +4937,7 @@ mod program {
                         launched: Ok(launched),
                         ..
                     }) => {
-                        if let Some(sound) = launched.sound {
+                        if let Ok(sound) = launched.sound {
                             sound.close();
                         }
                     }
@@ -4963,24 +4961,29 @@ mod program {
     }
 
     /// Play `pcm` on a machine's sound: the frames the machine should render
-    /// ahead next. A stream that fails is closed, and the machine plays on
-    /// silently; the machine in `slot` had its notifications on `set`.
+    /// ahead next, if it has sound. A stream that fails is closed, the machine
+    /// playing on silently, and `notes` says so; the machine in `slot` had its
+    /// notifications on `set`.
     fn play(
         sound: &mut Option<(Opened, Sound)>,
         pcm: &[u8],
         (set, slot): (u64, usize),
+        notes: &mut Vec<(String, String)>,
     ) -> Option<u32> {
         let (opened, waiting) = sound.as_mut()?;
         let mut ring = Ring(&mut opened.stream);
         if waiting.take(pcm, &mut ring).is_ok() {
             return Some(waiting.fill(&mut ring));
         }
-        app::report(APP_NAME, "the sound stream failed; the machine is silent");
         if let Some((opened, _)) = sound.take() {
             let [_, _, sounding] = machine_tokens(slot);
             unwatch_sound(set, &opened, sounding);
             opened.close();
         }
+        notes.push((
+            String::from("The machine went silent"),
+            String::from("Its sound stream failed; it plays on silently."),
+        ));
         None
     }
 

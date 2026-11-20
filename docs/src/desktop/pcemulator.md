@@ -1155,7 +1155,8 @@ still being copied.
   16-bit stereo, the machine mixed to the rate the stream was granted. What
   the stream's ring cannot yet take waits, bounded, its oldest dropped beyond
   the bound, and the machine's mix is steered by how much the two hold. A
-  seat with no sound runs the machine silent, and says so.
+  machine with no stream to be had, or whose stream fails, runs silent, and
+  a warning over its window says why.
 - **The clock card** reads the host's clock plus the machine's own offset.
   Setting the time in the guest moves the offset, as a real card's battery
   kept what it was set to, and the library keeps it; the zone a reader is in

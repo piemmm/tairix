@@ -24,9 +24,8 @@ use tairix_openmicro::worker::protocol::{
 use tairix_rt::work::Worker;
 use tairix_rt::{Dir, File};
 use tairix_util::defer::JobQueue;
-use tairix_window::app;
 
-use crate::program::{APP_NAME, LATENCY_FRAMES, LEAST_RING};
+use crate::program::{LATENCY_FRAMES, LEAST_RING};
 
 /// The file worker's own state: the files the media came from and the
 /// documents folder, once granted.
@@ -215,14 +214,14 @@ pub enum FileDone {
     },
     /// A write done, or why not.
     Written(Result<(), String>),
-    /// Machine `id`'s start's sound stream, if one opened.
+    /// Machine `id`'s start's sound stream, or why it has none.
     Sound {
         /// The machine.
         id: u32,
         /// The start.
         ticket: u64,
-        /// The stream.
-        speaker: Option<Speaker>,
+        /// The stream, or why the machine is silent.
+        speaker: Result<Speaker, String>,
     },
     /// Machine `id`'s folder made, or why not.
     FolderMade {
@@ -722,55 +721,45 @@ pub struct Speaker {
 }
 
 impl Speaker {
-    /// A 48 kHz 16-bit mono stream, started; none, said, where the seat has
-    /// none to give.
-    fn open() -> Option<Self> {
+    /// A 48 kHz 16-bit mono stream, started, or why the machine is silent:
+    /// the seat may have none to give.
+    fn open() -> Result<Self, String> {
         let mut audio = RtAudio::new();
+        let rate = Rate::new(SAMPLE_RATE)
+            .map_err(|err| format!("No sound at 48 kHz ({err}); the machine is silent."))?;
         let params = OpenParams {
             device_id: 0,
             direction: StreamDirection::Playback,
             format: SampleFormat::S16,
-            rate: Rate::new(SAMPLE_RATE).ok()?,
+            rate,
             channel_map: ChannelMap::MONO,
             role: StreamRole::Media,
             latency_target_frames: LATENCY_FRAMES,
             tenancy: Tenancy::Caller,
         };
-        let mut stream = match LiveStream::open(&mut audio, &params) {
-            Ok(stream) => stream,
-            Err(why) => {
-                app::report(
-                    APP_NAME,
-                    format_args!("no sound ({why:?}); the machine is silent"),
-                );
-                return None;
-            }
-        };
+        let mut stream = LiveStream::open(&mut audio, &params)
+            .map_err(|why| format!("No sound: {why}. The machine is silent."))?;
         let grant = stream.client().grant();
         if grant.format != SampleFormat::S16
             || grant.channel_map != ChannelMap::MONO
             || grant.rate.hz() != SAMPLE_RATE
         {
-            app::report(
-                APP_NAME,
-                "the sound stream is not 48 kHz 16-bit mono; the machine is silent",
-            );
             let _ = stream.close(&mut audio);
-            return None;
+            return Err(String::from(
+                "The sound stream is not 48 kHz 16-bit mono; the machine is silent.",
+            ));
         }
         let target = grant
             .granted_latency_frames
             .max(LEAST_RING)
             .min(grant.ring_frames);
         if let Err(err) = stream.client_mut().start(&mut audio, Frames::new(0)) {
-            app::report(
-                APP_NAME,
-                format_args!("the sound stream would not start ({err})"),
-            );
             let _ = stream.close(&mut audio);
-            return None;
+            return Err(format!(
+                "The sound stream would not start ({err}); the machine is silent."
+            ));
         }
-        Some(Self {
+        Ok(Self {
             audio,
             stream,
             target,

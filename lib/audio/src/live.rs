@@ -6,9 +6,10 @@
 //! attested pid and handed back in the grant, so it is bound here only once a
 //! grant names it, and admitted to the audio service alone: nobody else may
 //! forge a stream's state into it. The service hands a closed stream's slot to
-//! the next stream, so a mailbox stays bound for the life of the process and
-//! is bound only the first time a grant names it. Each stream reads its own
-//! mailbox, so one process may hold several streams at once.
+//! the next stream, so a mailbox is let go when its stream closes: the next
+//! stream binds it afresh, on whichever transport opens it, and reads nothing
+//! the closed one left. Each stream reads its own mailbox, so one process may
+//! hold several streams at once.
 
 use alloc::vec::Vec;
 
@@ -75,6 +76,26 @@ impl RtAudio {
             self.bound.push(port);
         }
         Ok(())
+    }
+
+    /// Let go of `mailbox`, bound for a stream now closed, and anything still
+    /// waiting in it; one this transport did not bind is left alone.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal to unbind it.
+    pub fn release(&mut self, mailbox: u64) -> Result<(), Errno> {
+        let Some(at) = self.bound.iter().position(|&port| port == mailbox) else {
+            return Ok(());
+        };
+        self.bound.swap_remove(at);
+        if self.watching == Some(mailbox) {
+            self.watching = None;
+            if let Some(set) = self.parked {
+                let _ = watch(set, WaitSetOp::Del, mailbox);
+            }
+        }
+        tairix_rt::port_unbind(mailbox)
     }
 
     /// `mailbox`, refused unless this transport bound it for a stream.
@@ -172,7 +193,9 @@ impl LiveStream {
                 geometry,
             }),
             Err(failure) => {
+                let mailbox = client.grant().notify_endpoint;
                 let _ = client.close(transport);
+                let _ = transport.release(mailbox);
                 Err(failure)
             }
         }
@@ -256,13 +279,18 @@ impl LiveStream {
         self.client.take_notify(transport)
     }
 
-    /// Close the stream; its ring is unmapped as this is dropped.
+    /// Close the stream and let go of its mailbox; its ring is unmapped as
+    /// this is dropped.
     ///
     /// # Errors
     ///
-    /// The service's refusal, or the transport's.
+    /// The service's refusal, or the transport's; the mailbox is let go
+    /// either way.
     pub fn close(self, transport: &mut RtAudio) -> Result<(), Errno> {
-        self.client.close(transport)
+        let mailbox = self.notify_port();
+        let closed = self.client.close(transport);
+        let released = transport.release(mailbox);
+        closed.and(released)
     }
 }
 

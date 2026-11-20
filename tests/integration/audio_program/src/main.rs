@@ -19,6 +19,14 @@
 //! rather than merely small. A guest that raced the device would turn a real
 //! defect and a slow host into the same observation.
 //!
+//! # The reopened stream
+//!
+//! The plain run first opens a stream on a transport of its own and closes
+//! it, then plays on a stream opened on another: the service hands the closed
+//! stream's slot, and so its notify mailbox, to the next, which binds it
+//! afresh. A closed stream whose mailbox stayed bound made every later stream
+//! of the process fail to open.
+//!
 //! # The seat run
 //!
 //! `audiotone seat` proves the stream follows the seat's lease
@@ -165,6 +173,17 @@ mod program {
         })
     }
 
+    /// A stream opened on a transport of its own and closed again: the
+    /// service hands its slot, and so its mailbox, to the run's own stream,
+    /// opened on another, which must bind it afresh.
+    fn opened_and_closed() -> Result<(), i32> {
+        let mut transport = RtAudio::new();
+        let stream = arm(&mut transport)?;
+        stream
+            .close(&mut transport)
+            .map_err(|err| fail("the first stream would not close", err, NO_SERVICE))
+    }
+
     /// Wait on the stream's own mailbox until the service tells it `want`,
     /// answering the frame the change took effect at.
     ///
@@ -302,6 +321,16 @@ mod program {
         }
     }
 
+    /// What `run` does before its own stream: the cue run's cue, and the
+    /// plain run's stream opened and closed on a transport of its own.
+    fn prelude(run: Run) -> Result<(), i32> {
+        match run {
+            Run::Cue => cued(),
+            Run::Plain => opened_and_closed(),
+            Run::Seat => Ok(()),
+        }
+    }
+
     fn main() -> i32 {
         let run = match tairix_rt::args().as_deref() {
             Some([]) => Run::Plain,
@@ -312,10 +341,8 @@ mod program {
                 return USAGE;
             }
         };
-        if run == Run::Cue {
-            if let Err(code) = cued() {
-                return code;
-            }
+        if let Err(code) = prelude(run) {
+            return code;
         }
         let mut transport = RtAudio::new();
         let mut stream = match arm(&mut transport) {

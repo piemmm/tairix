@@ -190,7 +190,8 @@ capital.
 
 While its sound plays, a machine is kept just ahead of the audio device: a
 slice is asked for whenever the stream's ring falls below the latency it was
-granted, so the two cannot drift. Without sound, or at double speed, a slice
+granted, so the two cannot drift. A machine with no stream to be had, or
+whose stream fails, runs silent, and its status strip says why. Without sound, or at double speed, a slice
 is due each 20 ms of the clock; at the fastest speed, or while a tape loads
 fast, slices run back to back.
 

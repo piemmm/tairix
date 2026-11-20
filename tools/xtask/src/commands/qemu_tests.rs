@@ -7883,9 +7883,11 @@ static TESTS: &[QemuTest] = &[
     // QEMU's `wav` audio backend. `devmgr` autoloads the sound driver into
     // its own user process (it claims a reserved `audiochan-v1` endpoint and
     // publishes its channel node), hands that endpoint to `audiod`, and the
-    // scripted root shell runs `audiotone`, which queues a deterministic
+    // scripted root shell runs `audiotone`, which opens and closes a stream
+    // on a transport of its own, then, on another, queues a deterministic
     // signal into a ring sized to hold all of it, starts the device, and
-    // drains.
+    // drains: the second stream inherits the first's slot and must bind its
+    // mailbox afresh.
     //
     // PASS needs **both** halves: the guest's `AUDIO PASS` witness (the
     // stack reported Idle with no lost frames) and the host-side assertion
@@ -7925,9 +7927,11 @@ static TESTS: &[QemuTest] = &[
     // QEMU's `wav` audio backend. `devmgr` autoloads the sound driver into
     // its own user process (it claims a reserved `audiochan-v1` endpoint and
     // publishes its channel node), hands that endpoint to `audiod`, and the
-    // scripted root shell runs `audiotone`, which queues a deterministic
+    // scripted root shell runs `audiotone`, which opens and closes a stream
+    // on a transport of its own, then, on another, queues a deterministic
     // signal into a ring sized to hold all of it, starts the device, and
-    // drains.
+    // drains: the second stream inherits the first's slot and must bind its
+    // mailbox afresh.
     //
     // PASS needs **both** halves: the guest's `AUDIO PASS` witness (the
     // stack reported Idle with no lost frames) and the host-side assertion
@@ -7967,9 +7971,11 @@ static TESTS: &[QemuTest] = &[
     // QEMU's `wav` audio backend. `devmgr` autoloads the sound driver into
     // its own user process (it claims a reserved `audiochan-v1` endpoint and
     // publishes its channel node), hands that endpoint to `audiod`, and the
-    // scripted root shell runs `audiotone`, which queues a deterministic
+    // scripted root shell runs `audiotone`, which opens and closes a stream
+    // on a transport of its own, then, on another, queues a deterministic
     // signal into a ring sized to hold all of it, starts the device, and
-    // drains.
+    // drains: the second stream inherits the first's slot and must bind its
+    // mailbox afresh.
     //
     // PASS needs **both** halves: the guest's `AUDIO PASS` witness (the
     // stack reported Idle with no lost frames) and the host-side assertion
