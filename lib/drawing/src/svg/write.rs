@@ -518,23 +518,22 @@ impl<'d> Plan<'d> {
             write!(out, " clip-path=\"url(#clip-{then})\"")?;
         }
         out.write_str(">\n")?;
-        self.write_clip_member(out, node, outer, None, (pending, next))?;
+        self.write_clip_member(out, node, (outer, false), None, (pending, next))?;
         out.write_str("</clipPath>\n")
     }
 
     /// `node` as the shapes a clip path holds, placed from its parent's space
-    /// by `outer`, inside the clips of the groups `within` the clip around it.
+    /// by `outer`, inside the clips of the groups `within` the clip around it,
+    /// and `hidden` where a group around it is: kept, but out of the clip.
     fn write_clip_member(
         &self,
         out: &mut dyn Write,
         node: &Node,
-        outer: Affine,
+        (outer, hidden): (Affine, bool),
         within: Option<&Within<'_>>,
         (pending, next): (&mut Vec<Pending>, &mut usize),
     ) -> fmt::Result {
-        if !node.visible() {
-            return Ok(());
-        }
+        let hidden = hidden || !node.visible();
         let placed = node.transform().then(outer);
         let clipped = match node.kind() {
             Kind::Group { children, clip } => {
@@ -548,34 +547,31 @@ impl<'d> Plan<'d> {
                     self.write_clip_member(
                         out,
                         child,
-                        placed,
+                        (placed, hidden),
                         around,
                         (&mut *pending, &mut *next),
                     )?;
                 }
                 return Ok(());
             }
-            _ if within.is_some() => {
-                // A member of no area clips nothing, so nothing calls for its
-                // clip paths.
-                let Some(back) = placed.invert() else {
-                    return Ok(());
-                };
-                chain(within, back, pending, next)?
-            }
+            // A member of no area clips nothing, so it calls for no clip path.
+            _ if within.is_some() => match placed.invert() {
+                Some(back) => chain(within, back, pending, next)?,
+                None => None,
+            },
             _ => None,
         };
         match node.kind() {
             Kind::Shape { shape, style } => {
                 Self::write_shape(out, shape)?;
-                Self::write_member_attributes(out, node, placed, clipped)?;
+                Self::write_member_attributes(out, node, placed, clipped, hidden)?;
                 self.write_style(out, style)?;
                 Self::write_clip_rule(out, style)?;
                 out.write_str("/>\n")
             }
             Kind::Text { text, style } => {
                 Self::write_text_open(out, text)?;
-                Self::write_member_attributes(out, node, placed, clipped)?;
+                Self::write_member_attributes(out, node, placed, clipped, hidden)?;
                 self.write_style(out, style)?;
                 Self::write_clip_rule(out, style)?;
                 out.write_str(">")?;
@@ -593,7 +589,7 @@ impl<'d> Plan<'d> {
                     Number(place.width()),
                     Number(place.height())
                 )?;
-                Self::write_member_attributes(out, node, placed, clipped)?;
+                Self::write_member_attributes(out, node, placed, clipped, hidden)?;
                 out.write_str("/>\n")
             }
             Kind::Group { .. } => Ok(()),
@@ -607,19 +603,24 @@ impl<'d> Plan<'d> {
         Ok(())
     }
 
-    /// A clip path member's attributes: `placed` as its transform, and the
-    /// clip path `clipped` that the groups within the clip around it make.
+    /// A clip path member's attributes: `placed` as its transform, the clip
+    /// path `clipped` that the groups within the clip around it make, and
+    /// whether it is `hidden`.
     fn write_member_attributes(
         out: &mut dyn Write,
         node: &Node,
         placed: Affine,
         clipped: Option<usize>,
+        hidden: bool,
     ) -> fmt::Result {
         if placed != Affine::IDENTITY {
             write!(out, " transform=\"{}\"", Matrix(placed))?;
         }
         if let Some(clipped) = clipped {
             write!(out, " clip-path=\"url(#clip-{clipped})\"")?;
+        }
+        if hidden {
+            out.write_str(" display=\"none\"")?;
         }
         if node.locked() {
             out.write_str(" draw:locked=\"true\"")?;

@@ -5,14 +5,18 @@
 //! write-protected disk leaving the file as it was; and the mouse.
 
 use super::*;
+use crate::asm::Reg16;
 use crate::chips::keyboard::Scan;
+use crate::cpu::Bus;
 use crate::dos::harness::{
-    diskette, diskette_bytes, press, protected_floppy, screen, settle, type_ahead, typed,
+    com, control, diskette, diskette_bytes, press, protected_floppy, screen, settle, type_ahead,
+    typed,
 };
 use crate::dos::utility::tests::{run, with_utilities, with_utilities_in};
 use crate::machine::{Machine, Template};
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 const ALT: Scan = Scan::plain(0x38);
 const CTRL: Scan = Scan::plain(0x1D);
@@ -114,6 +118,55 @@ fn a_file_is_edited_saved_and_left_the_screen_put_back() {
     );
     let shown = run(&mut m, "type notes.txt");
     assert!(shown.contains("\nnew first line\n"), "{shown}");
+}
+
+/// Regression: a block keeps what its last owner left, and EDIT's hooks are
+/// not read from it, so with no mouse driver it calls none.
+#[test]
+fn what_its_block_last_held_is_not_taken_for_a_mouse_driver() {
+    let fill = com(|asm| {
+        asm.cld();
+        asm.mov_imm16(Reg16::Di, 0x0200);
+        asm.mov_imm16(Reg16::Cx, 0x7000);
+        asm.mov_imm16(Reg16::Ax, 0x0101);
+        asm.bytes(&[0xF3, 0xAB]);
+        asm.mov_imm16(Reg16::Ax, 0x4C00);
+        asm.int(0x21);
+    });
+    let mut m = with_utilities(&[("FILL.COM", &fill)]);
+    let vector: Vec<u8> = (0x33 * 4..0x33 * 4 + 4)
+        .map(|at| m.board().peek(at))
+        .collect();
+    assert_eq!(vector, [0; 4], "no mouse driver");
+    typed(&mut m, "fill");
+    typed(&mut m, "edit");
+    assert!(
+        row(&m, 0).starts_with("  File  Edit  Search  Options"),
+        "{}",
+        screen(&m)
+    );
+}
+
+/// The console named is a document read to its end of file, a line
+/// beginning with Ctrl+Z, Ctrl+C being ignored while it is read.
+#[test]
+fn the_console_named_is_read_as_a_document_to_its_end_of_file() {
+    let mut m = with_utilities(&[]);
+    typed(&mut m, "edit con");
+    keyed(&mut m, "typed in\r");
+    control(&mut m, letter(0x2E));
+    control(&mut m, letter(0x2C));
+    keyed(&mut m, "\r");
+    assert!(
+        row(&m, 0).starts_with("  File  Edit  Search  Options"),
+        "{}",
+        screen(&m)
+    );
+    assert!(
+        row(&m, 2).starts_with(&format!("{UPRIGHT}typed in")),
+        "{}",
+        screen(&m)
+    );
 }
 
 /// The files `DIR` counts in the current directory.

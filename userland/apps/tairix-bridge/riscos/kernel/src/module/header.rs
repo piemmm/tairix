@@ -146,9 +146,11 @@ impl Os<'_> {
     /// The header of the module at `code`, `size` bytes long, as checked
     /// before anything of it runs, and the profile it runs in.
     pub(crate) fn checked_header(&mut self, code: u32, size: u32) -> Result<(Header, Bits), Fail> {
+        let mut bytes = [0; 4 * WORDS as usize];
+        self.read_bytes(code, &mut bytes)?;
         let mut words = [0; WORDS as usize];
-        for (at, word) in (code..).step_by(4).zip(words.iter_mut()) {
-            *word = self.read_word(at)?;
+        for (word, raw) in words.iter_mut().zip(bytes.as_chunks::<4>().0) {
+            *word = u32::from_le_bytes(*raw);
         }
         let header = Header { words, size };
         let get = |field| header.get(field);

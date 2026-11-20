@@ -10,9 +10,10 @@ use super::{Backing, Defect, Holder, Recorded, Volume, EMPTY_OBJECT};
 use crate::dir::{FixedFormat, Object};
 use crate::format::{format_volume, lay_out, new_map_record, BootRecord, Variant};
 use crate::identify::{identify, Layout};
-use crate::newmap::NewMap;
+use crate::newmap::{bits_field, bits_get, bits_set_field, NewMap};
 use crate::record::{
-    zone_check, MapCopy, DISC_RECORD_SIZE, FRAG_BAD, FRAG_ROOT, ZONE_CHECK_BYTE, ZONE_HEADER_SIZE,
+    link_bits, zone_check, zone_start_bit, MapCopy, DISC_RECORD_SIZE, FRAG_BAD, FRAG_ROOT,
+    FREELINK_BIT, ZONE_CHECK_BYTE, ZONE_HEADER_SIZE,
 };
 use crate::testkit::MemDisc;
 use crate::{Error, Fault, Structure};
@@ -472,5 +473,54 @@ fn a_big_directory_name_padded_past_its_heap_is_not_removed() {
     assert_eq!(
         volume.dir_remove_at(root, 0),
         Err(Error::Fault(Fault::Broken(Structure::Directory)))
+    );
+}
+
+#[test]
+fn a_big_directory_claiming_more_than_an_offset_holds_is_broken() {
+    let volume = ram_disc(0x4_0000);
+    let root = volume.root_addr();
+    let mut disc = MemDisc(volume.disc.0.clone());
+    let Backing::New { map, boot_block } = volume.backing else {
+        panic!("a new map");
+    };
+    let at = usize::try_from(map.locate(&mut disc, root, 0).expect("the root").0).expect("small");
+    let size = 0x8000_0000u32;
+    for (field, value) in [(12, size), (16, size / 28), (20, size)] {
+        disc.0[at + field..at + field + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    assert_eq!(
+        Volume::open(disc, Backing::New { map, boot_block }).err(),
+        Some(Error::Fault(Fault::Broken(Structure::Directory)))
+    );
+}
+
+#[test]
+fn a_map_turned_free_past_the_disc_once_mounted_is_refused() {
+    let mut volume = ram_disc(0x4_0000);
+    let Backing::New { map, .. } = &volume.backing else {
+        panic!("a new map");
+    };
+    let record = map.record;
+    let at = usize::try_from(record.zone_offset(MapCopy::First, 0)).expect("on the disc");
+    let len = usize::try_from(record.sector_size()).expect("a sector");
+    let end = zone_start_bit(0) + record.zone_stream_bits(0);
+    let zone = &mut volume.disc.0[at..at + len];
+    let defect = (zone_start_bit(0)..end - 1)
+        .rev()
+        .find(|&bit| bits_get(zone, bit))
+        .expect("the defect past the disc");
+    assert_eq!(bits_field(zone, defect, u32::from(record.idlen)), FRAG_BAD);
+    let links = link_bits(record.idlen);
+    let mut last = FREELINK_BIT;
+    while bits_field(zone, last, links) != 0 {
+        last += bits_field(zone, last, links);
+    }
+    bits_set_field(zone, last, links, defect - last);
+    bits_set_field(zone, defect, links, 0);
+    zone[ZONE_CHECK_BYTE] = zone_check(zone);
+    assert_eq!(
+        volume.space().err(),
+        Some(Error::Fault(Fault::Broken(Structure::Map)))
     );
 }

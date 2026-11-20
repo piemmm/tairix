@@ -1657,3 +1657,53 @@ fn a_symbol_draw_did_not_mark_as_its_picture_reads_as_what_it_holds() {
     assert!(lost.unkept.contains(Lost::Images));
     assert_eq!(pictures(&lost.drawing).len(), 0);
 }
+
+#[test]
+fn a_hidden_member_of_a_clip_is_kept_out_of_it_with_its_arrowhead() {
+    let source = r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:draw="urn:tairix:draw" width="100" height="100">
+      <clipPath id="c"><rect width="50" height="50"/>
+        <path visibility="hidden" d="M0 0 L90 90" stroke="#ff0000" draw:start-arrow="triangle 3 4"/></clipPath>
+      <rect width="90" height="90" clip-path="url(#c)"/></svg>"##;
+    let mut ids = Ids::new();
+    let first = read(source.as_bytes(), &mut ids).expect("read");
+    let svg = written(&first.drawing);
+    assert!(
+        svg.contains("display=\"none\""),
+        "the hidden member is kept:\n{svg}"
+    );
+    assert!(svg.contains("marker-start"), "with its arrowhead:\n{svg}");
+    let again = read(svg.as_bytes(), &mut ids).expect("read back");
+    assert_eq!(
+        written(&again.drawing),
+        svg,
+        "a second round trip says the same"
+    );
+    let mut hidden = 0;
+    for layer in again.drawing.layers().iter() {
+        walk(layer, &mut |node| hidden += usize::from(!node.visible()));
+    }
+    assert_eq!(hidden, 1, "the path reads back hidden, so it clips nothing");
+}
+
+#[test]
+fn a_clip_member_of_no_area_is_kept_without_the_clips_it_needs_none_of() {
+    let source = r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:draw="urn:tairix:draw" width="100" height="100">
+      <clipPath id="d"><rect width="5" height="5"/></clipPath>
+      <clipPath id="c"><rect width="50" height="50"/>
+        <path transform="scale(0)" clip-path="url(#d)" d="M0 0 L90 90" stroke="#ff0000" draw:end-arrow="triangle 3 4"/></clipPath>
+      <rect width="90" height="90" clip-path="url(#c)"/></svg>"##;
+    let mut ids = Ids::new();
+    let first = read(source.as_bytes(), &mut ids).expect("read");
+    let svg = written(&first.drawing);
+    assert!(
+        svg.contains("matrix(0 0 0 0 0 0)"),
+        "the member is kept:\n{svg}"
+    );
+    assert!(svg.contains("marker-end"), "with its arrowhead:\n{svg}");
+    let again = read(svg.as_bytes(), &mut ids).expect("read back");
+    assert_eq!(
+        written(&again.drawing),
+        svg,
+        "a second round trip says the same"
+    );
+}

@@ -670,8 +670,8 @@ pub(crate) const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_mins(45);
 /// source (`-Z build-std`) or links many packages in one `cargo build`
 /// (the QEMU integration-test matrix), either of which can legitimately run
 /// longer than an incremental host compile/test pass. Used explicitly by the
-/// image gate's kernel and driver/app cross-compiles and by the QEMU matrix
-/// build, never by default.
+/// image gate's kernel and driver/app cross-compiles, by the QEMU matrix
+/// build and by the host test build ahead of a test pass, never by default.
 pub(crate) const LONG_BUILD_COMMAND_TIMEOUT: Duration = Duration::from_hours(2);
 
 /// How a step ended.

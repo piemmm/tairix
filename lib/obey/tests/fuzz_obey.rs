@@ -203,11 +203,18 @@ fn hostile_everything(rng: &mut Prng) {
 }
 
 /// The bytes a reading's buffer counts as used: its address words, then up
-/// to the end of the value laid last, an `/E` value found by its word. What
-/// follows that value — a `/G` value's terminator, what is left of the text
-/// an `/E` or `/G` value was copied from — is written but not counted.
+/// to the end of the value laid last, an `/E` value found by its word, and
+/// three more for each `/E` integer, which counts eight bytes wherever it
+/// lies but lays five, the next value following them. What follows the last
+/// value — a `/G` value's terminator, what is left of the text an `/E` or
+/// `/G` value was copied from — is written but not counted.
 fn used(args: &[Arg], buffer: &[u8], base: u32) -> usize {
-    args.iter()
+    let integers = args
+        .iter()
+        .filter(|arg| matches!(arg, Arg::Evaluated(Answer::Integer(_))))
+        .count();
+    let laid = args
+        .iter()
         .enumerate()
         .filter_map(|(entry, arg)| match arg {
             Arg::Text(at) => Some(at.end + 1),
@@ -217,13 +224,14 @@ fn used(args: &[Arg], buffer: &[u8], base: u32) -> usize {
                 let address = u32::from_le_bytes(word.try_into().ok()?);
                 let start = usize::try_from(address.checked_sub(base)?).ok()?;
                 Some(match answer {
-                    Answer::Integer(_) => start + 8,
+                    Answer::Integer(_) => start + 5,
                     Answer::String(bytes) => start + 3 + bytes.len(),
                 })
             }
             Arg::Absent | Arg::Switch => None,
         })
-        .fold(args.len() * 4, usize::max)
+        .fold(args.len() * 4, usize::max);
+    laid + 3 * integers
 }
 
 /// `bytes` written in GSTrans's escapes, so that GSTrans reads them back.
@@ -304,6 +312,21 @@ fn a_translation_shorter_than_its_text_leaves_its_tail_uncounted() {
     assert!(read.buffer.len() > 11, "the text's tail stays");
     assert_eq!(read.left, 37);
     assert_eq!(read.left, 47 - used(&read.args, &read.buffer, 0x8000));
+}
+
+/// Regression: an `/E` integer laid before another value still counts the
+/// three bytes it never writes, wherever it lies.
+#[test]
+fn an_integer_laid_before_another_value_counts_eight_bytes() {
+    let store = Store::with_room(16, 256, NAMES).unwrap();
+    let mut vars = Counted { store, examined: 0 };
+    let read = within(&mut vars, 64, |vars, budget| {
+        read_args(b"n/E,a", b"1 z", vars, budget, 0x8000, 64)
+    })
+    .unwrap();
+    assert_eq!(read.args[1], Arg::Text(13..14), "laid five bytes on");
+    assert_eq!(read.left, 64 - 18);
+    assert_eq!(read.left, 64 - used(&read.args, &read.buffer, 0x8000));
 }
 
 #[test]

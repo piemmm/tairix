@@ -144,9 +144,11 @@ impl Os<'_> {
                 break;
             }
             let words = base.wrapping_add(words_offset);
+            let mut raw = [0; 16];
+            self.read_bytes(words, &mut raw)?;
             let mut field = [0; 4];
-            for (slot, word) in (words..).step_by(4).zip(field.iter_mut()) {
-                *word = self.read_word(slot)?;
+            for (word, bytes) in field.iter_mut().zip(raw.as_chunks::<4>().0) {
+                *word = u32::from_le_bytes(*bytes);
             }
             let item = Item {
                 key,

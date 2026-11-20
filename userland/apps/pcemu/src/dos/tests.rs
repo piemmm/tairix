@@ -258,6 +258,130 @@ fn a_child_runs_and_its_return_code_comes_back() {
     assert_eq!(ax(&code), 0x002A);
 }
 
+/// An MZ file whose sixteen-byte image asks for its stack at `ss:sp`, `ss`
+/// relative to where it loads.
+fn mz_with_stack(ss: u16, sp: u16) -> Vec<u8> {
+    let mut file = vec![0u8; 48];
+    file[..2].copy_from_slice(b"MZ");
+    for (at, word) in [
+        (0x02, 48u16),
+        (0x04, 1),
+        (0x08, 2),
+        (0x0A, 0x10),
+        (0x0C, 0x10),
+        (0x0E, ss),
+        (0x10, sp),
+        (0x18, 0x1C),
+    ] {
+        file[at..at + 2].copy_from_slice(&word.to_le_bytes());
+    }
+    file[32] = 0xC3;
+    file
+}
+
+/// EXEC's load of `path` with its parameter block at `block`: the stack it
+/// hands back, or its error.
+fn load_only(dos: &mut Dos, path: u16, block: u16) -> Result<(u16, u16), u16> {
+    let loaded = dos.call(|r| {
+        with_path(0x4B, 1, path)(r);
+        r.gpr[gpr::BX] = block;
+    });
+    if carry(&loaded) {
+        return Err(ax(&loaded));
+    }
+    let word = |dos: &Dos, at: u16| u16::from_le_bytes([dos.get(at, 2)[0], dos.get(at, 2)[1]]);
+    Ok((word(dos, block + 0x10), word(dos, block + 0x0E)))
+}
+
+#[test]
+fn a_load_whose_stack_lies_outside_the_program_is_refused_and_writes_nothing() {
+    let mut dos = Dos::boot(&[File {
+        name: b"BENIGN  EXE",
+        bytes: &mz_with_stack(0, 0x100),
+    }]);
+    let shell = dos.psp;
+    dos.call(|r| {
+        r.gpr[gpr::AX] = 0x4A00;
+        r.gpr[gpr::BX] = 0x1000;
+        r.set_sreg(Seg::Es, shell);
+    });
+    let block = DATA + 0x40;
+    dos.put(DATA + 0x60, &[0, 0x0D]);
+    let mut parameters = [0u8; 22];
+    for (at, word) in [
+        (2, DATA + 0x60),
+        (4, shell),
+        (6, DATA + 0x70),
+        (8, shell),
+        (10, DATA + 0x70),
+        (12, shell),
+    ] {
+        parameters[at..at + 2].copy_from_slice(&word.to_le_bytes());
+    }
+    dos.put(block, &parameters);
+    let benign = dos.asciz(DATA, "BENIGN.EXE");
+    let (load, sp) = load_only(&mut dos, benign, block).expect("a stack in its memory loads");
+    assert_eq!(sp, 0xFE, "the stack it asked for, less AX's word");
+    let child = load - 0x10;
+    let environment = kernel16_at(&dos.m, child, 0x2C);
+    dos.call(|r| {
+        r.gpr[gpr::AX] = 0x5000;
+        r.gpr[gpr::BX] = shell;
+    });
+    for segment in [child, environment] {
+        let freed = dos.call(|r| {
+            r.gpr[gpr::AX] = 0x4900;
+            r.set_sreg(Seg::Es, segment);
+        });
+        assert!(!carry(&freed), "{freed:X?}");
+    }
+    let hostile = mz_with_stack(data::SEGMENT.wrapping_sub(load), 0x100);
+    dos.put(DATA + 0x200, &hostile);
+    let name = dos.asciz(DATA + 0x20, "HOSTILE.EXE");
+    let made = dos.call(|r| {
+        with_path(0x3C, 0, name)(r);
+        r.gpr[gpr::CX] = 0;
+    });
+    let handle = ax(&made);
+    dos.call(|r| {
+        r.gpr[gpr::AX] = 0x4000;
+        r.gpr[gpr::BX] = handle;
+        r.gpr[gpr::CX] = u16::try_from(hostile.len()).unwrap();
+        r.gpr[gpr::DX] = DATA + 0x200;
+    });
+    dos.call(|r| {
+        r.gpr[gpr::AX] = 0x3E00;
+        r.gpr[gpr::BX] = handle;
+    });
+    let largest = |dos: &mut Dos| {
+        dos.call(|r| {
+            r.gpr[gpr::AX] = 0x4800;
+            r.gpr[gpr::BX] = 0xFFFF;
+        })
+        .gpr[gpr::BX]
+    };
+    let kernel = |dos: &Dos| -> Vec<u8> {
+        let start = u32::from(data::SEGMENT) * 16;
+        (start..start + 0x200)
+            .map(|at| dos.m.board().peek(at))
+            .collect()
+    };
+    let (room, before) = (largest(&mut dos), kernel(&dos));
+    assert_eq!(
+        load_only(&mut dos, name, block),
+        Err(fs::error::BAD_FORMAT),
+        "its stack lies in the kernel's data"
+    );
+    assert!(kernel(&dos) == before, "the kernel's data is untouched");
+    assert_eq!(largest(&mut dos), room, "its memory is given back");
+}
+
+/// A word at `offset` of `segment`.
+fn kernel16_at(m: &Machine, segment: u16, offset: u16) -> u16 {
+    let at = crate::cpu::linear(segment, offset);
+    u16::from_le_bytes([m.board().peek(at), m.board().peek(at + 1)])
+}
+
 #[test]
 fn the_version_and_the_list_of_lists_are_where_programs_look() {
     let mut dos = Dos::boot(&[]);

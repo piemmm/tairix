@@ -877,9 +877,12 @@ fn run_test(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         .then(|| test_firmware(ctx))
         .transpose()?;
 
-    // Build the opt-in matrices once, before any repeated passes, so a soak
-    // re-runs the binaries rather than rebuilding them each pass. The host
-    // `cargo test` invocation builds incrementally on its own.
+    // Build what a pass runs once, before any pass, so a soak re-runs the
+    // binaries rather than rebuilding them and no pass compiles under the
+    // deadline of its run.
+    if let Some(firmware) = &firmware {
+        build_host(ctx, &opts, firmware)?;
+    }
     if opts.run_qemu {
         qemu_tests::build_all(ctx, opts.only.as_deref())?;
     }
@@ -995,17 +998,53 @@ fn host_command(
     order: Option<u64>,
     firmware: &Path,
 ) -> std::process::Command {
+    let mut command = host_cargo(ctx, run, firmware);
+    command.args(forward);
+    if let Some(order) = order {
+        command.args(host_order_args(forward, order));
+    }
+    command
+}
+
+/// What [`host_command`] runs, built and not run: the same invocation with
+/// the cargo arguments of `forward`, so the step finds it all built.
+fn host_build_command(
+    ctx: &Context,
+    run: HostRun<'_>,
+    forward: &[OsString],
+    firmware: &Path,
+) -> std::process::Command {
+    let mut command = host_cargo(ctx, run, firmware);
+    command.arg("--no-run");
+    command.args(forward.iter().take_while(|arg| *arg != "--"));
+    command
+}
+
+/// The cargo invocation of a host test step, before what it is given.
+fn host_cargo(ctx: &Context, run: HostRun<'_>, firmware: &Path) -> std::process::Command {
     let mut command = match run {
         HostRun::Workspace => host_test_command(ctx),
         HostRun::Doctests => host_doctest_command(ctx),
         HostRun::Lane(selection) => HostLane::command(ctx, "test", selection),
     };
     command.env(PI_FIRMWARE_ENV, firmware);
-    command.args(forward);
-    if let Some(order) = order {
-        command.args(host_order_args(forward, order));
-    }
     command
+}
+
+/// The workspace's host test targets and each host lane's built, as the
+/// passes run them, under the long build budget: a pass's own budget then
+/// goes on running tests, where a cold or contended build directory would
+/// spend it compiling. Doctests are compiled only as they run.
+fn build_host(ctx: &Context, opts: &TestOptions, firmware: &Path) -> Result<(), String> {
+    let workspace = host_build_command(ctx, HostRun::Workspace, &opts.forward, firmware);
+    ctx.run_with_timeout("test (build)", workspace, crate::LONG_BUILD_COMMAND_TIMEOUT)?;
+    for lane in opts.host_lanes() {
+        let selection = lane.selection(ctx)?;
+        let command = host_build_command(ctx, HostRun::Lane(&selection), &opts.forward, firmware);
+        let label = format!("test (build, {})", lane.label());
+        ctx.run_with_timeout(&label, command, crate::LONG_BUILD_COMMAND_TIMEOUT)?;
+    }
+    Ok(())
 }
 
 /// Whether `forward` selects cargo targets, which leaves the doctests out
@@ -2728,12 +2767,12 @@ fn relative(base: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cargo_profile, cargo_subcommand_available, ci_long_plan, dir_size, host_clippy,
-        host_command, host_order_args, host_pass, image_drivers, kernel_diag_feature_args, libtest,
-        parse_image_args, parse_run_args, parse_test_options, run_session_spec, CiStage, Command,
-        HostLane, HostRun, HostStep, LongStep, PassOrder, Path, RunBudget, RunMachine, CI_STAGES,
-        CI_TEST_ARGS, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS, PI_FIRMWARE_ENV,
-        PLATFORM_IMAGE_DRIVER_STORE, STATIC_GATES,
+        cargo_profile, cargo_subcommand_available, ci_long_plan, dir_size, host_build_command,
+        host_clippy, host_command, host_order_args, host_pass, image_drivers,
+        kernel_diag_feature_args, libtest, parse_image_args, parse_run_args, parse_test_options,
+        run_session_spec, CiStage, Command, HostLane, HostRun, HostStep, LongStep, PassOrder, Path,
+        RunBudget, RunMachine, CI_STAGES, CI_TEST_ARGS, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS,
+        PI_FIRMWARE_ENV, PLATFORM_IMAGE_DRIVER_STORE, STATIC_GATES,
     };
     use crate::commands::soak::{Budget, NIGHTLY};
     use crate::Context;
@@ -2957,6 +2996,34 @@ mod tests {
                 .position(|arg| *arg == "7")
                 .expect("the order seed");
             assert!(filter < seed);
+        }
+    }
+
+    /// A host step's build is its own invocation with `--no-run` ahead of
+    /// the forwarded cargo arguments, the harness's left to the run.
+    #[test]
+    fn a_host_build_is_the_steps_invocation_built_and_not_run() {
+        let ctx = Context {
+            workspace_root: Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf(),
+            cargo: OsString::from("true"),
+            children: std::sync::Arc::new(crate::children::Children::new(None)),
+        };
+        let firmware = Path::new("/staged/pi-firmware");
+        let selection = [OsString::from("-p"), OsString::from("lane")];
+        let forward = [
+            OsString::from("--release"),
+            OsString::from("--"),
+            OsString::from("a_filter"),
+        ];
+        for run in [HostRun::Workspace, HostRun::Lane(&selection)] {
+            let built = host_build_command(&ctx, run, &forward, firmware);
+            let ran = host_command(&ctx, run, &forward, None, firmware);
+            assert!(built.get_envs().eq(ran.get_envs()), "built where it runs");
+            let built: Vec<_> = built.get_args().collect();
+            let ran: Vec<_> = ran.get_args().collect();
+            let cargo = ran.len() - 2;
+            assert_eq!(built[..cargo - 1], ran[..cargo - 1], "the same invocation");
+            assert_eq!(built[cargo - 1..], ["--no-run", "--release"]);
         }
     }
 

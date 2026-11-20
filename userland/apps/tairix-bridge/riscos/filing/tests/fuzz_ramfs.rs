@@ -89,7 +89,18 @@ fn act(os: &mut Os<'_>, rng: &mut Prng, data: u32, handles: &mut Vec<u32>) {
         1 => call(os, FILE, &[5, at]),
         2 => call(os, FILE, &[6, at]),
         3 => call(os, FILE, &[8, at]),
-        4 => call(os, FILE, &[255, at, data, 0]),
+        4 => {
+            // A load of a file the scribbles make longer than the buffer runs
+            // off its end, as a load into too little memory does on RISC OS.
+            let fits = call(os, FILE, &[5, at])
+                .ok()
+                .is_none_or(|info| info.r[0] != 1 || info.r[4] <= DISC);
+            if fits {
+                call(os, FILE, &[255, at, data, 0])
+            } else {
+                Ok(tairix_riscos_kernel::os::Regs::default())
+            }
+        }
         5 => {
             let opened = call(os, FIND, &[[0x40, 0x80, 0xC0][rng.below(3)], at]);
             if let Ok(regs) = &opened {

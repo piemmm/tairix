@@ -15,7 +15,8 @@
 //! looked in, write and search on a directory a name is made in or dropped
 //! from, read and write on a file opened for them, read on the listing of a
 //! directory the caller does not own, and write on a node whose attribute a
-//! non-owner sets. Every other failure is a test's [`Tree::refuse`].
+//! non-owner sets. A file grown past what its volume holds is refused as a
+//! full volume refuses it. Every other failure is a test's [`Tree::refuse`].
 //!
 //! Its caller is [`USER`]. It is test support: a builder, mutator or reader
 //! handed a path that names nothing panics. [`resolve`] is the kernel's path
@@ -167,6 +168,20 @@ struct NodeData {
     written: usize,
 }
 
+impl NodeData {
+    /// The volume blocks it holds: a sparse file's data, a file's bytes.
+    fn blocks(&self) -> u64 {
+        let bytes = match &self.body {
+            Body::File { bytes, runs: None } => bytes.len() as u64,
+            Body::File {
+                runs: Some(runs), ..
+            } => runs.iter().map(|&(start, end)| end - start).sum(),
+            Body::Dir { .. } | Body::Link { .. } => 0,
+        };
+        bytes.div_ceil(u64::from(VOLUME_BLOCK))
+    }
+}
+
 struct State {
     nodes: Vec<NodeData>,
     umask: u32,
@@ -194,6 +209,27 @@ struct State {
 impl State {
     fn data(&self, node: usize) -> &NodeData {
         &self.nodes[node]
+    }
+
+    /// The blocks `volume`'s files hold.
+    fn volume_used(&self, volume: u8) -> u64 {
+        self.nodes
+            .iter()
+            .filter(|data| data.volume == volume)
+            .map(NodeData::blocks)
+            .sum()
+    }
+
+    /// Whether `node`'s volume has room for it to hold `len` bytes written
+    /// out whole, in place of the blocks it holds now.
+    fn room_for(&self, node: usize, len: u64) -> Result<(), Errno> {
+        let data = self.data(node);
+        let (held, wanted) = (data.blocks(), len.div_ceil(u64::from(VOLUME_BLOCK)));
+        if wanted <= held || self.volume_used(data.volume) - held + wanted <= VOLUME_BLOCKS {
+            Ok(())
+        } else {
+            Err(Errno::NoSpace)
+        }
     }
 
     fn data_mut(&mut self, node: usize) -> &mut NodeData {
@@ -1443,20 +1479,7 @@ impl Node for Handle {
     fn volume_stats(&self) -> Result<VolumeStats, Errno> {
         self.tree.begin("volume_stats", self.node, None)?;
         let state = self.state();
-        let volume = state.data(self.node).volume;
-        let used = state
-            .nodes
-            .iter()
-            .filter(|data| data.volume == volume)
-            .map(|data| match &data.body {
-                Body::File { bytes, runs: None } => bytes.len() as u64,
-                Body::File {
-                    runs: Some(runs), ..
-                } => runs.iter().map(|&(start, end)| end - start).sum(),
-                Body::Dir { .. } | Body::Link { .. } => 0,
-            })
-            .map(|bytes| bytes.div_ceil(u64::from(VOLUME_BLOCK)))
-            .sum::<u64>();
+        let used = state.volume_used(state.data(self.node).volume);
         let free = VOLUME_BLOCKS.saturating_sub(used);
         Ok(VolumeStats {
             block_size: VOLUME_BLOCK,
@@ -1581,7 +1604,7 @@ impl Dir for Handle {
         if creation == Creation::Truncate && !fresh {
             self.tree
                 .handle(node, false, true)
-                .changed_bytes(Vec::clear)?;
+                .changed_bytes(|_| 0, Vec::clear)?;
         }
         Ok(self.tree.handle(node, access.reads(), access.writes()))
     }
@@ -1766,11 +1789,20 @@ impl Handle {
         }
     }
 
-    fn changed_bytes(&self, change: impl FnOnce(&mut Vec<u8>)) -> Result<(), Errno> {
+    /// `change` made to the file's bytes, which leave it the length
+    /// `len_after` gives from its length now.
+    fn changed_bytes(
+        &self,
+        len_after: impl FnOnce(u64) -> u64,
+        change: impl FnOnce(&mut Vec<u8>),
+    ) -> Result<(), Errno> {
         if !self.write {
             return Err(Errno::PermissionDenied);
         }
         let mut state = self.state_mut();
+        if let Body::File { bytes, .. } = &state.data(self.node).body {
+            state.room_for(self.node, len_after(bytes.len() as u64))?;
+        }
         if state.data(self.node).watched {
             let path = state.path(self.node);
             let mode = state.data(self.node).mode;
@@ -1851,22 +1883,29 @@ impl WriteAt for Handle {
 impl Target for Handle {
     fn write_all_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
         self.tree.data_failure("write", self.node)?;
+        let reach = u64::try_from(bytes.len())
+            .ok()
+            .and_then(|len| offset.checked_add(len))
+            .ok_or(Errno::LengthOutOfRange)?;
         let start = usize::try_from(offset).map_err(|_| Errno::LengthOutOfRange)?;
-        self.changed_bytes(|held| {
-            let end = start + bytes.len();
-            if held.len() < end {
-                held.resize(end, 0);
-            }
-            held[start..end].copy_from_slice(bytes);
-        })?;
+        let end = usize::try_from(reach).map_err(|_| Errno::LengthOutOfRange)?;
+        self.changed_bytes(
+            |len| len.max(reach),
+            |held| {
+                if held.len() < end {
+                    held.resize(end, 0);
+                }
+                held[start..end].copy_from_slice(bytes);
+            },
+        )?;
         self.state_mut().data_mut(self.node).written += bytes.len();
         Ok(())
     }
 
     fn set_len(&mut self, len: u64) -> Result<(), Errno> {
         self.tree.data_failure("set_len", self.node)?;
-        let len = usize::try_from(len).map_err(|_| Errno::LengthOutOfRange)?;
-        self.changed_bytes(|held| held.resize(len, 0))
+        let wanted = usize::try_from(len).map_err(|_| Errno::LengthOutOfRange)?;
+        self.changed_bytes(|_| len, |held| held.resize(wanted, 0))
     }
 }
 

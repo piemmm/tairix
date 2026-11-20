@@ -538,7 +538,8 @@ fn needs(number: u16) -> Option<u16> {
 }
 
 /// A program's stub jumped to the ROM, its number in AX: it starts, its
-/// stack moved into its own memory, if its block holds all it keeps.
+/// state cleared and its stack moved into its own memory, if its block
+/// holds all it keeps.
 pub fn start(g: &mut Guest<'_>) {
     let own = g.seg(Seg::Ds);
     let number = g.r16(Reg16::Ax);
@@ -547,9 +548,14 @@ pub fn start(g: &mut Guest<'_>) {
         needs(number).is_some_and(|paragraphs| top.wrapping_sub(own) >= paragraphs && top > own);
     let root = table::main(number).filter(|_| fits);
     let mut p = Program { g, own };
-    let Some(root) = root else {
+    let (Some(root), Some(state)) = (root, table::state_len(number)) else {
         return p.refuse(None);
     };
+    // A block holds what its last owner left: the state starts empty.
+    let end = u32::from(at::STATE) + u32::from(state);
+    for offset in (u32::from(at::STATE)..end).filter_map(|at| u16::try_from(at).ok()) {
+        p.g.write8(own, offset, 0);
+    }
     p.set8(at::NUMBER, number.to_le_bytes()[0]);
     p.set8(at::DEPTH, 0);
     p.set8(at::ROOTS, 0);

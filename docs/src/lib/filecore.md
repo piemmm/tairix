@@ -56,7 +56,8 @@ on the RAM disc:
   object grows, shrinks or frees the defects or the map's fragment. On an old
   map, one starting in the map or the root's sectors, the root's own start
   apart. A new map describing anything but a defect past the disc's end is
-  refused when it is opened.
+  refused when it is opened, and by every walk of its zones after, so a map
+  rewritten under a mounted disc gives out no space past its end either.
 
 ## What holds a byte, defects and compaction
 

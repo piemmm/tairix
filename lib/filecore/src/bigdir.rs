@@ -98,6 +98,15 @@ impl BigHeader {
         self.heap_offset() + self.names_size
     }
 
+    /// [`Self::used_end`] for a header read from a disc, whose fields may
+    /// describe more than an offset can hold.
+    fn checked_used_end(&self) -> Option<u32> {
+        self.entries
+            .checked_mul(BIG_ENTRY_SIZE)?
+            .checked_add(self.entries_offset())?
+            .checked_add(self.names_size)
+    }
+
     /// Offset of the tail.
     #[must_use]
     pub fn tail_offset(&self) -> u32 {
@@ -171,7 +180,9 @@ impl BigDir {
         if header.name_len as usize > MAX_NAME_LEN
             || header.entries > header.size / BIG_ENTRY_SIZE
             || header.names_size > header.size
-            || header.used_end() > header.tail_offset()
+            || header
+                .checked_used_end()
+                .is_none_or(|end| end > header.tail_offset())
         {
             return Err(BROKEN.into());
         }

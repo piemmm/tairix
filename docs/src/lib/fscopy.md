@@ -308,7 +308,9 @@ alias, nodes with no identity (`unidentified`), a capability gate kept as the
 gate tools' doubles read and set it (`gated`, `gate`, `gate_of`, `set_gate`),
 and an attacker hook (`before_call`, `before_line`) that runs between
 two of its calls and may rename, replace or relink any name, so a test proves
-what a race finds. `refuse` injects any other failure. `fixture::resolve` is
+what a race finds. A file grown past the room its volume reports is refused
+with `NoSpace`, as a full volume refuses it. `refuse` injects any other
+failure. `fixture::resolve` is
 the kernel's path resolution in miniature — each link on the way followed,
 each `..` applied, a cycle cut off as `LinkLoop` — for a test filesystem keyed
 by path.

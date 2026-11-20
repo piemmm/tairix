@@ -221,7 +221,7 @@ impl Routine for Exec {
             TABLE_READ => self.relocate(k, phase, child),
             CLOSED_FILE => {
                 take!(child);
-                self.start(k)
+                self.start(k, phase)
             }
             FAILED => {
                 let fault = Fault::Error(self.code);
@@ -434,15 +434,37 @@ impl Exec {
     }
 
     /// The program is loaded: an overlay returns; a load hands back its
-    /// entry and stack; a run starts it.
-    fn start(&self, k: &mut Kernel<'_, '_>) -> Flow {
+    /// entry and stack, refused where the stack word it leaves the program
+    /// would lie outside the program's memory; a run starts it.
+    fn start(&mut self, k: &mut Kernel<'_, '_>, phase: &mut u8) -> Flow {
         if self.mode == mode::OVERLAY {
             return Flow::Return(Ok(0));
         }
         let Some(image) = self.image(k) else {
-            return Flow::Return(Err(Fault::Error(error::BAD_FORMAT)));
+            return self.fail(k, phase, Fault::Error(error::BAD_FORMAT));
         };
         let child = self.psp;
+        let (cs, ip, ss, sp) = if image.mz {
+            (
+                self.load.wrapping_add(image.cs),
+                image.ip,
+                self.load.wrapping_add(image.ss),
+                image.sp,
+            )
+        } else {
+            let top = k.g.read16(child, psp::TOP);
+            let room = u32::from(top.wrapping_sub(child)) * 16;
+            let sp = if room >= 0x1_0000 {
+                0xFFFE
+            } else {
+                u16::try_from(room - 2).unwrap_or(0xFFFE)
+            };
+            k.g.write16(child, sp, 0);
+            (child, psp::LEN, child, sp)
+        };
+        if self.mode == mode::LOAD && !owns_word(k, child, ss, sp.wrapping_sub(2)) {
+            return self.fail(k, phase, Fault::Error(error::BAD_FORMAT));
+        }
         let tail = k.far_at(self.block.add(2));
         let mut bytes = [0u8; 128];
         k.g.read_bytes(tail.segment, tail.offset, &mut bytes);
@@ -469,24 +491,6 @@ impl Exec {
         k.g.write16(child, psp::TERMINATE + 2, return_cs);
         k.g.write16(0, 0x22 * 4, return_ip);
         k.g.write16(0, 0x22 * 4 + 2, return_cs);
-        let (cs, ip, ss, sp) = if image.mz {
-            (
-                self.load.wrapping_add(image.cs),
-                image.ip,
-                self.load.wrapping_add(image.ss),
-                image.sp,
-            )
-        } else {
-            let top = k.g.read16(child, psp::TOP);
-            let room = u32::from(top.wrapping_sub(child)) * 16;
-            let sp = if room >= 0x1_0000 {
-                0xFFFE
-            } else {
-                u16::try_from(room - 2).unwrap_or(0xFFFE)
-            };
-            k.g.write16(child, sp, 0);
-            (child, psp::LEN, child, sp)
-        };
         if self.mode == mode::LOAD {
             let sp = sp.wrapping_sub(2);
             k.g.write16(ss, sp, u16::from_le_bytes(validity));
@@ -520,6 +524,14 @@ impl Exec {
         g.set_r16(Reg16::Bp, 0x091E);
         Flow::Transfer
     }
+}
+
+/// Whether the word at `ss:sp` lies within the memory block of the program
+/// whose PSP is at `child`, which a hostile header may place it outside.
+fn owns_word(k: &mut Kernel<'_, '_>, child: u16, ss: u16, sp: u16) -> bool {
+    let top = k.g.read16(child, psp::TOP);
+    let at = u32::from(ss) * 16 + u32::from(sp);
+    u32::from(child) * 16 <= at && at + 2 <= u32::from(top) * 16
 }
 
 /// The eight-byte name a program's blocks carry: its file name's base.

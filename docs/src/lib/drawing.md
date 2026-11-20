@@ -189,7 +189,9 @@ scaled to the pixels and back. SVG's clip paths hold shapes and text but no grou
 clip is written as its members, each placed as its groups place it; a group
 within a clip that is clipped itself calls for that clip by a clip path of
 each member's own, written in the member's space and clipped in turn by the
-next group out, so every viewer clips exactly as Draw does. A picture in a
+next group out, so every viewer clips exactly as Draw does. A hidden member,
+or one within a hidden group, is kept with `display="none"`, which leaves it
+out of the clip, and a member of no area calls for no clip path. A picture in a
 clip clips by its rectangle and is written as one, and a member clips by its
 fill rule, written as `clip-rule`. A text in lines is a `<tspan>` for each
 line, placed on its baseline; a text along a path is a `<textPath>` naming

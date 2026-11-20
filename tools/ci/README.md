@@ -104,7 +104,8 @@ GitHub Actions runner — not both.
 listing is read before the first job starts, and one that fails or names no
 target stops the soak with nothing started. The repeated-test soak adds one
 more job, `cargo xtask test --qemu --soak`, that repeats the whole test matrix
-for the same budget.
+for the same budget. It builds what a pass runs once, before the first pass and
+under the long build budget, so no pass compiles under its own deadline.
 
 The budget has two forms. By default (24 h) or with `--secs N`, each job gets
 the whole budget counted from its own start, so the soak lasts as long as the

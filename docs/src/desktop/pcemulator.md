@@ -620,8 +620,9 @@ user supplies boots instead, as it would on the hardware.
 - **INT 21h**: console input and output with the line editor's template,
   FCBs, handles, directories and searches, attributes, stamps, commit,
   temporary and extended opens, memory with the three allocation strategies,
-  EXEC of COM and MZ programs to run, load or overlay, termination and its
-  return code, programs kept resident, vectors, the clock, the version, break
+  EXEC of COM and MZ programs to run, load or overlay — an image refused that
+  would have DOS write outside the program's memory, a relocation there or a
+  load's stack word —, termination and its return code, programs kept resident, vectors, the clock, the version, break
   and verify flags, country information for thirteen countries with
   function `65h`'s tables and upper-casing, extended error information, and
   canonical names. A drive's current directory outlives a change of disk: a
@@ -712,7 +713,8 @@ user supplies boots instead, as it would on the hardware.
 
 The shell is TAIRiX DOS's own `COMMAND.COM`: a stub on the disk whose
 behaviour is Rust, reaching DOS only through INT 21h as any program does, its
-state in its own memory.
+state in its own memory, cleared as it starts, since a block holds what its
+last owner left.
 
 - **Starting.** `/P` makes the primary shell, which runs `AUTOEXEC.BAT` from
   the root of the drive DOS booted from, or asks for the date and time

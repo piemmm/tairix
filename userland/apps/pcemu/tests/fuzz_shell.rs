@@ -8,8 +8,9 @@
 //!
 //! Every question asked is answered: a critical error failed, a yes or no
 //! given either way, a pause ended, `EDIT` left without saving; a Ctrl+C
-//! ends what waits for input before the probe looks. Lines are built from
-//! the shell's own words — commands, switches, names there and not,
+//! ends what waits for input before the probe looks, and an end of file a
+//! read of the console by a program that handles Ctrl+C itself. Lines are
+//! built from the shell's own words — commands, switches, names there and not,
 //! patterns, devices, redirections, pipes, variables, batch parameters — and
 //! noise; the disk's two batch files hold such lines too, but can neither
 //! loop nor run each other round, so a line that runs on is the shell's
@@ -53,6 +54,8 @@ const RETRIES: Nanos = 8 * SECOND;
 /// prompt answered from it takes a byte a key, and a drive put right is
 /// tried again at each.
 const BUSY: Nanos = (FILE_TEXT.len() as u64 + 1) * RETRIES;
+/// INT 23h's vector, the Ctrl+C handler's.
+const BREAK_VECTOR: u32 = 0x23 * 4;
 /// Where the probe leaves its count: the BIOS's intra-application area.
 const MARK: u32 = 0x4F0;
 /// The count before the probe has run, and when the chain is broken.
@@ -64,6 +67,7 @@ const ALT: Scan = Scan::plain(0x38);
 const ESC: Scan = Scan::plain(0x01);
 const F: Scan = Scan::plain(0x21);
 const X: Scan = Scan::plain(0x2D);
+const Z: Scan = Scan::plain(0x2C);
 /// `EDIT`'s menu bar, along the top of the screen while it runs.
 const EDIT_BAR: &[u8] = b"  File  Edit  Search  Options";
 
@@ -529,6 +533,8 @@ fn disk(rng: &mut Prng) -> Floppy {
 
 struct Run {
     machine: Machine,
+    /// The segment of the Ctrl+C handler the shell leaves at its prompt.
+    shell_break: u16,
 }
 
 impl Run {
@@ -541,8 +547,12 @@ impl Run {
             .unwrap();
         machine.board_mut().insert_floppy(0, disk(rng)).unwrap();
         machine.board_mut().share(0, folder());
-        let mut run = Self { machine };
+        let mut run = Self {
+            machine,
+            shell_break: 0,
+        };
         run.settle();
+        run.shell_break = run.peek16(BREAK_VECTOR + 2);
         run
     }
 
@@ -758,16 +768,35 @@ impl Run {
         }
     }
 
-    /// Breaks whatever runs, ends any batch file, and has the probe count
-    /// the shell's blocks.
+    /// Ends a read of the console as a file that a program handling Ctrl+C
+    /// itself keeps from it, as `EDIT CON` does: an end of file, a line
+    /// beginning with Ctrl+Z. Where the shell's handler is in place, Ctrl+C
+    /// alone must end a read, so none is typed.
+    fn end_console_read(&mut self) {
+        if self.peek16(BREAK_VECTOR + 2) == self.shell_break {
+            return;
+        }
+        for (key, down) in [(CTRL, true), (Z, true), (Z, false), (CTRL, false)] {
+            self.key(key, down);
+        }
+        self.type_text("\r");
+        self.settle();
+    }
+
+    /// Breaks whatever runs, ends any batch file and, where the probe then
+    /// went unrun, a console read Ctrl+C was kept from, and has the probe
+    /// count the shell's blocks.
     fn check(&mut self, rng: &mut Prng) {
-        for _ in 0..3 {
+        for tried in 0..3 {
             for at in 0..2 {
                 self.machine.board_mut().write(
                     MARK + at,
                     UNRUN.to_le_bytes()[usize::try_from(at).unwrap()],
                     0,
                 );
+            }
+            if tried > 0 {
+                self.end_console_read();
             }
             self.break_in();
             self.settle();

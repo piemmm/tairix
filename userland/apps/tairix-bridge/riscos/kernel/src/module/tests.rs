@@ -11,7 +11,7 @@ use super::inventory::{Held, INVENTORY};
 use super::{CommandKind, Help};
 use crate::memory::layout::{APPLICATION, RISC_OS_5, SHARED};
 use crate::memory::Bits;
-use crate::os::{len32, Ended, Outcome, Regs};
+use crate::os::{len32, Ended, Fail, Outcome, Regs, Unwind};
 use crate::swi::os::{MODULE, READ_DYNAMIC_AREA};
 use crate::swi::X;
 use crate::testkit::asm::{self, Condition};
@@ -585,6 +585,19 @@ fn a_header_is_checked_before_anything_of_it_runs() {
     let mut percent = Guest::new("Per%Cent");
     percent.set(Field::Init, 0);
     assert!(copy_in(&mut s, &percent).is_ok(), "a title may hold a %");
+}
+
+#[test]
+fn a_header_running_past_the_top_of_memory_aborts_its_reading() {
+    let mut s = session();
+    for code in [0xFFFF_FFD0, 0xFFFF_FFFC, u32::MAX] {
+        let mut regs = Regs::new([11, code, 0x100, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let result = s.kernel.os().perform(X | MODULE, &mut regs);
+        assert!(
+            matches!(result, Err(Fail::Unwind(Unwind::Transfer))),
+            "{code:#X}: {result:?}"
+        );
+    }
 }
 
 #[test]

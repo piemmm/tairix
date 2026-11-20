@@ -104,6 +104,9 @@ struct Zone {
     start_bit: u32,
     /// One past the last valid map bit of this zone's stream.
     end_bit: u32,
+    /// The first bit of the stream past the disc's end, `end_bit` where the
+    /// disc runs on.
+    disc_end_bit: u32,
     /// Disc block (map-bit units) where this zone's coverage starts.
     start_block: u64,
 }
@@ -236,8 +239,9 @@ impl Walker {
     ///
     /// # Errors
     ///
-    /// The map broken if a fragment runs past the zone end
-    /// (no stop bit before the map boundary).
+    /// The map broken if a fragment runs past the zone end (no stop bit
+    /// before the map boundary), or anything but a defect reaches past the
+    /// disc's end, which would give out space no sector holds.
     fn next(&mut self, staged: &Zone) -> core::result::Result<Option<Frag>, Fault> {
         if self.bit >= staged.end_bit {
             return Ok(None);
@@ -248,6 +252,9 @@ impl Walker {
             .next_set_bit(bit + self.idlen, staged.end_bit)
             .ok_or(BROKEN)?;
         let is_free = bit == self.next_free;
+        if end >= staged.disc_end_bit && (is_free || id != FRAG_BAD) {
+            return Err(BROKEN);
+        }
         let prev_free = self.prev_free;
         if is_free {
             let link = staged.field(bit, self.link_bits);
@@ -313,31 +320,34 @@ impl NewMap {
         Ok(map)
     }
 
-    /// Refuses a map that leaves anything but a defect where the disc ends,
-    /// which would give out space no sector holds. The block the end falls
-    /// in counts as the disc's.
+    /// Refuses a map that leaves anything but a defect where the disc ends:
+    /// each zone the end falls in walked whole, as the walk refuses one.
     fn check_past_disc<D: Disc>(&self, disc: &mut D) -> Result<(), D> {
-        let end = self
+        for zone in 0..u32::from(self.record.nzones) {
+            let (start_bit, end_bit, start_block) = self.zone_geometry(zone);
+            if self.disc_end_bit(start_bit, end_bit, start_block) == end_bit {
+                continue;
+            }
+            let staged = self.load_zone(disc, zone)?;
+            let mut walker = self.walker(&staged);
+            while walker.next(&staged)?.is_some() {}
+        }
+        Ok(())
+    }
+
+    /// The first bit of a zone's stream, `start_bit` to `end_bit` covering
+    /// the blocks from `start_block`, past the disc's end; `end_bit` where
+    /// the disc runs on. The block the end falls in counts as the disc's.
+    fn disc_end_bit(&self, start_bit: u32, end_bit: u32, start_block: u64) -> u32 {
+        let blocks = self
             .record
             .disc_size
             .div_ceil(self.record.bytes_per_map_bit());
-        for zone in 0..u32::from(self.record.nzones) {
-            let (start_bit, end_bit, start_block) = self.zone_geometry(zone);
-            let within = end.saturating_sub(start_block);
-            if within >= u64::from(end_bit - start_bit) {
-                continue;
-            }
-            // Below the zone's stream, so it fits the bit numbering.
-            let limit = start_bit + u32::try_from(within).unwrap_or(0);
-            let staged = self.load_zone(disc, zone)?;
-            let mut walker = self.walker(&staged);
-            while let Some(frag) = walker.next(&staged)? {
-                if frag.end >= limit && (frag.is_free || frag.id != FRAG_BAD) {
-                    return Err(BROKEN.into());
-                }
-            }
-        }
-        Ok(())
+        let within = blocks.saturating_sub(start_block);
+        u32::try_from(within)
+            .ok()
+            .filter(|&within| within < end_bit - start_bit)
+            .map_or(end_bit, |within| start_bit + within)
     }
 
     /// The disc record as zone 0 of the copy read holds it, which `FileCore`
@@ -1521,6 +1531,7 @@ impl NewMap {
             len: sector,
             start_bit,
             end_bit,
+            disc_end_bit: self.disc_end_bit(start_bit, end_bit, start_block),
             start_block,
         };
         // A zeroed sector checks, yet every genuine zone holds a fragment's

@@ -128,6 +128,32 @@ fn a_volume_accounts_for_the_files_on_it_alone() {
     );
 }
 
+/// A file grows only into the room its volume has, so a hostile length is
+/// refused as a full volume refuses it rather than held in memory.
+#[test]
+fn a_file_grown_past_its_volume_is_refused_as_a_full_volume_refuses_it() {
+    let tree = Tree::new().dir("/a").file("/a/f", &[1; 1000]);
+    let home = tree.open_dir("/a", false).expect("opens");
+    let stats = home.volume_stats().expect("stats");
+    let room = stats.free_blocks * u64::from(stats.block_size);
+    let mut file = home.create_file("g", 0o644).expect("made");
+    assert_eq!(file.set_len(room + 1), Err(Errno::NoSpace));
+    assert_eq!(file.set_len(u64::MAX), Err(Errno::NoSpace));
+    assert_eq!(file.write_all_at(room, b"x"), Err(Errno::NoSpace));
+    assert_eq!(
+        file.write_all_at(u64::MAX, b"x"),
+        Err(Errno::LengthOutOfRange)
+    );
+    assert_eq!(tree.bytes("/a/g"), Some(Vec::new()), "nothing was taken");
+    file.set_len(room).expect("the room it has");
+    assert_eq!(home.volume_stats().expect("stats").free_blocks, 0);
+    file.set_len(16).expect("shrunk");
+    let mut read = home
+        .open_reached("f", FileAccess::Read, Creation::Existing, 0o644)
+        .expect("readable");
+    assert_eq!(read.set_len(room * 2), Err(Errno::PermissionDenied));
+}
+
 #[test]
 fn a_hook_runs_once_immediately_before_its_call() {
     let tree = Tree::new().dir("/d").file("/d/f", b"x");
