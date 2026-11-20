@@ -65,6 +65,7 @@ mod program {
     use tairix_openmicro::front::settings::{self, Settings};
     use tairix_openmicro::front::{events, folder, media};
     use tairix_openmicro::machine::bbc::fdc::PhysicalDrive;
+    use tairix_openmicro::machine::lane::{Joiner, Spawner};
     use tairix_openmicro::machine::Model;
     use tairix_openmicro::worker::protocol::DeckKey;
     use tairix_openmicro::worker::MachineService;
@@ -74,8 +75,8 @@ mod program {
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_window::app::{self, LazyPool, Wake, WindowPane};
     use tairix_window::{
-        Answer, Desktop, EventDrain, EventError, EventMailbox, EventSource, Parked,
-        Target as Opened, WindowClient, WindowEvents,
+        Answer, Desktop, EventDrain, EventError, EventMailbox, EventSource, Parked, PostedRequest,
+        Refused, Target as Opened, WindowClient, WindowEvents,
     };
 
     use crate::files::{self, FileDone, FileJob, FileWorker, Speaker};
@@ -2686,6 +2687,22 @@ mod program {
             }
         }
 
+        /// The desktop refused `refused`.
+        fn refused(&mut self, refused: &Refused) {
+            app::report(APP_NAME, refused);
+            if refused.request != PostedRequest::Resize {
+                return;
+            }
+            let window_id = refused.window_id;
+            if let Some(machine) = self
+                .machines
+                .iter_mut()
+                .find(|machine| machine.window_id() == window_id)
+            {
+                machine.resize_refused();
+            }
+        }
+
         /// One event for machine window `n`.
         fn machine_event(&mut self, n: usize, event: &WindowEvent) {
             match *event {
@@ -2727,6 +2744,7 @@ mod program {
                     ..
                 } => self.machines[n].resized(
                     &mut self.client,
+                    (&self.desktop, self.themes.active()),
                     (width_px, height_px),
                     state.is_fullscreen(),
                 ),
@@ -3046,9 +3064,30 @@ mod program {
 
     tairix_rt::entry!(main);
 
+    /// Starts a machine's device runners on threads of this process.
+    struct RuntimeThreads;
+
+    /// A runner [`RuntimeThreads`] started.
+    struct RuntimeJoin(tairix_rt::thread::JoinHandle<()>);
+
+    impl Joiner for RuntimeJoin {
+        fn join(self: Box<Self>) {
+            // A runner that died took the whole process with it.
+            let _ = self.0.join();
+        }
+    }
+
+    impl Spawner for RuntimeThreads {
+        fn spawn(&self, body: Box<dyn FnOnce() + Send>) -> Option<Box<dyn Joiner>> {
+            let runner = tairix_rt::thread::Thread::spawn(body).ok()?;
+            Some(Box::new(RuntimeJoin(runner)))
+        }
+    }
+
     fn main() -> i32 {
         if session_worker_role() {
-            return match spawn_share().ok().and_then(MachineService::new) {
+            let service = spawn_share().ok().and_then(MachineService::new);
+            return match service.map(|service| service.spreading(Box::new(RuntimeThreads))) {
                 Some(mut service) => serve_session_stdio(&mut service).exit_code(),
                 None => 1,
             };
@@ -3186,7 +3225,7 @@ mod program {
                     Ok(Some(event)) => app.handle(&event),
                     Ok(None) => break,
                     Err(EventError::Undecodable(_)) => {}
-                    Err(EventError::Refused(refused)) => app::report(APP_NAME, refused),
+                    Err(EventError::Refused(refused)) => app.refused(&refused),
                     Err(EventError::Mailbox(_)) => {
                         return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "event channel lost");
                     }

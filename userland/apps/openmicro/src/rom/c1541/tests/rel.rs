@@ -1090,7 +1090,7 @@ fn whole_blocks(lines: &str) -> Vec<u8> {
         assert!(machine.cycles() < end, "the file was extended");
         run_for(&mut machine, 10 * JIFFY);
     }
-    image_of(&machine)
+    image_of(&mut machine)
 }
 
 /// `B`'s entry: its first side sector, record length and blocks.
@@ -1205,7 +1205,7 @@ fn a_record_read_a_byte_at_a_time_sends_each_byte_once() {
 fn a_drive_whose_disk_turns_talks_only_when_asked() {
     let mut machine = with_drive(surface(&commands().image()));
     press(&mut machine, &[Key::LEFT_SHIFT], Key::HOME);
-    if let Some(drive) = machine.drive_mut(Unit::Eight) {
+    if let Some(drive) = machine.drives().unit_mut(Unit::Eight) {
         drive.monitor_io(true);
     }
     type_text(
@@ -1215,7 +1215,7 @@ fn a_drive_whose_disk_turns_talks_only_when_asked() {
     let mut taken = Vec::new();
     for _ in 0..6000 {
         run_for(&mut machine, 500);
-        if let Some(drive) = machine.drive_mut(Unit::Eight) {
+        if let Some(drive) = machine.drives().unit_mut(Unit::Eight) {
             taken.extend(
                 drive
                     .take_io_trace()

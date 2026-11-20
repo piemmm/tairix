@@ -317,6 +317,11 @@ Stability tier: **experimental**.
   replacement never writes where its predecessor's output is still read;
   `rt::spawn_share` maps it in the worker, whole. `loopback::HeapShare` and
   `LoopbackShareLauncher` stand in for both sides in host tests.
+- **A worker's threads.** A session worker runs on its leader alone unless its
+  launcher grants more (`rt::RtSessionLauncher::threads`, which spawns it
+  through `SpawnAttach::with_threads`): a bound, never an unbounded count, for
+  a worker that runs work of its own beside the leader, as the Open Micro
+  Emulator's machine worker runs a Commodore 64's SID and drives.
 - **`moviedecode`** — a `WebM` recording decoded through `tairix-video` and
   [`tairix-sound`](./sound.md) by the same kind of long-lived worker, its
   file read through `paged` as a sound's is. One request at a time — open,

@@ -10,6 +10,10 @@ mod link;
 pub mod protocol;
 mod service;
 
+/// The threads a machine worker is granted: its own, and one each for the
+/// SID and the drives a Commodore 64 runs ahead of itself.
+pub const WORKER_THREADS: u64 = 3;
+
 pub use client::{Busy, MachineClient};
 pub use link::Link;
 #[cfg(not(freestanding))]

@@ -7,8 +7,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::{
-    AccelCaps, AccelLayer, BufferId, CursorCaps, DamageRect, DisplayMode, DisplayPower,
+    AccelCaps, AccelLayer, BufferId, CursorCaps, DamageList, DamageRect, DisplayFormat,
+    DisplayMode, DisplayPower, MAX_ACCEL_LAYERS,
 };
+use tairix_abi::window_ipc::{ViewFilter, WindowView};
 use tairix_abi::DriverError;
 use tairix_display::{Base, BaseFrame, CursorPlane, DrawInPlace, LayerPresenter, Presenter};
 
@@ -3381,5 +3383,221 @@ fn a_capture_of_a_promoted_window_is_its_software_composite() {
     assert_eq!(
         captured(&mut promoted, whole).pixels(),
         twin.back_buffer().pixels()
+    );
+}
+
+/// A 4 × 3 picture shown over the top-left 40 × 30 of a window's content.
+const VIEW: WindowView = WindowView {
+    width_px: 4,
+    height_px: 3,
+    placement: DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 40,
+        height_px: 30,
+    },
+    filter: ViewFilter::Sharp,
+};
+
+/// The view's rows of a frame, every dot `dot`, and their shape.
+fn view_rows(dot: [u8; 4]) -> (DisplayMode, Vec<u8>) {
+    let surface = DisplayMode {
+        width_px: 4,
+        height_px: 3,
+        stride_bytes: 16,
+        format: DisplayFormat::Rgba8888,
+    };
+    (surface, dot.repeat(12))
+}
+
+fn whole_view() -> DamageList {
+    DamageList::new(&[DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 4,
+        height_px: 3,
+    }])
+    .expect("the whole view")
+}
+
+/// What window `id`'s content holds at `(x, y)`.
+fn content_at(c: &Compositor, id: WindowId, x: u32, y: u32) -> Option<Pixel> {
+    c.window(id)?.content()?.get(x, y)
+}
+
+#[test]
+fn a_promoted_window_s_view_rides_a_layer_of_its_own_the_engine_enlarges() {
+    let output = mode(80, 60);
+    let (mut c, id) = fullscreenable(output);
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
+        .expect("fullscreen");
+    c.set_window_view(id, Some(VIEW)).expect("a view");
+    let (surface, bytes) = view_rows([0, 255, 0, 255]);
+    c.present_window_view(id, &surface, &bytes, &whole_view())
+        .expect("shown");
+    let mut engine = MockEngine::new(output);
+    engine.caps.hw_scaling = true;
+    c.present(&mut engine).expect("presents");
+    assert_eq!(c.presentation(), Some(Presentation::Promoted(id)));
+    let (based, stack) = engine.stacks.last().expect("a stack");
+    assert!(!based);
+    assert_eq!(stack.len(), 2, "the window, and its view above it");
+    let view = stack[1];
+    assert_eq!((view.src.width_px, view.src.height_px), (4, 3));
+    let client = c.window(id).expect("the window").client_rect();
+    assert_eq!(
+        (
+            view.dst_x,
+            view.dst_y,
+            view.dst_width_px,
+            view.dst_height_px
+        ),
+        (client.left(), client.top(), 40, 30)
+    );
+    let at = |x: i32| u32::try_from(x).expect("on screen");
+    assert_eq!(
+        pixel(
+            &engine.screen,
+            output,
+            at(client.left()) + 39,
+            at(client.top()) + 29
+        ),
+        [0, 255, 0, 255],
+        "the picture, enlarged by the engine"
+    );
+    // While its layer shows it, a new picture reaches the screen and not the
+    // window's own pixels.
+    let (_, blue) = view_rows([0, 0, 255, 255]);
+    c.present_window_view(id, &surface, &blue, &whole_view())
+        .expect("shown");
+    c.present(&mut engine).expect("presents");
+    assert_eq!(
+        pixel(
+            &engine.screen,
+            output,
+            at(client.left()) + 1,
+            at(client.top()) + 1
+        ),
+        [0, 0, 255, 255]
+    );
+    assert_eq!(
+        content_at(&c, id, 1, 1).map(|dot| (dot.g, dot.b)),
+        Some((255, 0)),
+        "nothing enlarged it in software"
+    );
+
+    // An engine that does not scale leaves it to software, which brings the
+    // window's content up to the picture as it stands.
+    engine.caps.hw_scaling = false;
+    c.present_window_view(id, &surface, &bytes, &whole_view())
+        .expect("shown");
+    c.present(&mut engine).expect("presents");
+    let (_, stack) = engine.stacks.last().expect("a stack");
+    assert_eq!(stack.len(), 1, "the window alone");
+    assert_eq!(
+        content_at(&c, id, 39, 29).map(|dot| (dot.r, dot.g)),
+        Some((0, 255)),
+        "the picture is in the window's content"
+    );
+    assert_eq!(
+        content_at(&c, id, 40, 30).map(|dot| dot.r),
+        Some(255),
+        "and only within its placement"
+    );
+}
+
+#[test]
+fn a_view_is_the_first_given_up_where_the_engine_s_line_buffer_runs_out() {
+    let output = mode(80, 60);
+    let (mut c, id) = fullscreenable(output);
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
+        .expect("fullscreen");
+    c.set_window_view(id, Some(VIEW)).expect("a view");
+    let (surface, bytes) = view_rows([0, 0, 255, 255]);
+    c.present_window_view(id, &surface, &bytes, &whole_view())
+        .expect("shown");
+    let mut engine = MockEngine::new(output);
+    engine.caps.hw_scaling = true;
+    engine.deepest = 1;
+    c.present(&mut engine).expect("presents");
+    assert_eq!(
+        c.presentation(),
+        Some(Presentation::Promoted(id)),
+        "the window keeps its layer"
+    );
+    let (_, stack) = engine.stacks.last().expect("a stack");
+    assert_eq!(stack.len(), 1);
+    assert_eq!(
+        content_at(&c, id, 20, 20).map(|dot| dot.b),
+        Some(255),
+        "and its view is enlarged in software"
+    );
+}
+
+/// A present without layers enlarges every view into its window first,
+/// however many windows carry one.
+#[test]
+fn every_view_no_layer_shows_is_enlarged_before_a_present_however_many() {
+    let output = mode(80, 60);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let windows: Vec<WindowId> = (0..=MAX_ACCEL_LAYERS)
+        .map(|_| c.add_window(Point::new(10, 10), opaque(60, 40, RED)))
+        .collect();
+    for &id in &windows {
+        c.set_window_view(id, Some(VIEW)).expect("a view");
+    }
+    c.present(&mut MockDisplay::new(output)).expect("presents");
+    for &id in &windows {
+        assert_eq!(
+            content_at(&c, id, 5, 5).map(|dot| (dot.r, dot.g, dot.b)),
+            Some((0, 0, 0)),
+            "the picture, black until presented, over the window's red"
+        );
+    }
+}
+
+#[test]
+fn without_layers_a_view_is_enlarged_into_its_window_and_over_what_the_window_presents() {
+    let output = mode(80, 60);
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let id = c.add_window(Point::new(10, 10), opaque(60, 40, RED));
+    c.set_window_view(id, Some(VIEW)).expect("a view");
+    let (surface, bytes) = view_rows([0, 255, 0, 255]);
+    c.present_window_view(id, &surface, &bytes, &whole_view())
+        .expect("shown");
+    assert_eq!(content_at(&c, id, 5, 5).map(|dot| dot.g), Some(255));
+    // A present of the window's own pixels over the placement leaves the
+    // picture over them.
+    let _ = c.present_window_content(id, 60, 40, |content, changed| {
+        content.fill(Color::rgb(255, 255, 255));
+        changed.add(Rect::new(0, 0, 60, 40));
+    });
+    assert_eq!(
+        content_at(&c, id, 5, 5).map(|dot| (dot.r, dot.g)),
+        Some((0, 255)),
+        "the picture is drawn over what was presented beneath it"
+    );
+    assert_eq!(
+        content_at(&c, id, 50, 35).map(|dot| dot.r),
+        Some(255),
+        "the rest is the window's own"
+    );
+    assert_eq!(
+        c.present_window_view(
+            id,
+            &DisplayMode {
+                width_px: 5,
+                ..surface
+            },
+            &bytes,
+            &whole_view()
+        ),
+        Err(tairix_abi::Errno::OutOfRange),
+        "a present shaped as some other picture"
+    );
+    c.set_window_view(id, None).expect("no view");
+    assert_eq!(
+        c.present_window_view(id, &surface, &bytes, &whole_view()),
+        Err(tairix_abi::Errno::NotFound)
     );
 }

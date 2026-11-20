@@ -36,7 +36,8 @@ use tairix_display::{FrameRegion, ShmMapper};
 use tairix_geometry::{Point, Rect, Region, Scale};
 
 use tairix_abi::window_ipc::{
-    DocumentsRefusal, LandingName, LandingOutcome, LandingStep, DROP_LANDINGS_MAX,
+    DocumentsRefusal, LandingName, LandingOutcome, LandingStep, ViewFilter, WindowView,
+    DROP_LANDINGS_MAX,
 };
 
 use crate::client::{
@@ -496,6 +497,10 @@ struct RecordingHost {
     terrain: Vec<TerrainPlate>,
     refuse_terrain: Option<Errno>,
     presented: Vec<(u64, Vec<u8>, DamageList)>,
+    /// Every view shown: the window, the view, its rows and what changed.
+    views_presented: Vec<(u64, WindowView, Vec<u8>, DamageList)>,
+    /// The view each resize carried.
+    resized_views: Vec<Option<WindowView>>,
     /// What a frame refused at the latch is refused with, if it is.
     refuse_frames: Option<Errno>,
     /// Every frame the latch could not show, by window.
@@ -620,6 +625,8 @@ impl Default for RecordingHost {
             terrain: Vec::new(),
             refuse_terrain: None,
             presented: Vec::new(),
+            views_presented: Vec::new(),
+            resized_views: Vec::new(),
             refuse_frames: None,
             frames_refused: Vec::new(),
             resized: Vec::new(),
@@ -714,6 +721,22 @@ impl FrameHost for RecordingHost {
             return Err(errno);
         }
         self.presented.push((window_id, frame.to_vec(), *damage));
+        Ok(())
+    }
+
+    fn view_presented(
+        &mut self,
+        window_id: u64,
+        view: &WindowView,
+        _surface: &DisplayMode,
+        frame: &[u8],
+        damage: &DamageList,
+    ) -> Result<(), Errno> {
+        if let Some(errno) = self.refuse_frames {
+            return Err(errno);
+        }
+        self.views_presented
+            .push((window_id, *view, frame.to_vec(), *damage));
         Ok(())
     }
 
@@ -828,11 +851,17 @@ impl WindowHost for RecordingHost {
         Ok(())
     }
 
-    fn window_resized(&mut self, window_id: u64, surface: &DisplayMode) -> Result<(), Errno> {
+    fn window_resized(
+        &mut self,
+        window_id: u64,
+        surface: &DisplayMode,
+        view: Option<&WindowView>,
+    ) -> Result<(), Errno> {
         if let Some(err) = self.refuse_resize {
             return Err(err);
         }
         self.resized.push((window_id, *surface));
+        self.resized_views.push(view.copied());
         Ok(())
     }
 
@@ -1287,7 +1316,12 @@ impl WindowHost for MinimalHost {
         Ok(())
     }
 
-    fn window_resized(&mut self, _window_id: u64, _surface: &DisplayMode) -> Result<(), Errno> {
+    fn window_resized(
+        &mut self,
+        _window_id: u64,
+        _surface: &DisplayMode,
+        _view: Option<&WindowView>,
+    ) -> Result<(), Errno> {
         Ok(())
     }
 
@@ -2328,7 +2362,9 @@ fn resize_remaps_the_window_and_presents_at_the_new_size() {
 
     // Re-map the window onto the larger region: the host is told the new
     // geometry, the id and count are unchanged.
-    client.resize(window, 20, 2, &BIG).expect("resize succeeds");
+    client
+        .resize(window, 20, 2, &BIG, None)
+        .expect("resize succeeds");
     {
         let inner = loopback.borrow();
         assert_eq!(inner.server.window_count(), 1);
@@ -2351,6 +2387,202 @@ fn resize_remaps_the_window_and_presents_at_the_new_size() {
     }
 }
 
+/// A 4 × 2 view shown over the whole of a SURFACE window.
+const VIEW: WindowView = WindowView {
+    width_px: 4,
+    height_px: 2,
+    placement: DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 4,
+        height_px: 3,
+    },
+    filter: ViewFilter::Smooth,
+};
+
+/// Bytes one SURFACE frame carrying VIEW occupies: five rows.
+const VIEW_FRAME_LEN: usize = 80;
+
+/// A refused resize leaves the window's frames carrying the view the session
+/// kept, so a present owed whole names only what those frames hold.
+#[test]
+fn a_refused_resize_leaves_the_frames_carrying_the_view_kept() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN), (20, VIEW_FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "Emulator").expect("create");
+    loopback.borrow_mut().host.refuse_resize = Some(Errno::OutOfMemory);
+    client
+        .resize(window, 20, 1, &SURFACE, Some(&VIEW))
+        .expect("posted");
+    assert_eq!(
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Resize, Errno::OutOfMemory))
+    );
+    assert_eq!(client.take_owed(), Some(Ok(kept(window, &SURFACE))));
+
+    // A refused present owes the next the whole window.
+    client.present(window, 1, full_damage()).expect("posted");
+    assert_eq!(
+        refusal(&mut client),
+        Some(refused(window, PostedRequest::Present, Errno::OutOfRange))
+    );
+    let corner = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 1,
+        height_px: 1,
+    };
+    client.present(window, 0, one(corner)).expect("posted");
+    assert_eq!(refusal(&mut client), None, "nothing past the kept frames");
+    let inner = loopback.borrow();
+    let (_, _, seen) = inner.host.presented.last().expect("shown");
+    assert_eq!(seen.rects(), full_damage().rects());
+    assert!(inner.host.views_presented.is_empty());
+}
+
+#[test]
+fn a_view_rides_the_rows_after_the_window_s_and_is_shown_on_its_own() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (20, 2 * VIEW_FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "Emulator").expect("create");
+    client
+        .resize(window, 20, 2, &SURFACE, Some(&VIEW))
+        .expect("resize");
+    assert_eq!(
+        loopback.borrow().host.resized_views,
+        alloc::vec![Some(VIEW)]
+    );
+
+    // A rectangle of the view's rows is the view's alone, moved to its origin.
+    let in_view = DamageRect {
+        x: 1,
+        y: 3,
+        width_px: 2,
+        height_px: 2,
+    };
+    client.present(window, 0, one(in_view)).expect("posted");
+    assert_eq!(refusal(&mut client), None);
+    {
+        let inner = loopback.borrow();
+        assert!(
+            inner.host.presented.is_empty(),
+            "nothing of the window's own"
+        );
+        let (id, view, rows, seen) = inner.host.views_presented.last().expect("the view shown");
+        assert_eq!((*id, *view), (window, VIEW));
+        assert_eq!(seen.rects(), &[DamageRect { y: 0, ..in_view }]);
+        assert_eq!(rows.len(), VIEW_FRAME_LEN - FRAME_LEN, "the view's rows");
+    }
+
+    // One of each: both shown, each its own.
+    let top = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 4,
+        height_px: 1,
+    };
+    let both = DamageList::new(&[top, in_view]).expect("two");
+    client.present(window, 1, both).expect("posted");
+    assert_eq!(refusal(&mut client), None);
+    {
+        let inner = loopback.borrow();
+        let (_, frame, seen) = inner.host.presented.last().expect("the window shown");
+        assert_eq!(seen.rects(), &[top]);
+        assert_eq!(frame.len(), VIEW_FRAME_LEN);
+        assert_eq!(inner.host.views_presented.len(), 2);
+    }
+
+    // A rectangle of neither: past the view's width in its rows, or across
+    // the row where the two meet.
+    let past = DamageRect {
+        x: 3,
+        y: 3,
+        width_px: 2,
+        height_px: 1,
+    };
+    let across = DamageRect {
+        x: 0,
+        y: 2,
+        width_px: 1,
+        height_px: 2,
+    };
+    for outside in [past, across] {
+        client.present(window, 0, one(outside)).expect("posted");
+        assert_eq!(
+            refusal(&mut client),
+            Some(refused(
+                window,
+                PostedRequest::Present,
+                Errno::LengthOutOfRange
+            )),
+            "{outside:?}"
+        );
+        // A refusal owes the next present the whole frame: the window's and
+        // the view's.
+        client.present(window, 1, one(top)).expect("posted");
+        assert_eq!(refusal(&mut client), None);
+        let inner = loopback.borrow();
+        let (_, _, seen) = inner.host.presented.last().expect("shown");
+        assert_eq!(seen.rects(), full_damage().rects());
+        let (_, _, _, seen) = inner.host.views_presented.last().expect("shown");
+        let rows = DisplayMode {
+            width_px: 4,
+            height_px: 2,
+            ..SURFACE
+        };
+        assert_eq!(seen.rects(), &[DamageRect::full(&rows)]);
+    }
+    // A redraw the session asks for brings both back.
+    let views = loopback.borrow().host.views_presented.len();
+    assert_eq!(client.answer_redraw(window), Ok(true));
+    assert_eq!(loopback.borrow().host.views_presented.len(), views + 1);
+}
+
+#[test]
+fn a_frame_s_rectangles_merge_only_on_their_own_side_of_the_view() {
+    let framed = crate::client::Framed {
+        width_px: 64,
+        height_px: 40,
+        view: Some((32, 20)),
+    };
+    let rect = |x, y| DamageRect {
+        x,
+        y,
+        width_px: 2,
+        height_px: 2,
+    };
+    // Six apart in the window's rows and six in the view's: more than one
+    // list holds, so each side is fitted to half of it.
+    let rects: Vec<DamageRect> = (0..6)
+        .map(|n| rect(n * 10, 0))
+        .chain((0..6).map(|n| rect(n * 5, 50)))
+        .collect();
+    let fitted = framed.fitted(rects.iter().copied()).expect("a list");
+    assert!(fitted.rects().len() <= tairix_abi::driver::display::MAX_DAMAGE_RECTS);
+    for rect in fitted.rects() {
+        let window = rect.y + rect.height_px <= 40;
+        let view = rect.y >= 40;
+        assert!(window != view, "{rect:?} lies on one side");
+    }
+    assert_eq!(
+        framed.whole().expect("whole").rects(),
+        &[
+            DamageRect {
+                x: 0,
+                y: 0,
+                width_px: 64,
+                height_px: 40
+            },
+            DamageRect {
+                x: 0,
+                y: 40,
+                width_px: 32,
+                height_px: 20
+            },
+        ]
+    );
+}
+
 #[test]
 fn resize_is_refused_fail_closed() {
     const BIG: DisplayMode = DisplayMode {
@@ -2369,7 +2601,7 @@ fn resize_is_refused_fail_closed() {
     // existed, and the host is never told; the size the session kept is
     // delivered again.
     loopback.borrow_mut().ticket = TICKET_B;
-    client.resize(window, 20, 2, &BIG).expect("posted");
+    client.resize(window, 20, 2, &BIG, None).expect("posted");
     assert_eq!(
         refusal(&mut client),
         Some(refused(window, PostedRequest::Resize, Errno::NotFound))
@@ -2381,7 +2613,7 @@ fn resize_is_refused_fail_closed() {
     // A host that refuses the resize leaves the old geometry intact: the
     // window still presents at its original size, not the (refused) new one.
     loopback.borrow_mut().host.refuse_resize = Some(Errno::WouldBlock);
-    client.resize(window, 20, 2, &BIG).expect("posted");
+    client.resize(window, 20, 2, &BIG, None).expect("posted");
     assert_eq!(
         refusal(&mut client),
         Some(refused(window, PostedRequest::Resize, Errno::WouldBlock))
@@ -2744,7 +2976,7 @@ fn released_frames_refuse_a_present_and_come_back_on_a_resize() {
     );
     // The client's own next paint re-attaches with an ordinary resize.
     client
-        .resize(window, 8, 1, &SURFACE)
+        .resize(window, 8, 1, &SURFACE, None)
         .expect("a released window re-attaches");
     assert!(!client.content_released(window));
     client
@@ -2812,7 +3044,7 @@ fn a_resize_past_the_budget_is_refused_and_keeps_the_old_geometry() {
     let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("first window");
 
-    client.resize(window, 8, 2, &TALL).expect("posted");
+    client.resize(window, 8, 2, &TALL, None).expect("posted");
     assert_eq!(
         refusal(&mut client),
         Some(refused(window, PostedRequest::Resize, Errno::NoSpace)),
@@ -2822,7 +3054,7 @@ fn a_resize_past_the_budget_is_refused_and_keeps_the_old_geometry() {
     // Resizing within the budget is still allowed, and the window keeps
     // working: the refusal above changed nothing.
     client
-        .resize(window, 8, 1, &TALL)
+        .resize(window, 8, 1, &TALL, None)
         .expect("a resize inside the budget");
 }
 
@@ -2890,6 +3122,15 @@ fn present_bounds_are_enforced() {
         ))
     );
     assert_eq!(loopback.borrow().host.presented.len(), 1);
+}
+
+/// What frames of a window shaped as `surface`, carrying no view, hold.
+const fn framed(surface: &DisplayMode) -> crate::client::Framed {
+    crate::client::Framed {
+        width_px: surface.width_px,
+        height_px: surface.height_px,
+        view: None,
+    }
 }
 
 #[test]
@@ -3860,7 +4101,7 @@ fn a_resize_or_a_release_drops_the_pending_frame() {
     loopback.borrow_mut().holds_frames = true;
 
     client.present(window, 0, full_damage()).expect("posted");
-    client.resize(window, 8, 2, &SURFACE).expect("posted");
+    client.resize(window, 8, 2, &SURFACE, None).expect("posted");
     assert_eq!(client.take_owed(), None, "the re-map was accepted");
     assert!(!loopback.borrow().server.has_pending_frames());
 
@@ -4006,7 +4247,9 @@ fn a_released_window_is_hidden_until_the_session_asks_for_it_again() {
         client.content_released(window),
         "and its next present re-attaches"
     );
-    client.resize(window, 8, 2, &SURFACE).expect("re-attached");
+    client
+        .resize(window, 8, 2, &SURFACE, None)
+        .expect("re-attached");
     assert!(!client.content_released(window) && !client.is_hidden(window));
 }
 
@@ -4225,7 +4468,7 @@ fn a_resize_a_release_or_a_close_answers_the_present_it_supersedes() {
     loopback.borrow_mut().holds_frames = true;
 
     hold_a_present(&mut client, window);
-    client.resize(window, 8, 2, &SURFACE).expect("posted");
+    client.resize(window, 8, 2, &SURFACE, None).expect("posted");
     assert!(!presenting(&mut client, window), "the re-map answered it");
 
     hold_a_present(&mut client, window);
@@ -4329,6 +4572,7 @@ fn every_call_is_answered_exactly_once() {
         height_px: SURFACE.height_px,
         stride_bytes: SURFACE.stride_bytes,
         format: SURFACE.format,
+        view: None,
     });
     let close = request_frame(&WindowRequest::Close { window_id: window });
     // `None` is a desktop frame.
@@ -4419,7 +4663,7 @@ fn a_resize_drops_a_redraw_held_for_the_region_it_replaced() {
     loopback.borrow_mut().holds_posts = true;
     client.present(window, 0, full_damage()).expect("posted");
     assert_eq!(client.answer_redraw(window), Ok(true), "held behind it");
-    client.resize(window, 8, 2, &SMALL).expect("posted");
+    client.resize(window, 8, 2, &SMALL, None).expect("posted");
 
     loopback.borrow_mut().serve_posted();
     client.reap_posted();
@@ -4446,7 +4690,7 @@ fn a_resize_while_hidden_keeps_the_window_hidden() {
     let mut events = WindowEvents::new(QueueSource::new([released.to_le_bytes()]));
     assert_eq!(events.try_wait(&mut client), Ok(Some(released)));
 
-    client.resize(window, 8, 2, &SURFACE).expect("posted");
+    client.resize(window, 8, 2, &SURFACE, None).expect("posted");
     assert!(client.is_hidden(window), "nobody can see it yet");
 }
 
@@ -4477,7 +4721,7 @@ fn a_reattach_refused_for_room_asks_for_the_paint_again() {
         .set_cursor(window, CursorShape::Text)
         .expect("fills the lane");
     assert_eq!(
-        client.resize(window, 8, 2, &SURFACE),
+        client.resize(window, 8, 2, &SURFACE, None),
         Err(Errno::WouldBlock)
     );
     assert!(client.content_released(window), "still released");
@@ -4505,7 +4749,7 @@ fn a_frame_is_drawn_only_once_the_previous_present_is_answered() {
     let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     loopback.borrow_mut().holds_posts = true;
-    let mut ring = crate::frames::FrameRing::new(&SURFACE);
+    let mut ring = crate::frames::FrameRing::new(&SURFACE, None);
     let mut drawn = Vec::new();
     let mut present = |client: &mut Client, ring: &mut crate::frames::FrameRing| {
         ring.present(client, window, full_damage(), |index, _| {
@@ -4530,7 +4774,7 @@ fn a_frame_is_drawn_only_once_the_previous_present_is_answered() {
     assert!(present(&mut client, &mut ring), "and goes then");
     loopback.borrow_mut().serve_posted();
     client.reap_posted();
-    ring.reset(&SURFACE);
+    ring.reset(&SURFACE, None);
     assert!(present(&mut client, &mut ring));
     assert_eq!(
         drawn,
@@ -4638,7 +4882,7 @@ fn a_posted_request_never_waits_on_the_session() {
     client
         .set_sizing(window, WindowSizing::Fixed)
         .expect("sizing");
-    client.resize(window, 20, 2, &BIG).expect("resize");
+    client.resize(window, 20, 2, &BIG, None).expect("resize");
     {
         let host = &loopback.borrow().host;
         assert!(host.cursors.is_empty() && host.tooltips.is_empty());
@@ -4730,7 +4974,7 @@ fn a_resize_refused_for_room_is_deferred_and_delivered_again() {
         .set_cursor(window, CursorShape::Text)
         .expect("fills the lane");
     assert_eq!(
-        client.resize(window, 20, 2, &BIG),
+        client.resize(window, 20, 2, &BIG, None),
         Err(Errno::WouldBlock),
         "refused for room"
     );
@@ -4765,7 +5009,7 @@ fn a_posted_resize_is_served_before_the_present_that_follows_it() {
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     loopback.borrow_mut().holds_posts = true;
 
-    client.resize(window, 20, 2, &BIG).expect("resize");
+    client.resize(window, 20, 2, &BIG, None).expect("resize");
     client
         .present(window, 1, one(DamageRect::full(&BIG)))
         .expect("the present at the new size is served after the resize");
@@ -4833,12 +5077,12 @@ fn a_resize_asked_while_another_is_unanswered_is_delivered_again() {
     };
     let mut events = WindowEvents::new(QueueSource::new([resized(8).to_le_bytes()]));
     assert_eq!(events.try_wait(&mut client), Ok(Some(resized(8))));
-    client.resize(window, 20, 2, &BIG).expect("posted");
+    client.resize(window, 20, 2, &BIG, None).expect("posted");
     let mut later = WindowEvents::new(QueueSource::new([resized(12).to_le_bytes()]));
     assert_eq!(later.try_wait(&mut client), Ok(Some(resized(12))));
     assert!(client.resize_in_flight(window), "the first is unanswered");
     assert_eq!(
-        client.resize(window, 20, 2, &BIG),
+        client.resize(window, 20, 2, &BIG, None),
         Err(Errno::WouldBlock),
         "no second resize is sent while the first is unanswered"
     );
@@ -8876,11 +9120,11 @@ fn rect(x: u32, y: u32, width_px: u32, height_px: u32) -> DamageRect {
 fn a_present_after_a_release_sends_the_whole_window() {
     let parts = DamageList::new(&[rect(2, 1, 1, 1), rect(0, 0, 1, 1)]).expect("two rectangles");
     assert_eq!(
-        presented_damage(&SURFACE, false, parts).map(|list| list.rects().to_vec()),
+        presented_damage(framed(&SURFACE), false, parts).map(|list| list.rects().to_vec()),
         Ok(parts.rects().to_vec())
     );
     assert_eq!(
-        presented_damage(&SURFACE, true, parts).map(|list| list.rects().to_vec()),
+        presented_damage(framed(&SURFACE), true, parts).map(|list| list.rects().to_vec()),
         Ok(alloc::vec![DamageRect::full(&SURFACE)])
     );
 }
@@ -10215,7 +10459,12 @@ fn a_host_that_has_not_implemented_the_layer_refuses_it() {
             Ok(())
         }
 
-        fn window_resized(&mut self, _window_id: u64, _surface: &DisplayMode) -> Result<(), Errno> {
+        fn window_resized(
+            &mut self,
+            _window_id: u64,
+            _surface: &DisplayMode,
+            _view: Option<&WindowView>,
+        ) -> Result<(), Errno> {
             Ok(())
         }
 

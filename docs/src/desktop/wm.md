@@ -311,6 +311,9 @@ and above it the windows' layers, each in two buffers the display allocated:
 - **Flattened** — a window translucent as a whole, baked as the software
   composite of its footprint over everything beneath it, the window
   included, opaque. It is re-baked wherever anything beneath it changes.
+- **View** — above an opaque window's free layer, the picture the window's
+  view carries (see [Window views](#window-views)), at the picture's own size,
+  shown enlarged over its placement: the engine does the enlarging.
 
 A flattened footprint and a frost's rectangle are *composite zones*: they
 never overlap, and never cross a frosted window of the base, so no composite
@@ -387,6 +390,36 @@ compositor also holds the rate the output scans at (`set_refresh_rate`), which
 every animation on it is paced by. A presenter that was replaced — the
 driver restarted under the session — is noticed by its buffers and plane no
 longer being held, and the layers are rebuilt.
+
+## Window views
+
+A client whose window shows a small picture enlarged — an emulator's screen —
+hands the compositor the picture rather than enlarging it itself: a `Resize`
+carrying a `WindowView` names the picture's size, a placement rectangle of the
+window, and a filter, and each frame then carries the picture's rows after the
+window's own. The session takes the view's damage apart from the window's
+(`FrameHost::view_presented`) and the compositor keeps the picture as
+presented, opaque, refusing a present shaped as any other picture.
+
+It is shown one of two ways, chosen each frame. Where the engine scales
+(`AccelCaps::hw_scaling`), the window is opaque and on a free layer of its own
+or promoted, the placement is clear of its rounded corners, no fade runs, and
+nothing composited reads the placement — no frost or flattened layer above it,
+no armed capture over it — it rides a **view layer** of its own directly above
+its window's, holding the picture at its own size and shown enlarged over the
+placement; the window's own pixels there are hidden and never enlarged into.
+Everywhere else it is enlarged into the window's content at the placement
+through the one frame scaler (`tairix_crt::screen::Screen`, sharp or smooth as
+the filter says), so the frame, captures, frosts, flattened layers and the
+taskbar's thumbnails (`Compositor::window_picture`) all read it as part of the
+window, and a present of the window's own pixels over the placement leaves the
+picture drawn over them. A view leaving its layer is drawn into the content
+before the frame composites. A stack whose line buffer the engine cannot fill
+gives up its view first; the view stays in software until the picture's size
+or its placement's changes. The HVS enlarges through its one
+Mitchell–Netravali kernel, so its `Sharp` and `Smooth` look alike. A view's
+picture, and every row enlarged from it, is overwritten before its memory is
+let go, as a window's content is.
 
 ## Screen capture
 

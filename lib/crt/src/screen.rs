@@ -170,6 +170,7 @@ impl Screen {
             return false;
         }
         fresh.resize(len, 0);
+        tairix_util::secret::wipe(&mut self.pixels);
         self.pixels = fresh;
         (self.width, self.height) = (width, height);
         self.drawn = None;
@@ -215,6 +216,17 @@ impl Screen {
 
     /// Forget what has been drawn: the next draw is whole.
     pub fn invalidate(&mut self) {
+        self.drawn = None;
+    }
+
+    /// Overwrite the frame and every row enlarged from it on the way to a
+    /// surface, keeping the frame's size: a frame is a picture of what the
+    /// user saw, and none is left in memory let go. The next draw is whole.
+    pub fn wipe(&mut self) {
+        tairix_util::secret::wipe(&mut self.pixels);
+        tairix_util::secret::wipe(&mut self.smoothed);
+        self.scaler.wipe();
+        self.changed = None;
         self.drawn = None;
     }
 
@@ -264,6 +276,24 @@ impl Screen {
             None => rows,
         });
     }
+}
+
+/// The first `len` bytes of `scratch`, grown to hold them where it is
+/// shorter. It never shrinks, so a wipe of it reaches every byte it held, and
+/// a buffer it outgrows is wiped before it goes.
+fn grown(scratch: &mut Vec<u8>, len: usize) -> Option<&mut [u8]> {
+    if scratch.len() < len {
+        if scratch.capacity() < len {
+            let mut fresh = Vec::new();
+            fresh.try_reserve_exact(len).ok()?;
+            fresh.resize(len, 0);
+            tairix_util::secret::wipe(scratch);
+            *scratch = fresh;
+        } else {
+            scratch.resize(len, 0);
+        }
+    }
+    scratch.get_mut(..len)
 }
 
 fn stride(width: u32) -> Option<usize> {
@@ -317,11 +347,7 @@ fn smooth(
         .ok()
         .and_then(|height| row_bytes.checked_mul(height))
         .ok_or(DrawError::Smooth(ResampleError::DestinationTooLarge))?;
-    scratch.clear();
-    if scratch.try_reserve_exact(len).is_err() {
-        return Err(DrawError::Smooth(ResampleError::OutOfMemory));
-    }
-    scratch.resize(len, 0);
+    let scratch = grown(scratch, len).ok_or(DrawError::Smooth(ResampleError::OutOfMemory))?;
     let whole = Target {
         x: 0,
         y: 0,

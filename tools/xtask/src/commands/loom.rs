@@ -143,6 +143,16 @@ pub const TARGETS: &[Target] = &[
                       never sleeps through the write it waits for and reads \
                       it, and of two writes one lands",
     },
+    Target {
+        package: "tairix-openmicro",
+        dir: "userland/apps/openmicro",
+        harness: "loom",
+        build: Build::Feature("loom"),
+        description: "a device lane's runner against the machine: every input \
+                      lands where it lands, no device is run past the time the \
+                      machine has said or a restored time, the machine never \
+                      waits for good, and a lane let go ends its runner",
+    },
 ];
 
 /// The cfg that swaps `core`'s atomics for the model checker's. Applied with

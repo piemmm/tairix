@@ -31,7 +31,7 @@ fn with_drive(disk: Surface) -> Machine {
     machine
         .fit_drive(Unit::Eight, &dos.bytes)
         .expect("a 16 KiB DOS");
-    if let Some(drive) = machine.drive_mut(Unit::Eight) {
+    if let Some(drive) = machine.drives().unit_mut(Unit::Eight) {
         drive.insert(disk);
     }
     run_for(&mut machine, 4 * Standard::Pal.clock());
@@ -59,10 +59,15 @@ fn played(disk: Surface, second: Option<&[u8]>, keys: &str) -> Machine {
                 .map(|(at, _)| at);
             match at.and_then(|at| keys[at..].chars().next()) {
                 Some('{') => {
-                    let drive = machine.drive_mut(Unit::Eight).expect("drive 8 is fitted");
-                    drive.eject();
+                    machine
+                        .drives()
+                        .unit_mut(Unit::Eight)
+                        .expect("drive 8 is fitted")
+                        .eject();
                     run_for(&mut machine, 100 * JIFFY);
-                    if let (Some(drive), Some(second)) = (machine.drive_mut(Unit::Eight), second) {
+                    if let (Some(drive), Some(second)) =
+                        (machine.drives().unit_mut(Unit::Eight), second)
+                    {
                         drive.insert(surface(second));
                     }
                     run_for(&mut machine, 100 * JIFFY);
@@ -140,23 +145,25 @@ fn the_talker_holds_each_bit_long_enough_for_a_stalled_controller() {
     // message's RETURN is taken and its error cleared.
     // The span under way when sampling starts is not counted whole.
     let mut spans: Vec<(bool, u64)> = Vec::new();
-    let drive_state = |machine: &Machine| {
+    let drive_state = |machine: &mut Machine| {
         machine
-            .drive(Unit::Eight)
+            .drives()
+            .unit(Unit::Eight)
             .map(|drive| (drive.holds().clock, drive.cycles()))
     };
-    let (mut held, _) = drive_state(&machine).unwrap_or_default();
+    let (mut held, _) = drive_state(&mut machine).unwrap_or_default();
     let mut since = None;
-    let error = |machine: &Machine| {
+    let error = |machine: &mut Machine| {
         machine
-            .drive(Unit::Eight)
+            .drives()
+            .unit(Unit::Eight)
             .map(|drive| drive.ram(super::ws::zp::ERROR))
     };
     let end = machine.cycles() + 120 * JIFFY;
-    while error(&machine) != Some(number::OK) {
+    while error(&mut machine) != Some(number::OK) {
         assert!(machine.cycles() < end, "the message was read");
         run_for(&mut machine, 4);
-        let (now, at) = drive_state(&machine).unwrap_or_default();
+        let (now, at) = drive_state(&mut machine).unwrap_or_default();
         if now != held {
             spans.extend(since.map(|since| (held, at - since)));
             (held, since) = (now, Some(at));
@@ -185,7 +192,7 @@ fn the_talker_holds_each_bit_long_enough_for_a_stalled_controller() {
 fn the_talker_holds_its_acknowledge_long_enough_for_a_stalled_controller() {
     let mut machine = with_drive(Surface::blank());
     press(&mut machine, &[Key::LEFT_SHIFT], Key::HOME);
-    if let Some(drive) = machine.drive_mut(Unit::Eight) {
+    if let Some(drive) = machine.drives().unit_mut(Unit::Eight) {
         drive.monitor_io(true);
     }
     // The error channel, then a channel with nothing to send.
@@ -197,7 +204,7 @@ fn the_talker_holds_its_acknowledge_long_enough_for_a_stalled_controller() {
     let mut port: Vec<(u64, u8)> = Vec::new();
     for _ in 0..4000 {
         run_for(&mut machine, 500);
-        if let Some(drive) = machine.drive_mut(Unit::Eight) {
+        if let Some(drive) = machine.drives().unit_mut(Unit::Eight) {
             let writes = drive
                 .take_io_trace()
                 .filter(|access| access.write && access.addr & 0x1C0F == via1(reg::ORB));

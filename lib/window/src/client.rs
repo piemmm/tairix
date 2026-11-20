@@ -20,7 +20,9 @@ use core::fmt;
 use tairix_display::winframe::damage_in;
 
 use tairix_abi::desktop::DesktopInfo;
-use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode};
+use tairix_abi::driver::display::{
+    DamageList, DamageRect, DamageRects, DisplayMode, MAX_DAMAGE_RECTS,
+};
 use tairix_abi::fs::FileId;
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::reply::STATUS_REPLY_LEN;
@@ -35,7 +37,7 @@ use tairix_abi::window_ipc::{
     DocumentName, DragItems, DropOperation, HandOverOutcome, HandOverTarget, KeyboardMode,
     LandingStep, LayerDepth, NameList, ObjectIds, OpenTarget, PickPurpose, PointerAction,
     PreviewSubject, ScreensaverEntry, SystemTask, TerrainPlate, TooltipText, WallpaperPage,
-    WindowEvent, WindowRegion, WindowRequest, WindowTitle, CLIPBOARD_MAX_BYTES,
+    WindowEvent, WindowRegion, WindowRequest, WindowTitle, WindowView, CLIPBOARD_MAX_BYTES,
     DESKTOP_LAYER_MAX_PLATES, DROP_LANDING_MAX_WIRE_LEN, WINDOW_AUTHORISED_OUTPUT_REPLY_MAX,
     WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CONNECT_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
     WINDOW_DRAG_SPOT_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_HANDLE_REPLY_LEN,
@@ -402,12 +404,12 @@ pub fn retained_damage(
 /// [`DamageList::new`]'s, for a mode with no pixels.
 #[cfg(any(test, all(freestanding, feature = "rt")))]
 pub(crate) fn presented_damage(
-    mode: &DisplayMode,
+    framed: Framed,
     released: bool,
     damage: DamageList,
 ) -> Result<DamageList, Errno> {
     if released {
-        DamageList::new(&[DamageRect::full(mode)])
+        framed.whole()
     } else {
         Ok(damage)
     }
@@ -1233,12 +1235,18 @@ struct LastPresent {
     width_px: u32,
     /// Client height in pixels, as last created or resized.
     height_px: u32,
+    /// The width and height of the view its frames carry after its rows, as
+    /// last resized.
+    view: Option<(u32, u32)>,
     /// The frame index of the last accepted present, if the window has
     /// presented at all since it was created or resized.
     frame_index: Option<u32>,
     /// The extent the session last accepted, which a refused resize leaves
     /// the window at.
     accepted: (u32, u32),
+    /// The view the session last accepted, which a refused resize leaves the
+    /// window's frames carrying.
+    accepted_view: Option<(u32, u32)>,
     /// The newest geometry the session reported for the window.
     reported: Option<(u32, u32, WindowSizeState)>,
     /// A resize was asked while another was unanswered; the reported
@@ -1268,6 +1276,15 @@ enum Frames {
 }
 
 impl LastPresent {
+    /// What its frames hold.
+    const fn framed(&self) -> Framed {
+        Framed {
+            width_px: self.width_px,
+            height_px: self.height_px,
+            view: self.view,
+        }
+    }
+
     /// What the window is owed once a resize that had to wait may go: the
     /// newest size the session reported, to lay out at, or, for a re-attach
     /// of a window it never sized, its paint asked for again.
@@ -1684,8 +1701,10 @@ impl<T: WindowTransport> WindowClient<T> {
             owner,
             width_px: surface.width_px,
             height_px: surface.height_px,
+            view: None,
             frame_index: None,
             accepted: (surface.width_px, surface.height_px),
+            accepted_view: None,
             reported: None,
             deferred: false,
             frames: Frames::Mapped,
@@ -1760,9 +1779,9 @@ impl<T: WindowTransport> WindowClient<T> {
         let owed = self
             .record_mut(window_id)
             .filter(|record| record.owed_whole)
-            .map(|record| (record.width_px, record.height_px));
+            .map(|record| record.framed());
         let damage = match owed {
-            Some((width_px, height_px)) => whole(width_px, height_px)?,
+            Some(framed) => framed.whole()?,
             None => damage,
         };
         self.post_or_hold(
@@ -1884,6 +1903,7 @@ impl<T: WindowTransport> WindowClient<T> {
         shm_handle: u64,
         frame_count: u32,
         surface: &DisplayMode,
+        view: Option<&WindowView>,
     ) -> Result<(), Errno> {
         if self.resize_in_flight(window_id) {
             return Err(Errno::WouldBlock);
@@ -1897,6 +1917,7 @@ impl<T: WindowTransport> WindowClient<T> {
             height_px: surface.height_px,
             stride_bytes: surface.stride_bytes,
             format: surface.format,
+            view: view.copied(),
         };
         let posted = if self.waits_for_room() {
             Err(Errno::WouldBlock)
@@ -1925,6 +1946,9 @@ impl<T: WindowTransport> WindowClient<T> {
         // The old frames describe the old extent, so the remembered
         // present is stale until the app paints the new size.
         self.note_extent(window_id, surface.width_px, surface.height_px);
+        if let Some(record) = self.record_mut(window_id) {
+            record.view = view.map(|view| (view.width_px, view.height_px));
+        }
         Ok(())
     }
 
@@ -3027,7 +3051,7 @@ impl<T: WindowTransport> WindowClient<T> {
         let (Frames::Mapped, Some(frame_index)) = (record.frames, record.frame_index) else {
             return Ok(false);
         };
-        let damage = whole(record.width_px, record.height_px)?;
+        let damage = record.framed().whole()?;
         self.post_or_hold(
             window_id,
             Asked::Present(frame_index, damage),
@@ -3174,9 +3198,7 @@ impl<T: WindowTransport> WindowClient<T> {
         // than when a held request is posted.
         let len = asked.request(window_id).encode(&mut self.frame)?;
         if kind.supersedes() {
-            let extent = self
-                .record_mut(window_id)
-                .map(|record| (record.width_px, record.height_px));
+            let extent = self.record_mut(window_id).map(|record| record.framed());
             if let Some(posting) = self
                 .posted
                 .iter_mut()
@@ -3511,9 +3533,11 @@ impl<T: WindowTransport> WindowClient<T> {
             .map_or_else(WindowSizeState::default, |(.., state)| state);
         let kept = if answer.is_ok() {
             record.accepted = (record.width_px, record.height_px);
+            record.accepted_view = record.view;
             None
         } else {
             (record.width_px, record.height_px) = record.accepted;
+            record.view = record.accepted_view;
             record.frame_index = None;
             Some(WindowEvent::Resized {
                 window_id: posting.window_id,
@@ -3717,13 +3741,80 @@ fn kept(frame: &[u8]) -> Result<Vec<u8>, Errno> {
 }
 
 /// Damage naming the whole of a `width_px` × `height_px` window.
-fn whole(width_px: u32, height_px: u32) -> Result<DamageList, Errno> {
-    DamageList::new(&[DamageRect {
-        x: 0,
-        y: 0,
-        width_px,
-        height_px,
-    }])
+/// What a window's frames hold: its own rows, and the rows of the view they
+/// carry after them, if they carry one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Framed {
+    /// The window's width in pixels.
+    pub(crate) width_px: u32,
+    /// Its height, the rows a view's follow.
+    pub(crate) height_px: u32,
+    /// The view's width and height.
+    pub(crate) view: Option<(u32, u32)>,
+}
+
+impl Framed {
+    /// The whole of what the frames hold: the window's rows and the view's.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for a window or a view with no area.
+    pub(crate) fn whole(self) -> Result<DamageList, Errno> {
+        let window = DamageRect {
+            x: 0,
+            y: 0,
+            width_px: self.width_px,
+            height_px: self.height_px,
+        };
+        match self.view_rect() {
+            Some(view) => DamageList::new(&[window, view]),
+            None => DamageList::new(&[window]),
+        }
+    }
+
+    /// The view's rows in a frame.
+    const fn view_rect(self) -> Option<DamageRect> {
+        match self.view {
+            Some((width_px, height_px)) => Some(DamageRect {
+                x: 0,
+                y: self.height_px,
+                width_px,
+                height_px,
+            }),
+            None => None,
+        }
+    }
+
+    /// `rects` of a frame fitted to one present's list: the window's and the
+    /// view's each fitted on their own, so none is merged across the rows
+    /// where the two meet, which the session would refuse. `None` when
+    /// nothing is left to name.
+    pub(crate) fn fitted(
+        self,
+        rects: impl IntoIterator<Item = DamageRect> + Clone,
+    ) -> Option<DamageList> {
+        const HALF: usize = MAX_DAMAGE_RECTS / 2;
+        if self.view.is_none() {
+            return DamageList::fitted(rects);
+        }
+        let below = self.height_px;
+        let window =
+            DamageRects::<HALF>::fitted(rects.clone().into_iter().filter(|rect| rect.y < below));
+        let view = DamageRects::<HALF>::fitted(rects.into_iter().filter(|rect| rect.y >= below));
+        let mut parts = window
+            .iter()
+            .chain(view.iter())
+            .flat_map(DamageRects::rects)
+            .copied();
+        let first = parts.next()?;
+        let mut out = [first; MAX_DAMAGE_RECTS];
+        let mut count = 1;
+        for (slot, rect) in out.iter_mut().skip(1).zip(parts) {
+            *slot = rect;
+            count += 1;
+        }
+        DamageList::new(&out[..count]).ok()
+    }
 }
 
 /// The present `newer` held behind the present of frame `earlier`, held
@@ -3733,15 +3824,19 @@ fn whole(width_px: u32, height_px: u32) -> Result<DamageList, Errno> {
 fn merged_present(
     (frame, damage): (u32, DamageList),
     newer: Asked,
-    extent: Option<(u32, u32)>,
+    extent: Option<Framed>,
 ) -> Asked {
     let Asked::Present(newer_frame, newer_damage) = newer else {
         return newer;
     };
     let both = if newer_frame == frame {
-        DamageList::fitted(damage.rects().iter().chain(newer_damage.rects()).copied())
+        let rects = damage.rects().iter().chain(newer_damage.rects()).copied();
+        match extent {
+            Some(framed) => framed.fitted(rects),
+            None => DamageList::fitted(rects),
+        }
     } else {
-        extent.and_then(|(width_px, height_px)| whole(width_px, height_px).ok())
+        extent.and_then(|framed| framed.whole().ok())
     };
     Asked::Present(newer_frame, both.unwrap_or(newer_damage))
 }

@@ -39,7 +39,8 @@ call; this page is what the parts are for and the rules they share.
   once, and two alike rows blend as either, so a screen drawing each line twice
   costs about half. The asset resampler stays exact and runs once per
   asset; this one costs well under 2 ns a pixel (`cargo xtask bench --filter
-  sharp`), most of its pixels copies.
+  sharp`), most of its pixels copies. `wipe` overwrites the rows it holds
+  enlarged, as does a new pair of sizes the rows it replaces.
 - **Meshes in depth** — `mesh` and `view`: triangles scan-converted against a
   depth buffer through a perspective, as a GPU draws them. WinterSun's 3D view
   is drawn through these, and nothing else in the tree needs a second

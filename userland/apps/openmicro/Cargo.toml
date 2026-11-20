@@ -54,6 +54,19 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The one DFS on-disc format: the catalogue the DFS ROM and the blank and
 # scenario discs are laid out by, and how an SSD or DSD holds its sides.
 tairix-dfs = { path = "../../../lib/dfs", version = "=0.0.0" }
+# The locks a device run ahead on its own thread is shared through, and, in
+# the freestanding `Run`, `_start`, the allocator, the files, the wait-set and
+# the worker desks the files and the settings are served on.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The model checker the lane's runner protocol is driven under; only the
+# `loom` feature links it.
+loom = { version = "0.7", optional = true }
+
+[features]
+# `loom` builds `tests/loom.rs`, the models of a device lane: the lane over
+# loom's locks and threads in place of `lib/rt`'s. `cargo xtask loom` alone
+# turns it on.
+loom = ["dep:loom"]
 
 # BASIC II's keywords and tokens, which the BASIC ROM's tables are built from,
 # and the VDU codes and character set the MOS's are. The ROM sources are
@@ -71,9 +84,6 @@ path = "src/run.rs"
 
 # Everything only the freestanding `Run` binary links.
 [target.'cfg(target_os = "none")'.dependencies]
-# The runtime: `_start`, the allocator, the files, the wait-set and the worker
-# desks the files and the settings are served on.
-tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 # The window channel and the app shell.
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The library's store work and its windows.

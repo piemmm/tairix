@@ -20,7 +20,10 @@ server and every app's client can never drift apart.
   newest frame and the damage since the last one shown, one per window
   however often it presents. `latch`, which the session calls once a desktop
   frame, hands each to the injected `FrameHost` (the compositor's side) as a
-  bounds-checked frame slice plus its damage — so a client presenting faster
+  bounds-checked frame slice plus its damage — the window's rows through
+  `window_presented` and, for a window whose `Resize` carried a
+  `WindowView`, the picture's rows after them through `view_presented`, a
+  rectangle lying in neither refused — so a client presenting faster
   than the desktop draws costs one conversion a frame, and the desktop's frame
   work never waits on a present. A present to a window holding no unshown
   frame is answered as it is served; one replacing a frame not yet shown is

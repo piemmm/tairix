@@ -12,11 +12,12 @@ mod envelope;
 mod filter;
 mod wave;
 
-use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_util::mathf;
 
+use crate::machine::lane::Device;
 use crate::snapshot;
 use dac::Tables;
 use envelope::Envelope;
@@ -185,17 +186,57 @@ snapshot::fields!(
     r | s.now == r.clock() && u64::from(s.summed) < CYCLES_PER_SAMPLE
 );
 
-/// A SID.
-#[derive(Clone, Debug)]
+/// What the chip's sound comes from: its voices, the filter and the output
+/// stage, clocked a cycle at a time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Voices {
+    /// The cycle the chip has been clocked to.
+    now: u64,
+    waves: [Wave; 3],
+    envelopes: [Envelope; 3],
+    filter: Filter,
+    output: Output,
+    /// The sample being taken: its sum and the cycles summed.
+    sum: f64,
+    summed: u8,
+}
+
+/// What the machine does to its SID's voices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidInput {
+    /// A write of `value` to `register` (its low five bits).
+    Write {
+        /// The register.
+        register: u8,
+        /// The value.
+        value: u8,
+    },
+    /// RES: the registers cleared and the envelopes released.
+    Reset,
+}
+
+/// Machine cycles a runner clocks the chip by at a time: how long the machine
+/// waits at most for a runner to give way.
+const PIECE: u64 = 256;
+
+/// A SID's voices, filter and output stage, and the sound they make: the part
+/// of the chip a thread of its own may clock.
+#[derive(Debug)]
 pub struct Sid {
-    tables: Rc<ModelTables>,
+    tables: Arc<ModelTables>,
     clock: u64,
     rates: OutputRates,
-    state: SidState,
+    model: Model,
+    voices: Voices,
+    /// Samples made since the machine last took them, and how many more may
+    /// be kept before it takes them.
+    audio: Vec<f32>,
+    room: usize,
 }
 
 impl Sid {
-    /// A `model` chip after reset, on a machine clocked at `clock`.
+    /// A `model` chip after reset, on a machine clocked at `clock`, keeping
+    /// no sound.
     #[must_use]
     pub fn new(model: Model, clock: u64) -> Self {
         let tables = ModelTables {
@@ -205,99 +246,149 @@ impl Sid {
         let mut filter = Filter::new();
         filter.write_cutoff_low(0, &tables.cutoff, clock);
         Self {
-            tables: Rc::new(tables),
+            tables: Arc::new(tables),
             clock,
             rates: OutputRates::at(clock),
-            state: SidState {
-                model,
+            model,
+            voices: Voices {
                 now: 0,
                 waves: [Wave::new(); 3],
                 envelopes: [Envelope::new(); 3],
                 filter,
                 output: Output::new(),
-                bus: 0,
-                bus_life: 0,
-                pot_inputs: [0xFF; 2],
-                pots: [0xFF; 2],
                 sum: 0.0,
                 summed: 0,
             },
+            audio: Vec::new(),
+            room: 0,
         }
     }
 
     /// Which chip it is.
     #[must_use]
     pub const fn model(&self) -> Model {
-        self.state.model
+        self.model
     }
 
-    /// Everything the chip holds.
+    /// Everything the chip holds, its data bus and paddles as `port` holds
+    /// them, as a snapshot records it.
     #[must_use]
-    pub const fn state(&self) -> &SidState {
-        &self.state
+    pub fn state(&self, port: &mut SidPort) -> SidState {
+        let v = &self.voices;
+        port.sample(v.now);
+        let bus_life = port.fades_at.saturating_sub(v.now);
+        let (bus, bus_life) = match u32::try_from(bus_life) {
+            Ok(life) if life > 0 => (port.bus, life),
+            _ => (0, 0),
+        };
+        SidState {
+            model: self.model,
+            now: v.now,
+            waves: v.waves,
+            envelopes: v.envelopes,
+            filter: v.filter,
+            output: v.output,
+            bus,
+            bus_life,
+            pot_inputs: port.pot_inputs,
+            pots: port.pots,
+            sum: v.sum,
+            summed: v.summed,
+        }
     }
 
-    /// Take back a state of this chip, its filter tuned again from the
-    /// registers; a state of the other chip is refused.
+    /// This chip as `state` holds it, its filter tuned again from the
+    /// registers, with the port it was read through; a state of the other
+    /// chip is refused. The sound not yet taken and what may be kept go with
+    /// the chip it replaces.
     ///
     /// # Errors
     ///
     /// [`snapshot::SnapshotError::Model`] for the other chip's state.
-    pub fn restore(&mut self, state: SidState) -> Result<(), snapshot::SnapshotError> {
-        if state.model.number() != self.state.model.number() {
+    pub fn restored(&self, state: &SidState) -> Result<(Self, SidPort), snapshot::SnapshotError> {
+        if state.model.number() != self.model.number() {
             return Err(snapshot::SnapshotError::Model);
         }
-        self.state = state;
-        self.state.filter.retune(&self.tables.cutoff, self.clock);
-        Ok(())
+        let mut voices = Voices {
+            now: state.now,
+            waves: state.waves,
+            envelopes: state.envelopes,
+            filter: state.filter,
+            output: state.output,
+            sum: state.sum,
+            summed: state.summed,
+        };
+        voices.filter.retune(&self.tables.cutoff, self.clock);
+        let chip = Self {
+            tables: Arc::clone(&self.tables),
+            clock: self.clock,
+            rates: self.rates,
+            model: self.model,
+            voices,
+            audio: Vec::new(),
+            room: self.room,
+        };
+        let port = SidPort {
+            model: self.model,
+            bus: state.bus,
+            fades_at: state.now.saturating_add(u64::from(state.bus_life)),
+            pot_inputs: state.pot_inputs,
+            pots: state.pots,
+            sampled_to: state.now,
+        };
+        Ok((chip, port))
     }
 
     /// RES at cycle `now`: the registers cleared and the envelopes
     /// released; the oscillators and envelope counters keep their values.
-    pub fn reset(&mut self, now: u64, audio: &mut Vec<f32>, capacity: usize) {
-        self.advance(now, audio, capacity);
-        for wave in &mut self.state.waves {
+    fn reset(&mut self, now: u64) {
+        self.advance(now);
+        let v = &mut self.voices;
+        for wave in &mut v.waves {
             wave.reset();
         }
-        for envelope in &mut self.state.envelopes {
+        for envelope in &mut v.envelopes {
             envelope.reset();
         }
         let mut filter = Filter::new();
         filter.write_cutoff_low(0, &self.tables.cutoff, self.clock);
-        self.state.filter = filter;
+        v.filter = filter;
     }
 
-    /// The paddles at `x` and `y`, from 0 to 255.
-    pub const fn set_pots(&mut self, x: u8, y: u8) {
-        self.state.pot_inputs = [x, y];
+    /// Keep up to `room` more samples before the machine next takes them.
+    pub const fn keep(&mut self, room: usize) {
+        self.room = room;
     }
 
-    /// Clock the chip up to cycle `to`, each sample finished pushed to
-    /// `audio` while it holds fewer than `capacity`.
-    pub fn advance(&mut self, to: u64, audio: &mut Vec<f32>, capacity: usize) {
-        while self.state.now < to {
-            if self.state.now.is_multiple_of(POT_PERIOD) {
-                self.state.pots = self.state.pot_inputs;
-            }
-            self.state.sum += self.clock_cycle();
-            self.state.summed += 1;
-            if u64::from(self.state.summed) == CYCLES_PER_SAMPLE {
-                if audio.len() < capacity {
-                    let mean = self.state.sum / f64::from(self.state.summed);
-                    audio.push(mathf::single(mean / FULL_SCALE));
+    /// Move the samples made since last asked to the end of `into`.
+    pub fn take_audio(&mut self, into: &mut Vec<f32>) {
+        into.append(&mut self.audio);
+    }
+
+    /// Clock the chip up to cycle `to`, each sample finished kept while there
+    /// is room for it.
+    pub fn advance(&mut self, to: u64) {
+        while self.voices.now < to {
+            self.voices.sum += self.clock_cycle();
+            self.voices.summed += 1;
+            if u64::from(self.voices.summed) == CYCLES_PER_SAMPLE {
+                if self.room > 0 {
+                    let mean = self.voices.sum / f64::from(self.voices.summed);
+                    self.audio.push(mathf::single(mean / FULL_SCALE));
+                    self.room -= 1;
                 }
-                self.state.sum = 0.0;
-                self.state.summed = 0;
+                self.voices.sum = 0.0;
+                self.voices.summed = 0;
             }
-            self.state.now += 1;
+            self.voices.now += 1;
         }
     }
 
     /// One cycle: the output stage's level after it.
     fn clock_cycle(&mut self) -> f64 {
-        let model = self.state.model;
+        let model = self.model;
         let tables = &self.tables;
-        let s = &mut self.state;
+        let s = &mut self.voices;
         for envelope in &mut s.envelopes {
             envelope.clock();
         }
@@ -327,47 +418,27 @@ impl Sid {
             let envelope = tables.dac.envelope[usize::from(s.envelopes[voice].output())];
             (wave - zero) * envelope + dc
         });
-        if s.bus_life != 0 {
-            s.bus_life -= 1;
-            if s.bus_life == 0 {
-                s.bus = 0;
-            }
-        }
         let mixed = s.filter.clock(voices, model.mixer_dc());
         s.output.clock(mixed, self.rates)
     }
 
-    /// The CPU reads `register` (its low five bits) in cycle `now`.
-    pub fn read(&mut self, now: u64, register: u8, audio: &mut Vec<f32>, capacity: usize) -> u8 {
-        self.advance(now, audio, capacity);
-        let s = &mut self.state;
-        let value = match register & 0x1F {
-            reg::POT_X => s.pots[0],
-            reg::POT_Y => s.pots[1],
-            reg::OSC3 => s.waves[2].osc3(),
-            reg::ENV3 => s.envelopes[2].env3(),
-            _ => s.bus,
-        };
-        s.bus = value;
-        s.bus_life = s.model.bus_life();
-        value
+    /// What a read of `register` finds of voice 3 once the chip is clocked
+    /// to the read: its waveform's top eight bits at OSC3, its envelope at
+    /// ENV3; `None` for any other register.
+    #[must_use]
+    pub fn voice3(&self, register: u8) -> Option<u8> {
+        match register & 0x1F {
+            reg::OSC3 => Some(self.voices.waves[2].osc3()),
+            reg::ENV3 => Some(self.voices.envelopes[2].env3()),
+            _ => None,
+        }
     }
 
-    /// The CPU writes `value` to `register` (its low five bits) in cycle
-    /// `now`.
-    pub fn write(
-        &mut self,
-        now: u64,
-        register: u8,
-        value: u8,
-        audio: &mut Vec<f32>,
-        capacity: usize,
-    ) {
-        self.advance(now, audio, capacity);
-        let (tables, clock) = (&self.tables, self.clock);
-        let s = &mut self.state;
-        s.bus = value;
-        s.bus_life = s.model.bus_life();
+    /// A write of `value` to `register` (its low five bits) in cycle `now`.
+    fn write(&mut self, now: u64, register: u8, value: u8) {
+        self.advance(now);
+        let (tables, clock, model) = (&self.tables, self.clock, self.model);
+        let s = &mut self.voices;
         let register = register & 0x1F;
         if register < 3 * reg::VOICE {
             let voice = usize::from(register / reg::VOICE);
@@ -382,7 +453,7 @@ impl Sid {
                     wave.width = (wave.width & 0x00FF) | (u16::from(value & 0x0F) << 8);
                 }
                 reg::CONTROL => {
-                    wave.write_control(s.model, value);
+                    wave.write_control(model, value);
                     envelope.write_control(value);
                 }
                 reg::ATTACK_DECAY => envelope.write_attack_decay(value),
@@ -397,6 +468,107 @@ impl Sid {
             reg::MODE_VOLUME => s.filter.write_mode_volume(value),
             _ => {}
         }
+    }
+}
+
+impl Device for Sid {
+    type Input = SidInput;
+
+    fn catch_up(&mut self, to: u64) {
+        self.advance(to);
+    }
+
+    fn run_ahead(&mut self, limit: u64) -> bool {
+        if self.voices.now >= limit {
+            return false;
+        }
+        self.advance(limit.min(self.voices.now + PIECE));
+        true
+    }
+
+    fn take(&mut self, at: u64, input: SidInput) {
+        match input {
+            SidInput::Write { register, value } => self.write(at, register, value),
+            SidInput::Reset => self.reset(at),
+        }
+    }
+}
+
+/// The chip's data bus and its paddle readings: what a read finds that no
+/// sound depends on, kept with the machine so such a read waits on no thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SidPort {
+    model: Model,
+    /// The last value on the chip's data bus, and the cycle from which it
+    /// reads as nothing.
+    bus: u8,
+    fades_at: u64,
+    /// The paddles' positions, and the readings last taken of them.
+    pot_inputs: [u8; 2],
+    pots: [u8; 2],
+    /// The cycle up to which the readings have been taken.
+    sampled_to: u64,
+}
+
+impl SidPort {
+    /// A `model` chip's port after power-on: nothing on the bus, the
+    /// paddles pulled high.
+    #[must_use]
+    pub const fn new(model: Model) -> Self {
+        Self {
+            model,
+            bus: 0,
+            fades_at: 0,
+            pot_inputs: [0xFF; 2],
+            pots: [0xFF; 2],
+            sampled_to: 0,
+        }
+    }
+
+    /// Which chip it is.
+    #[must_use]
+    pub const fn model(&self) -> Model {
+        self.model
+    }
+
+    /// The paddles read at every multiple of [`POT_PERIOD`] before `now`.
+    fn sample(&mut self, now: u64) {
+        if now <= self.sampled_to {
+            return;
+        }
+        if self.sampled_to.next_multiple_of(POT_PERIOD) < now {
+            self.pots = self.pot_inputs;
+        }
+        self.sampled_to = now;
+    }
+
+    /// The paddles at `x` and `y` from cycle `now`, from 0 to 255.
+    pub fn set_pots(&mut self, now: u64, x: u8, y: u8) {
+        self.sample(now);
+        self.pot_inputs = [x, y];
+    }
+
+    /// What a read of `register` (its low five bits) in cycle `now` finds,
+    /// but for voice 3's registers: a paddle's reading, or the data bus.
+    pub fn read(&mut self, now: u64, register: u8) -> u8 {
+        match register & 0x1F {
+            reg::POT_X => {
+                self.sample(now);
+                self.pots[0]
+            }
+            reg::POT_Y => {
+                self.sample(now);
+                self.pots[1]
+            }
+            _ if now < self.fades_at => self.bus,
+            _ => 0,
+        }
+    }
+
+    /// `value` left on the data bus by an access in cycle `now`.
+    pub fn latch(&mut self, now: u64, value: u8) {
+        self.bus = value;
+        self.fades_at = now.saturating_add(u64::from(self.model.bus_life()));
     }
 }
 

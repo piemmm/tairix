@@ -2950,10 +2950,14 @@ pub enum WindowRequest {
         width_px: u32,
         /// New window height in pixels; never zero.
         height_px: u32,
-        /// Bytes between consecutive scanlines; at least one scanline.
+        /// Bytes between consecutive scanlines; at least one scanline, of
+        /// the window or of its view.
         stride_bytes: u32,
         /// Pixel encoding of the new frames.
         format: DisplayFormat,
+        /// The picture each frame carries after the window's own rows, if
+        /// it carries one.
+        view: Option<WindowView>,
     },
     /// Retitle window `window_id`, replacing the title given at
     /// [`Self::Create`] with `title`.
@@ -4186,9 +4190,13 @@ const SURFACE_ID_OFFSET: usize = FRAME_LAYOUT_END;
 /// One past the surface prologue every surface-opening request carries.
 const SURFACE_PROLOGUE_END: usize = SURFACE_ID_OFFSET + 8;
 
+/// Byte offset of the view a [`WindowRequest::Resize`] carries after the
+/// frame layout: whether there is one, its width and height, its
+/// placement's four fields, then its filter.
+const RESIZE_VIEW_AT: usize = FRAME_LAYOUT_END;
 /// Encoded size of a [`WindowRequest::Resize`]: the header, the window id,
-/// the shared-memory handle, and the shared frame-layout block.
-const RESIZE_WIRE_LEN: usize = FRAME_LAYOUT_END;
+/// the shared-memory handle, the shared frame-layout block and the view.
+const RESIZE_WIRE_LEN: usize = RESIZE_VIEW_AT + 26;
 /// Encoded size of a [`WindowRequest::SetBackdropBlur`]: the header, the
 /// window id, and the radius.
 const SET_BACKDROP_BLUR_WIRE_LEN: usize = 18;
@@ -4821,6 +4829,14 @@ impl WindowRequest {
             {
                 Err(Errno::OutOfRange)
             }
+            Self::Resize {
+                width_px,
+                height_px,
+                stride_bytes,
+                format,
+                view: Some(view),
+                ..
+            } => view.check_in(width_px, height_px, stride_bytes, format),
             _ => Ok(()),
         }
     }
@@ -5208,6 +5224,7 @@ impl WindowRequest {
             height_px,
             stride_bytes,
             format,
+            view,
         } = *self
         else {
             return;
@@ -5222,6 +5239,17 @@ impl WindowRequest {
             format,
         }
         .write_to(out);
+        if let Some(view) = view {
+            let at = RESIZE_VIEW_AT;
+            out[at] = 1;
+            put_u32(out, at + 1, view.width_px);
+            put_u32(out, at + 5, view.height_px);
+            put_u32(out, at + 9, view.placement.x);
+            put_u32(out, at + 13, view.placement.y);
+            put_u32(out, at + 17, view.placement.width_px);
+            put_u32(out, at + 21, view.placement.height_px);
+            out[at + 25] = view.filter.as_u8();
+        }
     }
 
     /// The surface, parent and placement a popup or a tool window opens
@@ -5583,6 +5611,15 @@ fn read_resize(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     let window_id = nonzero_id(read_u64(bytes, 8))?;
     let shm_handle = read_u64(bytes, 16);
     let layout = read_frame_layout(bytes)?;
+    let view = read_view(bytes)?;
+    if let Some(view) = view {
+        view.check_in(
+            layout.width_px,
+            layout.height_px,
+            layout.stride_bytes,
+            layout.format,
+        )?;
+    }
     Ok(WindowRequest::Resize {
         window_id,
         shm_handle,
@@ -5591,7 +5628,30 @@ fn read_resize(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         height_px: layout.height_px,
         stride_bytes: layout.stride_bytes,
         format: layout.format,
+        view,
     })
+}
+
+/// Decode the view a [`WindowRequest::Resize`] carries, if it carries one;
+/// an absent view's bytes are required zero.
+fn read_view(bytes: &[u8]) -> Result<Option<WindowView>, Errno> {
+    let at = RESIZE_VIEW_AT;
+    match bytes[at] {
+        0 if bytes[at + 1..RESIZE_WIRE_LEN].iter().all(|&b| b == 0) => Ok(None),
+        0 => Err(Errno::BadMagic),
+        1 => Ok(Some(WindowView {
+            width_px: read_u32(bytes, at + 1),
+            height_px: read_u32(bytes, at + 5),
+            placement: DamageRect {
+                x: read_u32(bytes, at + 9),
+                y: read_u32(bytes, at + 13),
+                width_px: read_u32(bytes, at + 17),
+                height_px: read_u32(bytes, at + 21),
+            },
+            filter: ViewFilter::from_u8(bytes[at + 25])?,
+        })),
+        _ => Err(Errno::OutOfRange),
+    }
 }
 
 /// Decode a [`WindowRequest::QueryScreensaver`] frame.
@@ -7034,6 +7094,90 @@ impl FrameLayout {
         put_u32(out, FRAME_LAYOUT_AT + 8, self.height_px);
         put_u32(out, FRAME_LAYOUT_AT + 12, self.stride_bytes);
         out[FRAME_LAYOUT_AT + 16] = self.format.as_u8();
+    }
+}
+
+/// How the compositor resamples a view where it scales one in software; a
+/// display engine scales a view through its own filter.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ViewFilter {
+    /// Each source pixel a block of whole pixels, blended only where blocks
+    /// meet.
+    #[default]
+    Sharp = 0,
+    /// Bilinear throughout.
+    Smooth = 1,
+}
+
+impl ViewFilter {
+    /// Its wire byte.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// The filter `value` names.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for a byte naming none.
+    pub const fn from_u8(value: u8) -> Result<Self, Errno> {
+        match value {
+            0 => Ok(Self::Sharp),
+            1 => Ok(Self::Smooth),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// A picture a window's frames carry after the window's own rows, at a size
+/// of its own and at the frames' stride, shown scaled into `placement`: the
+/// way a client hands the compositor a picture to enlarge rather than
+/// enlarging it itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowView {
+    /// The picture's width in pixels; never zero.
+    pub width_px: u32,
+    /// Its height in pixels; never zero.
+    pub height_px: u32,
+    /// Where the window shows it, in the window's pixels: never empty and
+    /// never past the window.
+    pub placement: DamageRect,
+    /// How it is resampled in software.
+    pub filter: ViewFilter,
+}
+
+impl WindowView {
+    /// Whether it can be carried by frames of a `width_px` × `height_px`
+    /// window at `stride_bytes` in `format`: a picture, a placement within
+    /// the window, a stride holding its rows, and rows counted in a `u32`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for any of those it is not.
+    pub fn check_in(
+        &self,
+        width_px: u32,
+        height_px: u32,
+        stride_bytes: u32,
+        format: DisplayFormat,
+    ) -> Result<(), Errno> {
+        let within = |at: u32, len: u32, extent: u32| {
+            len != 0 && u64::from(at) + u64::from(len) <= u64::from(extent)
+        };
+        let row = u64::from(self.width_px) * u64::from(format.bytes_per_pixel());
+        let fits = self.width_px != 0
+            && self.height_px != 0
+            && within(self.placement.x, self.placement.width_px, width_px)
+            && within(self.placement.y, self.placement.height_px, height_px)
+            && row <= u64::from(stride_bytes)
+            && height_px.checked_add(self.height_px).is_some();
+        if fits {
+            Ok(())
+        } else {
+            Err(Errno::LengthOutOfRange)
+        }
     }
 }
 
@@ -11721,6 +11865,7 @@ mod tests {
         DROP_LANDING_NAME_OFFSET, DROP_LANDING_STEP_OFFSET, LANDING_MAKING,
     };
     use super::{PreviewOutcome, PreviewSubject, SystemTask};
+    use super::{ViewFilter, WindowView, RESIZE_VIEW_AT};
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageList, DamageRect, DisplayFormat, MAX_DAMAGE_RECTS};
     use crate::elevate::{ElevateWords, ELEVATE_MAX_ARGS, ELEVATE_MAX_ARGV_BYTES};
@@ -12447,6 +12592,17 @@ mod tests {
             height_px: 480,
             stride_bytes: 2560,
             format: DisplayFormat::Bgra8888,
+            view: None,
+        });
+        visit(WindowRequest::Resize {
+            window_id: 3,
+            shm_handle: 11,
+            frame_count: 2,
+            width_px: 640,
+            height_px: 480,
+            stride_bytes: 3584,
+            format: DisplayFormat::Rgba8888,
+            view: Some(sample_view()),
         });
         visit(WindowRequest::SetSizing {
             window_id: 3,
@@ -14342,6 +14498,7 @@ mod tests {
             height_px: 480,
             stride_bytes: 2560,
             format: DisplayFormat::Bgra8888,
+            view: None,
         };
         // A zero window id is refused.
         let mut zero_id = base.frame();
@@ -14367,11 +14524,94 @@ mod tests {
             WindowRequest::from_bytes(&short_stride),
             Err(Errno::LengthOutOfRange)
         );
-        // A byte past the format at offset 40 is past the operation's own
-        // end, so the frame is over-long and refused.
+        // A byte past the view is past the operation's own end, so the
+        // frame is over-long and refused.
         assert_eq!(
             WindowRequest::from_bytes(&base.frame().over_long(1)),
             Err(Errno::BadMagic)
+        );
+        // An absent view's bytes are clean.
+        let mut dirty_view = base.frame();
+        dirty_view[RESIZE_VIEW_AT + 3] = 1;
+        assert_eq!(WindowRequest::from_bytes(&dirty_view), Err(Errno::BadMagic));
+        let mut unknown_presence = base.frame();
+        unknown_presence[RESIZE_VIEW_AT] = 2;
+        assert_eq!(
+            WindowRequest::from_bytes(&unknown_presence),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    /// A 896 × 600 picture shown in the top 640 × 428 of a 640 × 480 window.
+    fn sample_view() -> WindowView {
+        WindowView {
+            width_px: 896,
+            height_px: 600,
+            placement: DamageRect {
+                x: 0,
+                y: 0,
+                width_px: 640,
+                height_px: 428,
+            },
+            filter: ViewFilter::Smooth,
+        }
+    }
+
+    #[test]
+    fn a_resize_carries_its_view_and_refuses_one_the_frames_cannot() {
+        let resize = |view: WindowView, stride_bytes: u32| WindowRequest::Resize {
+            window_id: 3,
+            shm_handle: 11,
+            frame_count: 2,
+            width_px: 640,
+            height_px: 480,
+            stride_bytes,
+            format: DisplayFormat::Rgba8888,
+            view: Some(view),
+        };
+        let sent = resize(sample_view(), 3584);
+        assert_eq!(WindowRequest::from_bytes(&sent.frame()), Ok(sent));
+        let refused = |view: WindowView, stride_bytes: u32| {
+            let request = resize(view, stride_bytes);
+            let mut out = [0u8; WindowRequest::MAX_WIRE_LEN];
+            assert_eq!(
+                request.encode(&mut out),
+                Err(Errno::LengthOutOfRange),
+                "{view:?}"
+            );
+            // The same frame, forced onto the wire, is refused as well.
+            let mut forced = resize(sample_view(), 3584).frame();
+            let at = RESIZE_VIEW_AT;
+            forced[at + 1..at + 5].copy_from_slice(&view.width_px.to_le_bytes());
+            forced[at + 5..at + 9].copy_from_slice(&view.height_px.to_le_bytes());
+            forced[at + 9..at + 13].copy_from_slice(&view.placement.x.to_le_bytes());
+            forced[at + 13..at + 17].copy_from_slice(&view.placement.y.to_le_bytes());
+            forced[at + 17..at + 21].copy_from_slice(&view.placement.width_px.to_le_bytes());
+            forced[at + 21..at + 25].copy_from_slice(&view.placement.height_px.to_le_bytes());
+            forced[36..40].copy_from_slice(&stride_bytes.to_le_bytes());
+            assert_eq!(
+                WindowRequest::from_bytes(&forced),
+                Err(Errno::LengthOutOfRange),
+                "{view:?}"
+            );
+        };
+        let with = |change: fn(&mut WindowView)| {
+            let mut view = sample_view();
+            change(&mut view);
+            view
+        };
+        refused(with(|v| v.width_px = 0), 3584);
+        refused(with(|v| v.height_px = 0), 3584);
+        refused(with(|v| v.placement.width_px = 0), 3584);
+        refused(with(|v| v.placement.x = 1), 3584);
+        refused(with(|v| v.placement.y = 53), 3584);
+        refused(with(|v| v.height_px = u32::MAX), 3584);
+        refused(sample_view(), 3583);
+        let mut unknown_filter = sent.frame();
+        unknown_filter[RESIZE_VIEW_AT + 25] = 2;
+        assert_eq!(
+            WindowRequest::from_bytes(&unknown_filter),
+            Err(Errno::OutOfRange)
         );
     }
 

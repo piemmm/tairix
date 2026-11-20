@@ -22,6 +22,7 @@ use tairix_crypto::FINGERPRINT_LEN;
 
 use crate::cpu::{Bus, Cpu, CpuState};
 use crate::machine::canvas::DirtyRows;
+use crate::machine::lane::{Caught, Device, Lane, Spawner};
 use crate::machine::{IoAccess, LetterCase, Model, Monitor, RomError, Timing};
 use crate::media::c1541::Surface;
 use crate::media::crt::Crt;
@@ -34,7 +35,7 @@ use datasette::Datasette;
 use drive::{Drive, Lines, Unit};
 use keyboard::{Key, Keyboard, Keycap};
 use memory::{vic_character_offset, Chip, Memory, LOWER_CASE_SET};
-use sid::{Sid, SidState};
+use sid::{Sid, SidInput, SidPort, SidState};
 use vic::{Vic, VicMemory};
 
 /// The television standard a machine is built for.
@@ -274,6 +275,14 @@ const DRIVE_SLICE: u64 = 32;
 /// on to the end of the step it was in.
 const LONGEST_STEP: u64 = 7;
 
+/// Drive cycles a runner brings one drive on by at a time: how long the
+/// machine waits at most for it to give way.
+const DRIVE_PIECE: u64 = 128;
+
+/// Machine cycles between the times the machine tells its devices' runners
+/// how far it has run.
+const PUBLISH_EVERY: u64 = 256;
+
 /// The sections a snapshot keeps each drive in, device 8's first.
 const DRIVE_SECTIONS: [[u8; 4]; 2] = [*b"DRV8", *b"DRV9"];
 
@@ -327,8 +336,11 @@ struct Board {
     vic: Vic,
     cia1: Cia,
     cia2: Cia,
-    sid: Sid,
-    /// The SID's sound since it was last taken, and how much is kept.
+    /// The SID's voices, on a lane of their own, and its data bus and
+    /// paddles, which no sound depends on.
+    sid: Lane<Sid>,
+    sid_port: SidPort,
+    /// The SID's sound since it was last taken, and how much of it is kept.
     audio: Vec<f32>,
     audio_capacity: usize,
     keyboard: Keyboard,
@@ -336,8 +348,10 @@ struct Board {
     joysticks: [u8; 2],
     /// Each control port's paddles, X then Y.
     paddles: [[u8; 2]; 2],
-    /// Devices 8 and 9, where fitted.
-    drives: [Option<Drive>; 2],
+    /// Devices 8 and 9, where fitted, on a lane of their own; and whether
+    /// both are, when each turn of theirs ends at every access to CIA2.
+    drives: Lane<Drives>,
+    two_drives: bool,
     cartridge: Option<Cartridge>,
     datasette: Datasette,
     /// RESTORE, held, and the cycle its pulse lets NMI go.
@@ -349,25 +363,34 @@ struct Board {
     nmi: bool,
     /// The first cycle a CIA must be brought up to.
     next_event: u64,
+    /// The cycle the devices' runners are next told how far the machine has
+    /// run.
+    next_publish: u64,
     monitor: Monitor,
 }
 
 impl Board {
     fn new(config: Config, roms: Roms<'_>) -> Result<Self, RomError> {
         let standard = config.standard;
+        let mut sid = Sid::new(config.sid, standard.clock());
+        sid.keep(audio_capacity(standard));
+        let cia2 = Cia::new(config.cia(), standard.mains());
+        let drives = Drives::new(standard.clock(), held_by(&cia2));
         let mut board = Self {
             now: 0,
             memory: Memory::new(roms.basic, roms.kernal, roms.character)?,
             vic: Vic::new(standard.vic()),
             cia1: Cia::new(config.cia(), standard.mains()),
-            cia2: Cia::new(config.cia(), standard.mains()),
-            sid: Sid::new(config.sid, standard.clock()),
+            cia2,
+            sid: Lane::new(sid),
+            sid_port: SidPort::new(config.sid),
             audio: Vec::new(),
             audio_capacity: audio_capacity(standard),
             keyboard: Keyboard::new(),
             joysticks: [0; 2],
             paddles: [[0xFF; 2]; 2],
-            drives: [None, None],
+            drives: Lane::new(drives),
+            two_drives: false,
             cartridge: None,
             datasette: Datasette::new(standard.clock()),
             restore_held: false,
@@ -376,6 +399,7 @@ impl Board {
             irq: false,
             nmi: false,
             next_event: u64::MAX,
+            next_publish: PUBLISH_EVERY,
             monitor: Monitor::default(),
         };
         board.follow_port();
@@ -449,6 +473,9 @@ impl Board {
             self.cia2.advance(self.now);
             self.schedule();
         }
+        if self.now >= self.next_publish {
+            self.publish();
+        }
         self.irq = self.vic.irq() || self.cia1.irq();
         self.nmi = self.cia2.irq() || self.now < self.restore_until;
         self.sync_cartridge();
@@ -461,6 +488,21 @@ impl Board {
             bank,
             ultimax,
         });
+    }
+
+    /// Tell the devices' runners how far the machine has run.
+    fn publish(&mut self) {
+        self.sid.publish(self.now);
+        self.drives.publish(self.now);
+        self.next_publish = self.now + PUBLISH_EVERY;
+    }
+
+    /// The SID's sound up to now, moved to what the machine keeps of it.
+    fn collect_sound(&mut self) {
+        let Self {
+            sid, audio, now, ..
+        } = self;
+        sid.at(*now).take_audio(audio);
     }
 
     /// The expansion port's lines as the cartridge holds them now.
@@ -560,8 +602,14 @@ impl Board {
         match addr {
             io::VIC..io::SID => self.vic.read(register),
             io::SID..io::COLOUR => {
-                self.sid
-                    .read(self.now, register, &mut self.audio, self.audio_capacity)
+                let now = self.now;
+                let value = match register & 0x1F {
+                    sid::reg::OSC3 | sid::reg::ENV3 => self.sid.at(now).voice3(register),
+                    _ => None,
+                }
+                .unwrap_or_else(|| self.sid_port.read(now, register));
+                self.sid_port.latch(now, value);
+                value
             }
             io::COLOUR..io::CIA1 => self.memory.colour(addr) | self.vic.phi1() & 0xF0,
             io::CIA1..io::CIA2 => {
@@ -573,11 +621,13 @@ impl Board {
                 }
             }
             io::CIA2..io::IO1 => {
-                self.catch_up_drives();
                 let value = self.cia2.read(self.now, register);
                 if register & 0x0F == cia::reg::PRA {
-                    value & self.serial_inputs()
+                    value & serial_inputs(self.drives.at(self.now).lines())
                 } else {
+                    if self.two_drives {
+                        self.drives.post(self.now, BusEvent::Access);
+                    }
                     value
                 }
             }
@@ -605,13 +655,8 @@ impl Board {
         match addr {
             io::VIC..io::SID => self.vic.write(register, value),
             io::SID..io::COLOUR => {
-                self.sid.write(
-                    self.now,
-                    register,
-                    value,
-                    &mut self.audio,
-                    self.audio_capacity,
-                );
+                self.sid_port.latch(self.now, value);
+                self.sid.post(self.now, SidInput::Write { register, value });
             }
             io::COLOUR..io::CIA1 => self.memory.write_colour(addr, value),
             io::CIA1..io::CIA2 => {
@@ -620,9 +665,8 @@ impl Board {
                 self.route_paddles();
             }
             io::CIA2..io::IO1 => {
-                self.catch_up_drives();
                 self.cia2.write(self.now, register, value);
-                self.tell_drives();
+                self.drives.post(self.now, BusEvent::Held(self.holds()));
             }
             _ => {
                 if let Some(cartridge) = self.cartridge.as_mut() {
@@ -642,83 +686,9 @@ impl Board {
             .resolve(self.cia1.port_a() & !port2, self.cia1.port_b() & !port1)
     }
 
-    /// The serial bus lines the machine holds, each through an inverter
-    /// from CIA2's port A.
+    /// The serial bus lines the machine holds.
     fn holds(&self) -> Lines {
-        let driven = self.cia2.port_a();
-        Lines {
-            atn: driven & serial::ATN_OUT != 0,
-            clock: driven & serial::CLOCK_OUT != 0,
-            data: driven & serial::DATA_OUT != 0,
-        }
-    }
-
-    /// The lines everything on the bus but drive `skip` holds.
-    fn others(&self, skip: Option<usize>) -> Lines {
-        self.drives
-            .iter()
-            .enumerate()
-            .filter(|&(index, _)| Some(index) != skip)
-            .filter_map(|(_, drive)| drive.as_ref())
-            .fold(self.holds(), |lines, drive| lines.or(drive.holds()))
-    }
-
-    /// The serial bus's clock and data lines as CIA2 reads them, the rest of
-    /// its port untouched: each low while anything on the bus holds it.
-    fn serial_inputs(&self) -> u8 {
-        let lines = self.others(None);
-        let mut levels = !0;
-        if lines.clock {
-            levels &= !serial::CLOCK_IN;
-        }
-        if lines.data {
-            levels &= !serial::DATA_IN;
-        }
-        levels
-    }
-
-    /// The drive cycle machine cycle `cycle` falls in.
-    fn drive_cycle(&self, cycle: u64) -> u64 {
-        let clock = self.standard().clock();
-        let scaled = u128::from(cycle) * u128::from(drive::CLOCK) / u128::from(clock);
-        u64::try_from(scaled).unwrap_or(u64::MAX)
-    }
-
-    /// Bring the drives up to the machine's time, two taking turns so each
-    /// sees the other's lines.
-    fn catch_up_drives(&mut self) {
-        let target = self.drive_cycle(self.now);
-        let fitted = self.drives.iter().flatten().count();
-        loop {
-            let mut behind = false;
-            for index in 0..self.drives.len() {
-                let others = self.others(Some(index));
-                let Some(drive) = self.drives[index].as_mut() else {
-                    continue;
-                };
-                let until = if fitted > 1 {
-                    target.min(drive.cycles() + DRIVE_SLICE)
-                } else {
-                    target
-                };
-                drive.set_others(others);
-                drive.run_until(until);
-                behind |= drive.cycles() < target;
-            }
-            if !behind {
-                return;
-            }
-        }
-    }
-
-    /// Give each drive the lines the rest of the bus now holds.
-    fn tell_drives(&mut self) {
-        for index in 0..self.drives.len() {
-            let others = self.others(Some(index));
-            if let Some(drive) = self.drives[index].as_mut() {
-                drive.set_others(others);
-            }
-        }
+        held_by(&self.cia2)
     }
 
     /// Give the SID the paddles of the control port CIA1 switches to it;
@@ -735,7 +705,7 @@ impl Board {
             ],
             [false, false] => [0xFF; 2],
         };
-        self.sid.set_pots(x, y);
+        self.sid_port.set_pots(self.now, x, y);
     }
 
     /// Tell the VIC-II of any edge on the light pen input.
@@ -755,6 +725,210 @@ pub const PADDLE_CHANNELS: usize = 4;
 fn audio_capacity(standard: Standard) -> usize {
     let timing = standard.timing();
     usize::try_from(timing.clock() / timing.cycles_per_sample()).unwrap_or(usize::MAX)
+}
+
+/// The serial bus lines a machine holds, each through an inverter from
+/// `cia2`'s port A.
+fn held_by(cia2: &Cia) -> Lines {
+    let driven = cia2.port_a();
+    Lines {
+        atn: driven & serial::ATN_OUT != 0,
+        clock: driven & serial::CLOCK_OUT != 0,
+        data: driven & serial::DATA_OUT != 0,
+    }
+}
+
+/// The drive cycle machine cycle `cycle` falls in, on a machine clocked at
+/// `clock`.
+fn drive_cycle(clock: u64, cycle: u64) -> u64 {
+    let scaled = u128::from(cycle) * u128::from(drive::CLOCK) / u128::from(clock);
+    u64::try_from(scaled).unwrap_or(u64::MAX)
+}
+
+/// The serial bus's clock and data lines as CIA2 reads them, the rest of its
+/// port untouched: each low while anything on the bus holds it.
+fn serial_inputs(lines: Lines) -> u8 {
+    let mut levels = !0;
+    if lines.clock {
+        levels &= !serial::CLOCK_IN;
+    }
+    if lines.data {
+        levels &= !serial::DATA_IN;
+    }
+    levels
+}
+
+/// What the machine does on the serial bus, as its drives hear it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BusEvent {
+    /// A read of CIA2, which ends each of two drives' turns where it lands.
+    Access,
+    /// A write to CIA2, after which the machine holds these lines.
+    Held(Lines),
+}
+
+/// The drives on the serial bus, brought up behind the machine together, two
+/// taking turns of `DRIVE_SLICE` drive cycles so each sees what the other does
+/// to the bus.
+pub struct Drives {
+    /// The machine's clock, which drive time is scaled from.
+    clock: u64,
+    units: [Option<Drive>; 2],
+    /// The lines the machine holds, as it last told the drives.
+    machine: Lines,
+}
+
+impl Drives {
+    /// No drives yet, on a machine clocked at `clock` holding `machine`.
+    const fn new(clock: u64, machine: Lines) -> Self {
+        Self {
+            clock,
+            units: [None, None],
+            machine,
+        }
+    }
+
+    /// `unit`'s drive, if fitted.
+    #[must_use]
+    pub fn unit(&self, unit: Unit) -> Option<&Drive> {
+        self.units[unit.index()].as_ref()
+    }
+
+    /// `unit`'s drive, if fitted, to change its disk.
+    pub fn unit_mut(&mut self, unit: Unit) -> Option<&mut Drive> {
+        self.units[unit.index()].as_mut()
+    }
+
+    /// The serial bus's lines, as everything on it holds them.
+    #[must_use]
+    pub fn lines(&self) -> Lines {
+        self.others(None)
+    }
+
+    fn fitted(&self) -> usize {
+        self.units.iter().flatten().count()
+    }
+
+    /// The lines everything on the bus but drive `skip` holds.
+    fn others(&self, skip: Option<usize>) -> Lines {
+        self.units
+            .iter()
+            .enumerate()
+            .filter(|&(index, _)| Some(index) != skip)
+            .filter_map(|(_, drive)| drive.as_ref())
+            .fold(self.machine, |lines, drive| lines.or(drive.holds()))
+    }
+
+    /// Give each drive the lines the rest of the bus now holds.
+    fn tell(&mut self) {
+        for index in 0..self.units.len() {
+            let others = self.others(Some(index));
+            if let Some(drive) = self.units[index].as_mut() {
+                drive.set_others(others);
+            }
+        }
+    }
+
+    /// Bring the drives up to drive cycle `target`, two taking turns.
+    fn run_to(&mut self, target: u64) {
+        let fitted = self.fitted();
+        loop {
+            let mut behind = false;
+            for index in 0..self.units.len() {
+                let others = self.others(Some(index));
+                let Some(drive) = self.units[index].as_mut() else {
+                    continue;
+                };
+                let until = if fitted > 1 {
+                    target.min(drive.cycles() + DRIVE_SLICE)
+                } else {
+                    target
+                };
+                drive.set_others(others);
+                drive.run_until(until);
+                behind |= drive.cycles() < target;
+            }
+            if !behind {
+                return;
+            }
+        }
+    }
+
+    /// Fit `drive` as `unit`, run from power-on to machine cycle `now`; any
+    /// drive it replaces goes with its disk.
+    fn fit(&mut self, unit: Unit, mut drive: Drive, now: u64) {
+        drive.run_until(drive_cycle(self.clock, now));
+        self.units[unit.index()] = Some(drive);
+        self.tell();
+    }
+
+    /// Take `unit`'s drive away, handing back its disk.
+    fn remove(&mut self, unit: Unit) -> Option<Surface> {
+        let disk = self.units[unit.index()]
+            .take()
+            .and_then(|mut drive| drive.eject());
+        self.tell();
+        disk
+    }
+
+    /// RES through the serial bus, after which the machine holds `machine`.
+    fn reset(&mut self, machine: Lines) {
+        for drive in self.units.iter_mut().flatten() {
+            drive.reset();
+        }
+        self.machine = machine;
+        self.tell();
+    }
+}
+
+impl Device for Drives {
+    type Input = BusEvent;
+
+    fn catch_up(&mut self, to: u64) {
+        self.run_to(drive_cycle(self.clock, to));
+    }
+
+    fn run_ahead(&mut self, limit: u64) -> bool {
+        let target = drive_cycle(self.clock, limit);
+        if self.fitted() > 1 {
+            // Whole turns only, each as a catch-up past it would take it.
+            let short = self
+                .units
+                .iter()
+                .flatten()
+                .any(|drive| drive.cycles() + DRIVE_SLICE > target);
+            if short {
+                return false;
+            }
+            for index in 0..self.units.len() {
+                let others = self.others(Some(index));
+                if let Some(drive) = self.units[index].as_mut() {
+                    let until = drive.cycles() + DRIVE_SLICE;
+                    drive.set_others(others);
+                    drive.run_until(until);
+                }
+            }
+            return true;
+        }
+        let machine = self.machine;
+        let Some(drive) = self.units.iter_mut().flatten().next() else {
+            return false;
+        };
+        if drive.cycles() >= target {
+            return false;
+        }
+        let until = target.min(drive.cycles() + DRIVE_PIECE);
+        drive.set_others(machine);
+        drive.run_until(until);
+        true
+    }
+
+    fn take(&mut self, _: u64, event: BusEvent) {
+        if let BusEvent::Held(lines) = event {
+            self.machine = lines;
+            self.tell();
+        }
+    }
 }
 
 impl Bus for Board {
@@ -824,10 +998,15 @@ impl Machine {
             self.cpu.step(&mut self.board);
         }
         let board = &mut self.board;
-        board
-            .sid
-            .advance(board.now, &mut board.audio, board.audio_capacity);
-        board.catch_up_drives();
+        board.collect_sound();
+        drop(board.drives.at(board.now));
+    }
+
+    /// Run the SID and the drives each on a thread of its own, where
+    /// `spawner` can start one; the machine runs just the same either way.
+    pub fn spread(&mut self, spawner: &dyn Spawner) {
+        self.board.sid.spread(spawner);
+        self.board.drives.spread(spawner);
     }
 
     /// Fit `unit` with a 1541 running `dos`, switched on with the machine:
@@ -839,23 +1018,21 @@ impl Machine {
     ///
     /// [`RomError::BadSize`] for a DOS not 16 KiB.
     pub fn fit_drive(&mut self, unit: Unit, dos: &[u8]) -> Result<(), RomError> {
-        let mut drive = Drive::new(dos, unit)?;
+        let drive = Drive::new(dos, unit)?;
         let board = &mut self.board;
-        board.catch_up_drives();
-        drive.run_until(board.drive_cycle(board.now));
-        board.drives[unit.index()] = Some(drive);
-        board.tell_drives();
+        let now = board.now;
+        let mut drives = board.drives.at(now);
+        drives.fit(unit, drive, now);
+        board.two_drives = drives.fitted() > 1;
         Ok(())
     }
 
     /// Take `unit`'s drive away, handing back its disk.
     pub fn remove_drive(&mut self, unit: Unit) -> Option<Surface> {
         let board = &mut self.board;
-        board.catch_up_drives();
-        let disk = board.drives[unit.index()]
-            .take()
-            .and_then(|mut drive| drive.eject());
-        board.tell_drives();
+        let mut drives = board.drives.at(board.now);
+        let disk = drives.remove(unit);
+        board.two_drives = drives.fitted() > 1;
         disk
     }
 
@@ -866,20 +1043,17 @@ impl Machine {
         self.cpu.reset();
         let board = &mut self.board;
         let now = board.now;
-        board.catch_up_drives();
         board.memory.port = memory::Port::new();
         board.follow_port();
         board.cia1.reset(now);
         board.cia2.reset(now);
-        board.sid.reset(now, &mut board.audio, board.audio_capacity);
+        board.sid.post(now, SidInput::Reset);
         if let Some(cartridge) = board.cartridge.as_mut() {
             cartridge.reset(now);
         }
-        for drive in board.drives.iter_mut().flatten() {
-            drive.reset();
-        }
+        let machine = board.holds();
+        board.drives.at(now).reset(machine);
         board.sync_cartridge();
-        board.tell_drives();
         board.route_paddles();
         board.follow_light_pen();
         board.schedule();
@@ -971,34 +1145,36 @@ impl Machine {
         board.datasette.tape()
     }
 
-    /// `unit`'s drive, if fitted.
-    #[must_use]
-    pub fn drive(&self, unit: Unit) -> Option<&Drive> {
-        self.board.drives[unit.index()].as_ref()
-    }
-
-    /// `unit`'s drive, if fitted, to change its disk.
-    pub fn drive_mut(&mut self, unit: Unit) -> Option<&mut Drive> {
-        self.board.catch_up_drives();
-        self.board.drives[unit.index()].as_mut()
+    /// The drives, brought up to the machine's time.
+    pub fn drives(&mut self) -> Caught<'_, Drives> {
+        self.board.drives.at(self.board.now)
     }
 
     /// Keep the sound for the front end to take, or not.
     pub fn set_sound_output(&mut self, on: bool) {
-        self.board.audio_capacity = if on {
-            audio_capacity(self.board.standard())
+        let board = &mut self.board;
+        board.audio_capacity = if on {
+            audio_capacity(board.standard())
         } else {
             0
         };
+        let mut sid = board.sid.at(board.now);
+        sid.take_audio(&mut board.audio);
         if !on {
-            self.board.audio.clear();
+            board.audio.clear();
         }
+        sid.keep(board.audio_capacity.saturating_sub(board.audio.len()));
     }
 
     /// The sound since last asked, a sample every [`sid::CYCLES_PER_SAMPLE`]
     /// cycles.
     pub fn take_audio(&mut self) -> Drain<'_, f32> {
-        self.board.audio.drain(..)
+        let board = &mut self.board;
+        let mut sid = board.sid.at(board.now);
+        sid.take_audio(&mut board.audio);
+        sid.keep(board.audio_capacity);
+        drop(sid);
+        board.audio.drain(..)
     }
 
     /// Control port `port`'s paddles (0 for port 1) at `x` and `y`.
@@ -1140,15 +1316,12 @@ impl Machine {
     fn settle(&mut self) {
         let board = &mut self.board;
         let now = board.now;
-        board
-            .sid
-            .advance(now, &mut board.audio, board.audio_capacity);
+        board.collect_sound();
         board.play_tape();
         board.cia1.advance(now);
         board.cia2.advance(now);
         board.schedule();
-        board.catch_up_drives();
-        for drive in board.drives.iter_mut().flatten() {
+        for drive in board.drives.at(now).units.iter_mut().flatten() {
             drive.settle();
         }
     }
@@ -1163,16 +1336,19 @@ impl Machine {
     /// snapshot.
     pub fn snapshot(&mut self) -> Result<Vec<u8>, SnapshotError> {
         self.settle();
+        let board = &mut self.board;
+        let sid = board.sid.at(board.now).state(&mut board.sid_port);
         let board = &self.board;
+        let drives = board.drives.at(board.now);
         let mut w = Writer::new();
         Model::C64.save(&mut w);
         w.section(*b"CONF", |w| {
             w.put(&board.standard());
-            w.put(&board.sid.model());
+            w.put(&board.sid_port.model());
         });
         w.section(*b"ROMS", |w| {
             board.memory.save_roms(w);
-            for drive in &board.drives {
+            for drive in &drives.units {
                 w.put(&drive.as_ref().map(|drive| *drive.dos_fingerprint()));
             }
         });
@@ -1189,11 +1365,11 @@ impl Machine {
         w.section(*b"VIC ", |w| w.put(&board.vic));
         w.section(*b"CIA1", |w| w.put(&board.cia1));
         w.section(*b"CIA2", |w| w.put(&board.cia2));
-        w.section(*b"SID ", |w| w.put(board.sid.state()));
+        w.section(*b"SID ", |w| w.put(&sid));
         w.section(*b"KEYS", |w| w.put(&board.keyboard));
         w.section(*b"TAPE", |w| w.put(&board.datasette));
         w.section(*b"CART", |w| w.put(&board.cartridge));
-        for (tag, drive) in DRIVE_SECTIONS.into_iter().zip(&board.drives) {
+        for (tag, drive) in DRIVE_SECTIONS.into_iter().zip(&drives.units) {
             if let Some(drive) = drive {
                 w.section(tag, |w| drive.save(w));
             }
@@ -1206,7 +1382,7 @@ impl Machine {
     fn check_fitting(&self, r: &mut Reader<'_>) -> Result<Config, SnapshotError> {
         let config = Config {
             standard: self.board.standard(),
-            sid: self.board.sid.model(),
+            sid: self.board.sid_port.model(),
         };
         r.section(*b"CONF", |r| {
             let built = Config {
@@ -1217,7 +1393,8 @@ impl Machine {
         })?;
         r.section(*b"ROMS", |r| {
             self.board.memory.check_roms(r)?;
-            for drive in &self.board.drives {
+            let drives = self.board.drives.at(self.board.now);
+            for drive in &drives.units {
                 let dos = r.get::<Option<[u8; FINGERPRINT_LEN]>>()?;
                 fitted(dos.as_ref() == drive.as_ref().map(Drive::dos_fingerprint))?;
             }
@@ -1259,23 +1436,26 @@ impl Machine {
         let vic: Vic = r.section(*b"VIC ", Reader::get)?;
         let cia1: Cia = r.section(*b"CIA1", Reader::get)?;
         let cia2: Cia = r.section(*b"CIA2", Reader::get)?;
-        let mut sid = self.board.sid.clone();
-        sid.restore(r.section(*b"SID ", Reader::get::<SidState>)?)?;
+        let sid_state = r.section(*b"SID ", Reader::get::<SidState>)?;
+        let (mut sid, sid_port) = self.board.sid.at(self.board.now).restored(&sid_state)?;
         let keyboard = r.section(*b"KEYS", Reader::get)?;
         let datasette = r
             .section(*b"TAPE", Reader::get::<Datasette>)?
             .clocked(config.standard.clock());
         let cartridge = r.section(*b"CART", Reader::get)?;
-        let target = self.board.drive_cycle(now);
-        let mut drives = [None, None];
-        for ((tag, fitted), restored) in DRIVE_SECTIONS
-            .into_iter()
-            .zip(&self.board.drives)
-            .zip(&mut drives)
+        let target = drive_cycle(config.standard.clock(), now);
+        let mut units = [None, None];
         {
-            if let Some(drive) = fitted {
-                let times = target..=target + LONGEST_STEP - 1;
-                *restored = Some(r.section(tag, |r| drive.restored(r, times))?);
+            let drives = self.board.drives.at(self.board.now);
+            for ((tag, fitted), restored) in DRIVE_SECTIONS
+                .into_iter()
+                .zip(&drives.units)
+                .zip(&mut units)
+            {
+                if let Some(drive) = fitted {
+                    let times = target..=target + LONGEST_STEP - 1;
+                    *restored = Some(r.section(tag, |r| drive.restored(r, times))?);
+                }
             }
         }
         let mains = config.standard.mains();
@@ -1288,36 +1468,38 @@ impl Machine {
                     .iter()
                     .all(|cia| cia.model() == config.cia() && cia.mains() == mains),
         )?;
-        let mut board = Board {
-            now,
-            memory,
-            vic,
-            cia1,
-            cia2,
-            sid,
-            audio: Vec::new(),
-            audio_capacity: self.board.audio_capacity,
-            keyboard,
-            joysticks,
-            paddles,
-            drives,
-            cartridge,
-            datasette,
-            restore_held,
-            restore_until,
-            light_pen,
-            irq: false,
-            nmi: false,
-            next_event: u64::MAX,
-            monitor: self.board.monitor.fresh(),
+        let board = &mut self.board;
+        board.now = now;
+        board.memory = memory;
+        board.vic = vic;
+        board.cia1 = cia1;
+        board.cia2 = cia2;
+        board.audio.clear();
+        sid.keep(board.audio_capacity);
+        board.sid.replace(now, sid);
+        board.sid_port = sid_port;
+        board.keyboard = keyboard;
+        board.joysticks = joysticks;
+        board.paddles = paddles;
+        let mut drives = Drives {
+            units,
+            ..Drives::new(config.standard.clock(), board.holds())
         };
+        drives.tell();
+        board.two_drives = drives.fitted() > 1;
+        board.drives.replace(now, drives);
+        board.cartridge = cartridge;
+        board.datasette = datasette;
+        board.restore_held = restore_held;
+        board.restore_until = restore_until;
+        board.light_pen = light_pen;
+        board.monitor = board.monitor.fresh();
+        board.next_publish = now + PUBLISH_EVERY;
         board.sync_cartridge();
         board.irq = board.vic.irq() || board.cia1.irq();
         board.nmi = board.cia2.irq() || board.now < board.restore_until;
         board.schedule();
-        board.tell_drives();
         self.cpu.restore(&cpu);
-        self.board = board;
         Ok(())
     }
 

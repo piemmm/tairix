@@ -21,6 +21,7 @@ use crate::machine::c64::drive::{Drive, Unit};
 use crate::machine::c64::{self, sid, Standard};
 use crate::machine::canvas::{CANVAS_HEIGHT, CANVAS_WIDTH};
 use crate::machine::electron::{CARTRIDGE_ROMS, PLUS1_ROM};
+use crate::machine::lane::Spawner;
 use crate::machine::{bbc, electron, Machine, RomError, Timing};
 use crate::media::c1541::{d64, g64, Format, Surface};
 use crate::media::crt;
@@ -142,6 +143,9 @@ pub struct MachineService<W: ShareWrite> {
     /// Whether the next slice writes every row: the owner holds no picture
     /// of a machine just built or restored.
     whole_picture: bool,
+    /// What starts the threads a machine's devices run ahead on, where the
+    /// worker may have them.
+    spawner: Option<Box<dyn Spawner>>,
 }
 
 impl<W: ShareWrite> MachineService<W> {
@@ -155,7 +159,16 @@ impl<W: ShareWrite> MachineService<W> {
             sound: None,
             timeline: 0,
             whole_picture: true,
+            spawner: None,
         })
+    }
+
+    /// The same service, its machines' devices run ahead on threads
+    /// `spawner` starts.
+    #[must_use]
+    pub fn spreading(mut self, spawner: Box<dyn Spawner>) -> Self {
+        self.spawner = Some(spawner);
+        self
     }
 
     fn answer(&mut self, request: &Request<'_>, out: &mut dyn FrameOut) -> bool {
@@ -295,6 +308,9 @@ impl<W: ShareWrite> MachineService<W> {
     /// changed, where that cannot be done.
     fn start(&mut self, built: &Built) -> Result<(), Refusal> {
         let mut machine = build(built).map_err(|_| Refusal::Rom)?;
+        if let (Machine::C64(machine), Some(spawner)) = (&mut machine, self.spawner.as_deref()) {
+            machine.spread(spawner);
+        }
         if let Some(old) = self.machine.as_mut() {
             move_media(old, &mut machine)?;
         }
@@ -317,15 +333,16 @@ impl<W: ShareWrite> MachineService<W> {
     fn restore(&mut self, snapshot: &[u8]) -> Result<Taken, Refusal> {
         let machine = self.machine.as_mut().ok_or(Refusal::Unconfigured)?;
         let mut taken = Taken::default();
-        match &*machine {
+        match &mut *machine {
             Machine::ModelB(machine) => {
                 for drive in PhysicalDrive::ALL {
                     taken.acorn_disc(drive, machine.disc(drive));
                 }
             }
             Machine::C64(machine) => {
+                let drives = machine.drives();
                 for drive in PhysicalDrive::ALL {
-                    taken.c64_disk(drive, machine.drive(Unit::of(drive)).and_then(Drive::disk));
+                    taken.c64_disk(drive, drives.unit(Unit::of(drive)).and_then(Drive::disk));
                 }
             }
             Machine::Electron(_) => {}
@@ -365,7 +382,7 @@ impl<W: ShareWrite> MachineService<W> {
             motor: machine.tape_motor(),
         };
         let case = machine.letter_case();
-        let (drives, turning, discs) = match &*machine {
+        let (drives, turning, discs) = match &mut *machine {
             Machine::ModelB(machine) => {
                 let active = PhysicalDrive::ALL.map(|drive| machine.drive_active(drive));
                 (
@@ -375,11 +392,14 @@ impl<W: ShareWrite> MachineService<W> {
                 )
             }
             Machine::Electron(_) => ([false; 2], [false; 2], [false; 2]),
-            Machine::C64(machine) => (
-                Unit::ALL.map(|unit| machine.drive(unit).is_some_and(Drive::led)),
-                Unit::ALL.map(|unit| machine.drive(unit).is_some_and(Drive::motor)),
-                Unit::ALL.map(|unit| machine.drive(unit).and_then(Drive::disk).is_some()),
-            ),
+            Machine::C64(machine) => {
+                let drives = machine.drives();
+                (
+                    Unit::ALL.map(|unit| drives.unit(unit).is_some_and(Drive::led)),
+                    Unit::ALL.map(|unit| drives.unit(unit).is_some_and(Drive::motor)),
+                    Unit::ALL.map(|unit| drives.unit(unit).and_then(Drive::disk).is_some()),
+                )
+            }
         };
         let (playing, cartridge) = match &*machine {
             Machine::C64(machine) => (machine.datasette().sensed(), machine.holds_cartridge()),
@@ -493,7 +513,8 @@ fn insert_disc(
             machine.insert_disc(drive, disc);
         }
         (Machine::C64(machine), DiscFormat::D64 | DiscFormat::G64) => {
-            let fitted = machine.drive_mut(Unit::of(drive)).ok_or(Refusal::Model)?;
+            let mut drives = machine.drives();
+            let fitted = drives.unit_mut(Unit::of(drive)).ok_or(Refusal::Model)?;
             let decoded = if format == DiscFormat::D64 {
                 d64::decode(image)
             } else {
@@ -518,7 +539,8 @@ fn eject_disc(
     match machine {
         Machine::ModelB(machine) => taken.acorn_disc(drive, machine.eject_disc(drive).as_ref()),
         Machine::C64(machine) => {
-            let fitted = machine.drive_mut(Unit::of(drive)).ok_or(Refusal::Model)?;
+            let mut drives = machine.drives();
+            let fitted = drives.unit_mut(Unit::of(drive)).ok_or(Refusal::Model)?;
             taken.c64_disk(drive, fitted.eject().as_ref());
         }
         Machine::Electron(_) => return Err(Refusal::Model),
@@ -544,8 +566,9 @@ fn collect_discs(
             }
         }
         Machine::C64(machine) => {
+            let mut drives = machine.drives();
             for drive in marked {
-                if let Some(disk) = machine.drive_mut(Unit::of(drive)).and_then(Drive::disk_mut) {
+                if let Some(disk) = drives.unit_mut(Unit::of(drive)).and_then(Drive::disk_mut) {
                     taken.c64_disk(drive, Some(disk));
                     disk.mark_saved();
                 }
@@ -569,19 +592,21 @@ fn move_media(old: &mut Machine, new: &mut Machine) -> Result<(), Refusal> {
             }
         }
         (Machine::C64(old), Machine::C64(new)) => {
+            let (mut from, mut to) = (old.drives(), new.drives());
             let homeless = Unit::ALL.into_iter().any(|unit| {
-                old.drive(unit).and_then(Drive::disk).is_some() && new.drive(unit).is_none()
+                from.unit(unit).and_then(Drive::disk).is_some() && to.unit(unit).is_none()
             });
             if homeless {
                 return Err(Refusal::Model);
             }
             for unit in Unit::ALL {
-                if let (Some(from), Some(to)) = (old.drive_mut(unit), new.drive_mut(unit)) {
+                if let (Some(from), Some(to)) = (from.unit_mut(unit), to.unit_mut(unit)) {
                     if let Some(disk) = from.eject() {
                         to.insert(disk);
                     }
                 }
             }
+            drop((from, to));
             if let Some(cartridge) = old.remove_cartridge() {
                 new.plug_cartridge(cartridge);
             }

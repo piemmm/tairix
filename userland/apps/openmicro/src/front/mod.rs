@@ -1,7 +1,7 @@
 //! The front end's host-tested model: the library's record of a machine, the
 //! new-machine assistant's offers and each machine's settings, how the host's
 //! keys reach a machine's, how it is paced, what is kept of its media, and
-//! how its picture is shown.
+//! how its picture is shown and enlarged.
 
 /// The picture a window opens to, in logical pixels: 4:3, as a television
 /// showed it. The status strip is beneath it.
@@ -21,3 +21,4 @@ pub mod menu;
 pub mod pacing;
 pub mod picture;
 pub mod settings;
+pub mod view;

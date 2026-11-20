@@ -31,6 +31,34 @@ fn grey(level: u8) -> [u8; 4] {
     [level, level, level, 255]
 }
 
+/// A wiped scaler holds no enlarged row, and draws as a fresh one would.
+#[test]
+fn a_wiped_scaler_keeps_no_row_and_draws_as_before() {
+    let source = picture(3, 2, |x, y| grey(u8::try_from(x * 70 + y * 20).unwrap()));
+    let frame = Rgba8Image::new(3, 2, &source).unwrap();
+    let target = Region {
+        x: 0,
+        y: 0,
+        width: 9,
+        height: 8,
+    };
+    let mut scaler = SharpScaler::new();
+    let mut first = Surface::new(9, 8).unwrap();
+    scaler.draw(&frame, &mut first, target, 0..8).unwrap();
+    assert!(scaler
+        .lines
+        .iter()
+        .any(|line| line.pixels.iter().any(|&p| p != Pixel::TRANSPARENT)));
+    scaler.wipe();
+    for line in &scaler.lines {
+        assert!(line.pixels.iter().all(|&p| p == Pixel::TRANSPARENT));
+        assert!(line.source_rows.is_empty());
+    }
+    let mut again = Surface::new(9, 8).unwrap();
+    scaler.draw(&frame, &mut again, target, 0..8).unwrap();
+    assert_eq!(again, first);
+}
+
 #[test]
 fn a_whole_scale_is_a_block_of_each_source_pixel() {
     let level = |x: u32, y: u32| u8::try_from(x * 70 + y * 20).unwrap();

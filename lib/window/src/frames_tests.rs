@@ -5,13 +5,16 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{
+    DamageList, DamageRect, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS,
+};
+use tairix_abi::window_ipc::{ViewFilter, WindowView};
 use tairix_abi::Errno;
 use tairix_display::{stale_frames, winframe, SERIAL};
-use tairix_geometry::Region;
+use tairix_geometry::{Rect, Region, StaleFrames};
 use tairix_raster::{Color, Surface};
 
-use super::{draw_frame, region_bytes};
+use super::{draw_frame, draw_view, frame_shape, region_bytes};
 
 const MODE: DisplayMode = DisplayMode {
     width_px: 12,
@@ -32,6 +35,11 @@ fn whole(surface: &Surface) -> Vec<u8> {
 
 fn one(rect: DamageRect) -> DamageList {
     DamageList::new(&[rect]).expect("a non-empty rectangle")
+}
+
+/// One frame's length.
+fn frame_len() -> usize {
+    region_bytes(&MODE, 1).expect("a frame")
 }
 
 /// Frame `index` of `pixels`.
@@ -68,11 +76,11 @@ fn alternate_frames_each_hold_the_whole_picture_once_drawn() {
         let index = usize::try_from(present).unwrap_or(0) % FRAMES;
         draw_frame(
             &mut pixels,
-            index,
+            (index, frame_len()),
             (&mut stale, &mut changed),
             &surface,
             &MODE,
-            &one(rect),
+            one(rect).rects(),
         )
         .expect("drawn");
         assert_eq!(
@@ -92,11 +100,11 @@ fn a_frame_past_the_region_is_refused_and_nothing_is_written() {
     assert_eq!(
         draw_frame(
             &mut pixels,
-            FRAMES,
+            (FRAMES, frame_len()),
             (&mut stale, &mut changed),
             &surface,
             &MODE,
-            &one(DamageRect::full(&MODE)),
+            one(DamageRect::full(&MODE)).rects(),
         ),
         Err(Errno::OutOfRange)
     );
@@ -118,11 +126,11 @@ fn a_refused_draw_leaves_the_frame_owing_everything_it_lacked() {
     assert!(
         draw_frame(
             &mut pixels,
-            0,
+            (0, frame_len()),
             (&mut stale, &mut changed),
             &small,
             &MODE,
-            &corner
+            corner.rects()
         )
         .is_err(),
         "a surface the frame cannot be drawn from is refused"
@@ -135,16 +143,113 @@ fn a_refused_draw_leaves_the_frame_owing_everything_it_lacked() {
     .expect("a surface");
     draw_frame(
         &mut pixels,
-        0,
+        (0, frame_len()),
         (&mut stale, &mut changed),
         &surface,
         &MODE,
-        &corner,
+        corner.rects(),
     )
     .expect("drawn");
     assert_eq!(
         frame(&pixels, 0),
         whole(&surface).as_slice(),
         "the frame was still owed the whole picture"
+    );
+}
+
+#[test]
+fn a_view_is_drawn_after_the_window_s_rows_and_kept_up_to_date_like_them() {
+    let view = WindowView {
+        width_px: 16,
+        height_px: 3,
+        placement: DamageRect::full(&MODE),
+        filter: ViewFilter::Sharp,
+    };
+    let shape = frame_shape(&MODE, Some(&view)).expect("a shape");
+    assert_eq!(
+        shape.stride_bytes, 64,
+        "a stride holding the wider view's row"
+    );
+    assert_eq!(shape.height_px, MODE.height_px + 3);
+    let rows = DisplayMode {
+        width_px: 16,
+        height_px: 3,
+        ..shape
+    };
+    let len = region_bytes(&shape, 1).expect("a frame");
+    let window_len = region_bytes(
+        &DisplayMode {
+            height_px: MODE.height_px,
+            ..shape
+        },
+        1,
+    )
+    .expect("the window's rows");
+    let mut pixels = vec![0u8; len * FRAMES];
+    let mut stale = StaleFrames::new(FRAMES, Rect::new(0, 0, 16, 3), FRAMES * MAX_DAMAGE_RECTS);
+    let mut changed = Region::new();
+    let mut picture =
+        Surface::filled(16, 3, Color::rgb(10, 20, 30).premultiply()).expect("a picture");
+    let shown = |picture: &Surface| {
+        let mut bytes = vec![0u8; region_bytes(&rows, 1).expect("the view's rows")];
+        winframe::encode(picture, &mut bytes, &rows, DamageRect::full(&rows), &SERIAL)
+            .expect("the whole view encodes");
+        bytes
+    };
+    let view_rows =
+        |pixels: &[u8], index: usize| pixels[index * len + window_len..(index + 1) * len].to_vec();
+    let mut draw = |pixels: &mut Vec<u8>, picture: &Surface, index: usize, rect: DamageRect| {
+        draw_view(
+            pixels,
+            (index, len, window_len),
+            (&mut stale, &mut changed),
+            picture,
+            &rows,
+            one(rect).rects(),
+        )
+        .expect("drawn");
+    };
+    let corner = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 1,
+        height_px: 1,
+    };
+    draw(&mut pixels, &picture, 0, corner);
+    assert_eq!(
+        view_rows(&pixels, 0),
+        shown(&picture),
+        "a fresh frame drawn whole"
+    );
+    assert!(
+        pixels[..window_len].iter().all(|&byte| byte == 0),
+        "the window's rows left alone"
+    );
+    picture.fill_rect(5, 1, 7, 2, Color::rgb(200, 0, 0));
+    let change = DamageRect {
+        x: 5,
+        y: 1,
+        width_px: 7,
+        height_px: 2,
+    };
+    draw(&mut pixels, &picture, 1, change);
+    assert_eq!(view_rows(&pixels, 1), shown(&picture));
+    draw(&mut pixels, &picture, 0, corner);
+    assert_eq!(
+        view_rows(&pixels, 0),
+        shown(&picture),
+        "owed the change it missed"
+    );
+    assert_eq!(
+        draw_view(
+            &mut pixels,
+            (FRAMES, len, window_len),
+            (&mut stale, &mut changed),
+            &picture,
+            &rows,
+            one(corner).rects(),
+        ),
+        Err(Errno::OutOfRange),
+        "a frame past the region"
     );
 }

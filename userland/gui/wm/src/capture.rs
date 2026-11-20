@@ -94,6 +94,11 @@ pub(super) struct Armed {
 }
 
 impl Armed {
+    /// The desktop rectangle the tap captures.
+    pub(super) const fn area(&self) -> Rect {
+        self.tap.area
+    }
+
     /// Owe the tap what of `rect` lies in its area.
     fn owe(&mut self, rect: Rect) {
         self.changed.add(rect.intersection(&self.tap.area));

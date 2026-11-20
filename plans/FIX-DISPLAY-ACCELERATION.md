@@ -13,6 +13,7 @@
 | E | Flips signalled by completion and paced off it, `Busy` coalesced rather than fatal, and hardware scaling of the scaled desktop | done |
 | R | The output's refresh rate: `Display::refresh`, the `Query` reply's rate, `gpu_virtio` reading it from the EDID and the HVS from the timing its surface is shaped for | done |
 | P.2 | The cursor plane moved by the frame's present while a gesture carries a window | done |
+| V | A window's view: a picture its frames carry after the window's own rows, enlarged over a rectangle of the window by the engine on a layer of its own, or in software where it cannot be; OpenMicro's picture shown through one | done |
 
 No item is optional and none defers work as "future". Items land together;
 the whole-project gate runs once on the final tree.
@@ -397,6 +398,39 @@ calls `move_to`.
   desktop-sized layer buffer and presented as one scaled layer — the HVS
   scaler replaces the software resample. Without it, the software resample
   stays.
+
+## V — a window's view
+
+- **The protocol.** A `Resize` may carry a `WindowView`: a picture of a size
+  of its own, a placement rectangle of the window, and a filter (`Sharp`,
+  `Smooth`). Each frame then holds the window's rows and, after them, the
+  view's, at a stride holding a row of either (`tairix_window::frame_shape`).
+  `Present` is unchanged: one damage list in frame coordinates, the view's
+  rectangles below the window's rows, each side fitted to half a list so no
+  merge straddles the two. The session shows the window's damage through
+  `FrameHost::window_presented` and the view's through `view_presented`, and
+  refuses a rectangle lying in neither. A window gains, changes or drops its
+  view by resizing; the app's frames stay its own (decision 1).
+- **The compositor** keeps the picture opaque as presented and shows it in
+  one of two ways. On a `Role::View` layer directly above its window's free
+  layer the engine enlarges it from the picture's size to the placement: only
+  where the engine scales, the window is opaque and clear of its rounded
+  corners at the placement, nothing composited reads it (a frost or flattened
+  layer above it, an armed capture over it), no fade is running, and the stack
+  has room; a promoted fullscreen window takes its view as a second layer.
+  Everywhere else it is enlarged into the window's content through the one
+  frame scaler (`tairix_crt::screen::Screen`), so captures, frosts, flattened
+  layers and thumbnails read it as part of the window. A view leaving its
+  layer is drawn into the content before the frame composites.
+- **Refusals.** A stack the engine's line buffer cannot take gives up its view
+  first, enlarged in software until the picture's size or its placement's
+  changes; a view whose buffers cannot be had is refused the same way.
+- **The filter** is software's: the HVS enlarges every layer through its one
+  Mitchell–Netravali kernel, so `Sharp` and `Smooth` look alike there.
+- **The cost it removes.** An app enlarging a small picture to a full-screen
+  window paid the enlargement and three window-sized copies a frame (the
+  app's frame, the session's decode, the layer bake); with a view it pays
+  three copies of the picture alone.
 
 ---
 

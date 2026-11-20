@@ -7,8 +7,10 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ops::Range;
 
-use tairix_abi::window_ipc::{KeyboardMode, PointerAction};
+use tairix_abi::driver::display::{DamageList, DamageRect, DisplayMode};
+use tairix_abi::window_ipc::{KeyboardMode, PointerAction, ViewFilter, WindowView};
 use tairix_abi::Errno;
 use tairix_controls::{Button, ButtonAction, StatusBand, StatusTone};
 use tairix_crt::screen::{fit, Drawing, Picture, Scaling, DOT};
@@ -21,6 +23,7 @@ use tairix_openmicro::front::media::{Disc, FileWork, Handover, Holding, Rack, Sa
 use tairix_openmicro::front::menu::{Offered, Shown, SHIFT_BREAK};
 use tairix_openmicro::front::pacing::{Next, Pacer, Quiet};
 use tairix_openmicro::front::picture::{palette_of, Expansion};
+use tairix_openmicro::front::view::ViewRefusal;
 use tairix_openmicro::front::{events, LEAST_PICTURE, OPEN_PICTURE};
 use tairix_openmicro::machine::bbc::fdc::PhysicalDrive;
 use tairix_openmicro::machine::c64::keyboard::Keycap;
@@ -32,9 +35,9 @@ use tairix_openmicro::worker::protocol::{
     session_bounds, Change, DeckKey, DiscFormat, Input, Lights, Loaded, Media, ModelKey, Ran,
     Refusal as Refused, Reply, Request, MAX_INPUTS, SHARE_BYTES,
 };
-use tairix_openmicro::worker::Link;
+use tairix_openmicro::worker::{Link, WORKER_THREADS};
 use tairix_raster::resample::Region as Target;
-use tairix_raster::{Color, Surface};
+use tairix_raster::{Color, Pixel, Surface};
 use tairix_rt::LogSink;
 use tairix_sandbox::rt::{KernelWaitSet, RtSessionLauncher, SessionMembers};
 use tairix_sandbox::session::Share;
@@ -338,6 +341,11 @@ pub struct MachineWindow {
     pub sound: Option<Speaker>,
     slots: Vec<u8>,
     expansion: Expansion,
+    /// The canvas rows changed since the window's view was last presented.
+    view_rows: Option<Range<u32>>,
+    /// Where the desktop refused a view, the window drawing its picture
+    /// itself there.
+    view_refusal: ViewRefusal,
     /// Its media and the picker.
     pub rack: Rack,
     /// The file a picker picked, held while its name is asked.
@@ -468,6 +476,8 @@ impl MachineWindow {
             sound: None,
             slots: alloc::vec![0; CANVAS_WIDTH],
             expansion: Expansion::default(),
+            view_rows: None,
+            view_refusal: ViewRefusal::default(),
             rack: Rack::new(model),
             picked: None,
             lights: Lights::default(),
@@ -514,7 +524,9 @@ impl MachineWindow {
         let share = core::num::NonZeroUsize::new(SHARE_BYTES)
             .ok_or_else(|| String::from("its picture has no size"))?;
         let bounds = session_bounds().map_err(|err| format!("{err:?}"))?;
-        let launcher = RtSessionLauncher::own_binary(WorkerMemory::Documents).sharing(share);
+        let launcher = RtSessionLauncher::own_binary(WorkerMemory::Documents)
+            .sharing(share)
+            .threads(WORKER_THREADS);
         let (set, read, write) = self.wait;
         let mut link = Link::new(
             SupervisedSession::new(launcher, bounds, LogSink),
@@ -561,7 +573,11 @@ impl MachineWindow {
 
     /// The window's picture and status strip.
     fn layout(&self, looks: (Scale, &Theme)) -> Option<(Target, Rect)> {
-        let mode = self.mode();
+        self.layout_of(&self.mode(), looks)
+    }
+
+    /// The picture and status strip of the window shaped as `mode`.
+    fn layout_of(&self, mode: &DisplayMode, looks: (Scale, &Theme)) -> Option<(Target, Rect)> {
         let strip = strip_height(self.model, looks).min(mode.height_px);
         let room = mode.height_px - strip;
         let picture = fit(mode.width_px, room)?;
@@ -569,6 +585,33 @@ impl MachineWindow {
             picture,
             Rect::new(0, i32::try_from(room).ok()?, mode.width_px, strip),
         ))
+    }
+
+    /// The view the frames of the window shaped as `mode` carry for a
+    /// picture at `target`: the canvas itself, for the desktop or its display
+    /// engine to enlarge, as long as the tube draws nothing at the window's
+    /// own size the enlarging would lose and no view was refused at its size.
+    fn wanted_view(&self, mode: &DisplayMode, target: Target, percent: u32) -> Option<WindowView> {
+        let allowed = self.view_refusal.allows((mode.width_px, mode.height_px));
+        if !allowed || self.picture.tube().passes(percent).1 > 0 {
+            return None;
+        }
+        let (width_px, height_px) = self.picture.screen().size();
+        let filter = match self.picture.screen().scaling() {
+            Scaling::Sharp => ViewFilter::Sharp,
+            Scaling::Smooth => ViewFilter::Smooth,
+        };
+        Some(WindowView {
+            width_px,
+            height_px,
+            placement: DamageRect {
+                x: target.x,
+                y: target.y,
+                width_px: target.width,
+                height_px: target.height,
+            },
+            filter,
+        })
     }
 
     /// `text` shown in the status strip, and recorded.
@@ -589,6 +632,7 @@ impl MachineWindow {
     pub fn owe_whole(&mut self) {
         self.owing = Owing::Whole;
         self.picture.invalidate();
+        self.view_rows = Some(0..self.picture.screen().size().1);
     }
 
     /// A request for the machine, behind those waiting.
@@ -867,6 +911,8 @@ impl MachineWindow {
                 if let Ok(row) = u32::try_from(row) {
                     let screen = self.picture.screen_mut();
                     self.expansion.row(&self.palette, screen, row, &self.slots);
+                    let rows = self.view_rows.get_or_insert(row..row + 1);
+                    *rows = rows.start.min(row)..rows.end.max(row + 1);
                 }
             }
         }
@@ -1240,13 +1286,59 @@ impl MachineWindow {
     }
 
     /// The window was resized, or left or took the whole screen.
-    pub fn resized(&mut self, client: &mut Client, (width, height): (u32, u32), full_screen: bool) {
+    pub fn resized(
+        &mut self,
+        client: &mut Client,
+        (desktop, theme): (&Desktop, &Theme),
+        (width, height): (u32, u32),
+        full_screen: bool,
+    ) {
         self.full_screen = full_screen;
+        self.view_refusal.resized((width, height));
         let mode = app::mode_for(width, height);
-        if self.pane.resize_with(client, &mode, &mut self.surface) == Fitted::Kept {
+        let looks = (desktop.scale(), theme);
+        let view = self
+            .layout_of(&mode, looks)
+            .and_then(|(target, _)| self.wanted_view(&mode, target, desktop.scale().percent()));
+        if self.reshape(client, &mode, view) == Fitted::Kept {
             app::report(APP_NAME, app::SIZE_KEPT);
         }
         self.owe_whole();
+    }
+
+    /// The window's frames shaped as `mode`, carrying `view`, the surface
+    /// it is drawn into fresh where its size changes.
+    fn reshape(
+        &mut self,
+        client: &mut Client,
+        mode: &DisplayMode,
+        view: Option<WindowView>,
+    ) -> Fitted {
+        let resized =
+            (mode.width_px, mode.height_px) != (self.surface.width(), self.surface.height());
+        let fresh = if resized {
+            match Surface::new(mode.width_px, mode.height_px) {
+                Some(fresh) => Some(fresh),
+                None => return Fitted::Kept,
+            }
+        } else {
+            None
+        };
+        let fitted = self.pane.reshape(client, mode, view);
+        if let (Fitted::Adopted, Some(fresh)) = (fitted, fresh) {
+            self.surface = fresh;
+        }
+        fitted
+    }
+
+    /// The desktop refused the window's last resize. A view it carried is not
+    /// asked for again at that size, so the size the desktop kept is taken
+    /// again without one.
+    pub fn resize_refused(&mut self) {
+        if self.pane.view().is_some() {
+            let mode = self.mode();
+            self.view_refusal.refused((mode.width_px, mode.height_px));
+        }
     }
 
     /// The desktop let go of the window's frames.
@@ -1328,6 +1420,15 @@ impl MachineWindow {
             return;
         };
         let mode = self.mode();
+        let view = self.wanted_view(&mode, target, desktop.scale().percent());
+        if view.as_ref() != self.pane.view() {
+            match self.reshape(client, &mode, view) {
+                Fitted::Adopted => self.owe_whole(),
+                // Painted once the resize in flight is answered.
+                Fitted::Deferred => return,
+                Fitted::Kept => {}
+            }
+        }
         let drawing = Drawing {
             percent: desktop.scale().percent(),
             runner: pool.runner(),
@@ -1346,12 +1447,15 @@ impl MachineWindow {
             Owing::Strip => damage.add(strip),
             Owing::Nothing => {}
         }
-        match self.picture.draw(&mut self.surface, target, drawing) {
-            Ok(drawn) => damage.add_region(&drawn),
-            Err(why) => app::report(
-                APP_NAME,
-                format_args!("the picture could not be drawn ({why:?})"),
-            ),
+        let viewed = self.pane.view().is_some();
+        if !viewed {
+            match self.picture.draw(&mut self.surface, target, drawing) {
+                Ok(drawn) => damage.add_region(&drawn),
+                Err(why) => app::report(
+                    APP_NAME,
+                    format_args!("the picture could not be drawn ({why:?})"),
+                ),
+            }
         }
         if damage.intersects(strip) {
             let message = message_of(self.message.as_ref(), &self.pacer);
@@ -1395,16 +1499,59 @@ impl MachineWindow {
                 }
             }
         }
-        self.owed.owe(&mode, Repaint::Reported, &self.damage);
-        let Some(parts) = self.owed.take(&mode) else {
-            return;
+        self.present(client, &mode, viewed);
+    }
+
+    /// Present what the paint drew into the window, shaped as `mode`, and
+    /// where it carries a view, the canvas rows that changed.
+    fn present(&mut self, client: &mut Client, mode: &DisplayMode, viewed: bool) {
+        self.owed.owe(mode, Repaint::Reported, &self.damage);
+        let parts = self.owed.take(mode);
+        let view_damage = if viewed { self.take_view_rows() } else { None };
+        let presented = match (parts, view_damage) {
+            (parts, Some(view_damage)) => {
+                self.pane
+                    .present_view(client, &self.surface, parts.as_ref(), &view_damage)
+            }
+            (Some(parts), None) => self.pane.present_list(client, &self.surface, &parts),
+            (None, None) => Ok(()),
         };
-        if let Err(err) = self.pane.present_list(client, &self.surface, &parts) {
+        if let Err(err) = presented {
             app::report(
                 APP_NAME,
                 format_args!("the window could not be presented ({err})"),
             );
         }
+    }
+
+    /// Copy the canvas rows changed since the view was last presented into
+    /// its picture, answering them as the view's damage.
+    fn take_view_rows(&mut self) -> Option<DamageList> {
+        let rows = self.view_rows.take().filter(|rows| !rows.is_empty())?;
+        let screen = self.picture.screen();
+        let (width, _) = screen.size();
+        let stride = usize::try_from(width).ok()?.checked_mul(DOT)?;
+        let picture = self.pane.view_picture_mut()?;
+        for row in rows.clone() {
+            let start = usize::try_from(row).ok()?.checked_mul(stride)?;
+            let (Some(dots), Some((_, into))) = (
+                screen.pixels().get(start..start + stride),
+                picture.row_span_mut(row, 0, width),
+            ) else {
+                continue;
+            };
+            for (out, dot) in into.iter_mut().zip(dots.as_chunks::<DOT>().0) {
+                let [r, g, b, a] = *dot;
+                *out = Pixel { r, g, b, a };
+            }
+        }
+        DamageList::new(&[DamageRect {
+            x: 0,
+            y: rows.start,
+            width_px: width,
+            height_px: rows.end - rows.start,
+        }])
+        .ok()
     }
 
     /// Present what the pane held back for a frame to come back.

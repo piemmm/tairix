@@ -53,6 +53,7 @@ use crate::geometry::{Point, Rect, Region};
 use crate::pointer::{PointerRoute, Sprite, SpriteRun, MAX_OWED, MAX_SPRITES};
 use crate::shadow::ShadowKit;
 use crate::surface::{blend_run, Surface};
+use crate::view::View;
 use crate::window::{RowLayer, Window, WindowId};
 
 /// How a window's layer is baked.
@@ -65,6 +66,10 @@ enum Role {
     /// Everything beneath the window's rectangle with its frost applied,
     /// opaque, beneath the window's own free layer.
     Frost,
+    /// The window's view, the picture its client hands over, above its free
+    /// layer: the engine enlarges it from the picture's size, which the layer
+    /// holds, to the placement it shows.
+    View,
 }
 
 impl Role {
@@ -169,10 +174,22 @@ pub(super) struct Refusals {
     pointer: Option<(u32, u32)>,
     /// The size the engine could not give the scaled desktop's layer.
     desktop: Option<(u32, u32)>,
+    /// The view the engine could not give a layer: it is enlarged in
+    /// software until its picture or the size it is shown at changes.
+    view: Option<RefusedView>,
     /// The display holds no frame of its own to draw a frame into: one is
     /// composed into the compositor's own and handed over instead, until a
     /// new sink arrives.
     pub(super) drawn: bool,
+}
+
+/// A view the engine could not give a layer: its window, its picture's size,
+/// and the size it was shown at.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) struct RefusedView {
+    window: WindowId,
+    picture: (u32, u32),
+    shown: (u32, u32),
 }
 
 impl Refusals {
@@ -184,6 +201,7 @@ impl Refusals {
         frost: None,
         pointer: None,
         desktop: None,
+        view: None,
         drawn: false,
     };
 }
@@ -347,6 +365,22 @@ impl Layer {
     /// screen a desktop layer is scaled onto.
     fn as_accel(&self, output: (u32, u32), opacity: u8) -> Option<AccelLayer> {
         let held = self.held.get(self.current()?)?;
+        if self.role() == Some(Role::View) {
+            return Some(AccelLayer {
+                buffer: held.id,
+                src: DamageRect {
+                    x: 0,
+                    y: 0,
+                    width_px: self.at.width,
+                    height_px: self.at.height,
+                },
+                dst_x: self.shows.left(),
+                dst_y: self.shows.top(),
+                dst_width_px: self.shows.width,
+                dst_height_px: self.shows.height,
+                opacity,
+            });
+        }
         let shows = self.shows.intersection(&self.at);
         let (dst_width_px, dst_height_px) = match self.source {
             Source::Desktop => output,
@@ -648,7 +682,7 @@ impl Compositor {
                 continue;
             };
             let depth = match role {
-                Role::Free => continue,
+                Role::Free | Role::View => continue,
                 Role::Flattened => Depth::Below(index.saturating_add(1)),
                 Role::Frost => Depth::Frost(index),
             };
@@ -773,6 +807,7 @@ impl Compositor {
     ) -> Result<bool, DriverError> {
         let Some(engine) = presenter.layers() else {
             self.leave_layers(None);
+            self.settle_views();
             return Ok(false);
         };
         let caps = engine.caps();
@@ -791,12 +826,18 @@ impl Compositor {
             if !self.reconcile(engine, &caps, &plan, pointer_layer) {
                 break;
             }
+            self.settle_views();
             match self.present_plan(engine, &plan) {
                 Ok(()) => return Ok(true),
                 // What could not be had for this frame may be had for the
                 // next: the frame carries the scene this once.
                 Err(DriverError::OutOfMemory) => break,
                 Err(DriverError::OutOfRange) if plan.shape != Shape::Desktop => {
+                    // An enlargement is what fills the engine's line buffer.
+                    if let Some(view) = self.layered_view() {
+                        self.refused.view = Some(view);
+                        continue;
+                    }
                     let Some((id, at)) = self.lowest_layered_window() else {
                         self.refused.stack = true;
                         break;
@@ -817,7 +858,66 @@ impl Compositor {
             }
         }
         self.leave_layers(Some(engine));
+        self.settle_views();
         Ok(false)
+    }
+
+    /// A view on a layer of its own, as its refusal records it.
+    fn layered_view(&self) -> Option<RefusedView> {
+        self.layers
+            .as_ref()?
+            .layers
+            .iter()
+            .find_map(|layer| match layer.source {
+                Source::Window(window, Role::View) => Some(RefusedView {
+                    window,
+                    picture: (layer.at.width, layer.at.height),
+                    shown: (layer.shows.width, layer.shows.height),
+                }),
+                _ => None,
+            })
+    }
+
+    /// Whether window `id`'s view rides a layer of its own.
+    pub(super) fn view_layered(&self, id: WindowId) -> bool {
+        self.layers.as_ref().is_some_and(|stack| {
+            stack
+                .layers
+                .iter()
+                .any(|layer| layer.source == Source::Window(id, Role::View))
+        })
+    }
+
+    /// Stale what of `rects`, in window `id`'s picture, its view's layer
+    /// holds.
+    pub(super) fn mark_view_layer(&mut self, id: WindowId, rects: &[DamageRect]) {
+        let at = |value: u32| i32::try_from(value).unwrap_or(i32::MAX);
+        for layer in self.layers.iter_mut().flat_map(|stack| &mut stack.layers) {
+            if layer.source == Source::Window(id, Role::View) {
+                for rect in rects {
+                    layer.dirty(Rect::new(
+                        layer.at.left().saturating_add(at(rect.x)),
+                        layer.at.top().saturating_add(at(rect.y)),
+                        rect.width_px,
+                        rect.height_px,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Enlarge into its window's content every view no layer of its own
+    /// shows that the content lacks, before anything composites them.
+    pub(super) fn settle_views(&mut self) {
+        for index in 0..self.windows.len() {
+            let lacking = self.windows.get(index).is_some_and(|window| {
+                window.view().is_some_and(|view| !view.overlaid())
+                    && !self.view_layered(window.id())
+            });
+            if lacking {
+                self.overlay_view_at(index);
+            }
+        }
     }
 
     /// The lowest window on a layer, and where its layer lies.
@@ -901,6 +1001,7 @@ impl Compositor {
         let based = planned.filter(|_| plan.shape == Shape::Based);
         let layers = self.bake_composited(engine, changed).and_then(|()| {
             self.bake_free(engine);
+            self.bake_views(engine);
             self.bake_pointer(engine);
             self.accel_layers()
         });
@@ -1158,7 +1259,7 @@ impl Compositor {
             .min(MAX_ACCEL_LAYERS)
             .checked_sub(1 + usize::from(pointer_layer))
             .filter(|room| *room > 0)?;
-        if let Some(plan) = self.promoted_plan(fits) {
+        if let Some(plan) = self.promoted_plan(fits, caps.hw_scaling && room >= 2) {
             return Some(plan);
         }
         let refused = |window: &Window, at: Rect| self.window_refused(window, at);
@@ -1170,7 +1271,21 @@ impl Compositor {
                 continue;
             }
             let left = room.saturating_sub(chosen.len());
-            let mut laid = self.laid(window, (reach, screen), left);
+            let mut laid = self.laid(window, (reach, screen), (left, caps.hw_scaling));
+            // A composited layer above reads the window's view in software, so
+            // it is not taken off the window's content.
+            let read = laid
+                .first()
+                .filter(|laid| laid.role == Role::View)
+                .is_some_and(|view| {
+                    chosen.iter().any(|(_, other)| {
+                        other.role.is_composite()
+                            && !other.shows.intersection(&view.shows).is_empty()
+                    })
+                });
+            if read {
+                laid = self.laid(window, (reach, screen), (left, false));
+            }
             // Planes the display could not give buffers, or a field larger than
             // a layer may be, leave the window flattened, as one layer.
             let frost_refused = self.refused.frost.is_some()
@@ -1181,7 +1296,7 @@ impl Compositor {
                         || (laid.role == Role::Frost && (frost_refused || !fits(laid.holds)))
                 })
             {
-                laid = self.laid(window, (reach, screen), 1);
+                laid = self.laid(window, (reach, screen), (1, false));
             }
             if laid.len() > left {
                 break;
@@ -1217,7 +1332,9 @@ impl Compositor {
     /// promoted window the pointer draws nothing over, or the base, holding
     /// every window.
     fn fade_plan(&self, fits: impl Fn(Rect) -> bool) -> Plan {
-        self.promoted_plan(fits)
+        // Every layer is shown at the reveal, so a view would let its window's
+        // own pixels show through it.
+        self.promoted_plan(fits, false)
             .filter(|_| self.pointer.sprite_bounds().is_none())
             .unwrap_or_else(|| Plan {
                 split: self.windows.len(),
@@ -1228,7 +1345,7 @@ impl Compositor {
 
     /// A fullscreen window covering the output alone on the one layer, where
     /// it may be.
-    fn promoted_plan(&self, fits: impl Fn(Rect) -> bool) -> Option<Plan> {
+    fn promoted_plan(&self, fits: impl Fn(Rect) -> bool, scales: bool) -> Option<Plan> {
         let cover = self.fullscreen_cover()?;
         let footprint = cover.footprint(self.shadow.reach());
         if !Self::promotable(cover) || !fits(footprint) || self.window_refused(cover, footprint) {
@@ -1236,6 +1353,12 @@ impl Compositor {
         }
         let mut windows = ArrayVec::new();
         let _ = windows.try_push((cover.id(), Laid::showing(Role::Free, footprint)));
+        if let Some(view) = self
+            .view_laid(cover, self.screen_rect())
+            .filter(|view| scales && fits(view.holds))
+        {
+            let _ = windows.try_push((cover.id(), view));
+        }
         Some(Plan {
             split: self.index_of(cover.id())?,
             windows,
@@ -1311,14 +1434,20 @@ impl Compositor {
         &self,
         window: &Window,
         (reach, screen): (u32, Rect),
-        left: usize,
-    ) -> ArrayVec<Laid, 2> {
+        (left, scales): (usize, bool),
+    ) -> ArrayVec<Laid, 3> {
         let footprint = window.footprint(reach);
         let shows = window.bounds().intersection(&screen);
         let whole = window.opacity() == u8::MAX;
         let mut laid = ArrayVec::new();
         // Wholly off screen, a frosted window has no frost to show.
         if !window.reads_backdrop() || (whole && shows.is_empty()) {
+            if let Some(view) = self
+                .view_laid(window, screen)
+                .filter(|_| scales && whole && !window.reads_backdrop() && left >= 2)
+            {
+                let _ = laid.try_push(view);
+            }
             let _ = laid.try_push(Laid::showing(Role::Free, footprint));
         } else if whole && window.is_retained() && left >= 2 {
             let _ = laid.try_push(Laid::showing(Role::Free, footprint));
@@ -1334,6 +1463,40 @@ impl Compositor {
             ));
         }
         laid
+    }
+
+    /// The layer `window`'s view would ride, where the engine may enlarge it:
+    /// a view clear of the window's rounded corners, on the screen, that no
+    /// armed capture reads in software, and that was not refused at this size.
+    fn view_laid(&self, window: &Window, screen: Rect) -> Option<Laid> {
+        let view = window.view()?;
+        let placement = view.placement();
+        if window.cuts_client(placement) {
+            return None;
+        }
+        let client = window.client_rect();
+        let shows = Rect::new(
+            client.left().saturating_add(placement.left()),
+            client.top().saturating_add(placement.top()),
+            placement.width,
+            placement.height,
+        );
+        let captured = self
+            .capture
+            .as_ref()
+            .is_some_and(|armed| !armed.area().intersection(&shows).is_empty());
+        let (width, height) = view.size();
+        let refused = self.refused.view
+            == Some(RefusedView {
+                window: window.id(),
+                picture: (width, height),
+                shown: (shows.width, shows.height),
+            });
+        (!captured && !refused && !shows.intersection(&screen).is_empty()).then(|| Laid {
+            role: Role::View,
+            holds: Rect::new(shows.left(), shows.top(), width, height),
+            shows,
+        })
     }
 
     /// Whether `window` may be the one layer of a promoted present, which has
@@ -1428,7 +1591,7 @@ impl Compositor {
                         .iter()
                         .any(|layer| matches!(layer.source, Source::Window(..) | Source::Desktop));
                 }
-                self.refuse(source, capacity);
+                self.refuse(source, capacity, shows);
                 // A window refused buffers takes everything beneath it into
                 // the base; anything else leaves no stack to show.
                 whole =
@@ -1487,9 +1650,16 @@ impl Compositor {
 
     /// Remember that the engine could not give `source` buffers of
     /// `capacity`, so it is not asked again until what is asked for changes.
-    fn refuse(&mut self, source: Source, capacity: (u32, u32)) {
+    fn refuse(&mut self, source: Source, capacity: (u32, u32), shows: Rect) {
         match source {
             Source::Window(id, Role::Frost) => self.refused.frost = self.frost_refusal(id),
+            Source::Window(id, Role::View) => {
+                self.refused.view = Some(RefusedView {
+                    window: id,
+                    picture: capacity,
+                    shown: (shows.width, shows.height),
+                });
+            }
             Source::Window(id, _) => self.refused.window = Some((id, capacity)),
             Source::Pointer => self.refused.pointer = Some(capacity),
             Source::Desktop => self.refused.desktop = Some(capacity),
@@ -1599,7 +1769,7 @@ impl Compositor {
                 Source::Window(_, Role::Flattened) => {
                     bake_stale(layer, back, engine, (*order, *runner));
                 }
-                Source::Window(_, Role::Free) | Source::Pointer => {}
+                Source::Window(_, Role::Free | Role::View) | Source::Pointer => {}
             }
         }
         Ok(())
@@ -1649,6 +1819,28 @@ impl Compositor {
             }
         }
         None
+    }
+
+    /// Bake every view layer's changed pixels from its window's picture.
+    fn bake_views(&mut self, engine: &mut dyn LayerPresenter) {
+        let Self {
+            layers,
+            windows,
+            order,
+            ..
+        } = self;
+        for layer in layers.iter_mut().flat_map(|stack| &mut stack.layers) {
+            let Source::Window(id, Role::View) = layer.source else {
+                continue;
+            };
+            let view = windows
+                .iter()
+                .find(|window| window.id() == id)
+                .and_then(Window::view);
+            if let Some(view) = view {
+                bake_view(layer, view, engine, *order);
+            }
+        }
     }
 
     /// Bake every free layer's changed pixels from its window alone.
@@ -1910,6 +2102,56 @@ fn bake_stale(
             order,
             runner,
         );
+    }
+    held.stale.clear();
+    layer.staged = Some(target);
+}
+
+/// Bake what `layer`'s buffer lacks of `view`'s picture, opaque RGBA8 written
+/// in the engine's channel `order`.
+fn bake_view(layer: &mut Layer, view: &View, engine: &mut dyn LayerPresenter, order: ChannelOrder) {
+    let Some(target) = layer.target() else {
+        return;
+    };
+    let Some((bytes, stride)) = engine.pixels(layer.held[target].id) else {
+        return;
+    };
+    let (Ok(stride), Ok(width)) = (usize::try_from(stride), usize::try_from(view.size().0)) else {
+        return;
+    };
+    let pitch = width.saturating_mul(4);
+    let picture = view.pixels();
+    let held = &mut layer.held[target];
+    for local in held.stale.rects() {
+        let (Ok(x), Ok(y)) = (usize::try_from(local.left()), usize::try_from(local.top())) else {
+            continue;
+        };
+        let (columns, rows) = (
+            x * 4..(x + local.width as usize) * 4,
+            y..y + local.height as usize,
+        );
+        for row in rows {
+            let (Some(from), Some(into)) = (
+                picture.get(row * pitch + columns.start..row * pitch + columns.end),
+                bytes.get_mut(row * stride + columns.start..row * stride + columns.end),
+            ) else {
+                continue;
+            };
+            match order {
+                ChannelOrder::Rgba => into.copy_from_slice(from),
+                ChannelOrder::Bgra => {
+                    for (out, dot) in into
+                        .as_chunks_mut::<4>()
+                        .0
+                        .iter_mut()
+                        .zip(from.as_chunks::<4>().0)
+                    {
+                        let [red, green, blue, alpha] = *dot;
+                        *out = [blue, green, red, alpha];
+                    }
+                }
+            }
+        }
     }
     held.stale.clear();
     layer.staged = Some(target);

@@ -35,13 +35,15 @@ encoder:
   anchored at the owner, so a worker ends when its owner does — crash
   included — rather than lingering until the owner's whole session ends
   (`docs/src/architecture/sessions.md`).
-- **A memory ceiling and one thread.** The block must lower the child's
-  `AddressSpaceBytes` and `Threads` limits to finite hard bounds
+- **A memory ceiling and a bounded number of threads.** The block must lower
+  the child's `AddressSpaceBytes` and `Threads` limits to finite hard bounds
   (`SpawnAttach::sandbox` sets the ceiling its caller names and a single
-  thread), so a decoder's runaway allocation — a file it under-forecast, or a
-  worker an attacker now drives — ends as the worker's own memory-bound exit
-  rather than squeezing the machine. Its stack counts toward the ceiling like
-  any other mapping.
+  thread, which `SpawnAttach::with_threads` raises to a bound the spawner
+  grants a worker that runs work beside its leader), so a decoder's runaway
+  allocation — a file it under-forecast, or a worker an attacker now drives —
+  ends as the worker's own memory-bound exit rather than squeezing the
+  machine, and no worker can make more kernel stacks than it was granted.
+  Its stacks count toward the ceiling like any other mapping.
 - **No reserved flag bits.** Any undefined `flags` bit refuses the block.
 
 A worker is re-spawned from its owner's own program, so the process list

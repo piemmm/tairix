@@ -2378,8 +2378,7 @@ impl DesktopShell {
         let Some(scaled) = self
             .tasks
             .window_for(window)
-            .and_then(|wm| compositor.window(wm))
-            .and_then(tairix_wm::Window::content)
+            .and_then(|wm| compositor.window_picture(wm))
             .and_then(|frame| thumbnail(frame, width, height))
         else {
             return false;

@@ -149,7 +149,8 @@ forget to, and a check-and-charge takes no lock.
   one field by field, so a spawn narrows its child but can never raise it, a
   `CAP_RLIMIT_RAISE` holder included. init starts every service under the
   limits its unit declares this way, and a parser sandbox's worker under a
-  memory ceiling and a single thread (`docs/src/security/sandbox.md`).
+  memory ceiling and a single thread, or the few its spawner grants it
+  (`docs/src/security/sandbox.md`).
 
 Storing a limit is not enough — it is **enforced on the path that consumes the
 resource**, before the resource is committed, and fails closed (`AGENTS.md`

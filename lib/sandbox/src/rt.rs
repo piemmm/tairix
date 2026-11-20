@@ -254,11 +254,12 @@ fn spawn_sandboxed_worker(
     path: &[u8],
     (role, service): (&[u8], Option<&[u8]>),
     ceiling: u64,
-    share: Option<u64>,
+    (share, threads): (Option<u64>, Option<u64>),
 ) -> Result<(i64, u32, u32), Errno> {
     let attach = |wires| {
         let attach = SpawnAttach::sandbox(wires, ceiling);
-        share.map_or(attach, |region| attach.with_share(region))
+        let attach = share.map_or(attach, |region| attach.with_share(region));
+        threads.map_or(attach, |threads| attach.with_threads(threads))
     };
     match service {
         Some(service) => tairix_rt::spawn_piped(path, &[path, role, service], attach),
@@ -274,7 +275,7 @@ impl Launcher for RtLauncher {
             self.path,
             (WORKER_ROLE_ARG, self.service),
             self.memory.ceiling(self.ram()),
-            None,
+            (None, None),
         )?;
         Ok(RtChannel {
             pid,
@@ -411,6 +412,17 @@ impl RtSessionChannel {
         memory: WorkerMemory,
         share: Option<NonZeroUsize>,
     ) -> Result<Self, Errno> {
+        Self::launch_granted(path, memory, share, None)
+    }
+
+    /// [`launch`](Self::launch), its worker allowed `threads` threads where
+    /// some are named rather than its leader alone.
+    fn launch_granted(
+        path: &[u8],
+        memory: WorkerMemory,
+        share: Option<NonZeroUsize>,
+        threads: Option<u64>,
+    ) -> Result<Self, Errno> {
         let own = match share {
             Some(len) => {
                 let region = SharedRegion::create(len.get()).ok_or(Errno::OutOfMemory)?;
@@ -422,7 +434,7 @@ impl RtSessionChannel {
             path,
             (SESSION_ROLE_ARG, None),
             worker_ceiling(memory),
-            own.as_ref().map(|own| own.0.id()),
+            (own.as_ref().map(|own| own.0.id()), threads),
         )?;
         Ok(Self {
             pid: Some(pid),
@@ -638,6 +650,7 @@ pub struct RtSessionLauncher {
     path: &'static [u8],
     memory: WorkerMemory,
     share: Option<NonZeroUsize>,
+    threads: Option<u64>,
 }
 
 impl RtSessionLauncher {
@@ -649,6 +662,7 @@ impl RtSessionLauncher {
             path,
             memory,
             share: None,
+            threads: None,
         }
     }
 
@@ -658,6 +672,14 @@ impl RtSessionLauncher {
     #[must_use]
     pub const fn sharing(mut self, len: NonZeroUsize) -> Self {
         self.share = Some(len);
+        self
+    }
+
+    /// The same launcher, each worker allowed `threads` threads rather than
+    /// its leader alone: for a worker that runs work of its own beside it.
+    #[must_use]
+    pub const fn threads(mut self, threads: u64) -> Self {
+        self.threads = Some(threads);
         self
     }
 
@@ -673,7 +695,7 @@ impl SessionLauncher for RtSessionLauncher {
     type Transport = RtSessionChannel;
 
     fn launch(&mut self) -> Result<RtSessionChannel, Errno> {
-        RtSessionChannel::launch(self.path, self.memory, self.share)
+        RtSessionChannel::launch_granted(self.path, self.memory, self.share, self.threads)
     }
 }
 

@@ -54,9 +54,10 @@ impl Scene {
 }
 
 /// The drive's disk as a D64 image.
-pub(super) fn image_of(machine: &Machine) -> Vec<u8> {
+pub(super) fn image_of(machine: &mut Machine) -> Vec<u8> {
     machine
-        .drive(Unit::Eight)
+        .drives()
+        .unit(Unit::Eight)
         .and_then(|drive| drive.disk())
         .and_then(|disk| d64::encode(disk, TRACKS))
         .expect("the disk encodes as a D64")
@@ -100,7 +101,7 @@ pub(super) fn check(scenes: Vec<Scene>) {
         disk.write_protected = scene.protected;
         let mut machine = played(disk, None, &scene.keys);
         shown(scene.name, &mut machine, scene.status);
-        assert_disk(scene.name, &image_of(&machine), &scene.after);
+        assert_disk(scene.name, &image_of(&mut machine), &scene.after);
     }
 }
 
@@ -368,13 +369,14 @@ fn one(disk: &mut Disk) {
 /// the table holds, and the scratch read a sixth from past its end.
 #[test]
 fn names_past_the_fifth_before_an_equals_sign_are_not_counted() {
-    let machine = played(
+    let mut machine = played(
         surface(&commands().image()),
         None,
         "OPEN15,8,15,\"S:ONE,X,X,X,X,X=Y\":CLOSE15|~",
     );
     let counted = machine
-        .drive(Unit::Eight)
+        .drives()
+        .unit(Unit::Eight)
         .map(|drive| drive.ram(crate::rom::c1541::ws::zp::NAME_EQUALS));
     assert!(
         counted.is_some_and(|count| count <= crate::rom::c1541::ws::PATTERNS),
@@ -697,7 +699,7 @@ fn a_name_ending_where_it_starts_is_written_as_the_originals_is() {
     let program = program_in_memory(&machine);
     assert_disk(
         "a save with no name, named a zero",
-        &image_of(&machine),
+        &image_of(&mut machine),
         &commands_with(|disk| {
             let (first, blocks) = disk.chain_along(&[(17, 0)], &program);
             disk.entry(closed(kind::PRG), &[0], first, blocks);
@@ -743,7 +745,7 @@ fn blocks_are_found_as_the_originals_finds_them() {
     shown("four blocks saved", &mut machine, " 0 OK 0  0");
     assert_disk(
         "interleaved on the directory's neighbour",
-        &image_of(&machine),
+        &image_of(&mut machine),
         &{
             let mut disk = blank();
             let (first, blocks) =
@@ -783,7 +785,7 @@ fn blocks_are_found_as_the_originals_finds_them() {
         &mut machine,
         " 72 DISK FULL 0  0",
     );
-    assert_disk("to the disk's edges", &image_of(&machine), &{
+    assert_disk("to the disk's edges", &image_of(&mut machine), &{
         let mut disk = nearly_full(&free);
         disk.block((25, 0), (35, 3), &program[..254]);
         disk.block((35, 3), (2, 7), &program[254..508]);
@@ -1061,7 +1063,7 @@ fn a_validate_that_fails_leaves_the_disks_own_bam_in_force() {
     after.entry(closed(kind::PRG), b"C", first, blocks);
     assert_disk(
         "a save after the validate",
-        &image_of(&machine),
+        &image_of(&mut machine),
         &after.image(),
     );
 }

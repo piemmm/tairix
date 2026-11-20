@@ -216,6 +216,29 @@ fn a_smooth_screen_blends_and_redraws_what_a_change_reaches() {
     assert_eq!(surface, whole, "as if drawn whole");
 }
 
+/// A wiped screen holds nothing of its frame, sharp or smooth, and draws
+/// whole next.
+#[test]
+fn a_wiped_screen_holds_nothing_of_its_frame() {
+    for scaling in [Scaling::Sharp, Scaling::Smooth] {
+        let mut screen = Screen::new();
+        screen.set_scaling(scaling);
+        let target = Target {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 32,
+        };
+        let mut surface = Surface::new(8, 32).unwrap();
+        assert!(screen.take(2, 8, &levels(2, 8, |y| 30 * u8::try_from(y).unwrap())));
+        assert_eq!(screen.draw(&mut surface, target), Ok(0..32));
+        screen.wipe();
+        assert!(screen.pixels().iter().all(|&byte| byte == 0), "{scaling:?}");
+        assert!(screen.smoothed.iter().all(|&byte| byte == 0), "{scaling:?}");
+        assert_eq!(screen.draw(&mut surface, target), Ok(0..32), "drawn whole");
+    }
+}
+
 #[test]
 fn changing_the_scaling_draws_whole() {
     let mut screen = Screen::new();

@@ -23,12 +23,12 @@
 //! the ordinary resize request. The app's paint code does not change.
 
 use tairix_abi::driver::display::DisplayMode;
-use tairix_abi::window_ipc::WINDOW_ENDPOINT;
+use tairix_abi::window_ipc::{WindowView, WINDOW_ENDPOINT};
 use tairix_rt::shm::SharedRegion;
 #[cfg(any(test, freestanding))]
 use {
     crate::client::{PresentState, WindowClient, WindowTransport},
-    tairix_abi::driver::display::DamageList,
+    tairix_abi::driver::display::{DamageList, DamageRect, MAX_DAMAGE_RECTS},
     tairix_abi::Errno,
     tairix_display::winframe::{self, damage_in},
     tairix_display::{add_damage, stale_frames, SERIAL},
@@ -148,32 +148,62 @@ pub fn region_bytes(mode: &DisplayMode, frame_count: u32) -> Option<usize> {
 /// reading, and the one the app draws its next present into.
 pub const FRAME_COUNT: u32 = 2;
 
+/// The shape of the frames of a window shaped as `mode` carrying `view`'s
+/// rows after its own: both sets of rows, at a stride holding a row of
+/// either. `None` when that does not fit the mode's fields.
+#[must_use]
+pub fn frame_shape(mode: &DisplayMode, view: Option<&WindowView>) -> Option<DisplayMode> {
+    let Some(view) = view else {
+        return Some(*mode);
+    };
+    let row = view.width_px.checked_mul(mode.format.bytes_per_pixel())?;
+    Some(DisplayMode {
+        width_px: mode.width_px,
+        height_px: mode.height_px.checked_add(view.height_px)?,
+        stride_bytes: mode.stride_bytes.max(row),
+        format: mode.format,
+    })
+}
+
 /// What an application keeps of its window's frames between presents: the
 /// frame the next present is drawn into, and what each lacks of the picture.
 #[cfg(any(test, freestanding))]
 pub(crate) struct FrameRing {
     stale: StaleFrames,
+    /// What each frame lacks of the view's picture, in the view's pixels.
+    view_stale: StaleFrames,
     back: usize,
     /// The change a present carries, held so a present allocates none.
     changed: Region,
 }
 
+/// What a frame being brought up to date is owed: the window's picture's
+/// record, the view's, and the scratch a present's change is held in.
+#[cfg(any(test, freestanding))]
+pub(crate) type Owed<'a> = (&'a mut StaleFrames, &'a mut StaleFrames, &'a mut Region);
+
 #[cfg(any(test, freestanding))]
 impl FrameRing {
-    /// The ring of a fresh region shaped as `mode`.
-    pub(crate) fn new(mode: &DisplayMode) -> Self {
+    /// The ring of a fresh region shaped as `mode`, carrying `view`.
+    pub(crate) fn new(mode: &DisplayMode, view: Option<&WindowView>) -> Self {
         Self {
             stale: stale_frames(FRAME_COUNT as usize, mode),
+            view_stale: StaleFrames::new(
+                FRAME_COUNT as usize,
+                view_bounds(view),
+                FRAME_COUNT as usize * MAX_DAMAGE_RECTS,
+            ),
             back: 0,
             changed: Region::new(),
         }
     }
 
-    /// Every frame lacks all of a fresh region shaped as `mode`, and the
-    /// first is drawn next.
-    pub(crate) fn reset(&mut self, mode: &DisplayMode) {
+    /// Every frame lacks all of a fresh region shaped as `mode` carrying
+    /// `view`, and the first is drawn next.
+    pub(crate) fn reset(&mut self, mode: &DisplayMode, view: Option<&WindowView>) {
         self.stale
             .reset(Rect::new(0, 0, mode.width_px, mode.height_px));
+        self.view_stale.reset(view_bounds(view));
         self.back = 0;
     }
 
@@ -196,7 +226,7 @@ impl FrameRing {
         client: &mut WindowClient<T>,
         window: u64,
         damage: DamageList,
-        draw: impl FnOnce(usize, (&mut StaleFrames, &mut Region)) -> Result<(), Errno>,
+        draw: impl FnOnce(usize, Owed<'_>) -> Result<(), Errno>,
     ) -> Result<bool, Errno> {
         let index = match client.present_state(window) {
             PresentState::InFlight => {
@@ -208,7 +238,10 @@ impl FrameRing {
             }
             PresentState::Idle => self.back,
         };
-        draw(index, (&mut self.stale, &mut self.changed))?;
+        draw(
+            index,
+            (&mut self.stale, &mut self.view_stale, &mut self.changed),
+        )?;
         let frame = u32::try_from(index).map_err(|_| Errno::OutOfRange)?;
         client.present(window, frame, damage)?;
         if index == self.back {
@@ -230,21 +263,17 @@ impl FrameRing {
 #[cfg(any(test, freestanding))]
 pub(crate) fn draw_frame(
     pixels: &mut [u8],
-    index: usize,
+    (index, frame_len): (usize, usize),
     (stale, changed): (&mut StaleFrames, &mut Region),
     surface: &Surface,
     mode: &DisplayMode,
-    damage: &DamageList,
+    damage: &[DamageRect],
 ) -> Result<(), Errno> {
-    let frame_len = region_bytes(mode, 1).ok_or(Errno::OutOfRange)?;
-    let start = index.checked_mul(frame_len).ok_or(Errno::OutOfRange)?;
-    let frame = pixels
-        .get_mut(start..start.saturating_add(frame_len))
-        .ok_or(Errno::OutOfRange)?;
+    let frame = frame_mut(pixels, index, frame_len)?;
     changed.clear();
     add_damage(
         changed,
-        damage.rects(),
+        damage,
         Rect::new(0, 0, mode.width_px, mode.height_px),
     );
     stale.bring_up_to_date(index, changed, Errno::OutOfRange, |refresh| {
@@ -254,6 +283,58 @@ pub(crate) fn draw_frame(
             }
         }
         Ok(())
+    })
+}
+
+/// Bring the view's rows of frame `index` of `pixels`, frames `frame_len`
+/// long, up to date from `picture` for a present of `damage` of it: as
+/// [`draw_frame`] does the window's, the rows beginning `window_len` into the
+/// frame and shaped as `surface`.
+///
+/// # Errors
+///
+/// [`draw_frame`]'s.
+#[cfg(any(test, freestanding))]
+pub(crate) fn draw_view(
+    pixels: &mut [u8],
+    (index, frame_len, window_len): (usize, usize, usize),
+    (stale, changed): (&mut StaleFrames, &mut Region),
+    picture: &Surface,
+    surface: &DisplayMode,
+    damage: &[DamageRect],
+) -> Result<(), Errno> {
+    let frame = frame_mut(pixels, index, frame_len)?;
+    let rows = frame.get_mut(window_len..).ok_or(Errno::OutOfRange)?;
+    changed.clear();
+    add_damage(
+        changed,
+        damage,
+        Rect::new(0, 0, surface.width_px, surface.height_px),
+    );
+    stale.bring_up_to_date(index, changed, Errno::OutOfRange, |refresh| {
+        for rect in refresh.rects() {
+            if let Some(rect) = damage_in(surface, *rect) {
+                winframe::encode(picture, rows, surface, rect, &SERIAL)?;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Frame `index` of `pixels`, frames `frame_len` long.
+#[cfg(any(test, freestanding))]
+fn frame_mut(pixels: &mut [u8], index: usize, frame_len: usize) -> Result<&mut [u8], Errno> {
+    let start = index.checked_mul(frame_len).ok_or(Errno::OutOfRange)?;
+    pixels
+        .get_mut(start..start.saturating_add(frame_len))
+        .ok_or(Errno::OutOfRange)
+}
+
+/// The rectangle `view`'s picture covers, empty for none.
+#[cfg(any(test, freestanding))]
+fn view_bounds(view: Option<&WindowView>) -> Rect {
+    view.map_or(Rect::new(0, 0, 0, 0), |view| {
+        Rect::new(0, 0, view.width_px, view.height_px)
     })
 }
 

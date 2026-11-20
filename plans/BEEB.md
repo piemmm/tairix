@@ -909,7 +909,9 @@ The worker is the `Run` binary in its `--sandbox-session-worker` role over a
 `SupervisedSession`, serving `worker::MachineService`, with one share holding
 the canvas, a byte a pixel, row after row. The owner, through
 `worker::MachineClient`, asks one request at a time; the worker answers each
-with one reply; nothing is unsolicited. One worker runs one machine.
+with one reply; nothing is unsolicited. One worker runs one machine. It is
+granted three threads (`worker::WORKER_THREADS`): its own, and one each a
+Commodore 64's SID and drives run on (`plans/C64.md` C18).
 
 - **Requests:** configure — the model and its fitting: for the Model B the
   OS image, each slot's ROM image or sideways RAM, and the keyboard links;

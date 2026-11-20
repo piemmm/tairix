@@ -15,6 +15,7 @@ pub mod c64;
 pub mod canvas;
 pub mod cassette;
 pub mod electron;
+pub mod lane;
 mod running;
 pub mod via;
 
@@ -22,7 +23,7 @@ pub use running::{BadTape, Machine};
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
-use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -249,7 +250,7 @@ impl Model {
 /// records it by, taken once.
 #[derive(Clone, Debug)]
 struct Rom {
-    image: Rc<[u8]>,
+    image: Arc<[u8]>,
     fingerprint: [u8; FINGERPRINT_LEN],
 }
 

@@ -28,7 +28,7 @@ use tairix_abi::window_ipc::{
     encode_screensaver_reply, AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape,
     DialogModality, DragItems, DropOperation, HandOverOutcome, HandOverTarget, KeyboardMode,
     LayerDepth, MenuRefusal, OfferedItem, PickPurpose, PointerAction, PreviewSubject, SystemTask,
-    TerrainPlate, ToolOver, WindowEvent, WindowRegion, MENU_OPEN_REVISION,
+    TerrainPlate, ToolOver, WindowEvent, WindowRegion, WindowView, MENU_OPEN_REVISION,
     WINDOW_SCREENSAVER_REPLY_MAX,
 };
 use tairix_abi::{AppIdentity as AttestedApp, BundleId, Errno, ProcId};
@@ -1417,6 +1417,23 @@ impl tairix_window::FrameHost for FrameShow<'_> {
         Ok(())
     }
 
+    fn view_presented(
+        &mut self,
+        window_id: u64,
+        _view: &WindowView,
+        surface: &DisplayMode,
+        frame: &[u8],
+        damage: &DamageList,
+    ) -> Result<(), Errno> {
+        let record = self
+            .windows
+            .records
+            .get(&window_id)
+            .ok_or(Errno::NotFound)?;
+        self.compositor
+            .present_window_view(record.wm, surface, frame, damage)
+    }
+
     fn frame_refused(&mut self, window_id: u64, errno: Errno) {
         tairix_log::log(
             self.shell.audit(),
@@ -2228,27 +2245,23 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         Ok(())
     }
 
-    fn window_resized(&mut self, window_id: u64, surface: &DisplayMode) -> Result<(), Errno> {
-        // The engine validated the new geometry and re-mapped the frame
-        // region; move the window's frame to reserve the new client size, so
-        // the furniture and the pointer's idea of the window agree with what
-        // the app has re-mapped. The app's own pixels arrive with its next
-        // present, which is what sizes their buffer. The window id →
-        // compositor id mapping is unchanged by a resize.
-        let Some(record) = self.windows.records.get(&window_id) else {
+    fn window_resized(
+        &mut self,
+        window_id: u64,
+        surface: &DisplayMode,
+        view: Option<&WindowView>,
+    ) -> Result<(), Errno> {
+        // The engine has validated and re-mapped the frames; the window's
+        // frame follows, so its furniture agrees with what the app now draws.
+        let Some(&WindowRecord { wm, standing, .. }) = self.windows.records.get(&window_id) else {
             return Err(Errno::NotFound);
         };
-        // An interactive drag owns the geometry for its whole duration: it
-        // recomputes the outer rectangle from the pointer on every sample, so
-        // adopting the size the app re-mapped at would set the window back to
-        // wherever the app had got to and the two would fight once per sample.
-        // The re-map itself is accepted — that is what sizes the pixels the
-        // app is about to present — and the settled size goes out when the
-        // grab ends.
-        if self.shell.router().wm().resizing() == Some(record.wm) {
-            return Ok(());
+        // A drag owns the geometry until its grab ends, so adopting the app's
+        // size would fight it once per sample; the view still changes, as it
+        // shapes the pixels the app is about to present.
+        if self.shell.router().wm().resizing() == Some(wm) {
+            return self.compositor.set_window_view(wm, view.copied());
         }
-        let (wm, standing) = (record.wm, record.standing);
         let asked = (surface.width_px, surface.height_px);
         // A dialog grown past the screen is fitted to it as it was on opening,
         // told so, and kept within the work area.
@@ -2256,30 +2269,37 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             Standing::Dialog(_) => self.dialog_extent(asked),
             Standing::TopLevel | Standing::Popup(_) | Standing::Tool(_) => asked,
         };
-        if self.compositor.resize_window_client(wm, width, height) {
-            if let Standing::Dialog(_) = standing {
-                let area = self.shell.work_area(self.compositor);
-                if let Some(bounds) = self.compositor.window(wm).map(Window::bounds) {
-                    let _ = self
-                        .compositor
-                        .move_window(wm, bounds.clamped_onto(area).origin);
-                }
-                if (width, height) != asked {
-                    self.windows.owed.push(WindowEvent::Resized {
-                        window_id,
-                        width_px: width,
-                        height_px: height,
-                        state: WindowSizeState::Restored,
-                    });
-                }
-            }
-            Ok(())
-        } else {
+        let held = self.compositor.window(wm).map(Window::client_size);
+        if !self.compositor.resize_window_client(wm, width, height) {
             // An empty client size, or a window the compositor no longer
-            // knows: refuse the resize (fail closed), leaving the old
-            // geometry the engine will keep in step.
-            Err(Errno::LengthOutOfRange)
+            // knows: refuse the resize (fail closed).
+            return Err(Errno::LengthOutOfRange);
         }
+        // A picture the compositor cannot hold refuses the resize, so the
+        // geometry it had is put back.
+        if let Err(errno) = self.compositor.set_window_view(wm, view.copied()) {
+            if let Some((width, height)) = held {
+                let _ = self.compositor.resize_window_client(wm, width, height);
+            }
+            return Err(errno);
+        }
+        if let Standing::Dialog(_) = standing {
+            let area = self.shell.work_area(self.compositor);
+            if let Some(bounds) = self.compositor.window(wm).map(Window::bounds) {
+                let _ = self
+                    .compositor
+                    .move_window(wm, bounds.clamped_onto(area).origin);
+            }
+            if (width, height) != asked {
+                self.windows.owed.push(WindowEvent::Resized {
+                    window_id,
+                    width_px: width,
+                    height_px: height,
+                    state: WindowSizeState::Restored,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn window_retitled(&mut self, window_id: u64, title: &str) -> Result<(), Errno> {
@@ -6867,9 +6887,9 @@ mod tests {
         with_owner((&mut shell, &mut comp, &mut windows), false, |host| {
             host.dialog_opened(2, true, &dialog(1, (200, 100), DialogModality::Modeless))
                 .expect("opens");
-            host.window_resized(2, &mode(200, 4000, DisplayFormat::Rgba8888))
+            host.window_resized(2, &mode(200, 4000, DisplayFormat::Rgba8888), None)
                 .expect("resized");
-            host.window_resized(2, &mode(220, 120, DisplayFormat::Rgba8888))
+            host.window_resized(2, &mode(220, 120, DisplayFormat::Rgba8888), None)
                 .expect("resized again");
         });
         let wm = windows.wm_id(2).expect("live");
@@ -8233,14 +8253,77 @@ mod tests {
         let wm = open_one(&mut host, 7);
         // A resize moves the client geometry the compositor draws and lays
         // furniture out from; the app's pixels follow with its next present.
-        host.window_resized(7, &mode(200, 150, DisplayFormat::Rgba8888))
+        host.window_resized(7, &mode(200, 150, DisplayFormat::Rgba8888), None)
             .expect("resizes");
         let size = host.compositor.window(wm).expect("live").client_size();
         assert_eq!(size, (200, 150));
         // An unknown window is refused.
         assert_eq!(
-            host.window_resized(99, &mode(10, 10, DisplayFormat::Rgba8888)),
+            host.window_resized(99, &mode(10, 10, DisplayFormat::Rgba8888), None),
             Err(Errno::NotFound)
+        );
+    }
+
+    /// A refused resize takes on neither its geometry nor its view: a refused
+    /// size leaves the window viewless, and a view the compositor cannot hold
+    /// puts back the geometry the window had.
+    #[test]
+    fn a_refused_resize_takes_on_neither_its_size_nor_its_view() {
+        use tairix_abi::window_ipc::ViewFilter;
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut compositor,
+            windows: &mut windows,
+            picker: &mut picker,
+            apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
+            screensaver: None,
+            relay: &mut RefusingRelay,
+            wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
+            authorise: None,
+            documents: &mut crate::documents::NoDocuments,
+        };
+        let wm = open_one(&mut host, 7);
+        let held = host.compositor.window(wm).expect("live").client_size();
+        let view = |width_px, height_px| WindowView {
+            width_px,
+            height_px,
+            placement: DamageRect {
+                x: 0,
+                y: 0,
+                width_px: 8,
+                height_px: 4,
+            },
+            filter: ViewFilter::Sharp,
+        };
+        assert_eq!(
+            host.window_resized(7, &mode(0, 150, DisplayFormat::Rgba8888), Some(&view(4, 2))),
+            Err(Errno::LengthOutOfRange)
+        );
+        let rows = mode(4, 2, DisplayFormat::Rgba8888);
+        assert_eq!(
+            host.compositor
+                .present_window_view(wm, &rows, &[0; 4 * 2 * 4], &whole(&rows)),
+            Err(Errno::NotFound),
+            "a refused resize carried no view in"
+        );
+        assert_eq!(
+            host.window_resized(
+                7,
+                &mode(200, 150, DisplayFormat::Rgba8888),
+                Some(&view(u32::MAX, u32::MAX))
+            ),
+            Err(Errno::OutOfMemory)
+        );
+        assert_eq!(
+            host.compositor.window(wm).expect("live").client_size(),
+            held
         );
     }
 
@@ -8313,7 +8396,7 @@ mod tests {
                 authorise: None,
                 documents: &mut crate::documents::NoDocuments,
             };
-            host.window_resized(7, &mode(220, 135, DisplayFormat::Rgba8888))
+            host.window_resized(7, &mode(220, 135, DisplayFormat::Rgba8888), None)
                 .expect("accepted");
         }
         assert_eq!(
@@ -8347,7 +8430,7 @@ mod tests {
                 authorise: None,
                 documents: &mut crate::documents::NoDocuments,
             };
-            host.window_resized(7, &mode(240, 150, DisplayFormat::Rgba8888))
+            host.window_resized(7, &mode(240, 150, DisplayFormat::Rgba8888), None)
                 .expect("resizes");
         }
         assert_eq!(

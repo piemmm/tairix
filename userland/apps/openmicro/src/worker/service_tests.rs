@@ -731,13 +731,15 @@ mod commodore {
             image: &image,
         };
         assert_eq!(refused(&rig.ask(&unfitted)), Refusal::Model, "device 9");
-        let track = machine(&mut rig)
-            .drive_mut(c64::drive::Unit::Eight)
+        let mut drives = machine(&mut rig).drives();
+        let track = drives
+            .unit_mut(c64::drive::Unit::Eight)
             .and_then(c64::drive::Drive::disk_mut)
             .and_then(|disk| disk.track_to_write(0, 3))
             .expect("track 1");
         let bit = track.bit(8 * 100);
         track.set_bit(8 * 100, !bit);
+        drop(drives);
         let reply = rig.ask(&Request::CollectDiscs([true, false]));
         let collected = media(&reply);
         assert_eq!(collected.discs.len(), 1);
@@ -790,7 +792,8 @@ mod commodore {
         assert_eq!(refused(&reply), Refusal::Model);
         assert!(
             machine(&mut rig)
-                .drive(c64::drive::Unit::Eight)
+                .drives()
+                .unit(c64::drive::Unit::Eight)
                 .and_then(c64::drive::Drive::disk)
                 .is_some(),
             "the disk still in its drive"
@@ -888,13 +891,15 @@ mod commodore {
             other => panic!("no snapshot: {other:?}"),
         };
         let machine = machine(&mut rig);
-        let track = machine
-            .drive_mut(c64::drive::Unit::Eight)
+        let mut drives = machine.drives();
+        let track = drives
+            .unit_mut(c64::drive::Unit::Eight)
             .and_then(c64::drive::Drive::disk_mut)
             .and_then(|disk| disk.track_to_write(0, 3))
             .expect("track 1");
         let last = track.len() - 1;
         track.set_bit(last, false);
+        drop(drives);
         let mut recorded = crate::media::tap::decode(&tap).expect("a TAP");
         recorded.record(0, &[0x180, 0x180]);
         machine.insert_tape(recorded);

@@ -22,11 +22,12 @@ use core::ops::Range;
 
 use tairix_abi::desktop::DOUBLE_CLICK_DEFAULT;
 use tairix_abi::driver::display::{
-    DamageRect, DisplayMode, RefreshRate, MAX_ACCEL_LAYERS, MAX_DAMAGE_RECTS,
+    DamageList, DamageRect, DisplayMode, RefreshRate, MAX_ACCEL_LAYERS, MAX_DAMAGE_RECTS,
 };
 use tairix_abi::sysinfo::DesktopFrameTotals;
 use tairix_abi::time::Duration64;
-use tairix_abi::DriverError;
+use tairix_abi::window_ipc::WindowView;
+use tairix_abi::{DriverError, Errno};
 use tairix_display::{damage_list, scanout_len, ChannelOrder, LayerPresenter, Presenter};
 
 use tairix_collections::SmallVec;
@@ -58,6 +59,7 @@ use crate::pointer::{Ghost, Halo, PointerOverlay, Sprite, SpriteRun, MAX_OWED, M
 use crate::shadow::ShadowKit;
 use crate::stats::{area_px, FrameCounters, FrameStats};
 use crate::surface::{blend_run, Surface};
+use crate::view::View;
 use crate::viewport::{FurnitureHit, RootViewport};
 use crate::window::{
     CursorHint, OpaqueRun, Placement, PointerCatch, ResizeBounds, RowLayer, Window, WindowId,
@@ -2132,7 +2134,7 @@ impl Compositor {
     /// genuine no-op.
     pub fn set_surface(&mut self, id: WindowId, surface: Surface) -> bool {
         self.mutate(id, |w| {
-            w.replace_surface(surface);
+            let _wiped = w.replace_surface(surface);
             true
         })
     }
@@ -2190,6 +2192,18 @@ impl Compositor {
         for local in changed.rects() {
             window.content_changed(*local);
         }
+        // A present over the view's placement leaves the view to draw there
+        // again.
+        if let Some(view) = window.view_mut() {
+            let placement = view.placement();
+            if changed
+                .rects()
+                .iter()
+                .any(|rect| !rect.intersection(&placement).is_empty())
+            {
+                view.invalidate();
+            }
+        }
         let client = window.client_rect();
         if established {
             self.mark_layer(id, client);
@@ -2199,7 +2213,97 @@ impl Compositor {
             self.mark_layer_region(id, &changed);
         }
         self.present_changes = changed;
+        if !self.view_layered(id) {
+            self.overlay_view(id);
+        }
         Some(out)
+    }
+
+    /// Window `id`'s frames carry `view` from now on, or none.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for a window not in the stack, and
+    /// [`Errno::OutOfMemory`] where its picture cannot be held: the window
+    /// keeps the view it had.
+    pub fn set_window_view(&mut self, id: WindowId, view: Option<WindowView>) -> Result<(), Errno> {
+        let index = self.index_of(id).ok_or(Errno::NotFound)?;
+        let window = self.windows.get_mut(index).ok_or(Errno::NotFound)?;
+        if window.view().map(View::spec) == view.as_ref() {
+            return Ok(());
+        }
+        window.set_view(view)?;
+        let client = window.client_rect();
+        self.mark_layer(id, client);
+        Ok(())
+    }
+
+    /// Show `damage` of window `id`'s view from `frame`, the view's rows
+    /// shaped as `surface`: on the view's own layer where it rides one, and
+    /// enlarged into the window's content otherwise.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for a window not in the stack or carrying no view,
+    /// [`Errno::OutOfRange`] for a surface not of the picture's size, and
+    /// [`Errno::LengthOutOfRange`] for damage past the picture or rows past the
+    /// frame; a refused present leaves the picture as it was.
+    pub fn present_window_view(
+        &mut self,
+        id: WindowId,
+        surface: &DisplayMode,
+        frame: &[u8],
+        damage: &DamageList,
+    ) -> Result<(), Errno> {
+        let layered = self.view_layered(id);
+        let index = self.index_of(id).ok_or(Errno::NotFound)?;
+        let view = self
+            .windows
+            .get_mut(index)
+            .and_then(Window::view_mut)
+            .ok_or(Errno::NotFound)?;
+        view.take(surface, frame, damage.rects())?;
+        if layered {
+            self.mark_view_layer(id, damage.rects());
+        } else {
+            self.overlay_view(id);
+        }
+        Ok(())
+    }
+
+    /// Window `id`'s content as the window shows it, its view enlarged in:
+    /// for a reader of the picture itself, as a thumbnail is.
+    pub fn window_picture(&mut self, id: WindowId) -> Option<&Surface> {
+        self.overlay_view(id);
+        self.window(id)?.content()
+    }
+
+    /// Enlarge window `id`'s view into its content where the content lacks
+    /// it, marking what that changed.
+    fn overlay_view(&mut self, id: WindowId) {
+        if let Some(index) = self.index_of(id) {
+            self.overlay_view_at(index);
+        }
+    }
+
+    /// [`overlay_view`](Self::overlay_view) for the window at `index` of the
+    /// stack.
+    fn overlay_view_at(&mut self, index: usize) {
+        let Some(window) = self.windows.get_mut(index) else {
+            return;
+        };
+        let Some(local) = window.overlay_view() else {
+            return;
+        };
+        let (id, client) = (window.id(), window.client_rect());
+        let drawn = Rect::new(
+            client.left().saturating_add(local.left()),
+            client.top().saturating_add(local.top()),
+            local.width,
+            local.height,
+        )
+        .intersection(&client);
+        self.mark_layer(id, drawn);
     }
 
     /// Whether window `id` holds a content buffer of `size`: what a
@@ -4268,6 +4372,7 @@ impl Compositor {
         let layered = wanted && self.pointer_allows_layers();
         if !layered {
             self.leave_layers(presenter.layers());
+            self.settle_views();
         }
         // A wake with nothing pending is not a frame, and must not open one:
         // the counters are what a reader watches for change, so counting the

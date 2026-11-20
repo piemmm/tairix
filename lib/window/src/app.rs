@@ -30,10 +30,12 @@ use core::fmt;
 
 use alloc::sync::Arc;
 
-use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{
+    DamageList, DamageRect, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS,
+};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::window_ipc::{
-    AlertSeverity, DialogModality, LayerDepth, WindowEvent, WindowSizing, WindowTitle,
+    AlertSeverity, DialogModality, LayerDepth, WindowEvent, WindowSizing, WindowTitle, WindowView,
     WINDOW_ENDPOINT,
 };
 use tairix_abi::{Errno, WaitSetOp, WaitSourceKind, CALL_DEADLINE_NONE};
@@ -44,11 +46,11 @@ use tairix_theme::{Accessibility, ThemeRegistry};
 use tairix_visible::Shown;
 
 use crate::client::{
-    notice_alert, presented_damage, retained_damage, Answer, PayloadRegion, PostedRequest,
+    notice_alert, presented_damage, retained_damage, Answer, Framed, PayloadRegion, PostedRequest,
     PresentState, Refused, WindowClient, WindowTransport,
 };
 use crate::desktop::Desktop;
-use crate::frames::{draw_frame, granted_region, FrameRing, WindowFrames};
+use crate::frames::{draw_frame, draw_view, frame_shape, granted_region, FrameRing, WindowFrames};
 pub use crate::frames::{region_bytes, FRAME_COUNT};
 use crate::server::{DialogSpec, LayerSpec, PopupSpec, ToolSpec, TransientSpec};
 
@@ -750,10 +752,41 @@ pub struct WindowPane {
     window: u64,
     frames: WindowFrames,
     mode: DisplayMode,
+    /// The view each frame carries after the window's rows, if one.
+    view: Option<PaneView>,
     ring: FrameRing,
-    /// What was drawn into the picture while both frames were the session's,
-    /// presented once one comes back ([`Self::present_deferred`]).
+    /// What was drawn while both frames were the session's, presented once
+    /// one comes back ([`Self::present_deferred`]): in a frame's rows, the
+    /// view's after the window's.
     deferred: Option<DamageList>,
+}
+
+/// A view a pane's frames carry, and the picture it is drawn from.
+struct PaneView {
+    spec: WindowView,
+    picture: Surface,
+}
+
+/// The rectangles of `damage`, a frame's, that lie in the rows of the view
+/// after a window `window_rows` high, moved to the view's own origin, and
+/// how many there are.
+fn view_rects(damage: &DamageList, window_rows: u32) -> ([DamageRect; MAX_DAMAGE_RECTS], usize) {
+    let mut moved = [DamageRect {
+        x: 0,
+        y: 0,
+        width_px: 0,
+        height_px: 0,
+    }; MAX_DAMAGE_RECTS];
+    let mut count = 0;
+    let below = damage.rects().iter().filter(|rect| rect.y >= window_rows);
+    for (slot, rect) in moved.iter_mut().zip(below) {
+        *slot = DamageRect {
+            y: rect.y - window_rows,
+            ..*rect
+        };
+        count += 1;
+    }
+    (moved, count)
 }
 
 impl WindowPane {
@@ -763,9 +796,31 @@ impl WindowPane {
             window,
             frames,
             mode: *mode,
-            ring: FrameRing::new(mode),
+            view: None,
+            ring: FrameRing::new(mode, None),
             deferred: None,
         }
+    }
+
+    /// The view the frames carry, if they carry one.
+    #[must_use]
+    pub fn view(&self) -> Option<&WindowView> {
+        self.view.as_ref().map(|view| &view.spec)
+    }
+
+    /// What the frames hold.
+    fn framed(&self) -> Framed {
+        Framed {
+            width_px: self.mode.width_px,
+            height_px: self.mode.height_px,
+            view: self.view().map(|view| (view.width_px, view.height_px)),
+        }
+    }
+
+    /// The picture of the view the frames carry, drawn into before
+    /// [`Self::present_view`] presents it.
+    pub fn view_picture_mut(&mut self) -> Option<&mut Surface> {
+        self.view.as_mut().map(|view| &mut view.picture)
     }
 
     /// Create and grant a `mode`-shaped frame region.
@@ -1070,44 +1125,118 @@ impl WindowPane {
         surface: &Surface,
         damage: &DamageList,
     ) -> Result<(), Errno> {
-        let (window, mode) = (self.window, self.mode);
+        self.present_frame(client, surface, *damage)
+    }
+
+    /// Present `damage` of `surface`, if any of the window's picture
+    /// changed, and `view_damage` of the view's picture
+    /// ([`Self::view_picture_mut`]): one frame carrying both, as
+    /// [`present`](Self::present) presents the window's alone.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotAttached`] for a pane whose frames carry no view, and
+    /// [`present`](Self::present)'s.
+    pub fn present_view<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+        surface: &Surface,
+        damage: Option<&DamageList>,
+        view_damage: &DamageList,
+    ) -> Result<(), Errno> {
+        let framed = self.framed();
+        if framed.view.is_none() {
+            return Err(Errno::NotAttached);
+        }
+        let below = framed.height_px;
+        let moved = view_damage.rects().iter().map(move |rect| DamageRect {
+            y: rect.y.saturating_add(below),
+            ..*rect
+        });
+        let rects = damage
+            .into_iter()
+            .flat_map(DamageList::rects)
+            .copied()
+            .chain(moved);
+        let list = framed.fitted(rects).ok_or(Errno::LengthOutOfRange)?;
+        self.present_frame(client, surface, list)
+    }
+
+    /// Present `damage` of a frame: the window's picture from `surface`, the
+    /// view's from its own.
+    fn present_frame<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+        surface: &Surface,
+        damage: DamageList,
+    ) -> Result<(), Errno> {
+        let window = self.window;
         if client.is_hidden(window) {
             self.deferred = None;
             return Ok(());
         }
         if client.present_state(window) == PresentState::InFlight {
-            self.defer(damage);
+            self.defer(&damage);
             client.owe_frame(window);
             return Ok(());
         }
-        let fresh = self.frames.is_released() || client.content_released(window);
-        if fresh {
-            self.deferred = None;
-            let grant = self.frames.reattach().ok_or(Errno::NotAttached)?;
-            if let Err(errno) = client.resize(window, grant, FRAME_COUNT, &mode) {
-                // The session never took the fresh region, so none is kept.
-                self.frames.release();
-                // A resize in flight, or this process's own calls filling its
-                // place at the session: the client asks for the paint again
-                // once one is answered.
-                return if errno == Errno::WouldBlock {
-                    Ok(())
-                } else {
-                    Err(Errno::NotAttached)
-                };
-            }
-            self.ring.reset(&mode);
-        }
-        let wanted = match self.deferred.take() {
-            Some(held) => DamageList::fitted(held.rects().iter().chain(damage.rects()).copied())
-                .unwrap_or(*damage),
-            None => *damage,
+        let shape = frame_shape(&self.mode, self.view()).ok_or(Errno::OutOfRange)?;
+        let rows = DisplayMode {
+            height_px: self.mode.height_px,
+            ..shape
         };
-        let damage = presented_damage(&mode, fresh, wanted)?;
+        let fresh = self.frames.is_released() || client.content_released(window);
+        if fresh && !self.reattach(client, &rows)? {
+            return Ok(());
+        }
+        let framed = self.framed();
+        let wanted = match self.deferred.take() {
+            Some(held) => framed
+                .fitted(held.rects().iter().chain(damage.rects()).copied())
+                .unwrap_or(damage),
+            None => damage,
+        };
+        let damage = presented_damage(framed, fresh, wanted)?;
+        let frame_len = region_bytes(&shape, 1).ok_or(Errno::OutOfRange)?;
+        let window_len = region_bytes(&rows, 1).ok_or(Errno::OutOfRange)?;
         let pixels = self.frames.pixels().ok_or(Errno::NotAttached)?;
-        let sent = self.ring.present(client, window, damage, |index, owed| {
-            draw_frame(pixels, index, owed, surface, &mode, &damage)
+        let view = self.view.as_ref().map(|view| {
+            let surface = DisplayMode {
+                width_px: view.spec.width_px,
+                height_px: view.spec.height_px,
+                ..rows
+            };
+            (&view.picture, surface)
         });
+        let sent = self.ring.present(
+            client,
+            window,
+            damage,
+            |index, (stale, view_stale, changed)| {
+                // The view's rectangles fall outside the window's rows, which
+                // its drawing clips them to.
+                draw_frame(
+                    pixels,
+                    (index, frame_len),
+                    (stale, changed),
+                    surface,
+                    &rows,
+                    damage.rects(),
+                )?;
+                let Some((picture, surface)) = view else {
+                    return Ok(());
+                };
+                let (moved, count) = view_rects(&damage, rows.height_px);
+                draw_view(
+                    pixels,
+                    (index, frame_len, window_len),
+                    (view_stale, changed),
+                    picture,
+                    &surface,
+                    &moved[..count],
+                )
+            },
+        );
         match sent {
             Ok(true) => Ok(()),
             Ok(false) => {
@@ -1119,6 +1248,31 @@ impl WindowPane {
                 Err(errno)
             }
         }
+    }
+
+    /// Re-attach a fresh region the session released, its window's rows
+    /// shaped as `rows`, answering whether the paint may go on: a resize in
+    /// flight, or this process's own calls filling its place at the session,
+    /// asks for the paint again once one is answered.
+    fn reattach<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+        rows: &DisplayMode,
+    ) -> Result<bool, Errno> {
+        self.deferred = None;
+        let grant = self.frames.reattach().ok_or(Errno::NotAttached)?;
+        if let Err(errno) = client.resize(self.window, grant, FRAME_COUNT, rows, self.view()) {
+            // The session never took the fresh region, so none is kept.
+            self.frames.release();
+            return if errno == Errno::WouldBlock {
+                Ok(false)
+            } else {
+                Err(Errno::NotAttached)
+            };
+        }
+        self.ring
+            .reset(&self.mode, self.view.as_ref().map(|view| &view.spec));
+        Ok(true)
     }
 
     /// Present from `surface` what was drawn while both frames were the
@@ -1133,15 +1287,17 @@ impl WindowPane {
         surface: &Surface,
     ) -> Result<(), Errno> {
         match self.deferred.take() {
-            Some(deferred) => self.present_list(client, surface, &deferred),
+            Some(deferred) => self.present_frame(client, surface, deferred),
             None => Ok(()),
         }
     }
 
     /// Keep `damage` for the present a returned frame makes.
     fn defer(&mut self, damage: &DamageList) {
+        let framed = self.framed();
         self.deferred = Some(match self.deferred {
-            Some(held) => DamageList::fitted(held.rects().iter().chain(damage.rects()).copied())
+            Some(held) => framed
+                .fitted(held.rects().iter().chain(damage.rects()).copied())
                 .unwrap_or(*damage),
             None => *damage,
         });
@@ -1162,23 +1318,55 @@ impl WindowPane {
         client: &mut WindowClient<T>,
         new_mode: &DisplayMode,
     ) -> Fitted {
-        if *new_mode == self.mode {
+        self.reshape(client, new_mode, None)
+    }
+
+    /// [`resize`](Self::resize) with frames carrying `view` after the
+    /// window's rows, or none. The view's picture is kept while its size is,
+    /// and is a fresh black one otherwise; the fresh frames are presented
+    /// whole either way. The shape a refusal named is [`Fitted::Kept`] if
+    /// asked again rather than posted again, so a caller whose view was
+    /// refused asks for another, or none.
+    pub fn reshape<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+        new_mode: &DisplayMode,
+        view: Option<WindowView>,
+    ) -> Fitted {
+        if *new_mode == self.mode && view.as_ref() == self.view() {
             return Fitted::Kept;
         }
         if client.resize_in_flight(self.window) {
             return Fitted::Deferred;
         }
-        self.remap(client, new_mode)
+        self.remap(client, new_mode, view)
     }
 
-    /// Post the resize onto a fresh region for `new_mode` and adopt it.
+    /// Post the resize onto a fresh region for `new_mode` carrying `view`
+    /// and adopt it.
     fn remap<T: WindowTransport>(
         &mut self,
         client: &mut WindowClient<T>,
         new_mode: &DisplayMode,
+        view: Option<WindowView>,
     ) -> Fitted {
-        let Some(len) = region_bytes(new_mode, FRAME_COUNT) else {
+        let Some(shape) = frame_shape(new_mode, view.as_ref()) else {
             return Fitted::Kept;
+        };
+        let Some(len) = region_bytes(&shape, FRAME_COUNT) else {
+            return Fitted::Kept;
+        };
+        let size = |view: &WindowView| (view.width_px, view.height_px);
+        let keeps_picture = self
+            .view()
+            .zip(view.as_ref())
+            .is_some_and(|(old, new)| size(old) == size(new));
+        let fresh_picture = match view {
+            Some(new) if !keeps_picture => match Surface::new(new.width_px, new.height_px) {
+                Some(picture) => Some(picture),
+                None => return Fitted::Kept,
+            },
+            _ => None,
         };
         let Some(spare) = WindowFrames::create(len) else {
             return Fitted::Kept;
@@ -1186,7 +1374,11 @@ impl WindowPane {
         let Some(grant) = spare.grant() else {
             return Fitted::Kept;
         };
-        match client.resize(self.window, grant, FRAME_COUNT, new_mode) {
+        let rows = DisplayMode {
+            height_px: new_mode.height_px,
+            ..shape
+        };
+        match client.resize(self.window, grant, FRAME_COUNT, &rows, view.as_ref()) {
             Ok(()) => {}
             // This process's own calls fill its place at the endpoint; the
             // size is delivered again once one of them is answered.
@@ -1195,7 +1387,11 @@ impl WindowPane {
         }
         self.frames = spare;
         self.mode = *new_mode;
-        self.ring.reset(new_mode);
+        let picture = fresh_picture.or_else(|| self.view.take().map(|old| old.picture));
+        self.view = view
+            .zip(picture)
+            .map(|(spec, picture)| PaneView { spec, picture });
+        self.ring.reset(new_mode, view.as_ref());
         // The fresh region is painted whole.
         self.deferred = None;
         Fitted::Adopted
@@ -1209,7 +1405,7 @@ impl WindowPane {
         new_mode: &DisplayMode,
         surface: &mut Surface,
     ) -> Fitted {
-        if *new_mode == self.mode {
+        if *new_mode == self.mode && self.view.is_none() {
             return Fitted::Kept;
         }
         if client.resize_in_flight(self.window) {
@@ -1218,7 +1414,7 @@ impl WindowPane {
         let Some(fresh) = Surface::new(new_mode.width_px, new_mode.height_px) else {
             return Fitted::Kept;
         };
-        let fitted = self.remap(client, new_mode);
+        let fitted = self.remap(client, new_mode, None);
         if fitted == Fitted::Adopted {
             *surface = fresh;
         }

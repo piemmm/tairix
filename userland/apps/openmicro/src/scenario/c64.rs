@@ -144,16 +144,23 @@ pub fn machine(roms: Roms<'_>, scenario: &Scenario) -> Result<Machine, ScenarioE
         if let Some(name) = scenario.discs.get(index) {
             let mut surface = disk(name)?;
             surface.write_protected = scenario.protected && unit == Unit::Eight;
-            drive(&mut machine, unit)?.insert(surface);
+            with_drive(&mut machine, unit, |drive| drive.insert(surface))?;
         }
     }
     wait(&mut machine, STARTED);
     Ok(machine)
 }
 
-fn drive(machine: &mut Machine, unit: Unit) -> Result<&mut Drive, ScenarioError> {
+/// `act` done to `unit`'s drive.
+fn with_drive<T>(
+    machine: &mut Machine,
+    unit: Unit,
+    act: impl FnOnce(&mut Drive) -> T,
+) -> Result<T, ScenarioError> {
     machine
-        .drive_mut(unit)
+        .drives()
+        .unit_mut(unit)
+        .map(act)
         .ok_or_else(|| ScenarioError::Disc(format!("no drive {unit:?}")))
 }
 
@@ -175,10 +182,13 @@ pub fn run(roms: Roms<'_>, scenario: &Scenario) -> Result<Observation, ScenarioE
     let mut discs = Vec::new();
     for &checked in &scenario.checked {
         let unit = Unit::of(checked);
-        let surface = drive(&mut machine, unit)?
-            .disk()
-            .ok_or_else(|| ScenarioError::Disc(format!("no disk in drive {unit:?}")))?;
-        discs.push((checked, tairix_crypto::sha256(&surface.encode().1)));
+        let digest = with_drive(&mut machine, unit, |drive| {
+            drive
+                .disk()
+                .map(|surface| tairix_crypto::sha256(&surface.encode().1))
+        })?
+        .ok_or_else(|| ScenarioError::Disc(format!("no disk in drive {unit:?}")))?;
+        discs.push((checked, digest));
     }
     Ok(Observation {
         rows: screen,
@@ -196,7 +206,7 @@ fn step_on(machine: &mut Machine, step: &str) -> Result<(), ScenarioError> {
         "wait" => wait(machine, centiseconds(argument)?),
         "swap" => {
             let surface = disk(argument)?;
-            drive(machine, Unit::Eight)?.insert(surface);
+            with_drive(machine, Unit::Eight, |drive| drive.insert(surface))?;
         }
         "restore" => press_restore(machine, false),
         "stoprestore" => press_restore(machine, true),

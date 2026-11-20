@@ -736,8 +736,9 @@ const SPAWN_ATTACH_CWD_AT: usize = SPAWN_ATTACH_SHARE_AT + 8;
 /// length.
 pub const SPAWN_ATTACH_LEN: usize = SPAWN_ATTACH_CWD_AT + PathAt::WIRE_LEN;
 
-/// The threads a sandbox worker may hold: its leader alone. A parser needs no
-/// other, and every thread costs kernel memory its ceiling does not bound.
+/// The threads a sandbox worker may hold unless its spawner grants more
+/// ([`SpawnAttach::with_threads`]): its leader alone. A parser needs no other,
+/// and every thread costs kernel memory its ceiling does not bound.
 const SANDBOX_THREADS: ResourceLimit = ResourceLimit { soft: 1, hard: 1 };
 
 /// Wire discriminant for [`SpawnSession::Inherit`]. `0` is reserved so a
@@ -1186,17 +1187,26 @@ impl SpawnAttach {
         threads: u64,
         share: u64,
     ) -> Self {
-        let sandbox = Self::sandbox(wires, address_space_bytes).with_share(share);
+        let sandbox = Self::sandbox(wires, address_space_bytes)
+            .with_share(share)
+            .with_threads(threads);
         Self {
             flags: sandbox.flags | SPAWN_FLAG_DRAWING,
-            limits: sandbox.limits.lowering(
-                LimitKind::Threads,
-                ResourceLimit {
-                    soft: threads,
-                    hard: threads,
-                },
-            ),
             ..sandbox
+        }
+    }
+
+    /// This block, its child allowed `threads` threads, the bound a sandbox
+    /// worker's host grants one that needs more than its leader.
+    #[must_use]
+    pub const fn with_threads(self, threads: u64) -> Self {
+        let bound = ResourceLimit {
+            soft: threads,
+            hard: threads,
+        };
+        Self {
+            limits: self.limits.lowering(LimitKind::Threads, bound),
+            ..self
         }
     }
 
@@ -2434,6 +2444,31 @@ mod tests {
         );
         assert_eq!(SpawnAttach::parse(&drawing.to_le_bytes()), Ok(drawing));
         assert!(!SpawnAttach::sandbox(explicit, CEILING).is_drawing());
+    }
+
+    /// A sandbox worker granted threads is bounded to them and is still a
+    /// sandbox, parsed as such.
+    #[test]
+    fn a_sandbox_granted_threads_is_bounded_to_them() {
+        let explicit = [
+            FdWire::Handle(4),
+            FdWire::Handle(5),
+            FdWire::Closed,
+            FdWire::Closed,
+        ];
+        let granted = SpawnAttach::sandbox(explicit, CEILING).with_threads(3);
+        assert!(granted.is_sandbox() && !granted.is_drawing());
+        assert_eq!(
+            granted.limits.get(LimitKind::Threads),
+            Some(ResourceLimit { soft: 3, hard: 3 })
+        );
+        assert_eq!(SpawnAttach::parse(&granted.to_le_bytes()), Ok(granted));
+        let unbounded = SpawnAttach::sandbox(explicit, CEILING).with_threads(RLIMIT_INFINITY);
+        assert_eq!(
+            SpawnAttach::parse(&unbounded.to_le_bytes()),
+            Err(Errno::OutOfRange),
+            "unbounded threads"
+        );
     }
 
     /// A parser sandbox handed a share carries it without being the drawing

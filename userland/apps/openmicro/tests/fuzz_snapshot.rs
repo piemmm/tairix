@@ -252,7 +252,7 @@ fn running(rng: &mut Prng, model: Model, os: &[u8]) -> Machine {
             let at = rng.below(image.len());
             image[at] = rng.next_u8();
             let disk = d64::decode(&image).expect("a D64");
-            if let Some(drive) = machine.drive_mut(Unit::Eight) {
+            if let Some(drive) = machine.drives().unit_mut(Unit::Eight) {
                 drive.insert(disk);
             }
             machine.press_play(record);

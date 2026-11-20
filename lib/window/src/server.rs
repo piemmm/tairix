@@ -69,7 +69,7 @@ use tairix_abi::window_ipc::{
     WINDOW_PICKED_FILE_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX,
     WINDOW_WALLPAPERS_REPLY_MAX,
 };
-use tairix_abi::window_ipc::{KeyboardMode, LandingStep, DROP_LANDINGS_MAX};
+use tairix_abi::window_ipc::{KeyboardMode, LandingStep, WindowView, DROP_LANDINGS_MAX};
 pub use tairix_abi::window_ipc::{WindowSizeState, WindowSizing};
 use tairix_abi::{BundleId, CapabilityId, Errno};
 use tairix_display::{add_damage, damage_list, FrameRegion, ShmMapper};
@@ -563,7 +563,12 @@ pub trait WindowHost {
     /// Any [`Errno`] the host cannot resize a window for (a surface it
     /// cannot reallocate, the desktop is tearing down); the refusal is
     /// relayed to the client and the old geometry stands.
-    fn window_resized(&mut self, window_id: u64, surface: &DisplayMode) -> Result<(), Errno>;
+    fn window_resized(
+        &mut self,
+        window_id: u64,
+        surface: &DisplayMode,
+        view: Option<&WindowView>,
+    ) -> Result<(), Errno>;
 
     /// A validated `SetTitle`: the attested owner of live `window_id`
     /// retitled it to `title`, already bounded and control-character-free
@@ -1414,6 +1419,21 @@ pub trait FrameHost {
         damage: &DamageList,
     ) -> Result<(), Errno>;
 
+    /// Show `damage` of `view`, window `window_id`'s view, from `frame`: the
+    /// view's rows of the newest presented frame, shaped as `surface`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::window_presented`].
+    fn view_presented(
+        &mut self,
+        window_id: u64,
+        view: &WindowView,
+        surface: &DisplayMode,
+        frame: &[u8],
+        damage: &DamageList,
+    ) -> Result<(), Errno>;
+
     /// Window `window_id`'s frame could not be shown, the first refused since
     /// the window last showed one. The window keeps the pixels it had, and the
     /// frame is tried again with the next frame the desktop composes, carrying
@@ -1430,6 +1450,8 @@ pub trait FrameHost {
 struct Pending {
     frame: Option<u32>,
     damage: Region,
+    /// What changed of the view, in the view's own pixels.
+    view_damage: Region,
     /// The frame named was refused, so it waits for a frame the desktop
     /// composes rather than asking for one: a lasting refusal would otherwise
     /// compose a frame every period for nothing.
@@ -1448,18 +1470,34 @@ impl Pending {
         Self {
             frame: None,
             damage: Region::with_budget(MAX_DAMAGE_RECTS),
+            view_damage: Region::with_budget(MAX_DAMAGE_RECTS),
             refused: false,
             reported: false,
             withheld: None,
         }
     }
 
-    /// Frame `frame_index` is the newest, `damage` of it changed.
-    fn record(&mut self, frame_index: u32, damage: &DamageList, surface: &DisplayMode) {
+    /// Frame `frame_index` is the newest, `damage` of it changed: of the
+    /// window's rows of `surface`, and of `view`'s after them.
+    fn record(
+        &mut self,
+        frame_index: u32,
+        damage: &DamageList,
+        surface: &DisplayMode,
+        view: Option<&WindowView>,
+    ) {
         self.frame = Some(frame_index);
         self.refused = false;
         let bounds = Rect::new(0, 0, surface.width_px, surface.height_px);
         add_damage(&mut self.damage, damage.rects(), bounds);
+        if let Some(view) = view {
+            let bounds = Rect::new(0, 0, view.width_px, view.height_px);
+            for rect in damage.rects() {
+                if let Some(rect) = view_rect(rect, surface.height_px, view) {
+                    add_damage(&mut self.view_damage, &[rect], bounds);
+                }
+            }
+        }
     }
 
     /// Nothing is pending: the frames it named are gone.
@@ -1467,6 +1505,7 @@ impl Pending {
         self.frame = None;
         self.refused = false;
         self.damage.clear();
+        self.view_damage.clear();
     }
 
     /// The frame named was shown.
@@ -1686,6 +1725,7 @@ struct ResizeSpec {
     shm_handle: u64,
     frame_count: u32,
     surface: DisplayMode,
+    view: Option<WindowView>,
 }
 
 /// Everything a transient — a popup, a tool window or a dialog — opens with,
@@ -2028,6 +2068,8 @@ struct WindowRecord<R> {
     owner: ProcId,
     event_endpoint: u64,
     surface: DisplayMode,
+    /// The picture each frame carries after the window's own rows.
+    view: Option<WindowView>,
     frame_count: u32,
     frame_len: usize,
     /// The mapped client frame region, or `None` while released: the session
@@ -2134,6 +2176,7 @@ impl<R> WindowRecord<R> {
             owner: opened.owner,
             event_endpoint: opened.event_endpoint,
             surface: opened.surface,
+            view: None,
             frame_count: opened.frame_count,
             frame_len: opened.frame_len,
             region: Some(region),
@@ -3238,7 +3281,7 @@ impl<M: ShmMapper> WindowServer<M> {
         }
         self.admit(caller, spec.window_id)?;
         let window_id = spec.window_id;
-        let frame_len = frame_bytes(&spec.surface)?;
+        let frame_len = frame_bytes(&spec.surface, None)?;
         let total = frame_len
             .checked_mul(spec.frame_count as usize)
             .ok_or(Errno::LengthOutOfRange)?;
@@ -3462,7 +3505,7 @@ impl<M: ShmMapper> WindowServer<M> {
         if parent.transient.is_some() || parent.layer.is_some() {
             return Err(Errno::NotSupported);
         }
-        let frame_len = frame_bytes(&spec.surface)?;
+        let frame_len = frame_bytes(&spec.surface, None)?;
         let total = frame_len
             .checked_mul(spec.frame_count as usize)
             .ok_or(Errno::LengthOutOfRange)?;
@@ -3515,7 +3558,7 @@ impl<M: ShmMapper> WindowServer<M> {
         {
             return Err(Errno::LimitExceeded);
         }
-        let frame_len = frame_bytes(&spec.surface)?;
+        let frame_len = frame_bytes(&spec.surface, None)?;
         let total = frame_len
             .checked_mul(spec.frame_count as usize)
             .ok_or(Errno::LengthOutOfRange)?;
@@ -3641,7 +3684,7 @@ impl<M: ShmMapper> WindowServer<M> {
         // Ownership first: a window the caller does not own answers
         // exactly like one that never existed, leaking nothing.
         owned_window(&self.windows, caller, spec.window_id)?;
-        let frame_len = frame_bytes(&spec.surface)?;
+        let frame_len = frame_bytes(&spec.surface, spec.view.as_ref())?;
         let total = frame_len
             .checked_mul(spec.frame_count as usize)
             .ok_or(Errno::LengthOutOfRange)?;
@@ -3655,11 +3698,12 @@ impl<M: ShmMapper> WindowServer<M> {
         let region = self.mapper.map(caller, spec.shm_handle, total)?;
         // Tell the host before committing: a refused resize drops the
         // freshly mapped region and leaves the record's old geometry.
-        host.window_resized(spec.window_id, &spec.surface)?;
+        host.window_resized(spec.window_id, &spec.surface, spec.view.as_ref())?;
         // `owned_window` proved the record exists and the borrow above is
         // released, so this re-lookup cannot miss.
         if let Some(record) = self.windows.get_mut(&spec.window_id) {
             record.surface = spec.surface;
+            record.view = spec.view;
             record.frame_count = spec.frame_count;
             record.frame_len = frame_len;
             record.region = Some(region);
@@ -3695,8 +3739,13 @@ impl<M: ShmMapper> WindowServer<M> {
             return Err(Errno::OutOfRange);
         }
         for rect in damage.rects() {
-            rect.validate_in(&record.surface)
-                .map_err(|_| Errno::LengthOutOfRange)?;
+            let in_view = record
+                .view
+                .as_ref()
+                .is_some_and(|view| view_rect(rect, record.surface.height_px, view).is_some());
+            if !in_view && rect.validate_in(&record.surface).is_err() {
+                return Err(Errno::LengthOutOfRange);
+            }
         }
         // A window whose frames the session released holds no pixels to
         // present. Refusing typed is what lets a client re-attach on its next
@@ -3706,7 +3755,9 @@ impl<M: ShmMapper> WindowServer<M> {
         }
         let replaces = record.pending.frame.is_some();
         self.unshown.count_out(&record.pending);
-        record.pending.record(frame_index, damage, &record.surface);
+        record
+            .pending
+            .record(frame_index, damage, &record.surface, record.view.as_ref());
         self.unshown.count_in(&record.pending);
         Ok(replaces && self.answers.hold(&mut record.pending, caller, ticket))
     }
@@ -3723,10 +3774,8 @@ impl<M: ShmMapper> WindowServer<M> {
         let mut unshown = Unshown::NONE;
         for (&window_id, record) in &mut self.windows {
             if let Some(frame_index) = record.pending.frame {
-                let shown = Self::frame_of(record, frame_index).and_then(|frame| {
-                    let damage = damage_of(&record.pending.damage, &record.surface)?;
-                    host.window_presented(window_id, &record.surface, frame, &damage)
-                });
+                let shown = Self::frame_of(record, frame_index)
+                    .and_then(|frame| Self::show(host, window_id, record, frame));
                 match shown {
                     Ok(()) => record.pending.shown(),
                     Err(errno) => {
@@ -3740,6 +3789,33 @@ impl<M: ShmMapper> WindowServer<M> {
             unshown.count_in(&record.pending);
         }
         self.unshown = unshown;
+    }
+
+    /// Show what changed of `record`'s window `window_id` in `frame`: its own
+    /// rows, then its view's.
+    fn show(
+        host: &mut dyn FrameHost,
+        window_id: u64,
+        record: &WindowRecord<M::Region>,
+        frame: &[u8],
+    ) -> Result<(), Errno> {
+        let pending = &record.pending;
+        if !pending.damage.is_empty() {
+            let damage = damage_of(&pending.damage, &record.surface)?;
+            host.window_presented(window_id, &record.surface, frame, &damage)?;
+        }
+        if let Some(view) = record
+            .view
+            .as_ref()
+            .filter(|_| !pending.view_damage.is_empty())
+        {
+            let surface = view_surface(&record.surface, view);
+            let start = frame_bytes(&record.surface, None)?;
+            let rows = frame.get(start..).ok_or(Errno::DeviceFault)?;
+            let damage = damage_of(&pending.view_damage, &surface)?;
+            host.view_presented(window_id, view, &surface, rows, &damage)?;
+        }
+        Ok(())
     }
 
     /// Whether a window presented a frame that asks the desktop for a frame:
@@ -5249,6 +5325,7 @@ fn resize_request(request: &WindowRequest) -> Option<ResizeSpec> {
         height_px,
         stride_bytes,
         format,
+        view,
     } = *request
     else {
         return None;
@@ -5258,6 +5335,7 @@ fn resize_request(request: &WindowRequest) -> Option<ResizeSpec> {
         shm_handle,
         frame_count,
         surface: surface_of(width_px, height_px, stride_bytes, format),
+        view,
     })
 }
 
@@ -5356,11 +5434,35 @@ fn owned_window_mut<R>(
 
 /// Bytes one frame of `surface` occupies (`stride_bytes * height_px`),
 /// refused if it overflows the host's address width.
-fn frame_bytes(surface: &DisplayMode) -> Result<usize, Errno> {
+/// The bytes one frame of `surface` takes, `view`'s rows after the window's.
+fn frame_bytes(surface: &DisplayMode, view: Option<&WindowView>) -> Result<usize, Errno> {
+    let rows = u64::from(surface.height_px) + view.map_or(0, |view| u64::from(view.height_px));
     u64::from(surface.stride_bytes)
-        .checked_mul(u64::from(surface.height_px))
+        .checked_mul(rows)
         .and_then(|bytes| usize::try_from(bytes).ok())
         .ok_or(Errno::LengthOutOfRange)
+}
+
+/// `rect` of a frame whose window is `window_rows` high, moved to `view`'s
+/// own origin, where it lies wholly in the view's rows.
+fn view_rect(rect: &DamageRect, window_rows: u32, view: &WindowView) -> Option<DamageRect> {
+    let y = rect.y.checked_sub(window_rows)?;
+    let inside = |at: u32, len: u32, extent: u32| {
+        len != 0 && u64::from(at) + u64::from(len) <= u64::from(extent)
+    };
+    (inside(rect.x, rect.width_px, view.width_px) && inside(y, rect.height_px, view.height_px))
+        .then_some(DamageRect { y, ..*rect })
+}
+
+/// The shape of `view`'s rows in frames of `surface`: the view's size at the
+/// frames' stride and format.
+const fn view_surface(surface: &DisplayMode, view: &WindowView) -> DisplayMode {
+    surface_of(
+        view.width_px,
+        view.height_px,
+        surface.stride_bytes,
+        surface.format,
+    )
 }
 
 /// Write a status-only reply into `reply`, returning its length.

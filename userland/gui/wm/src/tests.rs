@@ -9581,6 +9581,65 @@ fn releasing_content_overwrites_the_pixels_before_dropping_them() {
     assert_eq!(window.bounds(), Rect::new(0, 0, 8, 4));
 }
 
+#[test]
+fn replacing_content_overwrites_the_pixels_replaced() {
+    let mut window = crate::Window::new(WindowId(1), Point::new(0, 0), opaque(8, 4, RED));
+    let spent = window
+        .replace_surface(opaque(6, 2, GREEN))
+        .expect("the replaced buffer");
+    assert!(spent.pixels().iter().all(|p| *p == Pixel::TRANSPARENT));
+    assert_eq!(window.client_size(), (6, 2));
+}
+
+/// A 2 × 1 view shown across the whole of an 8 × 4 window.
+fn whole_window_view() -> tairix_abi::window_ipc::WindowView {
+    tairix_abi::window_ipc::WindowView {
+        width_px: 2,
+        height_px: 1,
+        placement: DamageRect {
+            x: 0,
+            y: 0,
+            width_px: 8,
+            height_px: 4,
+        },
+        filter: tairix_abi::window_ipc::ViewFilter::Sharp,
+    }
+}
+
+/// A view covers its placement opaque only while the window carries it.
+#[test]
+fn a_view_taken_away_gives_back_the_transparency_it_covered() {
+    let clear = Surface::new(8, 4).expect("a surface");
+    let mut window = crate::Window::new(WindowId(1), Point::new(0, 0), clear);
+    window.track_transparency();
+    assert_eq!(window.is_opaque(), Some(false));
+    window
+        .set_view(Some(whole_window_view()))
+        .expect("a picture held");
+    assert_eq!(window.is_opaque(), Some(true));
+    window.set_view(None).expect("no picture to hold");
+    assert_eq!(window.is_opaque(), Some(false));
+}
+
+/// Content that replaces the content a view was enlarged into lacks the view,
+/// so it is drawn in whole again; content given back holds none of it.
+#[test]
+fn replaced_content_has_the_view_drawn_into_it_again() {
+    let mut window = crate::Window::new(WindowId(1), Point::new(0, 0), opaque(8, 4, RED));
+    window
+        .set_view(Some(whole_window_view()))
+        .expect("a picture held");
+    assert_eq!(window.overlay_view(), Some(Rect::new(0, 0, 8, 4)));
+    let _wiped = window.replace_surface(opaque(8, 4, GREEN));
+    assert_eq!(window.overlay_view(), Some(Rect::new(0, 0, 8, 4)));
+    let black = Color::BLACK.premultiply();
+    let content = window.content().expect("content");
+    assert!(content.pixels().iter().all(|p| *p == black));
+    assert!(window.view().expect("a view").overlaid());
+    let _ = window.release_content();
+    assert!(!window.view().expect("a view").overlaid());
+}
+
 /// A window the embedder paints itself gives its pixels back only while it is
 /// hidden, and once shown keeps none, so the embedder's next repaint paints it
 /// whole; an application's are the pressure ladder's alone.

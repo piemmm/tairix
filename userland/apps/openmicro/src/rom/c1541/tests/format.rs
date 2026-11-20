@@ -27,9 +27,10 @@ fn after(disk: Surface, keys: &str, status: &str, scene: &str) -> Machine {
 }
 
 /// The drive's disk as a D64 image.
-fn image_of(machine: &Machine) -> Vec<u8> {
+fn image_of(machine: &mut Machine) -> Vec<u8> {
     machine
-        .drive(Unit::Eight)
+        .drives()
+        .unit(Unit::Eight)
         .and_then(|drive| drive.disk())
         .and_then(|disk| d64::encode(disk, TRACKS))
         .expect("the disk encodes as a D64")
@@ -49,19 +50,20 @@ fn quickly(name: &[u8]) -> Vec<u8> {
 
 #[test]
 fn a_blank_disk_is_formatted_as_the_original_formats_it() {
-    let machine = after(
+    let mut machine = after(
         Surface::blank(),
         &command("N0:TEST,AB"),
         " 0 OK 0  0",
         "a blank disk",
     );
     assert_eq!(
-        image_of(&machine),
+        image_of(&mut machine),
         d64::formatted(b"TEST", *b"AB"),
         "the disk formatted"
     );
-    let surface = machine
-        .drive(Unit::Eight)
+    let drives = machine.drives();
+    let surface = drives
+        .unit(Unit::Eight)
         .and_then(|drive| drive.disk())
         .expect("a disk");
     // Track 18 is left to its BAM's and directory's writes after.
@@ -143,25 +145,25 @@ fn assert_laid_out(surface: &Surface, track: u8) {
 
 #[test]
 fn a_used_disk_is_formatted_anew_and_quickly_as_the_original_does() {
-    let full = after(
+    let mut full = after(
         surface(&commands().image()),
         &command("N0:NEW,XY"),
         " 0 OK 0  0",
         "a full format",
     );
     assert_eq!(
-        image_of(&full),
+        image_of(&mut full),
         d64::formatted(b"NEW", *b"XY"),
         "the disk formatted anew"
     );
-    let quick = after(
+    let mut quick = after(
         surface(&commands().image()),
         &command("N0:NEW"),
         " 0 OK 0  0",
         "a quick format",
     );
     assert_eq!(
-        image_of(&quick),
+        image_of(&mut quick),
         quickly(b"NEW"),
         "the disk's BAM and directory made afresh"
     );
@@ -175,31 +177,31 @@ fn names_and_ids_are_taken_as_the_original_takes_them() {
         ("N0:TEST,A", b"TEST", [b'A', 0]),
         ("N0:X,,AB", b"X", *b",A"),
     ] {
-        let machine = after(
+        let mut machine = after(
             surface(&commands().image()),
             &command(text),
             " 0 OK 0  0",
             text,
         );
-        assert_eq!(image_of(&machine), d64::formatted(name, id), "{text}");
+        assert_eq!(image_of(&mut machine), d64::formatted(name, id), "{text}");
     }
 }
 
 #[test]
 fn a_name_ending_where_it_starts_is_formatted_as_the_original_formats_it() {
     let bam_at = |at: u8| offset(DIRECTORY_TRACK, 0) + usize::from(at);
-    let machine = after(
+    let mut machine = after(
         surface(&commands().image()),
         &command("N0:X,"),
         " 0 OK 0  0",
         "nothing after the comma",
     );
     assert_eq!(
-        image_of(&machine),
+        image_of(&mut machine),
         quickly(b"X"),
         "nothing after the comma is quick"
     );
-    let machine = after(
+    let mut machine = after(
         surface(&commands().image()),
         &command("N0:"),
         " 0 OK 0  0",
@@ -207,7 +209,7 @@ fn a_name_ending_where_it_starts_is_formatted_as_the_original_formats_it() {
     );
     let mut nameless = quickly(b"");
     nameless[bam_at(bam::NAME)] = 0;
-    assert_eq!(image_of(&machine), nameless, "no name is a zero");
+    assert_eq!(image_of(&mut machine), nameless, "no name is a zero");
     // A comma first is written with a whole field's padding after it, so
     // the header's padding runs a byte further on.
     for (text, mut disk) in [
@@ -215,13 +217,13 @@ fn a_name_ending_where_it_starts_is_formatted_as_the_original_formats_it() {
         ("N0:,AB", d64::formatted(b",", *b"AB")),
     ] {
         disk[bam_at(bam::HEADER_END)] = PADDING;
-        let machine = after(
+        let mut machine = after(
             surface(&commands().image()),
             &command(text),
             " 0 OK 0  0",
             text,
         );
-        assert_eq!(image_of(&machine), disk, "{text}");
+        assert_eq!(image_of(&mut machine), disk, "{text}");
     }
 }
 
@@ -240,9 +242,9 @@ fn formats_are_refused_as_the_original_refuses_them() {
     ] {
         let mut disk = surface(&commands().image());
         disk.write_protected = protected;
-        let machine = after(disk, &command(text), status, scene);
+        let mut machine = after(disk, &command(text), status, scene);
         assert_eq!(
-            image_of(&machine),
+            image_of(&mut machine),
             commands().image(),
             "{scene}: the disk untouched"
         );
@@ -260,14 +262,14 @@ fn a_format_gives_up_every_open_file_as_the_originals_does() {
     let keys = format!(
         "1 OPEN2,8,2,\"NEWF,S,W\":PRINT#2,\"X\"|2 OPEN15,8,15,\"N0:Q\":CLOSE2|RUN|~~{STATUS}RUN 9|"
     );
-    let machine = after(
+    let mut machine = after(
         surface(&commands().image()),
         &keys,
         " 0 OK 0  0",
         "a file open",
     );
     assert_eq!(
-        image_of(&machine),
+        image_of(&mut machine),
         quickly(b"Q"),
         "no file closed onto the formatted disk"
     );

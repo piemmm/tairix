@@ -40,6 +40,19 @@ paddles, the datasette and the expansion port. Its drives are devices 8 and
 GCR head over a turning disk, its time the machine's scaled by the exact
 ratio of the two clocks.
 
+A Commodore 64's SID and its drives each run on a thread of their own
+(`tairix_openmicro::machine::lane`), behind the machine: the machine posts
+what it does to them stamped with its cycle — a write to the SID, a write to
+CIA2, and with two drives every read of it — and tells their threads how far
+it has run, and wherever it needs one as it stands at a cycle (a read of OSC3
+or ENV3, of the serial lines, the end of a slice) it brings it up itself,
+waiting on its thread for one piece of work at most. A thread takes the SID
+in pieces and two drives only through whole turns, as far as bringing them up
+to any later cycle would have, so which thread did the work never shows: the
+machine is the same with its threads or without them, and runs without them
+wherever none can be had. The SID's data bus and paddle readings, which no
+sound depends on, stay with the machine, so reading them waits on nothing.
+
 Each machine is a pure function of its ROMs, media and timed input, so a run
 replays exactly. `tairix_openmicro::machine::Machine` runs any model: run it
 to a cycle, press keys, insert and take back discs (the Model B's), disks (a
@@ -71,7 +84,9 @@ of it has passed, and never names a file. The crate holds no `unsafe` code.
 ## The machine worker
 
 All guest code and every image runs in a sandboxed worker holding no
-capability, one worker a machine. `tairix_openmicro::worker::MachineService`
+capability, one worker a machine, granted three threads: its own, and one
+each for a Commodore 64's SID and drives (`worker::WORKER_THREADS`).
+`tairix_openmicro::worker::MachineService`
 is what it serves: built for its model from the owner's ROM images, it runs
 slices of up to a second of the machine's own clock with the input changes
 timed within them, writes the picture rows each slice changed into the one
@@ -150,7 +165,13 @@ enlarged sharp, each dot a block of whole pixels, or smooth, optionally with
 scan lines, through `tairix_crt::screen` — the PC emulator's picture too — and
 only the rows a slice changed are expanded, scaled and presented, a row
 alike the one before it copied rather than expanded again, as a Commodore 64's
-every line is; a lamp or message repaints only the strip.
+every line is; a lamp or message repaints only the strip. While the tube adds
+nothing at the window's size, the canvas is not enlarged here at all: the
+window carries it as its view ([Window views](wm.md#window-views)), which the
+display engine enlarges on a layer of its own where it can, so a full-screen
+machine costs the canvas's rows a frame rather than the screen's. A view the
+desktop refuses is not asked for again at that window size: the window
+enlarges the canvas itself there.
 
 The keyboard is read raw. *By character*, a symbol presses the machine's key
 and SHIFT that type it, and a letter its own key, its case the machine's CAPS
@@ -467,6 +488,10 @@ ROMs' own code as data runs only with images of those fitted; and the rest
   `c1541-dos.rom` in `<dir>`, by the same rules.
 - `tests/cpu_vectors.rs` replays a committed sample of the SingleStepTests
   65x02 suite; `cargo xtask openmicro --vectors <dir>` runs the whole suite.
+- A Commodore 64 run with its SID and drives on host threads is held to the
+  same picture, sound and snapshot as one run alone, and two drives brought up
+  in irregular pieces to the same drives brought up whole; `tests/loom.rs`
+  model-checks the lane's runner against the machine (`cargo xtask loom`).
 - `fuzz_media` (every model's discs, disks, tapes, cartridges and programs),
   `fuzz_snapshot` and `fuzz_worker` are registered with `cargo xtask fuzz`,
   and `lib/machines`' `fuzz_library` covers the library's record and state

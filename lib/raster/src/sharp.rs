@@ -160,6 +160,15 @@ impl SharpScaler {
         }
     }
 
+    /// Overwrite the rows it holds enlarged, a picture of the frames it
+    /// scaled, keeping its taps; what a new size replaces is overwritten too.
+    pub fn wipe(&mut self) {
+        for line in &mut self.lines {
+            tairix_util::secret::wipe_with(&mut line.pixels, Pixel::TRANSPARENT);
+            line.source_rows = 0..0;
+        }
+    }
+
     fn fit(&mut self, sizes: Sizes) -> Result<(), SharpError> {
         if self.sizes == Some(sizes) {
             return Ok(());
@@ -176,8 +185,10 @@ impl SharpScaler {
         self.rows = taps(source_h, dest_h).ok_or(SharpError::OutOfMemory)?;
         let width = usize::try_from(dest_w).map_err(|_| SharpError::OutOfMemory)?;
         for line in &mut self.lines {
-            line.pixels =
+            let fresh =
                 fallible::filled(width, Pixel::TRANSPARENT).ok_or(SharpError::OutOfMemory)?;
+            tairix_util::secret::wipe_with(&mut line.pixels, Pixel::TRANSPARENT);
+            line.pixels = fresh;
             line.source_rows = 0..0;
         }
         self.sizes = Some(sizes);

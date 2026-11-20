@@ -1613,6 +1613,7 @@ dependencies = [
  "tairix-parallel",
  "tairix-raster",
  "tairix-theme",
+ "tairix-util",
 ]
 
 [[package]]
@@ -4201,6 +4202,7 @@ dependencies = [
 name = "tairix-openmicro"
 version = "0.0.0"
 dependencies = [
+ "loom",
  "tairix-abi",
  "tairix-appdata",
  "tairix-audio",
@@ -9992,6 +9994,7 @@ dependencies = [
  "tairix-collections",
  "tairix-colour",
  "tairix-controls",
+ "tairix-crt",
  "tairix-cursor",
  "tairix-display",
  "tairix-font",

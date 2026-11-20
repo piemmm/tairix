@@ -78,6 +78,7 @@ pub mod select;
 pub mod shadow;
 pub mod stats;
 pub mod surface;
+mod view;
 pub mod viewport;
 pub mod window;
 

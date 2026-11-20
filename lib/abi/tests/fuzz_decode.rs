@@ -144,7 +144,7 @@ use tairix_abi::window_ipc::{
     SaveFormats, ToolOver, TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowSizing,
     WindowTitle,
 };
-use tairix_abi::window_ipc::{LandingName, LandingOutcome, LandingStep};
+use tairix_abi::window_ipc::{LandingName, LandingOutcome, LandingStep, ViewFilter, WindowView};
 use tairix_abi::BUNDLE_ID_MAX;
 use tairix_abi::{
     AppInfoHeader, IpcMessageHeader, LoadImage, ManifestHeader, NeededLibrary, Origin, PortName,
@@ -3686,6 +3686,31 @@ fn structured_window_requests_with_corrupted_fields_never_panic() {
 ///
 /// A `Vec` rather than an array: a `WindowRequest` carries a whole menu
 /// inline, so a dozen of them is more than belongs on a stack frame.
+/// A resize carrying a view: a 896 × 600 picture over the top of a 640 × 480
+/// window.
+fn view_resize_seed() -> WindowRequest {
+    WindowRequest::Resize {
+        window_id: 3,
+        shm_handle: 11,
+        frame_count: 2,
+        width_px: 640,
+        height_px: 480,
+        stride_bytes: 3584,
+        format: DisplayFormat::Rgba8888,
+        view: Some(WindowView {
+            width_px: 896,
+            height_px: 600,
+            placement: DamageRect {
+                x: 0,
+                y: 0,
+                width_px: 640,
+                height_px: 428,
+            },
+            filter: ViewFilter::Sharp,
+        }),
+    }
+}
+
 fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
     let mut seeds = std::vec![
         WindowRequest::Create {
@@ -3764,6 +3789,7 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
             height_px: 480,
             stride_bytes: 2560,
             format: DisplayFormat::Bgra8888,
+            view: None,
         },
         WindowRequest::SetTitle {
             window_id: 3,
@@ -3781,6 +3807,7 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
     seeds.extend(begin_drag_seeds());
     seeds.extend(drop_landing_seeds());
     seeds.extend(window_request_alert_seeds());
+    seeds.push(view_resize_seed());
     seeds
 }
 

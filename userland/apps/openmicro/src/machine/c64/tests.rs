@@ -404,7 +404,8 @@ fn busy() -> Machine {
     let disk = crate::media::c1541::d64::formatted(b"SNAP", *b"SN");
     let surface = crate::media::c1541::d64::decode(&disk).expect("a D64");
     machine
-        .drive_mut(Unit::Eight)
+        .drives()
+        .unit_mut(Unit::Eight)
         .expect("a drive")
         .insert(surface);
     let mut image = Vec::from(&b"C64-TAPE-RAW"[..]);
@@ -418,6 +419,171 @@ fn busy() -> Machine {
     machine.run_until(Standard::Pal.clock() / 3 + 17);
     assert!(machine.board.now < machine.board.restore_until, "in flight");
     machine
+}
+
+/// The SID and the drives brought up on threads of their own leave the
+/// machine exactly as it is alone: its picture, its sound and every part of
+/// it, with two drives taking turns on a busy bus while the SID sounds, and
+/// across a snapshot restored over it.
+#[test]
+fn threads_of_their_own_change_nothing_of_the_machine() {
+    use crate::machine::lane::host::HostThreads;
+    use crate::media::c1541::d64;
+    use crate::rom::c64::testing::{run_for, type_text};
+
+    let run = |spread: bool| {
+        let mut machine = shipped(Standard::Pal, 2);
+        if spread {
+            machine.spread(&HostThreads);
+        }
+        for (unit, name) in Unit::ALL.into_iter().zip([b"EIGHT", b"NINE!"]) {
+            let surface = d64::decode(&d64::formatted(name, *b"LN")).expect("a D64");
+            machine
+                .drives()
+                .unit_mut(unit)
+                .expect("a drive")
+                .insert(surface);
+        }
+        run_for(&mut machine, Standard::Pal.clock());
+        type_text(
+            &mut machine,
+            "POKE54296,15:POKE54277,9:POKE54278,240:POKE54273,30:POKE54276,33\n",
+        );
+        type_text(&mut machine, "LOAD\"$\",8\n");
+        let mut sound = Vec::new();
+        let mut pictures = Vec::new();
+        for step in 0..24 {
+            if step == 12 {
+                type_text(&mut machine, "LOAD\"$\",9\n");
+                let snapshot = machine.snapshot().expect("taken");
+                assert_eq!(machine.restore(&snapshot), Ok(()));
+            }
+            run_for(&mut machine, 50_000);
+            sound.extend(machine.take_audio());
+            pictures.push(tairix_crypto::sha256(machine.shown()));
+        }
+        (sound, pictures, machine.snapshot().expect("taken"))
+    };
+    let alone = run(false);
+    assert!(
+        alone
+            .0
+            .iter()
+            .any(|&level| (level - alone.0[0]).abs() > 1e-3),
+        "it sounded"
+    );
+    for _ in 0..2 {
+        let spread = run(true);
+        assert!(spread.0 == alone.0, "the same sound");
+        assert_eq!(spread.1, alone.1, "the same pictures");
+        assert!(spread.2 == alone.2, "every part of both alike");
+    }
+}
+
+/// A drive sees the lines the machine holds from the moment it is fitted: at
+/// power-on, before the KERNAL drives CIA2, its port's pull-ups hold every
+/// line.
+#[test]
+fn a_drive_fitted_sees_the_lines_the_machine_already_holds() {
+    let mut machine = shipped(Standard::Pal, 1);
+    let port = machine.cia2_port_a();
+    assert!(port & serial::ATN_OUT != 0, "ATN held at power-on");
+    let lines = machine.drives().lines();
+    assert_eq!(
+        (lines.atn, lines.clock),
+        (true, port & serial::CLOCK_OUT != 0)
+    );
+}
+
+/// A DOS for two drives watching one another: device 8 pulls CLOCK on and
+/// off in a timed loop, device 9 records VIA1's port B into RAM from `$0200`
+/// round and round, so what it records is when it saw each pull.
+fn watching_dos() -> Vec<u8> {
+    let mut dos = vec![0xEA; 0x4000];
+    let program: [u8; 0x35] = [
+        0x78, // SEI
+        0xA9, 0x1A, 0x8D, 0x02, 0x18, // DDRB: DATA, CLOCK and ATNA out
+        0xA9, 0x00, 0x8D, 0x00, 0x18, // nothing held
+        0xAD, 0x00, 0x18, 0x29, 0x20, 0xD0, 0x17, // device 9 watches
+        0xA9, 0x08, 0x8D, 0x00, 0x18, // CLOCK pulled
+        0xA2, 0x05, 0xCA, 0xD0, 0xFD, // a while
+        0xA9, 0x00, 0x8D, 0x00, 0x18, // CLOCK let go
+        0xA2, 0x07, 0xCA, 0xD0, 0xFD, // a while
+        0x4C, 0x12, 0xC0, // again
+        0xA0, 0x00, // the ring's start
+        0xAD, 0x00, 0x18, 0x99, 0x00, 0x02, 0xC8, // port B recorded
+        0x4C, 0x2B, 0xC0, // again
+    ];
+    dos[..program.len()].copy_from_slice(&program);
+    dos[0x3FFA..].copy_from_slice(&[0x00, 0xC0, 0x00, 0xC0, 0x00, 0xC0]);
+    dos
+}
+
+/// Two drives are brought up turn by turn exactly as a catch-up past the
+/// turns would take them, in whatever pieces a runner takes them: each sees
+/// the other's lines change where it would have, the machine's lines and its
+/// accesses landing between.
+#[test]
+fn two_drives_are_the_same_however_they_are_brought_up() {
+    let dos = watching_dos();
+    let fitted = || {
+        let mut drives = Drives::new(Standard::Pal.clock(), Lines::default());
+        for unit in Unit::ALL {
+            drives.fit(unit, Drive::new(&dos, unit).expect("the DOS fits"), 0);
+        }
+        drives
+    };
+    let atn = Lines {
+        atn: true,
+        clock: false,
+        data: false,
+    };
+    let events = [
+        (40_000, BusEvent::Access),
+        (40_437, BusEvent::Held(atn)),
+        (41_003, BusEvent::Held(Lines::default())),
+        (90_011, BusEvent::Access),
+    ];
+    let end = 150_000;
+    let mut whole = fitted();
+    for (at, event) in events {
+        whole.catch_up(at);
+        whole.take(at, event);
+    }
+    whole.catch_up(end);
+    let mut pieces = fitted();
+    let mut pending = events.iter().copied().peekable();
+    let mut limit = 0;
+    while limit < end {
+        limit = end.min(limit + 37 + limit % 101);
+        while let Some((at, event)) = pending.next_if(|&(at, _)| at <= limit) {
+            pieces.catch_up(at);
+            pieces.take(at, event);
+        }
+        while pieces.run_ahead(limit) {}
+    }
+    pieces.catch_up(end);
+    let watched = |drives: &Drives| {
+        let watcher = drives.unit(Unit::Nine).expect("fitted");
+        (0x0200..0x0300)
+            .map(|addr| watcher.ram(addr))
+            .collect::<Vec<u8>>()
+    };
+    let seen = watched(&whole);
+    assert!(
+        seen.iter().any(|&pins| pins & drive::bus::CLOCK_IN != 0)
+            && seen.iter().any(|&pins| pins & drive::bus::CLOCK_IN == 0),
+        "device 9 saw CLOCK both ways"
+    );
+    assert_eq!(watched(&pieces), seen);
+    for unit in Unit::ALL {
+        let saved = |drives: &Drives| {
+            let mut w = Writer::new();
+            drives.unit(unit).expect("fitted").save(&mut w);
+            w.finish()
+        };
+        assert!(saved(&whole) == saved(&pieces), "{unit:?}");
+    }
 }
 
 #[test]

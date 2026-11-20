@@ -1,6 +1,8 @@
 //! Windows: a placed surface with compositing attributes.
 
 use tairix_abi::driver::display::RefreshRate;
+use tairix_abi::window_ipc::WindowView;
+use tairix_abi::Errno;
 use tairix_controls::{
     FrameInsets, FrameRim, TitleBarEvent, WindowActivationState, WindowFrame, WindowSizeState,
 };
@@ -15,6 +17,7 @@ use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region, Scale};
 use crate::shadow::{spread, Elevation, Lift, ShadowKit, ShadowRow};
 use crate::surface::{self, blend_run, fill_run, Surface};
+use crate::view::View;
 use crate::viewport::RootViewport;
 use tairix_geometry::to_i32;
 
@@ -145,7 +148,7 @@ pub enum CursorHint {
 /// composites as transparent until the next present restores its pixels.
 ///
 /// [`Compositor::release_content_under_pressure`]: crate::Compositor::release_content_under_pressure
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub struct Window {
     id: WindowId,
     origin: Point,
@@ -258,6 +261,9 @@ pub struct Window {
     /// Boxes, in the content's own pixels, holding every pixel short of
     /// opaque, while the compositor keeps track.
     transparent: Option<Region>,
+    /// The picture the client's frames carry after the window's own rows,
+    /// shown enlarged over a rectangle of the content.
+    view: Option<View>,
 }
 
 /// The whole of `content`, in its own pixels.
@@ -439,6 +445,7 @@ impl Window {
             casts: false,
             lift: Lift::at(Elevation::LIFTED),
             transparent: None,
+            view: None,
         }
     }
 
@@ -891,6 +898,9 @@ impl Window {
         if let Some(transparent) = &mut self.transparent {
             transparent.clear();
         }
+        if let Some(view) = &mut self.view {
+            view.invalidate();
+        }
         Some(surface)
     }
 
@@ -902,6 +912,9 @@ impl Window {
         let mut transparent = Region::new();
         if let Some(content) = &self.content {
             note_transparent(content, content_rect(content), &mut transparent);
+        }
+        if let Some(view) = &self.view {
+            transparent.subtract(view.placement());
         }
         self.transparent = Some(transparent);
     }
@@ -927,6 +940,63 @@ impl Window {
         };
         transparent.subtract(local);
         note_transparent(content, local, transparent);
+        // A view covers its placement opaque, whatever lies beneath it there.
+        if let Some(view) = &self.view {
+            transparent.subtract(view.placement());
+        }
+    }
+
+    /// The view the window's frames carry, if they carry one.
+    pub(crate) const fn view(&self) -> Option<&View> {
+        self.view.as_ref()
+    }
+
+    /// The view the window's frames carry, to take a present into.
+    pub(crate) fn view_mut(&mut self) -> Option<&mut View> {
+        self.view.as_mut()
+    }
+
+    /// Carry `spec` from now on, or no view.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfMemory`] where its picture cannot be held: the window
+    /// keeps the view it had.
+    pub(crate) fn set_view(&mut self, spec: Option<WindowView>) -> Result<(), Errno> {
+        match (spec, self.view.as_mut()) {
+            (None, _) => self.view = None,
+            (Some(spec), Some(view)) => view.respec(spec)?,
+            (Some(spec), None) => self.view = Some(View::new(spec)?),
+        }
+        // Where the content is opaque depends on where a view covers it.
+        if self.transparent.take().is_some() {
+            self.track_transparency();
+        }
+        Ok(())
+    }
+
+    /// Enlarge the view into the content where the content lacks it,
+    /// answering the rectangle of the content drawn.
+    pub(crate) fn overlay_view(&mut self) -> Option<Rect> {
+        let (Some(view), Some(content)) = (self.view.as_mut(), self.content.as_mut()) else {
+            return None;
+        };
+        let drawn = view.overlay(content)?;
+        self.content_changed(drawn);
+        Some(drawn)
+    }
+
+    /// Whether the window's shape cuts any pixel of `local`, a rectangle of
+    /// its client area: a layer over it would square off a rounded corner.
+    pub(crate) fn cuts_client(&self, local: Rect) -> bool {
+        let (Ok(top), Ok(left)) = (u32::try_from(local.top()), u32::try_from(local.left())) else {
+            return true;
+        };
+        let right = left.saturating_add(local.width).saturating_sub(1);
+        (top..top.saturating_add(local.height)).any(|sy| {
+            self.row_cut(sy)
+                .is_some_and(|cut| cut.coverage(left) < u8::MAX || cut.coverage(right) < u8::MAX)
+        })
     }
 
     /// Give the content pixels back to the machine, returning the bytes
@@ -1415,14 +1485,16 @@ impl Window {
     }
 
     /// Replace the content pixels with `surface`, adopting its extent as
-    /// the window's client size (a replacement may be a different shape).
-    pub(crate) fn replace_surface(&mut self, surface: Surface) {
+    /// the window's client size (a replacement may be a different shape),
+    /// and hand back the pixels replaced, overwritten, for the caller to drop.
+    pub(crate) fn replace_surface(&mut self, surface: Surface) -> Option<Surface> {
+        let replaced = self.take_content_wiped();
         self.client_size = (surface.width(), surface.height());
-        if let Some(transparent) = &mut self.transparent {
-            transparent.clear();
-            note_transparent(&surface, content_rect(&surface), transparent);
-        }
         self.content = Some(surface);
+        if self.transparent.take().is_some() {
+            self.track_transparency();
+        }
+        replaced
     }
 
     /// Attach, replace, or clear the window's scrollable-content viewport,

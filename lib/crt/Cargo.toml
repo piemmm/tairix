@@ -24,6 +24,8 @@ tairix-mix = { path = "../mix", version = "=0.0.0" }
 tairix-parallel = { path = "../parallel", version = "=0.0.0" }
 # The surfaces the stages are and the box blur the glow spreads by.
 tairix-raster = { path = "../raster", version = "=0.0.0" }
+# The volatile wipe a frame is overwritten with before its memory goes.
+tairix-util = { path = "../util", version = "=0.0.0" }
 
 [dev-dependencies]
 # A runner that serves bands in reverse, so the tests show no band depends on
