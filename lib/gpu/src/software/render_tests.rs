@@ -194,7 +194,7 @@ fn a_triangle_covers_the_pixels_whose_centres_it_holds() {
 }
 
 /// A blend adding the source to what is held.
-const ADD: Blend = Blend {
+pub(super) const ADD: Blend = Blend {
     source_color: BlendFactor::One,
     destination_color: BlendFactor::One,
     color: BlendOp::Add,

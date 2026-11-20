@@ -30,10 +30,10 @@ use crate::device::Shared;
 use crate::format::Format;
 use crate::image::ClearValue;
 use crate::memory::Memory;
-use crate::pass::{DrawWork, IndexFormat, Load, PassWork};
+use crate::pass::{Counted, DrawWork, IndexFormat, Load, PassWork};
 use crate::render::Render;
 use crate::resource::ViewState;
-use crate::MAX_PASS_ATTACHMENTS;
+use crate::{Features, MAX_PASS_ATTACHMENTS};
 
 /// The most bytes a bin's samples take, every attachment's together, unless
 /// a block's take more: what keeps a bin's working set in a core's cache.
@@ -41,6 +41,10 @@ const BIN_BYTES: u64 = 1 << 18;
 
 /// The widest a bin is, in pixels; the narrowest is a block's.
 const MAX_BIN_SIDE: u32 = 128;
+
+/// The memories a draw reads besides its vertex buffers': its indices' and its
+/// records'.
+const SOURCES_PAST_VERTICES: usize = 2;
 
 /// A rectangle of pixels, `x0..x1` across and `y0..y1` down.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -417,10 +421,11 @@ fn into<'v>(view: &ViewState, locked: &'v Locked<'_>) -> Option<Into<'v>> {
 }
 
 /// A draw as its pass runs it: its checked work and pipeline, each stage's
-/// bindings and push constants, the memory its vertex buffers and indices
-/// lie in, its viewport, the pixels each of a pixel's samples may be covered
-/// in — within the viewport, the scissor and the pass's area — and the
-/// pixels they make up together, and its depth's format and range.
+/// bindings and push constants, the memory its vertex buffers, indices and
+/// records lie in, whether a record may name a first instance, its viewport,
+/// the pixels each of a pixel's samples may be covered in — within the
+/// viewport, the scissor and the pass's area — and the pixels they make up
+/// together, and its depth's format and range.
 pub(super) struct Drawn<'d> {
     pub(super) work: &'d DrawWork,
     pub(super) render: &'d Render,
@@ -428,6 +433,8 @@ pub(super) struct Drawn<'d> {
     pub(super) fragment: Option<Env<'d>>,
     pub(super) buffers: Vec<Option<(&'d [AtomicU32], u64, u64)>>,
     pub(super) index: Option<(&'d [AtomicU32], u64, u64, IndexFormat)>,
+    pub(super) records: Option<&'d [AtomicU32]>,
+    pub(super) takes_first_instance: bool,
     pub(super) viewport: Viewport,
     pub(super) inside: [Option<Area>; MAX_SAMPLES],
     pub(super) rect: Area,
@@ -547,9 +554,9 @@ fn starts_run(draws: &[DrawWork], at: usize) -> bool {
 }
 
 /// Every memory the pass reaches, in address order, each once: its
-/// attachments', its draws' vertex and index buffers', and every memory of
-/// each distinct set its draws bind, gathered and sorted once, so a pass of
-/// many draws costs its memories' logarithm rather than its sets'.
+/// attachments', its draws' vertex and index buffers' and records', and every
+/// memory of each distinct set its draws bind, gathered and sorted once, so a
+/// pass of many draws costs its memories' logarithm rather than its sets'.
 fn pass_memories(pass: &PassWork, meter: &mut Meter<'_>) -> Result<Vec<Arc<Memory>>, Outcome> {
     let exhausted = |_| Outcome::OutOfMemory;
     let mut sets: Vec<&Arc<BindSetState>> = Vec::new();
@@ -564,7 +571,7 @@ fn pass_memories(pass: &PassWork, meter: &mut Meter<'_>) -> Result<Vec<Arc<Memor
         + pass
             .draws
             .iter()
-            .map(|draw| draw.vertex_buffers.len() + 1)
+            .map(|draw| draw.vertex_buffers.len() + SOURCES_PAST_VERTICES)
             .sum::<usize>();
     let count = sets.iter().fold(others, |total, set| {
         total.saturating_add(set.memories.len())
@@ -588,6 +595,9 @@ fn pass_memories(pass: &PassWork, meter: &mut Meter<'_>) -> Result<Vec<Arc<Memor
         );
         if let Some((source, _)) = &draw.index {
             memories.push(Arc::clone(&source.memory));
+        }
+        if let Counted::Indirect(records) = &draw.count {
+            memories.push(Arc::clone(&records.memory));
         }
     }
     for set in &sets {
@@ -638,6 +648,10 @@ fn drawn<'d>(
             *format,
         ))
     });
+    let records = match &work.count {
+        Counted::Indirect(records) => Some(locked.view(&records.memory).ok_or(Outcome::Fault)?),
+        Counted::Direct(_) => None,
+    };
     let port = work.viewport;
     let raster = &render.rasterization;
     let viewport = Viewport::new(
@@ -670,6 +684,11 @@ fn drawn<'d>(
             .map(|(shading, rows)| env(&shading.program, rows)),
         buffers,
         index,
+        records,
+        takes_first_instance: device
+            .info
+            .features
+            .contains(Features::DRAW_INDIRECT_FIRST_INSTANCE),
         viewport,
         inside,
         rect,
@@ -795,9 +814,7 @@ fn draw_pass(
         .map_err(|_| Outcome::OutOfMemory)?;
     let mut first = true;
     loop {
-        if !cutting.plan(draws, &mut planned, meter) {
-            return Err(Outcome::Overran);
-        }
+        cutting.plan(draws, &mut planned, meter)?;
         let last = cutting.done(draws.len());
         let made = batches.get_mut(..planned.len()).ok_or(Outcome::Fault)?;
         set_up(device, meter, &slots, (draws, &planned, made))?;
@@ -958,7 +975,7 @@ pub(crate) fn run_bytes(pass: &PassWork, participants: usize) -> u64 {
             });
             total
                 .saturating_add(sets)
-                .saturating_add(wide(draw.vertex_buffers.len() + 1))
+                .saturating_add(wide(draw.vertex_buffers.len() + SOURCES_PAST_VERTICES))
         });
     let gathered = times(wide(bound), size_of::<&Arc<BindSetState>>()).saturating_add(times(
         memories,
@@ -1034,3 +1051,7 @@ pub(crate) fn run_bytes(pass: &PassWork, participants: usize) -> u64 {
 #[cfg(test)]
 #[path = "render_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "render_indirect_tests.rs"]
+mod indirect_tests;

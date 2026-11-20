@@ -487,6 +487,8 @@ fn a_description_no_context_could_be_served_by_is_refused() {
     attributes.limits.max_vertex_input_attributes = crate::MAX_VERTEX_ATTRIBUTES + 1;
     let mut bounds = valid();
     bounds.limits.viewport_bounds_range = [1, -1];
+    let mut no_records = valid();
+    no_records.limits.max_draw_indirect_count = 0;
     for info in [
         missing_heap,
         no_queues,
@@ -497,6 +499,7 @@ fn a_description_no_context_could_be_served_by_is_refused() {
         buffers,
         attributes,
         bounds,
+        no_records,
     ] {
         assert!(matches!(Model::new(info, &[1]), Err(Error::Malformed)));
     }

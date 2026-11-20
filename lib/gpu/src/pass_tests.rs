@@ -14,7 +14,7 @@ use crate::render::tests::{
 use crate::{
     BindSetLayout, ClearValue, ColourAttachment, ColourTarget, CommandBuffer, CompareOp, Context,
     DepthStencilAttachment, DepthStencilState, Draw, Drawer, Error, Format, IndexFormat, Indices,
-    Load, Pass, PipelineLayout, Rect, RenderPipeline, Topology, Viewport,
+    Indirect, Load, Pass, PipelineLayout, Rect, RenderPipeline, Topology, Viewport,
 };
 
 /// A pipeline of the plain stages under `layout`, its depth state `depth`.
@@ -238,6 +238,190 @@ fn a_draw_its_pipeline_could_not_run_is_refused_at_the_draw() {
     );
 }
 
+/// A pass over an 8 × 8 target of one draw of three vertices, by the plain
+/// pipeline, to record indirect draws into.
+struct IndirectRig {
+    pipeline: RenderPipeline,
+    target: Target,
+    vertices: (crate::Allocation, crate::Buffer),
+}
+
+impl IndirectRig {
+    fn new(context: &Context) -> Self {
+        let layout = bare(context);
+        let targets = [plain(Format::Rgba8Unorm)];
+        Self {
+            pipeline: plain_pipeline(context, &layout, &targets, None),
+            target: target(context, Format::Rgba8Unorm, (8, 8), 1),
+            vertices: three(context),
+        }
+    }
+
+    /// One pass drawing `records` — indexed, by the rig's vertices as
+    /// sixteen-bit indices, where `indexed` — recorded.
+    fn record(&self, context: &Context, indexed: bool, records: &Indirect<'_>) -> CommandBuffer {
+        let (viewport, scissor) = whole((8, 8));
+        let vertex_buffers = [(&self.vertices.1, 0)];
+        let draw = Draw {
+            pipeline: &self.pipeline,
+            sets: &[],
+            push_constants: &[],
+            vertex_buffers: &vertex_buffers,
+            viewport,
+            scissor,
+            stencil_reference: 0,
+            blend_constant: [0.0; 4],
+        };
+        let indices = Indices {
+            buffer: &self.vertices.1,
+            offset: 0,
+            format: IndexFormat::U16,
+        };
+        let mut commands = context.command_buffer();
+        commands
+            .render_pass(
+                &Pass {
+                    colour: &[attachment(&self.target.view)],
+                    depth_stencil: None,
+                    area: scissor,
+                },
+                |drawer| {
+                    if indexed {
+                        drawer.draw_indexed_indirect(&draw, &indices, records)
+                    } else {
+                        drawer.draw_indirect(&draw, records)
+                    }
+                },
+            )
+            .expect("recorded");
+        commands
+    }
+
+    /// Where a submission of [`Self::record`]'s pass is refused.
+    fn verdict(
+        &self,
+        context: &Context,
+        indexed: bool,
+        records: &Indirect<'_>,
+    ) -> Result<(), (Option<usize>, Error)> {
+        refusal(context, &self.record(context, indexed, records))
+    }
+}
+
+#[test]
+fn an_indirect_draw_s_records_are_checked_whole_at_the_draw() {
+    let device = rendering();
+    let context = context(&device);
+    let rig = IndirectRig::new(&context);
+    let memory = crate::device_tests::memory(&context, 64);
+    let records = crate::device_tests::over(&context, &memory, 0, 48);
+    let unread = context
+        .create_buffer(
+            &memory,
+            &crate::BufferDesc {
+                offset: 0,
+                size: 48,
+                usage: crate::BufferUsage::ALL.without(crate::BufferUsage::INDIRECT),
+            },
+        )
+        .expect("a buffer");
+    let read = |buffer, offset, count, stride| Indirect {
+        buffer,
+        offset,
+        count,
+        stride,
+    };
+    assert_eq!(
+        rig.verdict(&context, false, &read(&unread, 0, 1, 16)),
+        Err((Some(1), Error::Usage)),
+        "a buffer not made for indirect use"
+    );
+    let (misaligned, past) = (Some(Error::Misaligned), Some(Error::OutOfRange));
+    let cases = [
+        ("an offset off a word", false, 2, 1, 16, misaligned),
+        (
+            "records a stride off a word apart",
+            false,
+            0,
+            2,
+            18,
+            misaligned,
+        ),
+        ("records closer than a record", false, 0, 2, 12, past),
+        (
+            "indexed records a draw's record apart",
+            true,
+            0,
+            2,
+            16,
+            past,
+        ),
+        ("a record past the buffer", false, 36, 1, 16, past),
+        ("records to the buffer's end", false, 0, 3, 16, None),
+        ("the last of several past it", false, 4, 3, 16, past),
+        ("indexed records to its end", true, 0, 2, 28, None),
+        ("the last indexed record past it", true, 4, 2, 28, past),
+        ("no records, at the buffer's end", false, 48, 0, 0, None),
+        ("no records, past its end", false, 52, 0, 0, past),
+        ("one record, its stride unread", false, 32, 1, 3, None),
+        (
+            "past every count a buffer holds",
+            false,
+            0,
+            u32::MAX,
+            u32::MAX - 3,
+            past,
+        ),
+    ];
+    for (what, indexed, offset, count, stride, refused) in cases {
+        let expected = refused.map_or(Ok(()), |error| Err((Some(1), error)));
+        let records = read(&records, offset, count, stride);
+        assert_eq!(rig.verdict(&context, indexed, &records), expected, "{what}");
+    }
+}
+
+#[test]
+fn records_in_a_buffer_dropped_since_they_were_recorded_are_refused() {
+    let device = rendering();
+    let context = context(&device);
+    let rig = IndirectRig::new(&context);
+    let memory = crate::device_tests::memory(&context, 64);
+    let commands = {
+        let gone = crate::device_tests::over(&context, &memory, 0, 48);
+        let records = Indirect {
+            buffer: &gone,
+            offset: 0,
+            count: 1,
+            stride: 0,
+        };
+        rig.record(&context, false, &records)
+    };
+    assert_eq!(refusal(&context, &commands), Err((Some(1), Error::Stale)));
+}
+
+#[test]
+fn an_indirect_draw_of_more_records_than_its_device_reads_is_refused() {
+    let device = crate::binding::tests::device_stating(|info| {
+        info.limits.max_draw_indirect_count = 1;
+    });
+    let context = context(&device);
+    let rig = IndirectRig::new(&context);
+    let (_memory, records) = crate::device_tests::buffer(&context, 64);
+    for (count, expected) in [(1, Ok(())), (2, Err((Some(1), Error::TooLarge)))] {
+        let records = Indirect {
+            buffer: &records,
+            offset: 0,
+            count,
+            stride: 16,
+        };
+        assert_eq!(
+            rig.verdict(&context, false, &records),
+            expected,
+            "{count} records"
+        );
+    }
+}
+
 /// A layout of one sampled image the fragment stage reads.
 fn sampling(context: &Context) -> (BindSetLayout, PipelineLayout) {
     let set_layout = context
@@ -425,8 +609,18 @@ fn aliased(context: &Context, format: Format) -> Aliased {
     }
 }
 
+/// What a draw reads from where: its vertices, its indices, or its records,
+/// so many of them, the indexed ones with indices from elsewhere.
+#[derive(Copy, Clone)]
+enum Read<'b> {
+    Vertices(&'b crate::Buffer, u64),
+    Indices(&'b crate::Buffer, u64),
+    Records(&'b crate::Buffer, u64, u32),
+    IndexedRecords(&'b crate::Buffer, u64, u32),
+}
+
 #[test]
-fn a_draw_reading_as_vertices_or_indices_what_its_pass_renders_to_is_refused() {
+fn a_draw_reading_as_vertices_indices_or_records_what_its_pass_renders_to_is_refused() {
     let device = rendering();
     let context = context(&device);
     let layout = bare(&context);
@@ -440,28 +634,34 @@ fn a_draw_reading_as_vertices_or_indices_what_its_pass_renders_to_is_refused() {
         area: scissor,
     };
     let (_held, apart) = three(&context);
-    for (what, vertices, indices, refused) in [
-        ("vertices over the target", &rendered.whole, None, true),
+    let (over, beyond) = (&rendered.whole, &rendered.past);
+    // Ends half way into the target, so a read from its end starts within it.
+    let half = crate::device_tests::over(&context, &rendered.memory, 0, 128);
+    let cases = [
+        ("vertices over the target", Read::Vertices(over, 0), true),
+        ("indices over the target", Read::Indices(over, 0), true),
+        ("records over the target", Read::Records(over, 0, 1), true),
+        ("vertices past it", Read::Vertices(beyond, 0), false),
+        ("indices past it", Read::Indices(beyond, 0), false),
+        ("records past it", Read::IndexedRecords(beyond, 0, 1), false),
         (
-            "indices over the target",
-            &apart,
-            Some(&rendered.whole),
-            true,
-        ),
-        (
-            "vertices past it in its memory",
-            &rendered.past,
-            None,
+            "no vertices from within it",
+            Read::Vertices(&half, 128),
             false,
         ),
         (
-            "indices past it in its memory",
-            &apart,
-            Some(&rendered.past),
+            "no indices from within it",
+            Read::Indices(&half, 128),
             false,
         ),
-    ] {
-        let vertex_buffers = [(vertices, 0)];
+        ("no records within it", Read::Records(over, 128, 0), false),
+        ("a record within it", Read::Records(over, 128, 1), true),
+    ];
+    for (what, read, refused) in cases {
+        let vertex_buffers = [match read {
+            Read::Vertices(buffer, offset) => (buffer, offset),
+            _ => (&apart, 0),
+        }];
         let draw = Draw {
             pipeline: &pipeline,
             sets: &[],
@@ -474,18 +674,32 @@ fn a_draw_reading_as_vertices_or_indices_what_its_pass_renders_to_is_refused() {
         };
         let mut commands = context.command_buffer();
         commands
-            .render_pass(&pass, |drawer| match indices {
-                Some(buffer) => drawer.draw_indexed(
-                    &draw,
-                    &Indices {
-                        buffer,
-                        offset: 0,
-                        format: IndexFormat::U16,
-                    },
-                    (0..3, 0),
-                    0..1,
-                ),
-                None => drawer.draw(&draw, 0..3, 0..1),
+            .render_pass(&pass, |drawer| {
+                let indices = |buffer, offset| Indices {
+                    buffer,
+                    offset,
+                    format: IndexFormat::U16,
+                };
+                let records = |buffer, offset, count| Indirect {
+                    buffer,
+                    offset,
+                    count,
+                    stride: 0,
+                };
+                match read {
+                    Read::Vertices(..) => drawer.draw(&draw, 0..3, 0..1),
+                    Read::Indices(buffer, offset) => {
+                        drawer.draw_indexed(&draw, &indices(buffer, offset), (0..3, 0), 0..1)
+                    }
+                    Read::Records(buffer, offset, count) => {
+                        drawer.draw_indirect(&draw, &records(buffer, offset, count))
+                    }
+                    Read::IndexedRecords(buffer, offset, count) => drawer.draw_indexed_indirect(
+                        &draw,
+                        &indices(&apart, 0),
+                        &records(buffer, offset, count),
+                    ),
+                }
             })
             .expect("recorded");
         let expected = if refused {

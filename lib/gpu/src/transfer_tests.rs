@@ -1,8 +1,9 @@
 use tairix_fuzzseed::Prng;
 
-use super::{overlap, spans_meet, spans_overlap, Region};
+use super::{overlap, spans_overlap, Region};
 use crate::format::Aspects;
 use crate::image::{Extent3d, Origin3d};
+use crate::memory::overlaps;
 
 fn region(rng: &mut Prng) -> Region {
     let small = |rng: &mut Prng, below: u32| rng.next_u32() % below;
@@ -67,7 +68,7 @@ fn the_sweep_finds_every_overlap_the_pairs_of_spans_hold() {
             spans
                 .iter()
                 .skip(at + 1)
-                .any(|&(b, b_len)| spans_meet(a, a_len, b, b_len))
+                .any(|&(b, b_len)| overlaps(&(a..a + a_len), &(b..b + b_len)))
         });
         assert_eq!(spans_overlap(&mut spans), pairwise, "in {spans:?}");
     }

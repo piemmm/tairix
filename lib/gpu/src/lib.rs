@@ -140,8 +140,9 @@ pub use info::{
 pub use memory::MemoryUse;
 pub use objects::{BufferView, Image, ImageView, Sampler};
 pub use pass::{
-    ColourAttachment, DepthStencilAttachment, Draw, Drawer, IndexFormat, Indices, Load, Pass, Rect,
-    Viewport, MAX_DRAW_VERTEX_BUFFERS, MAX_PASS_ATTACHMENTS,
+    ColourAttachment, DepthStencilAttachment, Draw, Drawer, IndexFormat, Indices, Indirect, Load,
+    Pass, Rect, Viewport, DRAW_RECORD_BYTES, INDEXED_DRAW_RECORD_BYTES, MAX_DRAW_VERTEX_BUFFERS,
+    MAX_PASS_ATTACHMENTS,
 };
 pub use pipeline::{ComputePipeline, ComputePipelineDesc, MAX_DISPATCH_SETS, MAX_PUSH_BYTES};
 pub use render::{

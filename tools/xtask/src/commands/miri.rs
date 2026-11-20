@@ -389,6 +389,7 @@ pub const TARGETS: &[Target] = &[
                 "software::render::tests::a_pass_of_many_bins_and_flushes_draws_whole",
                 "software::render::tests::a_pass_of_many_draws_binding_distinct_sets_gathers_their_memories_once",
                 "software::render::tests::a_pass_of_many_draws_sharing_a_large_set_resolves_it_once",
+                "software::render::indirect_tests::an_indirect_draw_s_records_are_counted_against_its_deadline",
             ],
             reason: "the first asks the host for an exbibyte so that the allocator's refusal is a \
                      real one, which the interpreter cannot represent and ends the run as \
@@ -405,7 +406,10 @@ pub const TARGETS: &[Target] = &[
                      of their own, two thousand over one set of four thousand descriptors — \
                      and the first two were unfinished after fifty minutes interpreted, the \
                      third took forty-six; the kept render tests draw the same paths, threads \
-                     included, at a size the interpreter finishes. None \
+                     included, at a size the interpreter finishes. So is the indirect draw's \
+                     deadline test — a quarter of a million records read to reach one look at \
+                     the clock — which was unfinished after fifty minutes interpreted; the kept \
+                     indirect tests read records on the same path. None \
                      carries `unsafe`, the dispatch, locks and threads they reach are the kept \
                      tests' too, every one that finished passed interpreted, and all run in full \
                      under the ordinary test matrix. Two integration tests are excluded as \
@@ -425,7 +429,9 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-gpu",
         description: "the same locks driven by the submission fuzz harness's copies, fills \
-                      and updates over memories shared between buffers",
+                      and updates over memories shared between buffers, its image transfers, \
+                      and its passes and dispatches, direct and indirect, on a twin whose \
+                      participants are threads of their own",
         features: &[],
         scope: Scope::Test {
             name: "fuzz_gpu",

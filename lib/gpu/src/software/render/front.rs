@@ -4,7 +4,7 @@
 //! piece noting the pixels it may reach.
 
 use alloc::vec::Vec;
-use core::sync::atomic::AtomicU32;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use tairix_inline::ArrayVec;
 use tairix_raster::clip::{Mapped, MAX_CLIP_CORNERS};
@@ -12,13 +12,13 @@ use tairix_raster::{Primitive, MESH_SUB_UNITS};
 use tairix_util::mathf;
 
 use super::{Area, Drawn};
-use crate::pass::{Count, IndexFormat};
+use crate::pass::{Counted, Counts, IndexFormat};
 use crate::render::{CullMode, FrontFace, Topology, VertexStep};
 use crate::software::dispatch::Workspace;
 use crate::software::shader::exec::{shade, Lanes, Placement};
 use crate::software::shader::ir::{Carries, Fixed, LANES};
 use crate::software::texel::{decode, raw_at, Plane};
-use crate::software::Meter;
+use crate::software::{Meter, Outcome};
 
 /// The most primitives one batch assembles.
 pub(super) const BATCH_PRIMITIVES: u32 = 32;
@@ -38,44 +38,32 @@ const SCAN_STEP: u32 = 4096;
 const TABLE: usize = (2 * BATCH_POSITIONS).next_power_of_two();
 
 /// A batch: primitives `first..first + count` of the run of `length`
-/// positions from position `run` of one instance of one draw.
+/// positions from position `run` of instance `instance` of one draw, or of
+/// one of its records, whose positions are `counts`'.
 #[derive(Copy, Clone, Debug)]
 pub(super) struct Planned {
     pub(super) draw: usize,
     pub(super) instance: u32,
+    counts: Counts,
     run: u32,
     length: u32,
     first: u32,
     count: u32,
 }
 
-/// Where cutting a pass's draws into batches has reached: the draw and
-/// instance, the run of positions being cut and its length, once found, its
-/// next primitive, and whether the draw has cut a batch.
+/// Where cutting a pass's draws into batches has reached: the draw, its
+/// record and that record's counts once read, the instance among them, the
+/// run of positions being cut and its length, once found, its next primitive,
+/// and whether the record has cut a batch.
 pub(super) struct Planner {
     draw: usize,
+    record: u32,
+    counts: Option<Counts>,
     instance: u32,
     run: u32,
     length: Option<u32>,
     next: u32,
     cut: bool,
-}
-
-/// The positions and instances a draw counts.
-fn extent(count: &Count) -> (u32, (u32, u32)) {
-    let (positions, instances) = match count {
-        Count::Vertices {
-            vertices,
-            instances,
-        } => (vertices, instances),
-        Count::Indices {
-            indices, instances, ..
-        } => (indices, instances),
-    };
-    (
-        positions.end.saturating_sub(positions.start),
-        (instances.start, instances.end),
-    )
 }
 
 /// The primitives `length` positions of `topology` make.
@@ -108,6 +96,8 @@ impl Planner {
     pub(super) const fn new() -> Self {
         Self {
             draw: 0,
+            record: 0,
+            counts: None,
             instance: 0,
             run: 0,
             length: None,
@@ -122,49 +112,53 @@ impl Planner {
     }
 
     /// Cut up to [`FLUSH_BATCHES`] more batches of `draws` into `out`, in
-    /// order, the indices read finding where each run of a strip or fan
-    /// restarts counted on `meter`: `false` where it stopped.
+    /// order, each record read as it is reached and the indices read finding
+    /// where each run of a strip or fan restarts counted on `meter`.
     pub(super) fn plan(
         &mut self,
         bound: &[Drawn<'_>],
         out: &mut Vec<Planned>,
         meter: &mut Meter<'_>,
-    ) -> bool {
+    ) -> Result<(), Outcome> {
         out.clear();
         while out.len() < FLUSH_BATCHES {
             let Some(drawn) = bound.get(self.draw) else {
-                return true;
+                return Ok(());
             };
-            let (positions, (first_instance, last_instance)) = extent(&drawn.work.count);
-            if self.instance < first_instance {
-                self.instance = first_instance;
-            }
-            if self.instance >= last_instance {
-                self.advance_draw();
+            let counts = if let Some(counts) = self.counts {
+                counts
+            } else {
+                let Some(counts) = drawn.counts(self.record, meter)? else {
+                    self.advance_draw();
+                    continue;
+                };
+                *self.counts.insert(counts)
+            };
+            if self.instance >= counts.instances {
+                self.advance_record();
                 continue;
             }
             let length = match self.length {
                 Some(length) => length,
-                None => match self.find_run(drawn, positions, meter) {
-                    Some(length) => length,
-                    None => return false,
-                },
+                None => self
+                    .find_run(drawn, &counts, meter)
+                    .ok_or(Outcome::Overran)?,
             };
             let made = primitives(drawn.render.topology, length);
             if self.next >= made {
                 // The run's end, and past the restart that ended it.
                 let after = self.run.saturating_add(length).saturating_add(1);
-                if after < positions && drawn.restarts() {
+                if after < counts.positions && drawn.restarts() {
                     self.run = after;
                 } else if !self.cut {
                     // Every instance cuts what the first did: nothing.
-                    self.advance_draw();
+                    self.advance_record();
                     continue;
                 } else {
                     if !meter.proceed(1) {
-                        return false;
+                        return Err(Outcome::Overran);
                     }
-                    self.instance = self.instance.saturating_add(1);
+                    self.instance += 1;
                     self.run = 0;
                 }
                 self.length = None;
@@ -172,12 +166,11 @@ impl Planner {
                 continue;
             }
             let count = (made - self.next).min(BATCH_PRIMITIVES);
-            if out.try_reserve(1).is_err() {
-                return false;
-            }
+            out.try_reserve(1).map_err(|_| Outcome::OutOfMemory)?;
             out.push(Planned {
                 draw: self.draw,
-                instance: self.instance,
+                instance: counts.first_instance.wrapping_add(self.instance),
+                counts,
                 run: self.run,
                 length,
                 first: self.next,
@@ -186,11 +179,22 @@ impl Planner {
             self.next += count;
             self.cut = true;
         }
-        true
+        Ok(())
     }
 
     fn advance_draw(&mut self) {
         self.draw += 1;
+        self.record = 0;
+        self.start_record();
+    }
+
+    fn advance_record(&mut self) {
+        self.record = self.record.saturating_add(1);
+        self.start_record();
+    }
+
+    fn start_record(&mut self) {
+        self.counts = None;
         self.instance = 0;
         self.run = 0;
         self.length = None;
@@ -203,9 +207,10 @@ impl Planner {
     fn find_run(
         &mut self,
         drawn: &Drawn<'_>,
-        positions: u32,
+        counts: &Counts,
         meter: &mut Meter<'_>,
     ) -> Option<u32> {
+        let positions = counts.positions;
         let start = self.run.min(positions);
         let mut end = positions;
         if drawn.restarts() {
@@ -215,7 +220,7 @@ impl Planner {
                 {
                     return None;
                 }
-                if drawn.is_restart(position) {
+                if drawn.is_restart(counts, position) {
                     end = position;
                     break;
                 }
@@ -227,47 +232,89 @@ impl Planner {
     }
 }
 
+/// The words a record of an indexed draw holds; a draw of vertices' holds
+/// one fewer.
+const RECORD_WORDS: usize = 5;
+
 impl Drawn<'_> {
+    /// The counts of record `record` of the draw: a direct draw's own, its
+    /// one record, else read from its records and counted on `meter` —
+    /// `None` past its last. A record naming a first instance the device does
+    /// not state it draws from is malformed.
+    fn counts(&self, record: u32, meter: &mut Meter<'_>) -> Result<Option<Counts>, Outcome> {
+        let records = match &self.work.count {
+            Counted::Direct(counts) => return Ok((record == 0).then_some(*counts)),
+            Counted::Indirect(records) => records,
+        };
+        if record >= records.count {
+            return Ok(None);
+        }
+        let indexed = self.index.is_some();
+        let read = if indexed {
+            RECORD_WORDS
+        } else {
+            RECORD_WORDS - 1
+        };
+        if !meter.proceed(read as u64) {
+            return Err(Outcome::Overran);
+        }
+        let words = self.records.ok_or(Outcome::Fault)?;
+        let first = (u64::from(record) * records.stride)
+            .checked_add(records.start)
+            .filter(|byte| byte.is_multiple_of(4))
+            .and_then(|byte| usize::try_from(byte / 4).ok())
+            .ok_or(Outcome::Fault)?;
+        let mut record_words = [0u32; RECORD_WORDS];
+        let held = words
+            .get(first..first.saturating_add(read))
+            .ok_or(Outcome::Fault)?;
+        for (word, value) in record_words.iter_mut().zip(held) {
+            *word = value.load(Ordering::Relaxed);
+        }
+        let counts = Counts::of_record(record_words, indexed);
+        if counts.first_instance != 0 && !self.takes_first_instance {
+            return Err(Outcome::Fault);
+        }
+        Ok(Some(counts))
+    }
+
     /// Whether an index of all ones restarts its strips or fans.
     fn restarts(&self) -> bool {
         self.render.restart && self.index.is_some()
     }
 
-    /// The raw index at `position` of the draw's indices: zero past its
+    /// The raw index at `position` of `counts`' indices: zero past their
     /// buffer.
-    fn raw_index(&self, position: u32) -> u32 {
+    fn raw_index(&self, counts: &Counts, position: u32) -> u32 {
         let Some((words, start, size, format)) = self.index else {
             return 0;
         };
-        let Count::Indices { indices, .. } = &self.work.count else {
-            return 0;
-        };
         let bytes = format.bytes();
-        let at = u64::from(indices.start.saturating_add(position)) * bytes;
+        let at = (u64::from(counts.first) + u64::from(position)) * bytes;
         if at.saturating_add(bytes) > size {
             return 0;
         }
         raw_at(words, start + at, bytes)[0]
     }
 
-    /// Whether `position` holds the restart index.
-    fn is_restart(&self, position: u32) -> bool {
+    /// Whether `position` of `counts`' indices holds the restart index.
+    fn is_restart(&self, counts: &Counts, position: u32) -> bool {
         let all = match self.index.map(|(_, _, _, format)| format) {
             Some(IndexFormat::U16) => u32::from(u16::MAX),
             _ => u32::MAX,
         };
-        self.raw_index(position) == all
+        self.raw_index(counts, position) == all
     }
 
-    /// The vertex `position` of the draw names.
-    fn vertex(&self, position: u32) -> u32 {
-        match &self.work.count {
-            Count::Vertices { vertices, .. } => vertices.start.wrapping_add(position),
-            Count::Indices { base_vertex, .. } => self
-                .raw_index(position)
+    /// The vertex `position` of `counts` names.
+    fn vertex(&self, counts: &Counts, position: u32) -> u32 {
+        if self.index.is_some() {
+            self.raw_index(counts, position)
                 .cast_signed()
-                .wrapping_add(*base_vertex)
-                .cast_unsigned(),
+                .wrapping_add(counts.base_vertex)
+                .cast_unsigned()
+        } else {
+            counts.first.wrapping_add(position)
         }
     }
 
@@ -389,7 +436,7 @@ fn gather(drawn: &Drawn<'_>, planned: &Planned) -> Option<Gathered> {
     let mut table = [u8::MAX; TABLE];
     let bits = TABLE.trailing_zeros();
     for position in (start..end).chain(fan_origin(drawn.render.topology)) {
-        let vertex = drawn.vertex(planned.run + position);
+        let vertex = drawn.vertex(&planned.counts, planned.run + position);
         // A multiplicative hash's high bits, which every bit of the key moves.
         let mut at = (vertex.wrapping_mul(0x9e37_79b1) >> (32 - bits)) as usize;
         let slot = loop {

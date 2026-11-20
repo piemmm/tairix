@@ -227,7 +227,7 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-gpu",
         test: "fuzz_gpu",
-        description: "lib/gpu submission model (copies, fills and updates over buffers sharing allocations, ranges inside, across and past what they name) on the software device against a byte-array reference",
+        description: "lib/gpu submission model on the software device: copies, fills and updates over buffers sharing allocations against a byte-array reference; image descriptions of every shape, and the copies and clears of images against a texel reference; bind sets, dispatches and passes, direct and indirect, sound or carrying faults from a stated catalogue, each refusal at its first faulty command, each admitted one alike on a twin of several participants drawing every indirect record directly",
     },
     Target {
         package: "tairix-gpu",

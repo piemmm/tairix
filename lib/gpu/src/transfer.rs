@@ -8,12 +8,14 @@
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use crate::command::{buffer, Op};
 use crate::format::Aspects;
 use crate::image::ImageUsage;
 use crate::image::{BufferImageCopy, ClearValue, Extent3d, ImageCopy, ImageRange, Origin3d};
 use crate::info::BufferUsage;
+use crate::memory::overlaps;
 use crate::model::{BufferKey, BufferState, ContextState, ImageKey};
 use crate::resource::ImageState;
 use crate::{Error, MAX_COPY_REGIONS};
@@ -54,15 +56,18 @@ fn copied<T: Copy>(regions: &[T]) -> Result<Vec<T>, Error> {
     tairix_util::fallible::copied(regions).ok_or(Error::OutOfMemory)
 }
 
-/// Whether `[a, a + a_len)` and `[b, b + b_len)` share a byte.
-const fn spans_meet(a: u64, a_len: u64, b: u64, b_len: u64) -> bool {
-    a < b.saturating_add(b_len) && b < a.saturating_add(a_len)
+/// The bytes of its memory an image takes.
+const fn bytes_of(image: &ImageState) -> Range<u64> {
+    image.offset..image.offset.saturating_add(image.layout.size)
 }
 
 /// Whether a buffer's range and an image share a byte of one memory.
 fn aliases(buffer: &BufferState, image: &ImageState) -> bool {
     Arc::ptr_eq(&buffer.memory, &image.memory)
-        && spans_meet(buffer.offset, buffer.size, image.offset, image.layout.size)
+        && overlaps(
+            &(buffer.offset..buffer.offset.saturating_add(buffer.size)),
+            &bytes_of(image),
+        )
 }
 
 /// One region of an image a copy or a clear touches.
@@ -78,12 +83,8 @@ struct Region {
 impl Region {
     fn meets(&self, other: &Self) -> bool {
         let along = |a: u32, a_len: u32, b: u32, b_len: u32| {
-            spans_meet(
-                u64::from(a),
-                u64::from(a_len),
-                u64::from(b),
-                u64::from(b_len),
-            )
+            let span = |start: u32, len: u32| u64::from(start)..u64::from(start) + u64::from(len);
+            overlaps(&span(a, a_len), &span(b, b_len))
         };
         self.level == other.level
             && self.aspect.intersects(other.aspect)
@@ -272,7 +273,7 @@ pub(crate) fn image_image(
     }
     let shared = !Arc::ptr_eq(src, dst)
         && Arc::ptr_eq(&src.memory, &dst.memory)
-        && spans_meet(src.offset, src.layout.size, dst.offset, dst.layout.size);
+        && overlaps(&bytes_of(src), &bytes_of(dst));
     if overlapping || shared {
         return Err(Error::Overlap);
     }

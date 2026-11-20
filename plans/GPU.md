@@ -30,15 +30,15 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GP0 | This plan, `plans/SHADER.md`, the jump-sheet rows, the §3 map entries, the `PLAN.md` section | done |
 | GP1 | `drivers/display/gpu_virtio`: the 2D driver — `register`, `BIND_KEYS`, resources, scanout, and the flip-completion interrupt | done: delivered by `plans/FIX-DISPLAY-ACCELERATION.md` C |
 | GP2 | The memory and submission model in `lib/gpu`: contexts as the unit of isolation, typed allocations charged to a context and a heap, buffers made for stated uses, submissions checked whole, in-order queues, timelines and fences, deadlines and the engine reset — software-complete | done |
-| GP3 | `lib/gpu`: the device-neutral **render and compute** vocabulary, and the software backend — including the tile-wide SPIR-V interpreter that makes it complete rather than render-only (§1) | in progress |
+| GP3 | `lib/gpu`: the device-neutral **render and compute** vocabulary, and the software backend — including the tile-wide SPIR-V interpreter that makes it complete rather than render-only (§1) | done |
 | GP3.1 | Device-stated capabilities, features and format features, the render ones left to GP3.4; formats, images, views, buffer views and samplers; the buffer-image, image-image and clear commands; word memory, the device's own worker and the process's `JobRunner` | done |
 | GP3.2 | Bind set layouts, bind sets, pipeline layouts with stage visibility, and shader modules | done |
 | GP3.3 | The interpreter over `plans/SHADER.md`'s lowering view, compute pipelines and dispatch | done |
-| GP3.4 | `lib/raster` evolved into the one software 3D pipeline; render pipelines, passes and draws, with the render features, format features, limits and queue capability they read | in progress |
+| GP3.4 | `lib/raster` evolved into the one software 3D pipeline; render pipelines, passes and draws, with the render features, format features, limits and queue capability they read | done |
 | GP3.4.1 | `lib/raster`'s 3D stages, evolved in place: the converter's coverage as an integer half-plane predicate per edge its row walker and a block evaluator share, homogeneous clip-space clipping, perspective-correct, linear and flat interpolation, depth for every depth format and compare operation (its reciprocal depth the reversed-Z configuration), stencil, the four-sample lattice and the general blend; WinterSun's pictures unchanged | done |
 | GP3.4.2 | The interpreter's vertex and fragment stages: the stage interface and its built-ins, quads, derivatives and helper invocations, implicit-level samples and queries, and discards; the coverage test's fragment exception gone | done |
 | GP3.4.3 | Render pipelines, passes and draws on the software device: their fixed-function state and creation checks, the render features, format features, limits and the `GRAPHICS` queue; a pass's draws shaded, clipped and set up in bounded batches in parallel, its bins rasterised in parallel in place, cleared and resolved | done |
-| GP3.4.4 | Indirect draws, and `tests/fuzz_gpu.rs` generating images, bind sets, passes, draws and dispatches | planned |
+| GP3.4.4 | Indirect draws, and `tests/fuzz_gpu.rs` generating images, bind sets, passes, draws and dispatches | done |
 | GP4 | The pinned first-party pipeline set past the desktop's passes (GD6): OS chrome's draws and the game's passes as build-time SPIR-V, with their conformance cases | planned |
 | GP11 | The device channel: `gpu-v1`, a driver hosting GP2's model for every client process, the context-creation capability, per-context bounds on queued work, the watchdog's one-shot timer, and the IOMMU requirement — landing with the first hardware backend | planned |
 | GP5 | The Venus backend: a guest Vulkan ICD over virtio-gpu's Venus capset — arbitrary shaders on real host hardware | planned |
@@ -56,7 +56,7 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GD5 | The screen fade as a lone layer's opacity | done |
 | GD10 | Black as no layer: a solid black window over the screen is the engine's own background, nothing written, baked or held | done |
 | GD6 | The desktop's frost, dithered blend, copy, fill and encode as pinned compute passes (`lib/shaders`), `lib/raster`'s arithmetic to the bit | done |
-| GD7 | Copy engines as `lib/gpu`'s transfer queue | blocked: GP3, GP11 |
+| GD7 | Copy engines as `lib/gpu`'s transfer queue | blocked: GP11 |
 | GD11 | The desktop's compositing engine on a device: GD6's passes drawing its frost and flattened layers where the session is given hardware, `lib/raster` everywhere else | blocked: GP11, GP5 |
 
 Items are built in ledger order. An item is complete — tests, docs, and a green
@@ -255,9 +255,10 @@ device has not stated.
   shader capabilities of `plans/SHADER.md`'s allow-list it runs; its optional
   features — anisotropic filtering and mirror-clamp-to-edge, and with GP3.4's
   draws dual-source blending, logic operations, depth clamping, wide lines,
-  large points, and storage writes and atomics from a vertex or a fragment
-  stage, which Vulkan 1.1 does not require; each format's features; and its
-  subgroup size. A statement is
+  large points, storage writes and atomics from a vertex or a fragment stage,
+  and indirect records naming a first instance, which Vulkan 1.1 does not
+  require; each format's features; its subgroup size; and the most records an
+  indirect draw reads, one where the device draws no more. A statement is
   added with the creation-time check that reads it, never ahead of it. Each limit is either a fixed bound (§24.4)
   or, for the software device, a capacity derived from discovered memory.
 - **`Format`** — the 8-, 16- and 32-bit-per-channel unorm, snorm, uint, sint
@@ -327,7 +328,9 @@ device has not stated.
   `draw_indexed` and their indirect forms — are each a self-describing call
   naming its pipeline, bind sets, push constants, vertex and index buffers,
   viewport (of either height's sign), scissor, stencil reference and blend
-  constant. A pass is recorded by a closure, so none is left open. Each draw
+  constant; an indirect one names its records too — a count of them, a stride
+  apart in a buffer, each Vulkan's four words for a draw of vertices and five
+  for an indexed draw. A pass is recorded by a closure, so none is left open. Each draw
   counts as one command and its pass as one more, in recording order, which is
   how a refusal names it; every list a command carries has its fixed bound.
 - **Queues** state `TRANSFER` and `COMPUTE`, and `GRAPHICS` with GP3.4's
@@ -342,8 +345,9 @@ device has not stated.
   writes only through depth, stencil and blending, and the storage writes of a
   pass's draws are unordered within it and seen by every command after it; a
   draw whose stages see a view or buffer overlapping an attachment the pass
-  writes, or that reads one as vertices or indices, is refused (a
-  depth-stencil attachment the pass only tests may be read, not written). That
+  writes, or that reads a byte of one as vertices, indices or records, is
+  refused (a depth-stencil attachment the pass only tests may be read, not
+  written). That
   is what lets a backend batch a pass's draws and keep its attachments on chip.
   A hardware backend derives the dependencies it needs from each command's
   resources and each entry point's static `Access`, which the validator states.
@@ -359,7 +363,10 @@ device has not stated.
 - **Indirect arguments are read once, when the command runs**, into the job,
   and computed with wrapping or checked arithmetic. A dispatch past the
   device's workgroup counts loses its context (`Loss::Fault`), as work the
-  device found malformed; a draw runs in bounded batches whatever it counts.
+  device found malformed; a draw runs in bounded batches whatever it counts,
+  each record read as its pass reaches it, its vertex and instance numbers
+  wrapping and an index's place not, and a record naming a first instance a
+  device does not state is malformed too.
   A hardware backend (GP5, GP9) sanitises indirect records on the device before
   the command reads them.
 - **A bind set holds the objects it binds** — each buffer, view and sampler,
@@ -1160,8 +1167,10 @@ Each needs sign-off before the item that depends on it; none is assumed.
     each interpolation qualifier, centroid, per-sample depth, `SampleMask`,
     alpha-to-coverage, `EarlyFragmentTests`, overlapping quads in one tile and
     every resolve each pin their pixels; a pass of many bins and flushes
-    renders whole; `tests/fuzz_gpu.rs` generates images, bind sets, passes,
-    draws and dispatches as it does copies.
+    renders whole; every indirect record draws what the direct draw it names
+    draws; `tests/fuzz_gpu.rs` generates images, bind sets, passes, draws and
+    dispatches as it does copies, an admitted one held to a twin of several
+    participants drawing each record directly.
 - **GP4**: the pinned modules are regenerated reproducibly, verify-mode fails on
   drift and runs in `ci`, and every pipeline's conformance case pins its
   software output.

@@ -7,8 +7,8 @@ device that implements it on every target; the images, views, texel buffers,
 samplers and transfers of `plans/GPU.md` GP3.1; GP3.2's bind set layouts, bind
 sets, pipeline layouts and shader modules; GP3.3's compute pipelines, their
 dispatches and the interpreter that runs them; and GP3.4's render pipelines,
-passes and draws, rasterised through `lib/raster`'s stages. Indirect draws
-arrive with GP3.4.4; reaching a hardware device's driver arrives with GP11.
+passes and draws, direct and indirect, rasterised through `lib/raster`'s
+stages. Reaching a hardware device's driver arrives with GP11.
 
 ## A device and what it is
 
@@ -19,9 +19,9 @@ A `Device` is described by a `DeviceInfo`:
 | `heaps` | pools of memory, each with its size and whether it is the device's own |
 | `memory_types` | the kinds of memory an allocation is made in, each over one heap, with its `MemoryProperties`: device-local, host-visible, host-coherent, host-cached |
 | `queue_families` | sets of queues running one kind of work — `QueueCapabilities::TRANSFER`, `COMPUTE`, `GRAPHICS` — and how many queues of each a context has, at most `MAX_QUEUES_PER_FAMILY` |
-| `limits` | the bounds it puts on what is asked of it: the largest allocation and the alignments a buffer and its bindings take, image sizes and layers, bind sets, push-constant bytes, binding ranges and texel-buffer elements, workgroup sizes, counts and memory, per-invocation memory, its subgroup size, the longest a submission may run, and a render pipeline's vertex attributes, buffers, offsets, strides and stage components, its colour targets, viewports, point sizes and line widths |
+| `limits` | the bounds it puts on what is asked of it: the largest allocation and the alignments a buffer and its bindings take, image sizes and layers, bind sets, push-constant bytes, binding ranges and texel-buffer elements, workgroup sizes, counts and memory, per-invocation memory, its subgroup size, the longest a submission may run, a render pipeline's vertex attributes, buffers, offsets, strides and stage components, its colour targets, viewports, point sizes and line widths, and the records an indirect draw reads |
 | `capabilities` | the shader capabilities of `lib/spirv`'s allow-list it runs |
-| `features` | what it offers past the portable core: anisotropic filtering, mirror-clamp-to-edge, dual-source blending, logic operations, depth clamping, wide lines, large points, and storage writes and atomics from a vertex or fragment stage |
+| `features` | what it offers past the portable core: anisotropic filtering, mirror-clamp-to-edge, dual-source blending, logic operations, depth clamping, wide lines, large points, storage writes and atomics from a vertex or fragment stage, and indirect draw records naming a first instance |
 | `formats` | what it states each `Format` can be used for (`FormatFeatures`): sampled, filtered, stored, a colour or depth-stencil attachment, blended, multisampled, resolved, a texel buffer, a vertex attribute |
 
 The portable core is what Vulkan 1.1 requires of every device; anything past
@@ -31,8 +31,8 @@ with no queues, too many or no capability, an alignment that is not a power of
 two, a subgroup size that is not a power of two up to `MAX_SUBGROUP_SIZE`,
 capabilities out of order, no deadline at all, more colour targets than
 `MAX_PASS_ATTACHMENTS`, vertex buffers than `MAX_DRAW_VERTEX_BUFFERS` or vertex
-attributes than `MAX_VERTEX_ATTRIBUTES`, or viewport bounds out of order is
-refused (`Error::Malformed`).
+attributes than `MAX_VERTEX_ATTRIBUTES`, viewport bounds out of order, or no
+record an indirect draw may read is refused (`Error::Malformed`).
 
 `Device::software` makes the software device from a `SoftwareDesc`: the
 machine's memory, a clock, the process's `JobRunner`, what starts its worker
@@ -46,7 +46,9 @@ its encoding can mean: a colour format of float or unsigned normalised
 channels renders, blends and resolves, but for the shared-exponent one, which
 is only sampled; an integer one renders without either; a signed normalised
 one is no attachment. Its buffers align to 16 bytes, the widest vector its copies move,
-and its submissions run for at most a minute.
+its submissions run for at most a minute, and an indirect draw reads as many
+records as its count names, each as its pass reaches it and none kept, so a
+count costs only the time the deadline bounds.
 
 ## Contexts
 
@@ -120,8 +122,8 @@ A `Buffer` is a span of one allocation, at an offset that is a multiple of the
 device's `buffer_alignment`, made for the `BufferUsage` it states:
 `TRANSFER_SRC` and `TRANSFER_DST` to be copied from and into, `UNIFORM`,
 `STORAGE`, `UNIFORM_TEXEL` and `STORAGE_TEXEL` to be bound, `INDIRECT` to be
-read by an indirect dispatch, and `VERTEX` and `INDEX` to be read by a draw. It
-holds its memory while it lives.
+read by an indirect dispatch or draw, and `VERTEX` and `INDEX` to be read by a
+draw. It holds its memory while it lives.
 
 ## Images, views and samplers
 
@@ -314,11 +316,12 @@ A `CommandBuffer` records:
 | `update_buffer` | writes bytes recorded with the command | whole words, at most `MAX_UPDATE_BYTES` |
 | `copy_buffer_to_image`, `copy_image_to_buffer` | moves texels between a buffer laid out in rows and slices and one aspect of a single-sampled image's level and layers | each region within both; a row at least the region's width and whole texels, as many rows a slice as the region; the depth of `Depth24PlusStencil8` never copied; no texel or byte written twice; the buffer and the image not sharing memory |
 | `copy_image` | moves texels between images of one sample count, the same plane, and texels of one size | each region within both; no texel written twice, and within one image none both read and written; two images sharing memory refused |
-| `clear_image` | writes one value over ranges of an image, in each aspect a range names | a float, signed or unsigned colour of the format's kind, or a depth within `0.0..=1.0` and a stencil value |
+| `clear_image` | writes one value over ranges of an image, in each aspect a range names, an integer channel keeping the value's low bits | a float, signed or unsigned colour of the format's kind, or a depth within `0.0..=1.0` and a stencil value |
 | `dispatch` | runs a compute pipeline's workgroups, so many along each axis, with its bind sets and push constants, read as words once as they are recorded and shared by every submission | one bind set for each set of the pipeline's layout, each laid out as that set (`Error::Bindings`); the push constants exactly the layout's bytes (`Error::Shape`); counts within `max_workgroup_count` (`Error::TooLarge`); at most `MAX_DISPATCH_SETS` sets and `MAX_PUSH_BYTES` bytes (`Error::TooMany`, when recorded) |
 | `dispatch_indirect` | `dispatch` with its counts three little-endian words read from a buffer when it runs | the buffer made `INDIRECT` (`Error::Usage`), the offset whole words (`Error::Misaligned`), and twelve bytes within the buffer (`Error::OutOfRange`) |
 | `render_pass` | loads its attachments — keeping what each held or clearing it within the pass's area — runs the draws its closure records in order, and resolves its four-sample targets | some attachment (`Error::Empty`); each a two-dimensional view of one level and layer of an image made for the attachment use (`Error::Usage`, `Error::Shape`), in a format the device states the use and sample count of (`Error::Unsupported`), a depth-stencil view of all its format's aspects (`Error::Aspect`); all of one extent (`Error::Shape`) and sample count (`Error::Samples`), none overlapping another in memory (`Error::Overlap`); a resolve from four samples to one (`Error::Samples`) of the same extent and format (`Error::Shape`) the device resolves (`Error::Unsupported`); a clear of the format's kind, its depth within `0.0..=1.0` (`Error::Shape`); an area not empty (`Error::Empty`) and within the attachments (`Error::OutOfRange`); at most `max_color_attachments` targets (`Error::TooMany`), and `MAX_PASS_ATTACHMENTS` when recorded |
-| `draw`, `draw_indexed` | within a pass: instances of a range of vertices, or of the vertices a range of indices names, each index added to a base vertex, drawn with a pipeline, its bind sets, push constants and vertex buffers, a viewport, a scissor, a stencil reference and a blend constant | the pipeline's targets and depth-stencil format the pass's (`Error::Interface`), at its sample count (`Error::Samples`); sets and push constants as a dispatch's; a vertex buffer made `VERTEX` for each of the pipeline's (`Error::Bindings`, `Error::Usage`), indices made `INDEX` at a multiple of their size (`Error::Misaligned`); each buffer's offset within it, a viewport finite, wider than nought and not flat, within the device's dimensions and bounds and its depths within `0.0..=1.0`, a scissor whose far edges a `u32` holds, ranges in order and a blend constant finite (`Error::OutOfRange`); nothing a stage of it sees, nor its vertices or indices, reaching an attachment the pass writes, and nothing a stage of it writes reaching a depth-stencil attachment the pass only tests, which its loads keep and none of its draws writes (`Error::Overlap`); at most `MAX_DRAW_VERTEX_BUFFERS` vertex buffers when recorded (`Error::TooMany`) |
+| `draw`, `draw_indexed` | within a pass: instances of a range of vertices, or of the vertices a range of indices names, each index added to a base vertex, drawn with a pipeline, its bind sets, push constants and vertex buffers, a viewport, a scissor, a stencil reference and a blend constant | the pipeline's targets and depth-stencil format the pass's (`Error::Interface`), at its sample count (`Error::Samples`); sets and push constants as a dispatch's; a vertex buffer made `VERTEX` for each of the pipeline's (`Error::Bindings`, `Error::Usage`), indices made `INDEX` at a multiple of their size (`Error::Misaligned`); each buffer's offset within it, a viewport finite, wider than nought and not flat, within the device's dimensions and bounds and its depths within `0.0..=1.0`, a scissor whose far edges a `u32` holds, ranges in order and a blend constant finite (`Error::OutOfRange`); nothing a stage of it sees, nor its vertices, indices or records, reaching an attachment the pass writes, and nothing a stage of it writes reaching a depth-stencil attachment the pass only tests, which its loads keep and none of its draws writes (`Error::Overlap`); at most `MAX_DRAW_VERTEX_BUFFERS` vertex buffers when recorded (`Error::TooMany`) |
+| `draw_indirect`, `draw_indexed_indirect` | within a pass: `draw` or `draw_indexed` once for each of `count` records in a buffer, `stride` bytes apart, each four little-endian words — its vertices, its instances, its first vertex and its first instance (`DRAW_RECORD_BYTES`) — or for an indexed draw five — its indices, its instances, its first index, the signed word added to each index and its first instance (`INDEXED_DRAW_RECORD_BYTES`) | as `draw` and `draw_indexed`; the buffer made `INDIRECT` (`Error::Usage`); its offset whole words, and where there are several records the stride too (`Error::Misaligned`); several records a record or more apart (`Error::OutOfRange`); no more than the device's `max_draw_indirect_count` (`Error::TooLarge`); every record within the buffer, and for none the offset (`Error::OutOfRange`) |
 
 Recording checks only that what is named belongs to the context. Everything
 else is checked when a `Submission` carries the buffer to `Queue::submit`,
@@ -383,7 +386,13 @@ memory one of its shaders writes, or whose fragments store to one word, leaves
 what it read and that word to the device, as racing workgroups do; every
 command after it sees everything it wrote. An indirect dispatch whose counts, read when it
 runs, pass the device's loses its context (`Loss::Fault`), and a count of zero
-along an axis runs nothing.
+along an axis runs nothing. An indirect draw reads each record once, as its
+pass reaches it, so the record an earlier command wrote is the one it draws,
+and one a shader of the same pass writes is the device's to read before the
+write or after it. Its vertex and instance numbers wrap past the last; an
+index's place does not, so one past the index buffer however far reads nought.
+A record naming a first instance other than nought loses the context on a
+device that does not state `DRAW_INDIRECT_FIRST_INSTANCE` (`Loss::Fault`).
 
 ## Deadlines and loss
 
@@ -413,7 +422,8 @@ when its engine is already running work, on the thread running it, which takes
 the next job when it finishes.
 
 A job counts its work — the bytes its transfers move, the words over lanes its
-dispatches compute, and what locking and resolving each dispatch costs — and
+dispatches compute, what locking and resolving each dispatch costs, and the
+words of each record an indirect draw reads — and
 reads the clock each 2<sup>20</sup> of it, stopping before its next piece of
 work once its deadline has passed. Each piece of a dispatch starts from where
 the job stood, and the job goes on from the most any piece that claimed
@@ -443,7 +453,8 @@ channels, the sRGB transfer through tables made from `lib/colour`'s once a
 device, and the packed 10:10:10:2, 11:11:10 and 9:9:9:5 encodings.
 
 A pass locks every memory it reaches once, as a dispatch does: gathered from
-its attachments, its draws' buffers and each distinct set they bind and sorted
+its attachments, its draws' vertex, index and record buffers and each distinct
+set they bind and sorted
 once, so a pass of many draws costs its memories' logarithm. A run of draws
 of one pipeline and the same sets resolves their descriptors once. It runs its
 draws a flush at a time in bounded memory: up to 16 batches of 32 primitives
@@ -719,9 +730,12 @@ fill of the whole heap runs far past a deadline.
   a stage writing storage on a device not stating it. The pass tests refuse a
   pass whose attachments or area disagree, a resolve into another extent or
   from one sample, a draw its pipeline could not run, a draw binding or reading
-  as vertices or indices what its pass renders to — but only through the
-  stages that see it, and a depth-stencil attachment only tested read but not
-  written — and an attachment in a format the device does not render to. The
+  as vertices, indices or records what its pass renders to — but only through
+  the stages that see it, not where it reads none of it, and a depth-stencil
+  attachment only tested read but not written — an attachment in a format the
+  device does not render to, an
+  indirect draw's records each way they are checked, at the edges they are
+  admitted, and past the records a device reads. The
   render tests pin the pixels of coverage and shared edges, each
   interpolation qualifier across a near-plane clip, depth, depth bias, stencil,
   blending, write masks and the blend constant, points and lines, strips, fans
@@ -737,7 +751,14 @@ fill of the whole heap runs far past a deadline.
   empty instances, restarting or not, gather the memories of thousands of
   draws' distinct sets once, resolve a large set shared by thousands of draws
   once, charge a queued pass for its own bytes, and name a refused draw among
-  its pass's commands.
+  its pass's commands. The indirect tests draw each record as the direct
+  draw it names, of vertices and of either width of index, blended and
+  replaced, its records apart by more than their size, a draw of no records
+  and one of one whose stride goes unread; read a record an earlier command
+  of the submission wrote and one written after the draw was recorded; wrap
+  vertex and instance numbers past the last and not an index's place; lose a
+  context to a record naming a first instance its device does not state; and
+  stop a draw of records enough to reach the clock at its deadline.
 - The lowering tests build one edge for a switch's many labels of one target,
   share runs of zeros, refuse constants past their budget, lay out a
   structure of the most members in one walk, leave another entry point's
@@ -779,9 +800,23 @@ fill of the whole heap runs far past a deadline.
   a dispatch of no workgroups, one of nothing, or the empty blocks that end a
   tile's lanes; hold a queued dispatch's memories only through its sets; and
   give a workgroup past four billion its own id.
-- `tests/fuzz_gpu.rs` (in `cargo xtask fuzz`) records copies, fills and updates
-  over buffers sharing allocations, ranges inside, across and past what they
-  name, and holds every verdict and every byte to a reference.
+- `tests/fuzz_gpu.rs` (in `cargo xtask fuzz`) runs three sweeps. One records
+  copies, fills and updates over buffers sharing allocations, ranges inside,
+  across and past what they name, and holds every verdict and every byte to a
+  reference. One asks the device's verdict of image descriptions of every
+  shape and format, places images in memory of their own and beside each
+  other, and copies between them and buffers and clears them, every level,
+  layer, place and buffer layout drawn inside, across and past what they
+  name, held to a texel reference and read back whole. One makes bind sets
+  over ranges and views fit and not, and submits dispatches and passes,
+  direct and indirect, their draws direct, indexed and indirect, each sound or
+  carrying faults from a stated catalogue: a refusal is at the first command
+  carrying faults, with one of its refusals, and changes nothing; an admitted
+  submission runs on a device of one participant and on a twin of several
+  drawing each record as the direct draw it names, every byte of the two
+  alike, every buffer byte the reference's, and an image's bytes changed only
+  where a pass renders or a clear writes; and an indirect dispatch's counts
+  past the device's lose the context.
 - `tests/fuzz_shader.rs` (in `cargo xtask fuzz`) generates compute modules the
   validator admits — every scalar kind, vectors, selections and data-dependent
   loops with early breaks, calls, barriers, subgroup operations, and memory

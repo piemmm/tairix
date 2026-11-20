@@ -38,7 +38,7 @@ tairix_util::flags! {
         const UNIFORM_TEXEL = 1 << 4;
         /// Viewed as a storage texel buffer.
         const STORAGE_TEXEL = 1 << 5;
-        /// Read as an indirect dispatch's arguments.
+        /// Read as an indirect dispatch's or draw's arguments.
         const INDIRECT = 1 << 6;
         /// Read as a draw's vertex attributes.
         const VERTEX = 1 << 7;
@@ -98,6 +98,9 @@ tairix_util::flags! {
         const VERTEX_STORES = 1 << 7;
         /// Storage writes and atomics from a fragment stage.
         const FRAGMENT_STORES = 1 << 8;
+        /// An indirect draw's records naming a first instance other than
+        /// nought.
+        const DRAW_INDIRECT_FIRST_INSTANCE = 1 << 9;
     }
 }
 
@@ -111,7 +114,8 @@ impl Features {
         .with(Self::WIDE_LINES)
         .with(Self::LARGE_POINTS)
         .with(Self::VERTEX_STORES)
-        .with(Self::FRAGMENT_STORES);
+        .with(Self::FRAGMENT_STORES)
+        .with(Self::DRAW_INDIRECT_FIRST_INSTANCE);
 }
 
 /// What a device states each format can be used for.
@@ -259,6 +263,9 @@ pub struct Limits {
     pub max_point_size: u32,
     /// The widest line, in pixels, where lines may be wide.
     pub max_line_width: u32,
+    /// The most records one indirect draw reads: one where the device draws
+    /// no more.
+    pub max_draw_indirect_count: u32,
 }
 
 /// The most shader capabilities a device states.
@@ -307,6 +314,7 @@ impl DeviceInfo {
             && limits.subgroup_size.is_power_of_two()
             && limits.subgroup_size <= MAX_SUBGROUP_SIZE
             && limits.max_bind_sets > 0
+            && limits.max_draw_indirect_count > 0
             && limits.max_vertex_input_attributes <= MAX_VERTEX_ATTRIBUTES
             && limits.max_vertex_input_bindings as usize <= MAX_DRAW_VERTEX_BUFFERS
             && limits.max_color_attachments as usize <= MAX_PASS_ATTACHMENTS

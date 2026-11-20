@@ -34,7 +34,7 @@ bounds stay fixed), §26.4 (untrusted input is hostile).
 
 Items are built in ledger order. SH7's harness is written *with* SH1–SH6 rather
 than after them: a validator whose refusals are untested has no property worth
-naming. SH8 follows SH2, which it extends, because GP3 is blocked on it.
+naming. SH8 follows SH2, which it extends.
 
 ## 0. Binding decisions
 

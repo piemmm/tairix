@@ -13,7 +13,7 @@ use crate::device::{owned, Buffer, CommandBuffer};
 use crate::format::{Aspects, Format, FormatFeatures};
 use crate::image::{ClearValue, ImageUsage, ViewDimension};
 use crate::info::{BufferUsage, DeviceInfo};
-use crate::memory::Memory;
+use crate::memory::{overlaps, Memory};
 use crate::model::{BindSetKey, BufferKey, ContextState, RenderPipelineKey, ViewKey};
 use crate::objects::ImageView;
 use crate::render::{Render, RenderPipeline, RenderPipelineState};
@@ -25,6 +25,16 @@ pub const MAX_PASS_ATTACHMENTS: usize = 8;
 
 /// The most vertex buffers one draw binds: past every device's.
 pub const MAX_DRAW_VERTEX_BUFFERS: usize = 32;
+
+/// The bytes a record of [`Drawer::draw_indirect`] takes: its vertices'
+/// count, its instances' count, its first vertex and its first instance, each
+/// a little-endian word.
+pub const DRAW_RECORD_BYTES: u32 = 16;
+
+/// The bytes a record of [`Drawer::draw_indexed_indirect`] takes: its
+/// indices' count, its instances' count, its first index, the signed word
+/// added to each index, and its first instance, each a little-endian word.
+pub const INDEXED_DRAW_RECORD_BYTES: u32 = 20;
 
 /// What an attachment holds as its pass begins; it keeps what the pass
 /// renders.
@@ -158,6 +168,22 @@ pub struct Indices<'a> {
     pub format: IndexFormat,
 }
 
+/// Where an indirect draw's records lie: `count` of them in `buffer`, the
+/// first at `offset` and each `stride` bytes past the one before.
+#[derive(Copy, Clone, Debug)]
+pub struct Indirect<'a> {
+    /// The buffer holding them, made for indirect use.
+    pub buffer: &'a Buffer,
+    /// Where the first starts: whole words.
+    pub offset: u64,
+    /// How many there are: at most the device's
+    /// [`max_draw_indirect_count`](crate::Limits::max_draw_indirect_count).
+    pub count: u32,
+    /// The bytes from one record to the next: where there are several, whole
+    /// words and at least a record.
+    pub stride: u32,
+}
+
 /// A pass's attachment as recorded.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct AttachmentRecord {
@@ -174,18 +200,79 @@ pub(crate) struct DepthStencilRecord {
     stencil: Load,
 }
 
-/// How many vertices and instances a draw makes, and where they come from.
-#[derive(Clone, Debug)]
+/// How many vertices and instances a draw makes, as recorded: given, or read
+/// from records when it runs.
+#[derive(Debug)]
 pub(crate) enum Count {
-    Vertices {
-        vertices: Range<u32>,
-        instances: Range<u32>,
-    },
-    Indices {
-        indices: Range<u32>,
+    /// Its positions — vertices, or for an indexed draw indices — each index
+    /// added to `base_vertex`, and its instances.
+    Direct {
+        positions: Range<u32>,
         base_vertex: i32,
         instances: Range<u32>,
     },
+    Indirect {
+        buffer: BufferKey,
+        offset: u64,
+        count: u32,
+        stride: u32,
+    },
+}
+
+/// One draw's positions and instances: `positions` vertices numbered from
+/// `first`, or for an indexed draw the vertices `positions` indices from index
+/// `first` name, each added to `base_vertex`; and `instances` instances
+/// numbered from `first_instance`. Vertex and instance numbers wrap.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Counts {
+    pub(crate) first: u32,
+    pub(crate) positions: u32,
+    pub(crate) base_vertex: i32,
+    pub(crate) first_instance: u32,
+    pub(crate) instances: u32,
+}
+
+impl Counts {
+    /// What a record of `words` names, the first four of them a draw of
+    /// vertices' and all five an indexed draw's.
+    pub(crate) const fn of_record(words: [u32; 5], indexed: bool) -> Self {
+        let [positions, instances, first, fourth, fifth] = words;
+        if indexed {
+            Self {
+                first,
+                positions,
+                base_vertex: fourth.cast_signed(),
+                first_instance: fifth,
+                instances,
+            }
+        } else {
+            Self {
+                first,
+                positions,
+                base_vertex: 0,
+                first_instance: fourth,
+                instances,
+            }
+        }
+    }
+}
+
+/// Where an indirect draw's records lie in their memory, proved within it:
+/// `count` from byte `start`, `stride` apart, the `span` bytes from `start`
+/// they reach.
+pub(crate) struct Records {
+    pub(crate) memory: Arc<Memory>,
+    pub(crate) start: u64,
+    pub(crate) span: u64,
+    pub(crate) count: u32,
+    pub(crate) stride: u64,
+}
+
+/// How many vertices and instances a checked draw makes: once, as recorded,
+/// or once for each of its records, read as the draw runs.
+pub(crate) enum Counted {
+    Direct(Counts),
+    Indirect(Records),
 }
 
 /// A draw as recorded, its objects named by key.
@@ -312,8 +399,9 @@ impl Drawer<'_> {
         self.record(
             draw,
             None,
-            Count::Vertices {
-                vertices,
+            Count::Direct {
+                positions: vertices,
+                base_vertex: 0,
                 instances,
             },
         )
@@ -332,20 +420,65 @@ impl Drawer<'_> {
         (range, base_vertex): (Range<u32>, i32),
         instances: Range<u32>,
     ) -> Result<(), Error> {
-        let index = (
-            self.buffer.named(indices.buffer)?,
-            indices.offset,
-            indices.format,
-        );
+        let index = self.named_indices(indices)?;
         self.record(
             draw,
             Some(index),
-            Count::Indices {
-                indices: range,
+            Count::Direct {
+                positions: range,
                 base_vertex,
                 instances,
             },
         )
+    }
+
+    /// [`Self::draw`] once for each of `records`' records, read from its
+    /// buffer as the draw runs: four words, [`DRAW_RECORD_BYTES`]. A record
+    /// naming a first instance on a device that does not state
+    /// [`Features::DRAW_INDIRECT_FIRST_INSTANCE`](crate::Features::DRAW_INDIRECT_FIRST_INSTANCE)
+    /// loses the context.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::draw`].
+    pub fn draw_indirect(&mut self, draw: &Draw<'_>, records: &Indirect<'_>) -> Result<(), Error> {
+        let count = self.indirect(records)?;
+        self.record(draw, None, count)
+    }
+
+    /// [`Self::draw_indexed`] once for each of `records`' records, read as
+    /// [`Self::draw_indirect`]'s are: five words,
+    /// [`INDEXED_DRAW_RECORD_BYTES`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::draw`].
+    pub fn draw_indexed_indirect(
+        &mut self,
+        draw: &Draw<'_>,
+        indices: &Indices<'_>,
+        records: &Indirect<'_>,
+    ) -> Result<(), Error> {
+        let index = self.named_indices(indices)?;
+        let count = self.indirect(records)?;
+        self.record(draw, Some(index), count)
+    }
+
+    fn named_indices(&self, indices: &Indices<'_>) -> Result<(BufferKey, u64, IndexFormat), Error> {
+        Ok((
+            self.buffer.named(indices.buffer)?,
+            indices.offset,
+            indices.format,
+        ))
+    }
+
+    fn indirect(&self, records: &Indirect<'_>) -> Result<Count, Error> {
+        Ok(Count::Indirect {
+            buffer: self.buffer.named(records.buffer)?,
+            offset: records.offset,
+            count: records.count,
+            stride: records.stride,
+        })
     }
 
     fn record(
@@ -431,7 +564,31 @@ pub(crate) struct DrawWork {
     pub(crate) scissor: Rect,
     pub(crate) stencil_reference: u8,
     pub(crate) blend_constant: [f32; 4],
-    pub(crate) count: Count,
+    pub(crate) count: Counted,
+}
+
+impl DrawWork {
+    /// Each span of memory it reads as vertices, indices or records.
+    fn sources(&self) -> impl Iterator<Item = (&Arc<Memory>, Range<u64>)> {
+        fn read(source: &Source) -> (&Arc<Memory>, Range<u64>) {
+            (
+                &source.memory,
+                source.start..source.start.saturating_add(source.size),
+            )
+        }
+        let records = match &self.count {
+            Counted::Indirect(records) => Some((
+                &records.memory,
+                records.start..records.start.saturating_add(records.span),
+            )),
+            Counted::Direct(_) => None,
+        };
+        self.vertex_buffers
+            .iter()
+            .chain(self.index.as_ref().map(|(source, _)| source))
+            .map(read)
+            .chain(records)
+    }
 }
 
 /// A pass checked whole: its attachments of one extent and sample count, its
@@ -660,18 +817,13 @@ fn written_spans(colour: &[Target], depth_stencil: Option<&DepthTarget>) -> Resu
     Ok(spans)
 }
 
-/// Whether two spans share a byte.
-const fn overlaps(a: &Range<u64>, b: &Range<u64>) -> bool {
-    a.start < b.end && b.start < a.end
-}
-
 /// A span of a memory a pass writes.
 type Written = (Arc<Memory>, Range<u64>);
 
 /// Refuse the first of `draws` reaching what its pass writes: a descriptor
-/// its stages see, or a vertex or index buffer, reaching an attachment's
-/// level and layer in `written` — and a descriptor its stages may write
-/// reaching the depth-stencil attachment's, where only `tested`.
+/// its stages see, or the vertices, indices or records it reads, reaching an
+/// attachment's level and layer in `written` — and a descriptor its stages may
+/// write reaching the depth-stencil attachment's, where only `tested`.
 fn refuse_reaches(
     draws: &[DrawWork],
     (written, tested): (&[Written], Option<&Written>),
@@ -693,16 +845,11 @@ fn refuse_reaches(
             written.iter().any(|span| meets(span, false))
                 || tested.is_some_and(|span| meets(span, true))
         });
-        let buffers_reach = draw
-            .vertex_buffers
-            .iter()
-            .chain(draw.index.as_ref().map(|(source, _)| source))
-            .any(|source| {
-                let read = source.start..source.start.saturating_add(source.size);
-                written.iter().any(|(memory, span)| {
-                    Arc::ptr_eq(memory, &source.memory) && overlaps(&read, span)
-                })
-            });
+        let buffers_reach = draw.sources().any(|(source, read)| {
+            written
+                .iter()
+                .any(|(memory, span)| Arc::ptr_eq(memory, source) && overlaps(&read, span))
+        });
         if sets_reach || buffers_reach {
             return Err(Refused {
                 at: at + 1,
@@ -880,18 +1027,10 @@ fn check_draw(
     {
         return Err(Error::OutOfRange);
     }
-    let ranges_hold = match &recorded.count {
-        Count::Vertices {
-            vertices,
-            instances,
-        } => vertices.start <= vertices.end && instances.start <= instances.end,
-        Count::Indices {
-            indices, instances, ..
-        } => indices.start <= indices.end && instances.start <= instances.end,
-    };
-    if !ranges_hold || !recorded.blend_constant.iter().all(|c| c.is_finite()) {
+    if !recorded.blend_constant.iter().all(|c| c.is_finite()) {
         return Err(Error::OutOfRange);
     }
+    let count = counted(info, context, &recorded.count, index.is_some())?;
     Ok(DrawWork {
         pipeline,
         sets,
@@ -902,8 +1041,74 @@ fn check_draw(
         scissor,
         stencil_reference: recorded.stencil_reference,
         blend_constant: recorded.blend_constant,
-        count: recorded.count.clone(),
+        count,
     })
+}
+
+/// A draw's count checked: its ranges each in order; or its records whole
+/// words into a buffer made for them, whole words apart, a record or more
+/// apart where there are several, within the buffer, and no more of them than
+/// the device reads.
+fn counted(
+    info: &DeviceInfo,
+    context: &ContextState,
+    count: &Count,
+    indexed: bool,
+) -> Result<Counted, Error> {
+    let (key, offset, count, stride) = match count {
+        Count::Direct {
+            positions,
+            base_vertex,
+            instances,
+        } => {
+            if positions.start > positions.end || instances.start > instances.end {
+                return Err(Error::OutOfRange);
+            }
+            return Ok(Counted::Direct(Counts {
+                first: positions.start,
+                positions: positions.end - positions.start,
+                base_vertex: *base_vertex,
+                first_instance: instances.start,
+                instances: instances.end - instances.start,
+            }));
+        }
+        &Count::Indirect {
+            buffer,
+            offset,
+            count,
+            stride,
+        } => (buffer, offset, count, stride),
+    };
+    let held = buffer(context, key, BufferUsage::INDIRECT)?;
+    let several = count > 1;
+    if !offset.is_multiple_of(4) || (several && !stride.is_multiple_of(4)) {
+        return Err(Error::Misaligned);
+    }
+    if count > info.limits.max_draw_indirect_count {
+        return Err(Error::TooLarge);
+    }
+    let record = if indexed {
+        INDEXED_DRAW_RECORD_BYTES
+    } else {
+        DRAW_RECORD_BYTES
+    };
+    if several && stride < record {
+        return Err(Error::OutOfRange);
+    }
+    // At most 2^32 - 2 strides of under 2^32 bytes and a record: within 64 bits.
+    let span = count.checked_sub(1).map_or(0, |before| {
+        u64::from(before) * u64::from(stride) + u64::from(record)
+    });
+    if offset.checked_add(span).is_none_or(|end| end > held.size) {
+        return Err(Error::OutOfRange);
+    }
+    Ok(Counted::Indirect(Records {
+        memory: Arc::clone(&held.memory),
+        start: held.offset + offset,
+        span,
+        count,
+        stride: u64::from(stride),
+    }))
 }
 
 /// Refuse a viewport that is not finite, of no width or height, past the

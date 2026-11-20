@@ -3,6 +3,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
+use core::ops::Range;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_inline::ArrayVec;
@@ -259,6 +260,11 @@ impl Memory {
             (a.lock(), second)
         }
     }
+}
+
+/// Whether two spans share a value: an empty one shares none.
+pub(crate) const fn overlaps(a: &Range<u64>, b: &Range<u64>) -> bool {
+    a.start < a.end && b.start < b.end && a.start < b.end && b.start < a.end
 }
 
 /// Copy `out.len()` bytes from byte `offset` of `words` into `out`; `None`

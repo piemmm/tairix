@@ -40,7 +40,8 @@ and `lib/raster`'s stages rasterising its passes.
   checked against what the device states.
 - `CommandBuffer`, `Queue`, `Submission` — copies, fills, updates, copies
   between buffers and images and between images, clears, dispatches direct
-  and indirect, and render passes and the draws recorded into them, checked
+  and indirect, and render passes and the draws recorded into them, direct and
+  indirect, an indirect draw's records read as its pass reaches them, checked
   whole when submitted: a refusal names the command — a pass's draw counting as
   one — and changes nothing but the room its queues made ahead of it, and no
   range is clamped. A queue runs its work in the order submitted.
@@ -106,5 +107,9 @@ creation and submission check, and the render tests pin the pixels each rule
 of a draw gives; the dispatch tests hold deadlines,
 determinism across cores, isolation between contexts, indirect counts, limits
 and working memory; `tests/fuzz_gpu.rs` holds the submission path to a
-byte-array reference, and `tests/fuzz_shader.rs` holds the interpreter total,
-contained and deterministic over generated modules and their mutants.
+byte-array reference for buffers and a texel reference for images, and holds
+bind sets, dispatches, passes and draws, direct and indirect, to the faults
+they are drawn carrying and to a twin device of several participants drawing
+each indirect record directly; and `tests/fuzz_shader.rs` holds the
+interpreter total, contained and deterministic over generated modules and
+their mutants.

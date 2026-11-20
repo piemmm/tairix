@@ -235,6 +235,9 @@ pub(crate) const fn limits(heap: u64) -> Limits {
         viewport_bounds_range: VIEWPORT_BOUNDS,
         max_point_size: 256,
         max_line_width: 64,
+        // A record is read as its pass reaches it and none is kept, so a
+        // count costs time alone, which the deadline bounds.
+        max_draw_indirect_count: u32::MAX,
     }
 }
 
