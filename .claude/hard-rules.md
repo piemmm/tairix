@@ -44,12 +44,10 @@ PROCESS
   make a finding go away. (§19.11, §15.19)
 - Check the `plans/` jump-sheet before touching a covered area. (§15.18)
 - Verify documentation claims against code you have written to ensure it is correct, fix any inconsistencies.
-- Adversarial self-review against §23, then the §23.5 completion report. YOU MUST declare findings in this review even if there are none. Reviews must include any incoming code to merge as well as your code. This will be also be checked by another system.
-- Separate to the adversarial review, before declaring any implementation complete, YOU *MUST* critically self-review all new and modified code for poor design and avoidable performance costs, including inefficient or unnecessarily nested loops, excessive time or space complexity, redundant computations, repeated allocations, and unsuitable data structures; fix identified issues without compromising correctness, safety, or readability, and validate changes with tests and, where appropriate, benchmarks rather than assuming they are faster(benchmarks should not be affected by speed of ci/testing machine cpu). YOU MUST declare findings in this review even if there are none. Reviews must include any incoming code to merge as well as your code. This will be also be checked by another system as well.
-- Other agents (subagents, background agents, peer sessions) do READ-ONLY
-  scoping work only: search, read, analyse, report. They never edit, create,
-  delete or reformat a file, never build, test or run the gate, and never run a
-  `git` command that writes. The main agent makes every edit; a live peer is
+- Adversarial self-review against §23, then the §23.5 completion report. YOU MUST declare findings in this review even if there are none. Reviews must include any incoming code to merge as well as your code. 
+- Separate to the adversarial review, before declaring any implementation complete, YOU *MUST* critically self-review all new and modified code for poor design and avoidable performance costs, including inefficient or unnecessarily nested loops, excessive time or space complexity, redundant computations, repeated allocations, unsuitable data structures, and duplicate code; fix identified issues without compromising correctness, safety, or readability, and validate changes with tests and, where appropriate, benchmarks rather than assuming they are faster(benchmarks should not be affected by speed of ci/testing machine cpu). YOU MUST declare findings in this review even if there are none. Reviews must include any incoming code to merge as well as your code.
+- Other agents (subagents, background agents, peer sessions) do READ-ONLY scoping work only: search, read, analyse, report. They never edit, create,
+  delete or reformat a file, never build, test or run the gate, and never run a `git` command that writes. The main agent makes every edit; a live peer is
   asked to quit. (§15.20)
 
 GENERAL

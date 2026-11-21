@@ -44,7 +44,7 @@ impl Machine<'_, '_> {
         let mut regs = [0; 10];
         regs[..5].copy_from_slice(&[ws::TYPED.at(), ws::LINE_ROOM - 1, 0, 0xFF, 0]);
         Ok(Leave::Swi {
-            number: super::statements::READ_LINE,
+            number: tairix_riscos_kernel::swi::os::READ_LINE32,
             regs,
             flags: 0,
         })

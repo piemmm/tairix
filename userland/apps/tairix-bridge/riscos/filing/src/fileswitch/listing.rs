@@ -445,7 +445,7 @@ fn date(os: &mut Os<'_>, info: &Info, full: bool) -> Result<Vec<u8>, Fail> {
 fn screen_width(os: &mut Os<'_>) -> usize {
     let mut regs = Regs::default();
     regs.r[0] = u32::MAX;
-    regs.r[1] = 1;
+    regs.r[1] = tairix_vdu::mode::var::SCR_R_COL;
     match os.perform(tairix_riscos_kernel::swi::X | READ_MODE_VARIABLE, &mut regs) {
         Ok(()) if regs.r[2] > 0 => regs.r[2] as usize,
         _ => LINE_MOST,

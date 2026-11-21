@@ -10,6 +10,7 @@ mode 7 with:
   drawn — colours, mosaics, separation, flashing, double height, concealment
   and held mosaics — each code taking effect on its own cell or the next, as
   the chip has it.
+- **Double height**: which rows are a pair's lower half, and what shows in one.
 
 The glyph shapes are first-party designs in the proportions of the chip's
 English character set. OpenMicro's SAA5050 draws from it a line at a time

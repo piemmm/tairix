@@ -10,13 +10,14 @@ use std::sync::OnceLock;
 use tairix_riscos_arm::psr;
 use tairix_tz::{Zone, ZoneInfo};
 
-use super::dst::TIME_ZONE_CHANGED;
 use super::{calendar, CHUNK};
 use crate::memory::layout::RISC_OS_5;
 use crate::memory::Bits;
 use crate::msgtrans::tests::{swi, X};
+use crate::os::MILLENNIUM;
+use crate::service::TIME_ZONE_CHANGED;
 use crate::swi::os::{BYTE, SERVICE_CALL};
-use crate::testkit::{asm, boot_in, Session, CODE, DATA, MILLENNIUM};
+use crate::testkit::{asm, boot_in, Session, CODE, DATA};
 
 const BUFFER: u32 = DATA + 0x100;
 const TIME: u32 = DATA + 0x80;

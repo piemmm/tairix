@@ -2,32 +2,14 @@
 //! as colours through the palette, the lines stored into since it last
 //! asked, and the text cursor drawn over it.
 
-use tairix_riscos_filing::session::{session, Session, Setup};
+mod common;
+
+use common::{drivers, vdu};
+use tairix_riscos_filing::session::Session;
 use tairix_riscos_kernel::os::Regs;
-use tairix_riscos_kernel::swi::os::{BYTE, WORD, WRITE_C};
+use tairix_riscos_kernel::swi::os::{BYTE, WORD};
 use tairix_riscos_kernel::swi::X;
 use tairix_riscos_vdu::display;
-
-fn boot() -> Session {
-    session(&Setup {
-        vdu: Some(tairix_riscos_vdu::DRIVERS),
-        modules: &tairix_riscos_vdu::MODULES,
-        bytes: 0x10_0000,
-        keys: b"",
-        disc: None,
-    })
-}
-
-fn vdu(session: &mut Session, bytes: &[u8]) {
-    for &byte in bytes {
-        let mut regs = Regs::new([u32::from(byte), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        session
-            .kernel
-            .os()
-            .perform(X | WRITE_C, &mut regs)
-            .expect("written");
-    }
-}
 
 /// The runs of lines `damage` gives.
 fn damaged(session: &mut Session) -> Vec<(u32, u32)> {
@@ -40,8 +22,8 @@ fn damaged(session: &mut Session) -> Vec<(u32, u32)> {
 
 #[test]
 fn a_screen_is_shown_through_its_palette_with_the_lines_drawn_since_last_asked() {
-    let mut session = boot();
-    vdu(&mut session, &[22, 12]);
+    let mut session = drivers(b"");
+    vdu(&mut session, &[22, 12]).expect("written");
     let view = display::view(&mut session.kernel.os()).expect("a screen");
     assert_eq!(
         (view.width, view.height, view.x_eig, view.y_eig),
@@ -56,7 +38,8 @@ fn a_screen_is_shown_through_its_palette_with_the_lines_drawn_since_last_asked()
     vdu(
         &mut session,
         &[18, 0, 1, 25, 4, 0, 0, 0, 0, 25, 101, 99, 0, 99, 0],
-    );
+    )
+    .expect("written");
     let runs = damaged(&mut session);
     assert_eq!(runs.len(), 1, "{runs:?}");
     let (first, last) = runs[0];
@@ -76,14 +59,15 @@ fn a_screen_is_shown_through_its_palette_with_the_lines_drawn_since_last_asked()
 
 #[test]
 fn a_double_pixel_mode_s_lines_are_shown_at_its_width() {
-    let mut session = boot();
-    vdu(&mut session, &[22, 2]);
+    let mut session = drivers(b"");
+    vdu(&mut session, &[22, 2]).expect("written");
     let view = display::view(&mut session.kernel.os()).expect("a screen");
     assert_eq!((view.width, view.height), (320, 256));
     vdu(
         &mut session,
         &[18, 0, 2, 25, 4, 0, 0, 0, 0, 25, 101, 7, 0, 3, 0],
-    );
+    )
+    .expect("written");
     let mut line = Vec::new();
     display::line(&mut session.kernel.os(), 255, &mut line).expect("read");
     assert_eq!(line.len(), 320);
@@ -97,11 +81,11 @@ fn a_double_pixel_mode_s_lines_are_shown_at_its_width() {
 
 #[test]
 fn the_text_cursor_is_drawn_where_it_stands_and_not_in_vdu_5() {
-    let mut session = boot();
-    vdu(&mut session, &[22, 12, 31, 3, 2]);
+    let mut session = drivers(b"");
+    vdu(&mut session, &[22, 12, 31, 3, 2]).expect("written");
     let cursor = display::cursor(&mut session.kernel.os()).expect("a cursor");
     assert_eq!((cursor.x, cursor.y, cursor.width), (24, 16, 8));
-    vdu(&mut session, &[5]);
+    vdu(&mut session, &[5]).expect("written");
     assert_eq!(
         display::cursor(&mut session.kernel.os()),
         None,
@@ -111,7 +95,7 @@ fn the_text_cursor_is_drawn_where_it_stands_and_not_in_vdu_5() {
 
 #[test]
 fn the_pointer_is_its_selected_shape_a_pixel_to_a_colour() {
-    let mut session = boot();
+    let mut session = drivers(b"");
     let mut pixels = Vec::new();
     let os = &mut session.kernel.os();
     assert_eq!(

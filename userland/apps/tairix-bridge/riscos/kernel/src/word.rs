@@ -12,8 +12,6 @@ use crate::territory::{
 };
 use crate::vectors::{self, Carry};
 
-/// `Service_UKWord`.
-const UK_WORD: u32 = 0x08;
 /// The territory `-1` names: the current one.
 const CURRENT: u32 = u32::MAX;
 /// `OS_Word` 14's string form.
@@ -68,7 +66,7 @@ impl Os<'_> {
                 let pitch = self.read_word(block + 4)?;
                 let mut sound = Regs::new([channel, pitch, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
                 self.perform_quietly(
-                    crate::swi::X | crate::byte::SOUND_CONTROL_PACKED,
+                    crate::swi::X | crate::swi::sound::CONTROL_PACKED,
                     &mut sound,
                 )?;
                 true
@@ -85,7 +83,19 @@ impl Os<'_> {
             return Ok(());
         }
         let mut service = Regs::new([
-            0, UK_WORD, regs.r[0], regs.r[1], regs.r[2], 0, 0, 0, 0, 0, 0, 0, 0,
+            0,
+            crate::service::UK_WORD,
+            regs.r[0],
+            regs.r[1],
+            regs.r[2],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
         ]);
         self.service(&mut service)?;
         if service.r[1] == 0 {

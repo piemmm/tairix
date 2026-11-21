@@ -8,14 +8,15 @@ use tairix_controls::{
 };
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key};
+use tairix_raster::{Body, RoundRect, ShadowRow};
 use tairix_reclaim::CachedBytes;
 use tairix_theme::{CursorKind, Theme};
 
 use crate::chrome::WindowChrome;
-use crate::color::{div255, Color, DitherRow, Pixel};
+use crate::color::{Color, DitherRow, Pixel};
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region, Scale};
-use crate::shadow::{spread, Elevation, Lift, ShadowKit, ShadowRow};
+use crate::shadow::{spread, Elevation, Lift, ShadowKit};
 use crate::surface::{self, blend_run, fill_run, Surface};
 use crate::view::View;
 use crate::viewport::RootViewport;
@@ -695,7 +696,7 @@ impl Window {
     /// silhouette rounds off, where the shadow shows inside its bounds.
     pub(crate) fn shadow_strips(&self, reach: u32) -> [Rect; 7] {
         let bounds = self.bounds();
-        let corner = self.shape().map_or(0, WindowShape::corner_reach);
+        let corner = self.shape().map_or(0, RoundRect::corner_reach);
         let (corner_i, reach_i) = (to_i32(corner), to_i32(reach));
         let deep = bounds.height.saturating_add(reach.saturating_mul(2));
         let (right, bottom) = (bounds.right(), bounds.bottom());
@@ -1300,7 +1301,7 @@ impl Window {
     /// effect confined to the window's rectangle (the compositor's frosted
     /// backdrop) weights itself by it, so a frosted corner cannot square off
     /// what the rim curves around.
-    pub(crate) fn shape(&self) -> Option<WindowShape> {
+    pub(crate) fn shape(&self) -> Option<RoundRect> {
         let (ow, oh) = self.outer_size();
         // A fullscreen window is cut to nothing: a rounded corner at the
         // scan-out's own corner would notch the display onto the desktop
@@ -1314,10 +1315,10 @@ impl Window {
             None => self.corners,
         };
         match corners {
-            Corners::Rounded { .. } | Corners::Painted { .. } => Some(WindowShape {
-                corners,
+            Corners::Rounded { radius } | Corners::Painted { radius } => Some(RoundRect {
                 width: ow,
                 height: oh,
+                radius,
             }),
             Corners::Square => None,
         }
@@ -1346,10 +1347,10 @@ impl Window {
         let (ow, oh) = self.outer_size();
         let insets = self.band?;
         Some(ClientCut {
-            shape: WindowShape {
-                corners: Corners::from_radius(radius),
+            shape: RoundRect {
                 width: ow.saturating_sub(inset.saturating_mul(2)),
                 height: oh.saturating_sub(inset.saturating_mul(2)),
+                radius,
             },
             offset: (
                 insets.left.saturating_sub(inset),
@@ -2209,8 +2210,8 @@ fn activation_for(current: WindowActivationState, active: bool) -> WindowActivat
 /// [`Window::row`].
 ///
 /// Holds the source row slices this window draws from and the row-constant
-/// factors that apply to them, so [`sample`](Self::sample) is a slice
-/// index rather than a fresh layer decision per column.
+/// factors that apply to them, so [`body`](Self::body) is a slice index
+/// rather than a fresh layer decision per column.
 pub(crate) struct WindowRow<'a> {
     /// Drawable client pixels, the first at screen column `client_x`.
     /// Shorter than `client_cols` where the furniture gutter clips the
@@ -2261,46 +2262,22 @@ impl RowLayer<'_> {
 }
 
 impl<'a> WindowRow<'a> {
-    /// The composited contribution at screen column `x`: the source pixel
-    /// scaled by the combined opacity and clip coverage, or `None` where this
-    /// window draws nothing there.
-    ///
-    /// A client pixel the clip does not fully cover gives way to the
-    /// decoration, because on such a column the frame's own arc — its rim and
-    /// the plate inside it — is what the window's curve is made of. Only where
-    /// there is no decoration to give way to does the coverage anti-alias the
-    /// client's own edge, which is how a plain rounded window presents its
-    /// corners.
-    ///
-    /// `bias` is this pixel's share of the composite's ordered dither, taken
-    /// here as well as in the blend because scaling by an opacity is the same
-    /// loss of tonal resolution: a translucent window's own gradients would
-    /// otherwise step before they ever reached the backdrop.
-    #[must_use]
-    pub(crate) fn sample(&self, x: i32, bias: u32) -> Option<Pixel> {
-        if let Some(lx) = x
+    /// What this row holds at screen column `x`, before it is laid at its
+    /// opacity: the client's pixel and the clip's coverage there where `x` is
+    /// one of the client's columns, and the decoration's pixel.
+    fn body(&self, x: i32) -> Body {
+        let client = x
             .checked_sub(self.client_x)
             .and_then(|d| u32::try_from(d).ok())
-        {
-            if lx < self.client_cols {
+            .filter(|&lx| lx < self.client_cols)
+            .map(|lx| {
                 let coverage = self.cut.map_or(u8::MAX, |cut| cut.coverage(lx));
-                if coverage == u8::MAX {
-                    return Some(
-                        self.client_pixel(lx)?
-                            .scale_alpha_biased(self.opacity, bias),
-                    );
-                }
-                if let Some(pixel) = self.decoration_sample(x) {
-                    return Some(pixel.scale_alpha_biased(self.opacity, bias));
-                }
-                let pixel = self.client_pixel(lx)?;
-                return Some(pixel.scale_alpha_biased(combine(self.opacity, coverage), bias));
-            }
+                (self.client_pixel(lx), coverage)
+            });
+        Body {
+            client,
+            furniture: self.decoration_sample(x),
         }
-        Some(
-            self.decoration_sample(x)?
-                .scale_alpha_biased(self.opacity, bias),
-        )
     }
 
     /// This row's client pixel at client column `lx`: the client's own where
@@ -2329,9 +2306,10 @@ impl<'a> WindowRow<'a> {
     /// straight runs — the two furniture strips and the client's own drawable
     /// pixels — laid at a single opacity, so the row is composited a *run* at
     /// a time through the shared span blend rather than a column at a time
-    /// through [`sample`](Self::sample). The arithmetic is the same operator
-    /// at the same rounding; what goes is the per-column layer decision, which
-    /// is what the composite was actually spending its time on.
+    /// through [`body`](Self::body). The arithmetic is the same operator at
+    /// the same rounding, a transparent source skipped on either path; what
+    /// goes is the per-column layer decision, which is what the composite was
+    /// actually spending its time on.
     ///
     /// Two rows keep the column-by-column path, because on them the three runs
     /// are not the whole truth: a row the shape cuts, where coverage varies
@@ -2347,9 +2325,8 @@ impl<'a> WindowRow<'a> {
         if self.cut.is_some() || self.decoration.iter().any(|s| self.overlaps_client(s)) {
             let mut blended = 0;
             for (dst, x) in dst.iter_mut().zip(first_x..) {
-                let bias = dither.bias(x.cast_unsigned());
-                if let Some(src) = self.sample(x, bias) {
-                    *dst = src.over_biased(*dst, bias);
+                if let Some((src, factor)) = self.body(x).laid(self.opacity) {
+                    *dst = src.laid_over(*dst, factor, dither.bias(x.cast_unsigned()));
                     blended += 1;
                 }
             }
@@ -2393,8 +2370,8 @@ impl<'a> WindowRow<'a> {
     }
 
     /// Whether `span` reaches any column the client owns, where
-    /// [`sample`](Self::sample) decides between the two by coverage rather
-    /// than by position.
+    /// [`body`](Self::body) decides between the two by coverage rather than
+    /// by position.
     fn overlaps_client(&self, span: &DecorationSpan<'_>) -> bool {
         let Ok(len) = i64::try_from(span.pixels.len()) else {
             return true;
@@ -2531,48 +2508,13 @@ impl<'a> DecorationSpan<'a> {
     }
 }
 
-/// The rounded shape a plain window's rectangle is cut to: its corner style
-/// and the extent that style is measured against.
-///
-/// Read once and reused across a whole row or region — the compositor
-/// weights a window's frosted backdrop by it — so the style and the extent
-/// can never be paired wrongly and the corner arithmetic is not re-derived
-/// per pixel.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) struct WindowShape {
-    corners: Corners,
-    width: u32,
-    height: u32,
-}
-
-impl WindowShape {
-    /// Coverage in `0..=255` at window-local `(lx, ly)`.
-    pub(crate) fn coverage(self, lx: u32, ly: u32) -> u8 {
-        self.corners.coverage(lx, ly, self.width, self.height)
-    }
-
-    /// How far in from its own edges this shape can weight a pixel by less than
-    /// full coverage: the radius it actually rounds by, clamped as the shared
-    /// rounded-rectangle definition clamps it. A pixel at least this far inside
-    /// every edge is fully covered, whatever the corner style.
-    pub(crate) fn corner_reach(self) -> u32 {
-        self.corners.radius(self.width, self.height)
-    }
-
-    /// Whether row `ly` carries an arc at all: `false` where the shape covers
-    /// every column of it.
-    pub(crate) fn clips_row(self, ly: u32) -> bool {
-        self.corners.clips_row(ly, self.width, self.height)
-    }
-}
-
 /// The shape a window's client pixels are clipped to, and where the client
 /// sits inside it: `offset` is the client's top-left in the shape's own
 /// coordinates, which is the rim thickness in from the outer rectangle for a
 /// decorated window and nothing at all for a plain one.
 #[derive(Copy, Clone)]
 struct ClientCut {
-    shape: WindowShape,
+    shape: RoundRect,
     offset: (u32, u32),
 }
 
@@ -2581,7 +2523,7 @@ struct ClientCut {
 /// costs one addition and one coverage lookup.
 #[derive(Copy, Clone)]
 pub(crate) struct RowCut {
-    shape: WindowShape,
+    shape: RoundRect,
     /// This row in the shape's own coordinates.
     ly: u32,
     /// The shape column the client's first pixel sits at.
@@ -2593,11 +2535,6 @@ impl RowCut {
     pub(crate) fn coverage(self, lx: u32) -> u8 {
         self.shape.coverage(lx.saturating_add(self.lx0), self.ly)
     }
-}
-
-/// Combine two `0..=255` factors as `a * b / 255` (shared `div255`).
-fn combine(a: u8, b: u8) -> u8 {
-    div255(u32::from(a) * u32::from(b))
 }
 
 #[cfg(test)]

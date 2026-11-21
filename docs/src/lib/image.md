@@ -390,7 +390,9 @@ module's own rustdoc:
   holds sixteen palette registers, so most 256-colour sprites carry sixteen
   entries and those written by `*ScreenSave` carry sixty-four; RISC OS passes
   the *last* sixteen to the hardware, and a pixel's top four bits then
-  override supremacy bits of the entry its low four selected. A palette long
+  override supremacy bits of the entry its low four selected, in both nibbles
+  of each channel as RISC OS 5 programs its own palette (`lib/vdu`'s
+  `palette::grouped`). A palette long
   enough for the depth is read straight through instead, which is what the
   full 256-entry form is for.
 - **A mask supersedes a pixel's own alpha.** The mask is what the format calls

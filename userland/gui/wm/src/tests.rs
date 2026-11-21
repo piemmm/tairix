@@ -14,6 +14,7 @@ use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region};
 use crate::surface::Surface;
 use crate::{CaptureTap, Compositor, PointerCatch, Presentation, WindowId};
+use tairix_raster::RoundRect;
 
 use tairix_cursor::CursorImage;
 use tairix_hash::BuildFastHash;
@@ -338,66 +339,59 @@ const WHITE: Color = Color::rgb(255, 255, 255);
 
 // ---- rounded corners -------------------------------------------------
 
+/// A client pixel whose alpha is nought lays nothing, whatever colour it
+/// carries, on a row its corners cut as on any other: the column-by-column
+/// path a cut row takes skips it exactly as the run path does.
 #[test]
-fn square_corners_fully_cover() {
-    assert_eq!(Corners::Square.coverage(0, 0, 10, 10), 255);
-    assert_eq!(Corners::Square.coverage(9, 9, 10, 10), 255);
+fn a_transparent_client_pixel_lays_nothing_on_a_cut_row_as_on_any_other() {
+    let ghost = Pixel {
+        r: 90,
+        g: 60,
+        b: 30,
+        a: 0,
+    };
+    let mut content = opaque(20, 20, GREEN);
+    let (column, rows) = (10, [0u32, 10]);
+    for y in rows {
+        content.set(column, y, ghost);
+    }
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(5, 5), content);
+    assert!(c.set_corners(id, Corners::Rounded { radius: 8 }));
+    c.composite();
+    for y in rows {
+        assert_eq!(
+            c.back_buffer().get(5 + column, 5 + y),
+            Some(BLUE.premultiply()),
+            "row {y} of the window"
+        );
+    }
 }
 
+/// A window's corner style is the silhouette it is cut to: none for square
+/// corners, and its outer rectangle rounded by the style's radius otherwise,
+/// whether the compositor cuts it or the surface painted it.
 #[test]
-fn zero_radius_fully_covers() {
-    assert_eq!(Corners::Rounded { radius: 0 }.coverage(0, 0, 10, 10), 255);
-}
-
-#[test]
-fn rounded_corner_pixel_is_clipped() {
-    // The extreme corner of a generous radius is entirely outside.
-    assert_eq!(Corners::Rounded { radius: 8 }.coverage(0, 0, 20, 20), 0);
-}
-
-#[test]
-fn only_the_corner_bands_clip_a_row() {
-    // What a per-row decision may skip: a row no arc reaches is fully covered
-    // at every column, so the compositor pays for coverage at the corners only.
-    let rounded = Corners::Rounded { radius: 8 };
-    assert!(rounded.clips_row(0, 20, 20));
-    assert!(rounded.clips_row(7, 20, 20));
-    assert!(!rounded.clips_row(8, 20, 20));
-    assert!(!rounded.clips_row(11, 20, 20));
-    assert!(rounded.clips_row(12, 20, 20));
-    assert!(rounded.clips_row(19, 20, 20));
-    // A square window, and a radius clamped away by a short side, clip nothing.
-    assert!(!Corners::Square.clips_row(0, 20, 20));
-    assert!(!Corners::Rounded { radius: 8 }.clips_row(0, 20, 1));
-}
-
-#[test]
-fn rounded_centre_is_opaque() {
-    assert_eq!(Corners::Rounded { radius: 8 }.coverage(10, 10, 20, 20), 255);
-}
-
-#[test]
-fn rounded_edge_midpoints_are_opaque() {
-    // The middle of each edge lies on the straight section, not an arc.
-    let c = Corners::Rounded { radius: 6 };
-    assert_eq!(c.coverage(10, 0, 20, 20), 255);
-    assert_eq!(c.coverage(0, 10, 20, 20), 255);
-}
-
-#[test]
-fn rounded_arc_has_partial_coverage() {
-    // A pixel straddling the arc is neither fully in nor fully out.
-    let c = Corners::Rounded { radius: 8 };
-    let cov = c.coverage(2, 2, 20, 20);
-    assert!(cov > 0 && cov < 255, "expected partial coverage, got {cov}");
-}
-
-#[test]
-fn radius_is_clamped_to_half_side() {
-    // A radius larger than half the height is clamped, so the surface
-    // becomes a capsule whose centre row is fully covered.
-    let huge = Corners::Rounded { radius: 1000 };
-    assert_eq!(huge.coverage(10, 5, 20, 10), 255);
+fn a_windows_corner_style_is_the_silhouette_it_is_cut_to() {
+    let cut = |corners| {
+        let surface = Surface::new(20, 10).expect("a surface");
+        let mut window = crate::window::Window::new(WindowId(1), Point::new(3, 4), surface);
+        window.set_corners(corners);
+        window.shape()
+    };
+    assert_eq!(cut(Corners::Square), None);
+    assert_eq!(cut(Corners::from_radius(0)), None);
+    for corners in [Corners::Rounded { radius: 8 }, Corners::painted(8)] {
+        assert_eq!(
+            cut(corners),
+            Some(RoundRect {
+                width: 20,
+                height: 10,
+                radius: 8,
+            }),
+            "{corners:?}"
+        );
+    }
 }
 
 // ---- damage ----------------------------------------------------------
@@ -8960,8 +8954,9 @@ fn a_frosted_window_s_own_repaint_costs_no_blur_and_no_widening() {
 fn a_frost_is_the_blur_of_the_unfrosted_backdrop_sampled_past_its_edges() {
     const RADIUS: u16 = 3;
     const SIDE: (u32, u32) = (48, 32);
+    const CORNER: u32 = 6;
     let output = mode(SIDE.0, SIDE.1);
-    let corners = Corners::Rounded { radius: 6 };
+    let corners = Corners::Rounded { radius: CORNER };
     // Stripes and a frosted pane beneath, so both a texture and a frost lie
     // under the top window's edges and corners.
     let backdrop = |c: &mut Compositor, lower_blur: u16| {
@@ -8993,7 +8988,12 @@ fn a_frost_is_the_blur_of_the_unfrosted_backdrop_sampled_past_its_edges() {
         }
         let lx = x - window.left().cast_unsigned();
         let ly = y - window.top().cast_unsigned();
-        let weight = corners.coverage(lx, ly, window.width, window.height);
+        let weight = RoundRect {
+            width: window.width,
+            height: window.height,
+            radius: CORNER,
+        }
+        .coverage(lx, ly);
         let bias = tairix_raster::DitherRow::at(y).bias(x);
         let channel = |from: u8, to: u8| match weight {
             255 => to,
@@ -12195,7 +12195,12 @@ fn a_translucent_surface_never_shows_its_own_shadow_through_itself() {
     let (casting, plain) = (scene(true), scene(false));
     for ly in 0..40u32 {
         for lx in 0..60u32 {
-            if Corners::painted(8).coverage(lx, ly, 60, 40) < u8::MAX {
+            let silhouette = RoundRect {
+                width: 60,
+                height: 40,
+                radius: 8,
+            };
+            if silhouette.coverage(lx, ly) < u8::MAX {
                 continue;
             }
             let (x, y) = (60 + lx.cast_signed(), 40 + ly.cast_signed());

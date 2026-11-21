@@ -8,16 +8,22 @@
 //! [`round_rect_coverage`], and a control plate through
 //! [`Surface::fill_round_rect`](crate::Surface::fill_round_rect).
 //!
-//! Coverage is computed by **supersampling** on a fixed
-//! `SUBSAMPLES`×`SUBSAMPLES` grid and counting the sub-pixels inside the
+//! Coverage is computed by **supersampling** on a fixed grid of
+//! [`ROUND_RECT_SUBSAMPLES`] a side and counting the sub-pixels inside the
 //! rounded rectangle's signed-distance region. This needs no `sqrt`
 //! (unavailable in `core`) and is fully deterministic, so the anti-aliasing
 //! is exactly reproducible in tests.
 
 use crate::scan::MAX_DRAWING_EXTENT;
 
-/// Sub-samples per axis. `SUBSAMPLES * SUBSAMPLES` coverage levels.
-const SUBSAMPLES: u32 = 4;
+/// Sub-samples per axis of a pixel's rounded-rectangle coverage:
+/// `ROUND_RECT_SUBSAMPLES²` coverage levels.
+pub const ROUND_RECT_SUBSAMPLES: u32 = 4;
+
+/// The fixed-point units a pixel's side is counted in while its coverage is
+/// supersampled: sub-sample `s` of pixel `p` is centred at
+/// `p · ROUND_RECT_SCALE + 2s + 1`, an integer.
+pub const ROUND_RECT_SCALE: u32 = 2 * ROUND_RECT_SUBSAMPLES;
 
 /// The radius a `width`×`height` rounded rectangle is actually rounded by:
 /// `radius` clamped to half its shorter side, so an over-large radius yields
@@ -70,14 +76,47 @@ pub fn round_rect_coverage(x: u32, y: u32, width: u32, height: u32, radius: u32)
     coverage_supersampled(x, y, width, height, radius)
 }
 
+/// A `width`×`height` rectangle rounded by `radius`: a silhouette read a pixel
+/// or a row at a time through [`round_rect_coverage`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct RoundRect {
+    /// Its width, in pixels.
+    pub width: u32,
+    /// Its height, in pixels.
+    pub height: u32,
+    /// The radius asked for, before [`round_rect_radius`] clamps it.
+    pub radius: u32,
+}
+
+impl RoundRect {
+    /// Coverage in `0..=255` at its pixel `(x, y)`.
+    #[must_use]
+    pub fn coverage(self, x: u32, y: u32) -> u8 {
+        round_rect_coverage(x, y, self.width, self.height, self.radius)
+    }
+
+    /// How far in from its edges a pixel can be less than fully covered: the
+    /// radius it rounds by once clamped.
+    #[must_use]
+    pub fn corner_reach(self) -> u32 {
+        round_rect_radius(self.width, self.height, self.radius)
+    }
+
+    /// Whether row `y` carries an arc: `false` where every column of it is
+    /// fully covered.
+    #[must_use]
+    pub fn clips_row(self, y: u32) -> bool {
+        let radius = self.corner_reach();
+        radius > 0 && (y < radius || y >= self.height.saturating_sub(radius))
+    }
+}
+
 /// Count the in-region sub-samples of pixel `(x, y)` and scale to `0..=255`.
 ///
-/// All distances are kept in fixed-point units of `1 / (2 * SUBSAMPLES)` of a
-/// pixel so the sub-sample centres land on integers: the centre of sub-sample
-/// `s` within pixel `p` is `p + (2 * s + 1) / (2 * SUBSAMPLES)`, i.e.
-/// `p * 2 * SUBSAMPLES + 2 * s + 1` scaled units.
+/// All distances are kept in [`ROUND_RECT_SCALE`] units a pixel, so the
+/// sub-sample centres land on integers.
 fn coverage_supersampled(x: u32, y: u32, width: u32, height: u32, radius: u32) -> u8 {
-    let scale = 2 * SUBSAMPLES;
+    let scale = ROUND_RECT_SCALE;
     let r = u64::from(radius) * u64::from(scale);
     let r_sq = r * r;
     // Inset rectangle edges (the centres of the four corner circles).
@@ -87,10 +126,10 @@ fn coverage_supersampled(x: u32, y: u32, width: u32, height: u32, radius: u32) -
     let inset_bottom = u64::from(height) * u64::from(scale) - r;
 
     let mut inside = 0u32;
-    for sy in 0..SUBSAMPLES {
+    for sy in 0..ROUND_RECT_SUBSAMPLES {
         let py = u64::from(y) * u64::from(scale) + u64::from(2 * sy + 1);
         let dy = axis_distance(py, inset_top, inset_bottom);
-        for sx in 0..SUBSAMPLES {
+        for sx in 0..ROUND_RECT_SUBSAMPLES {
             let px = u64::from(x) * u64::from(scale) + u64::from(2 * sx + 1);
             let dx = axis_distance(px, inset_left, inset_right);
             if dx * dx + dy * dy <= r_sq {
@@ -98,7 +137,7 @@ fn coverage_supersampled(x: u32, y: u32, width: u32, height: u32, radius: u32) -
             }
         }
     }
-    let total = SUBSAMPLES * SUBSAMPLES;
+    let total = ROUND_RECT_SUBSAMPLES * ROUND_RECT_SUBSAMPLES;
     let scaled = (inside * 255 + total / 2) / total;
     u8::try_from(scaled.min(255)).unwrap_or(u8::MAX)
 }
@@ -132,11 +171,11 @@ pub(crate) fn round_rect_row_reach(y: u32, width: u32, height: u32, radius: u32)
     if radius == 0 || (radius..height - radius).contains(&y) {
         return RowReach::WHOLE;
     }
-    let scale = u64::from(2 * SUBSAMPLES);
+    let scale = u64::from(ROUND_RECT_SCALE);
     let r = u64::from(radius) * scale;
     let inset_bottom = u64::from(height) * scale - r;
     let (mut nearest, mut farthest) = (u64::MAX, 0);
-    for sy in 0..SUBSAMPLES {
+    for sy in 0..ROUND_RECT_SUBSAMPLES {
         let py = u64::from(y) * scale + u64::from(2 * sy + 1);
         let dy = axis_distance(py, r, inset_bottom);
         nearest = nearest.min(dy);
@@ -166,8 +205,40 @@ fn axis_distance(pos: u64, low: u64, high: u64) -> u64 {
 mod tests {
     use super::{
         coverage_supersampled, round_rect_coverage, round_rect_radius, round_rect_row_reach,
-        MAX_DRAWING_EXTENT,
+        RoundRect, MAX_DRAWING_EXTENT,
     };
+
+    /// A row a `RoundRect` says carries no arc is covered whole, a row with any
+    /// pixel short of whole says it does, and its reach is the clamped radius.
+    #[test]
+    fn a_round_rect_reports_the_arcs_its_coverage_draws() {
+        for &(width, height) in &[(1, 1), (2, 3), (20, 20), (40, 9), (17, 33)] {
+            for radius in [0u32, 1, 3, 4, 8, 200] {
+                let shape = RoundRect {
+                    width,
+                    height,
+                    radius,
+                };
+                assert_eq!(
+                    shape.corner_reach(),
+                    round_rect_radius(width, height, radius)
+                );
+                for y in 0..height {
+                    let short = (0..width).any(|x| shape.coverage(x, y) < 255);
+                    assert!(
+                        shape.clips_row(y) || !short,
+                        "row {y} of {width}x{height} r={radius} is cut but not clipped"
+                    );
+                    for x in 0..width {
+                        assert_eq!(
+                            shape.coverage(x, y),
+                            round_rect_coverage(x, y, width, height, radius)
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn zero_radius_is_square_everywhere() {

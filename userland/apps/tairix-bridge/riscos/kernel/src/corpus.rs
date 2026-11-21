@@ -733,11 +733,7 @@ fn is_word(text: &str) -> bool {
 #[must_use]
 pub fn format_observations(header: &[&str], observations: &[Observation]) -> String {
     let mut out = String::new();
-    for line in header {
-        out.push_str("# ");
-        out.push_str(line);
-        out.push('\n');
-    }
+    write_comments(&mut out, header);
     for observation in observations {
         out.push_str("\nscenario ");
         out.push_str(&observation.name);
@@ -748,6 +744,156 @@ pub fn format_observations(header: &[&str], observations: &[Observation]) -> Str
         }
     }
     out
+}
+
+/// `lines` written to `out` as comments, one to a line.
+pub fn write_comments<S: AsRef<str>>(out: &mut String, lines: &[S]) {
+    for line in lines {
+        out.push_str("# ");
+        out.push_str(line.as_ref());
+        out.push('\n');
+    }
+}
+
+/// An answers file's head: the recording's `provenance` as comments, then
+/// the warning that the file is recorded, never written.
+#[must_use]
+pub fn answers_head<S: AsRef<str>>(provenance: &[S]) -> String {
+    let mut out = String::new();
+    write_comments(&mut out, provenance);
+    out.push_str("# Never edit by hand.\n");
+    out
+}
+
+/// The bytes a run of hexadecimal digit pairs spells; none for an empty run,
+/// an odd one, or one holding anything else.
+#[must_use]
+pub fn hex_bytes(digits: &str) -> Option<Vec<u8>> {
+    if digits.is_empty() || !digits.len().is_multiple_of(2) {
+        return None;
+    }
+    digits
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| {
+            core::str::from_utf8(pair)
+                .ok()
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+        })
+        .collect()
+}
+
+/// One listing of a listing corpus: its name, its numbered lines, and what
+/// followed them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listing<T> {
+    /// Its name.
+    pub name: String,
+    /// Its numbered lines, a newline ending each.
+    pub text: String,
+    /// Each line after its numbered ones that opened with the corpus's
+    /// trailer, as the trailer's reader read it.
+    pub trailers: Vec<T>,
+}
+
+/// What follows a listing's numbered lines in a listing corpus: lines opening
+/// with `keyword`, the rest of each `what` and read by `read`.
+pub struct Trailer<'a, T> {
+    /// The word such a line opens with.
+    pub keyword: &'a str,
+    /// What the rest of the line is, for a refusal.
+    pub what: &'a str,
+    /// The rest of the line, read; `None` refuses it.
+    pub read: &'a dyn Fn(&str) -> Option<T>,
+}
+
+/// The listings `corpus` holds, a `#` line a comment. Each opens
+/// `{keyword} NAME`, a name of lower-case letters, digits and `_` no other
+/// listing has; then holds lines numbered within `numbers`, each above the
+/// one before and of printable ASCII, at least one; then, given a `trailer`,
+/// any of its lines.
+///
+/// # Errors
+///
+/// The line that breaks this, and why.
+pub fn listings<T>(
+    corpus: &str,
+    keyword: &str,
+    numbers: core::ops::RangeInclusive<u32>,
+    trailer: Option<&Trailer<'_, T>>,
+) -> Result<Vec<Listing<T>>, String> {
+    let opening = |line: &str, word: &str| {
+        line.strip_prefix(word)
+            .and_then(|rest| rest.strip_prefix(' '))
+            .map(ToString::to_string)
+    };
+    let mut listings: Vec<Listing<T>> = Vec::new();
+    let mut last: Option<u32> = None;
+    for (index, line) in corpus.lines().enumerate() {
+        let refused = |reason: &str| format!("line {}: {reason}", index + 1);
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(name) = opening(line, keyword) {
+            let named = !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+            if !named || listings.iter().any(|listing| listing.name == name) {
+                return Err(refused(&format!("a {keyword} has a name of its own")));
+            }
+            if listings
+                .last()
+                .is_some_and(|listing| listing.text.is_empty())
+            {
+                return Err(refused(&format!("a {keyword} has lines")));
+            }
+            listings.push(Listing {
+                name,
+                text: String::new(),
+                trailers: Vec::new(),
+            });
+            last = None;
+            continue;
+        }
+        let Some(listing) = listings.last_mut() else {
+            return Err(refused(&format!("a line within a {keyword}")));
+        };
+        if let Some(trailer) = trailer {
+            if let Some(rest) = opening(line, trailer.keyword) {
+                let read = (trailer.read)(&rest).ok_or_else(|| refused(trailer.what))?;
+                listing.trailers.push(read);
+                continue;
+            }
+            if !listing.trailers.is_empty() {
+                return Err(refused(&format!(
+                    "a {keyword}'s {} follows its lines",
+                    trailer.keyword
+                )));
+            }
+        }
+        let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+        let number: Option<u32> = line[..digits].parse().ok();
+        let fits =
+            number.is_some_and(|n| numbers.contains(&n) && last.is_none_or(|before| n > before));
+        if !fits || !line.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
+            return Err(refused(&format!(
+                "a line numbered {} to {} of printable ASCII, after the one before",
+                numbers.start(),
+                numbers.end()
+            )));
+        }
+        last = number;
+        listing.text.push_str(line);
+        listing.text.push('\n');
+    }
+    if listings
+        .last()
+        .is_some_and(|listing| listing.text.is_empty())
+    {
+        return Err(format!("a {keyword} has lines"));
+    }
+    Ok(listings)
 }
 
 #[cfg(test)]

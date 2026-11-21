@@ -104,6 +104,9 @@ pub enum Ending {
     Input,
 }
 
+/// 00:00:00 UTC on 1 January 2000 as [`Host::real_time`] reads it.
+pub const MILLENNIUM: u64 = 36_524 * crate::clock::CENTISECONDS_PER_DAY;
+
 /// What the kernel asks of the session hosting it. The kernel is a pure
 /// function of the bytes it is given, its input and these readings, so a
 /// session replays exactly.

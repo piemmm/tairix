@@ -15,22 +15,8 @@ use crate::error::Error;
 use crate::module::{Builtin, Command, CommandKind, Help, Resource, Services};
 use crate::msgtrans::Own;
 use crate::os::{len32, Fail, Os, Regs, Unwind, World};
+use crate::service::{self, international as reason};
 use crate::swi::{os, X};
-
-/// `Service_International`, and its reasons.
-pub(crate) const SERVICE: u32 = 0x43;
-pub(crate) mod reason {
-    pub(crate) const COUNTRY_NUMBER: u32 = 0;
-    pub(crate) const ALPHABET_NUMBER: u32 = 1;
-    pub(crate) const COUNTRY_NAME: u32 = 2;
-    pub(crate) const ALPHABET_NAME: u32 = 3;
-    pub(crate) const COUNTRY_ALPHABET: u32 = 4;
-    pub(crate) const DEFINE: u32 = 5;
-    pub(crate) const KEYBOARD: u32 = 6;
-    pub(crate) const DEFINE_UCS: u32 = 7;
-    pub(crate) const UCS_TABLE: u32 = 8;
-    pub(crate) const ISO_3166: u32 = 9;
-}
 
 /// `OS_Byte` 70 and 71: the country, and the alphabet or keyboard.
 const COUNTRY_BYTE: u32 = 70;
@@ -169,7 +155,7 @@ pub(crate) static INTERNATIONAL: Builtin = Builtin {
     bridge: false,
     swis: None,
     services: Some(Services {
-        numbers: &[SERVICE],
+        numbers: &[service::INTERNATIONAL],
         handler: service,
     }),
     commands: &[
@@ -373,7 +359,7 @@ impl Os<'_> {
         size: u32,
     ) -> Result<Option<(u32, u32)>, Fail> {
         let mut regs = Regs::default();
-        regs.r[1..6].copy_from_slice(&[SERVICE, reason, r3, buffer, size]);
+        regs.r[1..6].copy_from_slice(&[service::INTERNATIONAL, reason, r3, buffer, size]);
         self.service(&mut regs)?;
         Ok((regs.r[1] == 0).then_some((regs.r[4], regs.r[5])))
     }
@@ -539,7 +525,7 @@ fn named(os: &mut Os<'_>, reason: u32, text: u32) -> Result<Option<u32>, Fail> {
 
 fn alphabet_command(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     if regs.r[1] == 0 {
-        let current = os.os_byte(ALPHABET_BYTE, READ_ALPHABET)?;
+        let current = os.read_alphabet()?;
         let name = os.international_name(reason::ALPHABET_NAME, current)?;
         return line(os, &name);
     }

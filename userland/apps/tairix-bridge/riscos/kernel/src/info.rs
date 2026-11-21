@@ -63,8 +63,6 @@ const HW_BAD_ENTRY: Error = Error {
     token: "HardwareCallMissing",
 };
 
-/// `Service_Hardware`.
-const SERVICE_HARDWARE: u32 = 0xD9;
 /// Where a HAL device's version word is: its major version in the top half.
 const DEVICE_VERSION: u32 = 8;
 
@@ -130,7 +128,7 @@ struct Ids {
 /// The mode, monitor type and sync an automatic setting comes to when no
 /// driver describes the display: a VGA-class monitor showing 640 by 480 in
 /// 256 colours, with separate syncs.
-const AUTO_DISPLAY: [u32; 3] = [28, 3, 0];
+const AUTO_DISPLAY: [u32; 3] = [tairix_vdu::mode::DEFAULT_MODE, 3, 0];
 
 impl Os<'_> {
     /// The current processor's identity.
@@ -476,7 +474,8 @@ impl Os<'_> {
             self.read_spread(&cmos::SYNC)?,
         ];
         if display.contains(&u32::MAX) {
-            let mut lead = Regs::new([0, 0x76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            let mut lead = Regs::default();
+            lead.r[1] = crate::service::MONITOR_LEAD_TRANSLATION;
             self.service(&mut lead)?;
             let described = if lead.r[1] == 0 {
                 [lead.r[3], lead.r[4], lead.r[5]]
@@ -626,7 +625,8 @@ impl Os<'_> {
             check::USER_READ | check::USER_WRITE | check::PRIVILEGED_READ | check::PRIVILEGED_WRITE;
         let mut valid = flags & complete != 0;
         if !valid {
-            let mut service = Regs::new([0, 0x6D, start, regs.r[1], 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            let mut service = Regs::default();
+            service.r[1..4].copy_from_slice(&[crate::service::VALIDATE_ADDRESS, start, regs.r[1]]);
             self.service(&mut service)?;
             valid = service.r[1] == 0;
         }
@@ -694,8 +694,21 @@ impl Os<'_> {
                     return Err(self.no_memory());
                 }
                 self.world.devices.push(device);
-                let mut service =
-                    Regs::new([0, SERVICE_HARDWARE, device, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+                let mut service = Regs::new([
+                    0,
+                    crate::service::HARDWARE,
+                    device,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ]);
                 self.service(&mut service)?;
                 Ok(())
             }
@@ -714,7 +727,21 @@ impl Os<'_> {
     /// Removes a registered device, unless a `Service_Hardware` 1 claimant
     /// objects with its error.
     fn remove_device(&mut self, device: u32) -> Result<(), Fail> {
-        let mut service = Regs::new([1, SERVICE_HARDWARE, device, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let mut service = Regs::new([
+            1,
+            crate::service::HARDWARE,
+            device,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]);
         self.service(&mut service)?;
         if service.r[1] == 0 {
             return Err(Fail::Error(service.r[0]));
@@ -769,7 +796,8 @@ impl Os<'_> {
     /// `OS_Reset`: `Service_PreReset`, then a hard reset, which ends the
     /// session's program.
     pub(crate) fn reset(&mut self, _regs: &mut Regs) -> Result<(), Fail> {
-        let mut service = Regs::new([0, 0x45, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let mut service = Regs::default();
+        service.r[1] = crate::service::PRE_RESET;
         self.service(&mut service)?;
         Err(Fail::Unwind(crate::os::Unwind::Ended(
             crate::os::Ended::Reset {

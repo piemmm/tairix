@@ -23,10 +23,11 @@ use alloc::vec::Vec;
 
 use tairix_fscopy::tree::Dir as _;
 use tairix_riscos_kernel::error::Error;
-use tairix_riscos_kernel::filing::fs::{block, info, REDECLARE};
+use tairix_riscos_kernel::filing::fs::{block, info};
 use tairix_riscos_kernel::module::{Builtin, Command, CommandKind, Help, Resource, Services};
 use tairix_riscos_kernel::msgtrans::{Own, OWN_DESCRIPTOR, REQUEST};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, Unwind, World};
+use tairix_riscos_kernel::service::FS_REDECLARE;
 use tairix_riscos_kernel::swi::os::{fs_control, FS_CONTROL};
 use tairix_riscos_kernel::swi::X;
 
@@ -78,7 +79,7 @@ pub static HOST_FS: Builtin = Builtin {
     bridge: false,
     swis: None,
     services: Some(Services {
-        numbers: &[REDECLARE],
+        numbers: &[FS_REDECLARE],
         handler: service,
     }),
     commands: &[Command {
@@ -359,7 +360,7 @@ fn declare(os: &mut Os<'_>, workspace: u32) -> Result<(), Fail> {
 
 /// Its service handler: `Service_FSRedeclare`, HostFS registered again.
 fn service(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Unwind> {
-    if regs.r[1] != REDECLARE {
+    if regs.r[1] != FS_REDECLARE {
         return Ok(());
     }
     let Ok(workspace) = with(os, |state| state.workspace) else {

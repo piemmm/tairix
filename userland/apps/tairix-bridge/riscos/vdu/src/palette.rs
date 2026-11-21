@@ -5,20 +5,22 @@
 //! `OS_Word` 11 and 12 and `OS_ReadPalette` go through `PaletteV`, whose
 //! default is here, so a claimant may stand in front of it.
 
+use tairix_colour::Rgb;
 use tairix_riscos_kernel::os::{Entry, Fail, Os, Regs};
 use tairix_riscos_kernel::vectors::Vector;
+use tairix_vdu::mode::Flags;
+use tairix_vdu::palette::{default_256, DEFAULT_2, DEFAULT_4};
 
-use crate::colour::default_rgb_8;
-use crate::mode::{flag, Format};
+use crate::mode::Format;
 use crate::state::with;
 
 /// `PaletteV`.
 pub(crate) const PALETTE_V: Vector = Vector(0x23);
 
 /// How an entry was set, its word's low byte.
-mod kind {
+pub(crate) mod kind {
     /// Both flash states alike.
-    pub(super) const NORMAL: u32 = 16;
+    pub(crate) const NORMAL: u32 = 16;
     /// The first flash state alone.
     pub(super) const FIRST: u32 = 17;
     /// The second alone.
@@ -32,8 +34,8 @@ mod kind {
 }
 
 /// `PaletteV`'s reasons.
-mod reason {
-    pub(super) const READ: u32 = 1;
+pub(crate) mod reason {
+    pub(crate) const READ: u32 = 1;
     pub(super) const SET: u32 = 2;
     pub(super) const FIRST_FLASH: u32 = 3;
     pub(super) const SECOND_FLASH: u32 = 4;
@@ -45,12 +47,19 @@ mod reason {
 }
 
 /// The BBC Micro's sixteen physical colours: eight solid, then eight
-/// flashing pairs, as `&BBGGRR`.
-const PHYSICAL: [[u32; 2]; 16] = {
-    const SOLID: [u32; 8] = [
-        0x00_0000, 0x00_00FF, 0x00_FF00, 0x00_FFFF, 0xFF_0000, 0xFF_00FF, 0xFF_FF00, 0xFF_FFFF,
+/// flashing pairs.
+const PHYSICAL: [[Rgb; 2]; 16] = {
+    const SOLID: [Rgb; 8] = [
+        Rgb::new(0, 0, 0),
+        Rgb::new(0xFF, 0, 0),
+        Rgb::new(0, 0xFF, 0),
+        Rgb::new(0xFF, 0xFF, 0),
+        Rgb::new(0, 0, 0xFF),
+        Rgb::new(0xFF, 0, 0xFF),
+        Rgb::new(0, 0xFF, 0xFF),
+        Rgb::new(0xFF, 0xFF, 0xFF),
     ];
-    let mut table = [[0; 2]; 16];
+    let mut table = [[SOLID[0]; 2]; 16];
     let mut i = 0;
     while i < 8 {
         table[i] = [SOLID[i], SOLID[i]];
@@ -60,12 +69,14 @@ const PHYSICAL: [[u32; 2]; 16] = {
     table
 };
 
-/// The four-colour modes' defaults: black, red, yellow and white.
-const FOUR: [u32; 4] = [0x00_0000, 0x00_00FF, 0x00_FFFF, 0xFF_FFFF];
+/// A colour word: `rgb` with `how` in the low byte.
+const fn word(rgb: Rgb, how: u32) -> u32 {
+    rgb.riscos_word() | how
+}
 
-/// A colour word: `rgb` as `&BBGGRR00` with `how` in the low byte.
-const fn word(rgb: u32, how: u32) -> u32 {
-    (rgb << 8) | how
+/// Physical colour `physical`'s solid state.
+const fn physical(physical: u8) -> Rgb {
+    PHYSICAL[physical as usize][0]
 }
 
 /// The palette.
@@ -90,8 +101,8 @@ impl Palette {
         let mut palette = Self {
             entries: [[0; 2]; 256],
             base: [[0; 2]; 16],
-            border: [word(0, kind::BORDER); 2],
-            pointer: [[word(0, kind::POINTER); 2]; 3],
+            border: [word(physical(0), kind::BORDER); 2],
+            pointer: [[word(physical(0), kind::POINTER); 2]; 3],
             second: false,
             blanked: false,
         };
@@ -102,16 +113,17 @@ impl Palette {
     /// The mode's default entries; the border and the pointer's colours as
     /// they were.
     pub(crate) fn set_default(&mut self, format: &Format) {
-        let solid = |rgb: u32| [word(rgb, kind::NORMAL); 2];
+        let solid = |rgb: Rgb| [word(rgb, kind::NORMAL); 2];
         self.entries = [[0; 2]; 256];
         match format.log2_bpp() {
             0 => {
-                self.entries[0] = solid(0);
-                self.entries[1] = solid(0xFF_FFFF);
+                for (entry, &p) in self.entries.iter_mut().zip(&DEFAULT_2) {
+                    *entry = solid(physical(p));
+                }
             }
             1 => {
-                for (entry, &rgb) in self.entries.iter_mut().zip(&FOUR) {
-                    *entry = solid(rgb);
+                for (entry, &p) in self.entries.iter_mut().zip(&DEFAULT_4) {
+                    *entry = solid(physical(p));
                 }
             }
             2 => {
@@ -119,7 +131,7 @@ impl Palette {
                     let [first, second] = PHYSICAL[i];
                     *entry = if i < 8 {
                         solid(first)
-                    } else if format.has(flag::TELETEXT) {
+                    } else if format.has(Flags::TELETEXT) {
                         [word(first, kind::NORMAL | kind::SUPREMACY); 2]
                     } else {
                         [word(first, kind::FIRST), word(second, kind::SECOND)]
@@ -128,16 +140,16 @@ impl Palette {
             }
             3 => {
                 for (i, entry) in self.entries.iter_mut().enumerate() {
-                    let [r, g, b] = default_rgb_8(i.to_le_bytes()[0]);
-                    *entry = solid(u32::from(r) | u32::from(g) << 8 | u32::from(b) << 16);
+                    let [r, g, b] = default_256(i.to_le_bytes()[0]);
+                    *entry = solid(Rgb::new(r, g, b));
                 }
                 for (i, base) in self.base.iter_mut().enumerate() {
                     *base = self.entries[i];
                 }
             }
             _ => {
-                for (i, entry) in (0u32..).zip(self.entries.iter_mut()) {
-                    *entry = solid(i | i << 8 | i << 16);
+                for (i, entry) in (0..=u8::MAX).zip(self.entries.iter_mut()) {
+                    *entry = solid(Rgb::new(i, i, i));
                 }
             }
         }
@@ -184,10 +196,9 @@ impl Palette {
         }
     }
 
-    /// The colour of pixel value `pixel` as the display shows it now, as
-    /// `&BBGGRR`.
-    pub(crate) fn shown(&self, pixel: u32) -> u32 {
-        self.entries[(pixel & 0xFF) as usize][usize::from(self.second)] >> 8
+    /// The colour of pixel value `pixel` as the display shows it now.
+    pub(crate) fn shown(&self, pixel: u32) -> Rgb {
+        Rgb::from_riscos_word(self.entries[(pixel & 0xFF) as usize][usize::from(self.second)])
     }
 
     /// Whether any entry flashes.
@@ -195,7 +206,7 @@ impl Palette {
         let count = (colours(format) + 1) as usize;
         self.entries[..count]
             .iter()
-            .any(|[first, second]| first >> 8 != second >> 8)
+            .any(|&[first, second]| Rgb::from_riscos_word(first) != Rgb::from_riscos_word(second))
     }
 }
 
@@ -208,15 +219,11 @@ const fn colours(format: &Format) -> u32 {
     }
 }
 
-/// A base colour as entry `i` of its group shows it: red's, green's and
-/// blue's top bits from the entry's own bits 4 to 7.
+/// A base colour word as entry `i` of its group shows it, its low byte kept.
 const fn grouped(base: u32, i: u32) -> u32 {
-    let red = (base >> 8) & 0x77 | if i & 0x10 != 0 { 0x88 } else { 0 };
-    let green = (base >> 16) & 0x33
-        | if i & 0x20 != 0 { 0x44 } else { 0 }
-        | if i & 0x40 != 0 { 0x88 } else { 0 };
-    let blue = (base >> 24) & 0x77 | if i & 0x80 != 0 { 0x88 } else { 0 };
-    (blue << 24) | (green << 16) | (red << 8) | (base & 0xFF)
+    let [r, g, b] =
+        tairix_vdu::palette::grouped(Rgb::from_riscos_word(base).to_array(), i.to_le_bytes()[0]);
+    word(Rgb::new(r, g, b), base & 0xFF)
 }
 
 /// What `VDU 19,logical,physical,red,green,blue` sets: the kind of entry and
@@ -224,7 +231,7 @@ const fn grouped(base: u32, i: u32) -> u32 {
 /// physical colour no form names.
 pub(crate) fn vdu_19(physical: u8, rgb: [u8; 3], current: [u32; 2]) -> Option<(u32, [u32; 2])> {
     let supremacy = u32::from(physical & 0x80);
-    let given = u32::from(rgb[0]) | u32::from(rgb[1]) << 8 | u32::from(rgb[2]) << 16;
+    let given = Rgb::new(rgb[0], rgb[1], rgb[2]);
     let mark = |how: u32| how | supremacy;
     match u32::from(physical & 0x7F) {
         p @ 0..=15 => {
@@ -417,9 +424,7 @@ fn gamma(os: &mut Os<'_>, regs: &mut Regs) -> Result<bool, Fail> {
     with(os, |vdu, _| {
         if vdu.screen.format.direct() {
             for (i, entry) in vdu.palette.entries.iter_mut().enumerate() {
-                let rgb = u32::from(tables[0][i])
-                    | u32::from(tables[1][i]) << 8
-                    | u32::from(tables[2][i]) << 16;
+                let rgb = Rgb::new(tables[0][i], tables[1][i], tables[2][i]);
                 *entry = [word(rgb, kind::NORMAL); 2];
             }
         }

@@ -12,6 +12,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# The mode variable a listing's width is read from.
+tairix-vdu = { path = "../../../../../lib/vdu", version = "=0.0.0" }
 # The kernel: the module seam FileSwitch is built on, guest memory, SWIs and
 # calls into the filing systems' code.
 tairix-riscos-kernel = { path = "../kernel", version = "=0.0.0" }
@@ -48,6 +50,8 @@ tairix-tz = { path = "../../../../../lib/tz", version = "=0.0.0", optional = tru
 test-support = ["dep:tairix-tz", "tairix-fscopy/test-support"]
 
 [dev-dependencies]
+# The shared test session, whose application slot the integration tests make.
+tairix-riscos-filing = { path = ".", features = ["test-support"] }
 # The seeded generator the fuzz harness draws from.
 tairix-fuzzseed = { path = "../../../../../tests/fuzzseed", version = "=0.0.0" }
 # The in-memory tree HostFS's tests serve.

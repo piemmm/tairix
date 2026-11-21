@@ -20,11 +20,6 @@ pub(super) fn cases(text: &str) -> Result<Vec<Case>, String> {
     corpus::cases(text).map_err(|e| format!("riscos: {CASES}: {e}"))
 }
 
-/// The HostFS name case `n`'s program is staged under.
-fn program_name(n: usize) -> String {
-    format!("Scr{n}")
-}
-
 /// The program run after the cases, which leaves the screen as the machine
 /// booted with it — the configured mode, and the screen area no larger than
 /// that needs — since what the harness records next reads the screen.
@@ -37,7 +32,12 @@ pub(super) fn staged(cases: &[Case]) -> Vec<(String, Vec<u8>)> {
     cases
         .iter()
         .enumerate()
-        .map(|(n, case)| (program_name(n), corpus::program(case, n).into_bytes()))
+        .map(|(n, case)| {
+            (
+                corpus::program_name(n),
+                corpus::program(case, n).into_bytes(),
+            )
+        })
         .chain([(RESTORE_NAME.to_string(), RESTORE.as_bytes().to_vec())])
         .collect()
 }
@@ -45,9 +45,9 @@ pub(super) fn staged(cases: &[Case]) -> Vec<(String, Vec<u8>)> {
 /// The `!Boot` commands that run every case on the screen, then restore it.
 pub(super) fn run(cases: &[Case]) -> Vec<String> {
     (0..cases.len())
-        .map(program_name)
+        .map(corpus::program_name)
         .chain([RESTORE_NAME.to_string()])
-        .map(|name| format!("BASIC -quit HostFS:$.{name}"))
+        .map(|name| corpus::run_command(&name))
         .collect()
 }
 
@@ -56,7 +56,7 @@ pub(super) fn left(cases: &[Case]) -> Vec<String> {
     (0..cases.len())
         .flat_map(|n| {
             [
-                program_name(n),
+                corpus::program_name(n),
                 corpus::record_name(n),
                 corpus::dump_name(n),
             ]

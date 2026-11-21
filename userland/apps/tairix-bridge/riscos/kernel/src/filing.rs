@@ -83,9 +83,8 @@ pub const UNSUPPORTED: Error = Error {
 /// The longest name an error quotes.
 const NAME_MOST: usize = 255;
 
-/// `UpCall_NewApplication` and `Service_NewApplication`.
+/// `UpCall_NewApplication`.
 const NEW_APPLICATION_UPCALL: u32 = 256;
-const NEW_APPLICATION_SERVICE: u32 = 0x2A;
 /// The handlers a new application may find left in application space.
 const CODE_HANDLERS: [u32; 12] = [
     env::UNDEFINED,
@@ -243,7 +242,7 @@ impl Os<'_> {
             return Err(self.error(CANT_START));
         }
         let mut service = Regs::default();
-        service.r[1] = NEW_APPLICATION_SERVICE;
+        service.r[1] = crate::service::NEW_APPLICATION;
         service.r[2] = object;
         self.service(&mut service)?;
         if service.r[1] == 0 {

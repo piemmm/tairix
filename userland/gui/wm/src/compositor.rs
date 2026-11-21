@@ -40,7 +40,9 @@ use tairix_icon::IconKind;
 use tairix_inline::ArrayVec;
 use tairix_input::{InputEvent, Key};
 use tairix_parallel::JobRunner;
-use tairix_raster::{halved_reach, resample_reach, BlurScratch, Blurring, ResampleScratch};
+use tairix_raster::{
+    halved_reach, resample_reach, BlurScratch, Blurring, ResampleScratch, RoundRect,
+};
 use tairix_reclaim::{
     screenful_ui_budget, stacked_ui_budget, CacheAccounting, PressureBand, PressureGauge,
     ReclaimCache, Served,
@@ -63,7 +65,7 @@ use crate::view::View;
 use crate::viewport::{FurnitureHit, RootViewport};
 use crate::window::{
     CursorHint, OpaqueRun, Placement, PointerCatch, ResizeBounds, RowLayer, Window, WindowId,
-    WindowRow, WindowShape,
+    WindowRow,
 };
 
 #[path = "layers.rs"]
@@ -5144,7 +5146,7 @@ fn frost_interior(window: &Window) -> [Rect; 3] {
 
 /// The coverage of `shape`, the shape of a window at `bounds`, at screen
 /// pixel `(x, y)`: full for a window with no shape.
-fn shape_coverage(shape: Option<WindowShape>, bounds: Rect, x: u32, y: u32) -> u8 {
+fn shape_coverage(shape: Option<RoundRect>, bounds: Rect, x: u32, y: u32) -> u8 {
     let local = |at: u32, from: i32| u32::try_from(i64::from(at) - i64::from(from));
     match (shape, local(x, bounds.left()), local(y, bounds.top())) {
         (None, _, _) => u8::MAX,
@@ -5894,7 +5896,7 @@ fn caster_radius(window: &Window) -> Option<u32> {
     }
     window
         .shape()
-        .map(WindowShape::corner_reach)
+        .map(RoundRect::corner_reach)
         .filter(|radius| *radius > 0)
 }
 

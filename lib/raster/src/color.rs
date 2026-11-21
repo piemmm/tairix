@@ -72,8 +72,18 @@ pub(crate) fn scale8(a: u8, b: u8) -> u8 {
 /// The 8-bit weights sum to exactly 256, so a grey is its own luma.
 #[inline]
 fn luma(r: u8, g: u8, b: u8) -> u32 {
-    (77 * u32::from(r) + 150 * u32::from(g) + 29 * u32::from(b) + 128) >> 8
+    let [wr, wg, wb] = LUMA_WEIGHTS;
+    (wr * u32::from(r) + wg * u32::from(g) + wb * u32::from(b) + (1 << (LUMA_SHIFT - 1)))
+        >> LUMA_SHIFT
 }
+
+/// The BT.601 weights of red, green and blue in a luma, in
+/// 2^[`LUMA_SHIFT`]ths: they sum to exactly that, so a grey pixel's luma is
+/// its own level.
+pub const LUMA_WEIGHTS: [u32; 3] = [77, 150, 29];
+
+/// The binary places [`LUMA_WEIGHTS`] are counted in.
+pub const LUMA_SHIFT: u32 = 8;
 
 /// A straight-alpha colour as authored by a client (not premultiplied).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -456,6 +466,21 @@ impl Pixel {
     pub fn over(self, dst: Self) -> Self {
         self.over_biased(dst, ROUND_NEAREST)
     }
+
+    /// `self` scaled by `factor`/255 and composited over `dst`, both rounding
+    /// at `bias`: what [`blend_span`] lays at each pixel.
+    ///
+    /// A source whose alpha is nought leaves `dst` as it was, whatever colour
+    /// it carries, so a pixel laid alone and the same pixel laid in a span
+    /// agree even where its colour is not premultiplied.
+    #[must_use]
+    #[inline]
+    pub fn laid_over(self, dst: Self, factor: u8, bias: u32) -> Self {
+        if self.a == 0 {
+            return dst;
+        }
+        self.scale_alpha_biased(factor, bias).over_biased(dst, bias)
+    }
 }
 
 /// Composite `src` over `dst` pixel for pixel, each source scaled by
@@ -745,9 +770,7 @@ fn blend_one(dst: &mut Pixel, src: Pixel, factor: u8, bias: u32, map: &impl Fn(P
     if src.a == 0 {
         return;
     }
-    *dst = map(src)
-        .scale_alpha_biased(factor, bias)
-        .over_biased(*dst, bias);
+    *dst = map(src).laid_over(*dst, factor, bias);
 }
 
 /// `weight`/255 of the way from `from` to `to`, per premultiplied channel.

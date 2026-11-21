@@ -13,9 +13,13 @@ This crate owns:
 
 - `Color` / `Pixel` — a straight-alpha authored colour and its
   **premultiplied-alpha** pixel, with the `div255` rounded divide, the
-  Porter–Duff `over` operator, `scale_alpha`, and `premultiply` /
-  `unpremultiply`, with `unpremultiply_span` taking a run of pixels to the
-  straight bytes an encoder or a clipboard takes. The compositor works
+  Porter–Duff `over` operator, `luma` (its `LUMA_WEIGHTS` and `LUMA_SHIFT`
+  published for a device toning as `desaturate` does), `scale_alpha`,
+  `laid_over` — a pixel scaled
+  and laid over another as `blend_span` lays each, a source whose alpha is
+  nought leaving it as it was — and `premultiply` / `unpremultiply`, with
+  `unpremultiply_span` taking a run of pixels to the straight bytes an encoder
+  or a clipboard takes. The compositor works
   exclusively in premultiplied alpha,
   which keeps per-region opacity and rounded-corner coverage correct
   (`AGENTS.md` §10).
@@ -192,6 +196,12 @@ This crate owns:
   taken on the process's one heap. `shape::Scratch` carries one, so a
   `shape::fill` allocates nothing either. A refused row buffer paints nothing
   rather than aborting.
+- `ScanScratch::coverage_rows` / `ScanScratch::design_rows` → `CoverageRows`
+  — a shape's coverage a row at a time, its vertices at some units a pixel or
+  on a design grid stretched over a rectangle as `fill_polygon` places them.
+  `CoverageRows::pieces` hands a device the converter's own pieces of a row —
+  each edge clipped to it, a `RowPiece` in `SCAN_UNIT` sub-units — through the
+  one clip the converter's own row walk takes, and `rule` its fill rule.
 - `FillRule` / `Paint` — what a contour fill resolves and paints with. A
   `Paint` is a flat `Color`, a `Gradient`, or a `Pattern`. A `Gradient` is
   linear or radial (with a focal
@@ -237,6 +247,8 @@ This crate owns:
   its tolerance by. Its trigonometry comes from `tairix_util::mathf`, so no
   external libm enters the trusted computing base and this crate rotates
   identically to the glyph rasteriser and the SVG decoder.
+- `stroke_quads` — the quads a stroke fills, one a segment in order: what
+  `Surface::stroke_polyline` lays and what a device covers in turn.
 - `Surface::stroke_polyline` — the one stroked-line path the desktop shares: a
   window-furniture diagonal and a history graph's trace are the same primitive
   at different scales. Each segment is offset along *its own* perpendicular, so
@@ -436,7 +448,9 @@ This crate owns:
 - `Surface::blit_rounded` — the same walk confined to the rounded rectangle the
   source spans: a pixel outside it is not drawn and one on a corner arc lands
   at the fraction the arc covers, through the one `round_rect_coverage` every
-  rounded fill uses, so a picture's corners match the rim drawn around it.
+  rounded fill uses, so a picture's corners match the rim drawn around it. A
+  source pixel whose alpha is nought lays nothing on a corner row as on any
+  other.
 - `Surface::fill_vertical_gradient` — a top-to-bottom colour ramp, one span
   fill per row. Interpolation is in *straight* alpha, so a ramp that fades out
   keeps its hue instead of being dragged toward black. The ramp is evaluated in
@@ -496,6 +510,26 @@ This crate owns:
   rectangle a caller names. A caller reasoning about
   *where* a shape's corners are — which rows carry an arc at all, as the
   compositor asks per window row — reads the clamp rather than restating it.
+- `RoundRect` — a rectangle rounded by a radius: its `coverage`, its
+  `corner_reach` (the clamped radius) and whether a row `clips_row`. A
+  window's silhouette, its client's cut and a shadow caster's shape are each
+  one. `ROUND_RECT_SUBSAMPLES` and `ROUND_RECT_SCALE` are the coverage's grid,
+  read by the pinned passes that evaluate it on a device.
+- `Body` — what a window holds at one pixel of a frame, its client's pixel
+  and the cut's coverage there and its furniture's pixel, and what it `laid`
+  there at an opacity: a client pixel the cut leaves partly uncovered gives
+  way to the furniture, and only where there is none does the coverage
+  anti-alias the client's edge. The compositor's per-column path and the
+  pinned `body` pass both lay through it.
+- `drop_shadow` — the drop shadow beneath a floating surface: its silhouette
+  dropped by its reach and softened by a biweight kernel, exact by linearity
+  as a separable `H·V` term less four blurred corner notches. A `DropShadow`
+  holds one level's kernel, straight-edge profile and notch tiles; `Caster`
+  is a surface's bounds, silhouette and opacity; `shadow_row` casts a row at
+  one level or crossfades two while a surface eases between them, and
+  `ShadowRow::blend_into` lays it, its straight-edge and solid runs bit for
+  bit the per-pixel evaluation. `shadow_reach` holds a reach to `MAX_REACH`;
+  `DropShadow::ramp` and `notch` hand a device the tables.
 - `RowReducer` — the reducing arm of that resampler fed a source a row at a
   time, so a decoder reduces a picture it never holds (see "The resampler").
 - `Surface::resample_window_into` / `resample_reach` — one window of a
@@ -503,6 +537,10 @@ This crate owns:
   bands across a job runner, and the destination samples a change to some
   source samples reaches: the pair a compositor drawing a desktop smaller than
   its output resamples each frame's damage through.
+- `ResamplePlan` — the taps that window is filtered through, both axes, as a
+  device filtering it is handed them: `AxisTaps` per column and per row, each
+  a source pixel and a weight in `RESAMPLE_SHIFT` binary places, and whether
+  the plan only copies.
 - `resample` / `resample_window` / `Surface::resampled` — the single image
   resampler the whole desktop scales through: the icon pipeline fitting a
   bundle's artwork into a slot, the wallpaper pipeline placing a photograph

@@ -232,10 +232,6 @@ pub mod func {
     pub const READ_BOOT_OPTION: u32 = 27;
 }
 
-/// `Service_FSRedeclare`: every filing system asked to register again, as
-/// FileSwitch does at its start.
-pub const REDECLARE: u32 = 0x40;
-
 /// `UpCall_ModifyingFile`, which comes before each change a call makes, and
 /// the reasons in R9 beyond `FSEntry_File`'s own numbers.
 pub mod modifying {

@@ -9,6 +9,7 @@
 //! the pixel's mask makes every GCOL action.
 
 use tairix_vdu::code::{self, Operation};
+use tairix_vdu::plot;
 
 use super::copy;
 use super::ws::{buffer, var, vdu, vdu_zp, vector};
@@ -275,7 +276,7 @@ fn plot(a: &mut Asm) {
     a.ldx(abs(vdu::PIXELS_PER_BYTE));
     a.beq("plot_unrecognised");
     // Relative coordinates add to the cursor's.
-    a.and(imm(4));
+    a.and(imm(plot::ABSOLUTE));
     a.bne("plot_absolute");
     a.ldx(imm(2));
     let relative = a.here_local();
@@ -298,17 +299,17 @@ fn plot(a: &mut Asm) {
     a.ldx(imm(const { variable_offset(vdu::PLOT_POINT) }));
     a.jsr("point_store");
     a.lda(abs(PLOT_CODE));
-    a.cmp(imm(96));
+    a.cmp(imm(plot::RECTANGLE));
     a.bcs("plot_extended");
-    a.cmp(imm(32));
+    a.cmp(imm(plot::LINE_WITHOUT_FIRST));
     a.bcc("plot_recognised");
-    a.cmp(imm(64));
+    a.cmp(imm(plot::POINT));
     a.bcs("plot_recognised");
     a.here("plot_unrecognised");
     a.clc();
     a.jmp(abs(vector::VDU).ind());
     a.here("plot_extended");
-    a.cmp(imm(128));
+    a.cmp(imm(plot::FLOOD));
     a.bcs("plot_unrecognised");
     copy(a, &[(vdu::PLOT_POINT, &[vdu::GRAPHICS_INTERNAL])], 4);
     a.lda(abs(PLOT_CODE));
@@ -316,7 +317,7 @@ fn plot(a: &mut Asm) {
     a.here("plot_recognised");
     a.jsr("plot_masks");
     a.lda(abs(PLOT_CODE));
-    a.and(imm(3));
+    a.and(imm(plot::INK));
     a.beq("plot_done");
     a.lda(abs(PLOT_CODE));
     for _ in 0..3 {
@@ -346,8 +347,8 @@ fn plot(a: &mut Asm) {
     // inverting, or background.
     a.here("plot_masks");
     a.lda(abs(PLOT_CODE));
-    a.and(imm(3));
-    a.cmp(imm(2));
+    a.and(imm(plot::INK));
+    a.cmp(imm(plot::INVERSE));
     a.beq("plot_masks_invert");
     a.bcs("plot_masks_background");
     a.lda(abs(vdu::GRAPHICS_FOREGROUND));

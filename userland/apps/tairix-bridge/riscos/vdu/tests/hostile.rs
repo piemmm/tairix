@@ -3,15 +3,17 @@
 //! a wild list, a copy cursor left behind by a smaller window, a cursor
 //! wrapped round the coordinates, and characters as large as VDU 5 allows.
 
-use tairix_riscos_filing::session::{session, Session, Setup};
+mod common;
+
+use common::{answers, drivers, vdu};
+use tairix_riscos_filing::session::Session;
 use tairix_riscos_kernel::os::{Fail, Regs};
-use tairix_riscos_kernel::swi::os::{BYTE, PLOT, READ_C, READ_MODE_VARIABLE, SCREEN_MODE, WRITE_C};
+use tairix_riscos_kernel::swi::os::{BYTE, MODULE, PLOT, READ_C, SCREEN_MODE};
 use tairix_riscos_kernel::swi::X;
 use tairix_riscos_vdu::display;
 
 const SELECTOR_AT: u32 = 0x9000;
-/// `OS_Module`, and its reasons to claim a block and insert a module there.
-const MODULE: u32 = 0x1E;
+/// `OS_Module`'s reasons to claim a block and insert a module there.
 const CLAIM: u32 = 6;
 const INSERT: u32 = 10;
 
@@ -37,37 +39,9 @@ fn wild_module() -> Vec<u8> {
     image
 }
 
-fn boot(keys: &'static [u8]) -> Session {
-    session(&Setup {
-        vdu: Some(tairix_riscos_vdu::DRIVERS),
-        modules: &tairix_riscos_vdu::MODULES,
-        bytes: 0x10_0000,
-        keys,
-        disc: None,
-    })
-}
-
-fn vdu(session: &mut Session, bytes: &[u8]) -> Result<(), Fail> {
-    for &byte in bytes {
-        let mut regs = Regs::new([u32::from(byte), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        session.kernel.os().perform(X | WRITE_C, &mut regs)?;
-    }
-    Ok(())
-}
-
-/// The drivers still read a mode variable.
-fn answers(session: &mut Session) -> bool {
-    let mut regs = Regs::new([u32::MAX, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    session
-        .kernel
-        .os()
-        .perform(X | READ_MODE_VARIABLE, &mut regs)
-        .is_ok()
-}
-
 #[test]
 fn a_selector_naming_no_screen_is_refused() {
-    let mut session = boot(b"");
+    let mut session = drivers(b"");
     for (index, value) in [
         (12, u32::MAX),
         (11, u32::MAX),
@@ -94,7 +68,7 @@ fn a_selector_naming_no_screen_is_refused() {
 
 #[test]
 fn a_teletext_page_past_what_one_holds_is_refused() {
-    let mut session = boot(b"");
+    let mut session = drivers(b"");
     let os = &mut session.kernel.os();
     os.write_bytes(SELECTOR_AT, b"X640 Y500 T16 TX999999999\0")
         .expect("written");
@@ -114,7 +88,7 @@ fn a_teletext_page_past_what_one_holds_is_refused() {
 
 #[test]
 fn a_mode_extension_answered_with_a_wild_list_is_a_value() {
-    let mut session = boot(b"");
+    let mut session = drivers(b"");
     let image = wild_module();
     let os = &mut session.kernel.os();
     let mut claim = Regs::new([
@@ -142,7 +116,7 @@ fn a_mode_extension_answered_with_a_wild_list_is_a_value() {
 
 #[test]
 fn a_copy_cursor_outside_a_smaller_window_is_let_go() {
-    let mut session = boot(b"");
+    let mut session = drivers(b"");
     vdu(&mut session, &[22, 12, 31, 0, 31]).expect("the cursor on the last row");
     for key in [0x8F, b'A'] {
         let mut regs = Regs::new([138, 0, u32::from(key), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -178,7 +152,7 @@ fn a_copy_cursor_outside_a_smaller_window_is_let_go() {
 
 #[test]
 fn shapes_about_a_cursor_wrapped_round_the_coordinates_are_values() {
-    let mut session = boot(b"");
+    let mut session = drivers(b"");
     vdu(&mut session, &[22, 28]).expect("mode 28");
     let plot = |session: &mut Session, code: u32, x: i32, y: i32| {
         let mut regs = Regs::new([
@@ -218,7 +192,7 @@ fn shapes_about_a_cursor_wrapped_round_the_coordinates_are_values() {
 
 #[test]
 fn a_character_as_large_as_vdu_5_allows_is_drawn_on_the_screen_alone() {
-    let mut session = boot(b"");
+    let mut session = drivers(b"");
     vdu(
         &mut session,
         &[

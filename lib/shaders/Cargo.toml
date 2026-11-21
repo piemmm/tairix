@@ -1,6 +1,6 @@
 [package]
 name = "tairix-shaders"
-description = "TAIRiX pinned shader set: the desktop's passes as GPU programs — the frost's reduce, blur, spread and mix, and the compositor's dithered over, copy, fill and channel-order encode — each written in Rust through lib/spirv's builder, committed as SPIR-V and verified on drift by `cargo xtask shaders`, and held bit for bit to lib/raster's own arithmetic (plans/GPU.md GD6, plans/SHADER.md SH3). no_std, forbids unsafe."
+description = "TAIRiX pinned shader set: the desktop's passes as GPU programs — the frost's reduce, blur, spread and mix, the compositor's dithered over, copy, fill, channel-order encode and resample, its chrome: a window's body cut to its shape and its drop shadow, and the furniture painter's plates, washes, rings, covered shapes, inked masks and pictures — each written in Rust through lib/spirv's builder, committed as SPIR-V and verified on drift by `cargo xtask shaders`, and held bit for bit to lib/raster's own arithmetic (plans/GPU.md GD6 and GP4, plans/SHADER.md SH3). no_std, forbids unsafe."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

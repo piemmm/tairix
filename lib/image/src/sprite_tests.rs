@@ -825,6 +825,19 @@ fn a_sixteen_entry_palette_at_eight_bits_is_the_vidc_arrangement() {
 }
 
 #[test]
+fn a_sixteen_entry_palette_keeps_each_entry_s_low_bits_as_risc_os_5_shows_them() {
+    // RISC OS 5.30 reads pixel &31 over an entry of &10, &20, &30 back as
+    // &98, &64, &30: the top bits replace bits of both nibbles, never the
+    // low nibble itself.
+    let mut entries = [[0u8, 0, 0]; 16];
+    entries[1] = [0x10, 0x20, 0x30];
+    let sprite = Sprite::new(MODE_256, 8, 1, 1)
+        .palette(&entries)
+        .pixels(&[0x31]);
+    assert_eq!(rgba(&one(sprite)), [[0x98, 0x64, 0x30, 255]]);
+}
+
+#[test]
 fn a_sixty_four_entry_palette_uses_its_last_sixteen() {
     // VIDC holds sixteen registers, so a longer-but-still-short palette
     // hands it the last sixteen entries.
@@ -833,7 +846,7 @@ fn a_sixty_four_entry_palette_uses_its_last_sixteen() {
     let sprite = Sprite::new(MODE_256, 8, 1, 1)
         .palette(&entries)
         .pixels(&[0x00]);
-    assert_eq!(rgba(&one(sprite)), [[0x77, 0x33, 0x77, 255]]);
+    assert_eq!(rgba(&one(sprite)), [[0x70, 0x30, 0x70, 255]]);
 }
 
 #[test]

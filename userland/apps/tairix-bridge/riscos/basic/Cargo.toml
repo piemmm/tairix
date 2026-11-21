@@ -22,6 +22,8 @@ tairix-riscos-kernel = { path = "../kernel", version = "=0.0.0" }
 tairix-softfloat = { path = "../../../../../lib/softfloat", version = "=0.0.0" }
 # BASIC V's tokens, tokenising and listing.
 tairix-openbasic = { path = "../../../../../lib/openbasic", version = "=0.0.0" }
+# The plot codes BASIC's graphics statements give.
+tairix-vdu = { path = "../../../../../lib/vdu", version = "=0.0.0" }
 
 [dev-dependencies]
 # The fuzz harness's seeded generator and budget.

@@ -112,7 +112,7 @@ use core::ops::Range;
 use tairix_parallel::JobRunner;
 use tairix_util::fallible;
 
-use crate::color::Pixel;
+use crate::color::{Pixel, ROUND_NEAREST};
 
 /// Bytes per straight-alpha RGBA8 pixel.
 const CHANNELS: usize = 4;
@@ -404,7 +404,7 @@ impl Space for Straight {
             let scaled = premultiplied.saturating_mul(255) + alpha_scaled / 2;
             *channel = clamp_u8(scaled / alpha_scaled);
         }
-        out[3] = clamp_u8((alpha_scaled + 127) / 255);
+        out[3] = clamp_u8((alpha_scaled + ROUND_NEAREST.cast_signed()) / 255);
         out
     }
 }
@@ -438,7 +438,8 @@ impl Space for Premultiplied {
     /// pixel, and the cubic's negative lobes can overshoot into that range
     /// on an enlargement.
     fn encode(channels: [i64; CHANNELS]) -> Pixel {
-        let level = |sample: i64| (narrow(descale(sample)).max(0) + 127) / 255;
+        let level =
+            |sample: i64| (narrow(descale(sample)).max(0) + ROUND_NEAREST.cast_signed()) / 255;
         let alpha = clamp_u8(level(channels[3]));
         let ceiling = i32::from(alpha);
         let channel = |sample: i64| {
@@ -807,7 +808,16 @@ struct Band {
 /// geometry the other refuses; each then checks its own buffer's length in
 /// its own units.
 fn validate<R: Rows>(src: &R, region: Region, band: Band) -> Result<usize, ResampleError> {
-    validate_region(src, region)?;
+    validate_extents((src.width(), src.height()), region, band)
+}
+
+/// [`validate`] for a source known only by its extent.
+fn validate_extents(
+    source: (u32, u32),
+    region: Region,
+    band: Band,
+) -> Result<usize, ResampleError> {
+    validate_region(source, region)?;
     if band.dest_width == 0 || band.dest_height == 0 {
         return Err(ResampleError::EmptyDestination);
     }
@@ -955,8 +965,9 @@ fn copy_rows<'o, R: Rows>(
     }
 }
 
-/// Check that `region` is non-empty and lies wholly inside `src`.
-fn validate_region<R: Rows>(src: &R, region: Region) -> Result<(), ResampleError> {
+/// Check that `region` is non-empty and lies wholly inside a `width`×`height`
+/// source.
+fn validate_region((width, height): (u32, u32), region: Region) -> Result<(), ResampleError> {
     let right = region
         .x
         .checked_add(region.width)
@@ -965,7 +976,7 @@ fn validate_region<R: Rows>(src: &R, region: Region) -> Result<(), ResampleError
         .y
         .checked_add(region.height)
         .ok_or(ResampleError::SourceRegionOutOfBounds)?;
-    if region.width == 0 || region.height == 0 || right > src.width() || bottom > src.height() {
+    if region.width == 0 || region.height == 0 || right > width || bottom > height {
         return Err(ResampleError::SourceRegionOutOfBounds);
     }
     Ok(())
@@ -1122,6 +1133,120 @@ impl Axis {
                 tap.weight == WEIGHT_ONE
                     && u64::from(tap.source) == u64::from(first.source).saturating_add(dest as u64)
             })
+    }
+}
+
+/// The binary places a [`ResamplePlan`]'s weights carry: a sample's weights
+/// sum to one shifted by this.
+pub const RESAMPLE_SHIFT: u32 = WEIGHT_SHIFT;
+
+/// The taps a window of a premultiplied resample reads, both axes resolved:
+/// what a device filtering that window is handed, so it filters exactly as
+/// [`Surface::resample_window_into`](crate::Surface::resample_window_into)
+/// does.
+///
+/// A sample is filtered along the row first: each channel of each source
+/// pixel a column tap reads, times 255, weighed by the tap and summed, has
+/// [`RESAMPLE_SHIFT`] removed rounding to nearest (an arithmetic shift of the
+/// sum plus half); those sums are weighed by the row taps and summed, and the
+/// shift removed again. A channel is then that floored at nought, plus
+/// [`ROUND_NEAREST`], over 255; its alpha is held to 255 and each colour to
+/// the alpha. A plan that
+/// [copies](Self::is_copy) is not filtered at all: each sample is the source
+/// pixel its one tap names.
+pub struct ResamplePlan {
+    columns: Axis,
+    rows: Axis,
+}
+
+impl ResamplePlan {
+    /// The taps of `window` of a `dest` destination drawn from the whole of a
+    /// `source` image.
+    ///
+    /// # Errors
+    ///
+    /// [`ResampleError::SourceSizeMismatch`] for a source with a zero side,
+    /// [`ResampleError::EmptyDestination`],
+    /// [`ResampleError::WindowOutOfBounds`], and
+    /// [`ResampleError::OutOfMemory`] when the allocator refuses a plan.
+    pub fn new(
+        source: (u32, u32),
+        dest: (u32, u32),
+        window: Region,
+    ) -> Result<Self, ResampleError> {
+        if source.0 == 0 || source.1 == 0 {
+            return Err(ResampleError::SourceSizeMismatch);
+        }
+        let band = Band {
+            window,
+            dest_width: dest.0,
+            dest_height: dest.1,
+        };
+        validate_extents(source, whole(source.0, source.1), band)?;
+        let mut work = PlanWork::EMPTY;
+        let mut plan = Self {
+            columns: Axis::EMPTY,
+            rows: Axis::EMPTY,
+        };
+        let planned = plan
+            .columns
+            .plan(&mut work, 0, source.0, dest.0, window.x, window.width)
+            && plan
+                .rows
+                .plan(&mut work, 0, source.1, dest.1, window.y, window.height);
+        if planned {
+            Ok(plan)
+        } else {
+            Err(ResampleError::OutOfMemory)
+        }
+    }
+
+    /// Whether the window is a copy: every sample of it one source pixel, in
+    /// order, at full weight, which is copied rather than filtered.
+    #[must_use]
+    pub fn is_copy(&self) -> bool {
+        self.columns.is_identity() && self.rows.is_identity()
+    }
+
+    /// The taps along the window's rows, one set for each of its columns.
+    #[must_use]
+    pub const fn columns(&self) -> AxisTaps<'_> {
+        AxisTaps(&self.columns)
+    }
+
+    /// The taps down the window's columns, one set for each of its rows.
+    #[must_use]
+    pub const fn rows(&self) -> AxisTaps<'_> {
+        AxisTaps(&self.rows)
+    }
+}
+
+impl core::fmt::Debug for ResamplePlan {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ResamplePlan")
+            .field("columns", &self.columns.stride)
+            .field("rows", &self.rows.stride)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One axis of a [`ResamplePlan`]: [`per_sample`](Self::per_sample) taps for
+/// each sample of the window along it, in order.
+#[derive(Copy, Clone)]
+pub struct AxisTaps<'a>(&'a Axis);
+
+impl AxisTaps<'_> {
+    /// Taps each sample reads.
+    #[must_use]
+    pub const fn per_sample(&self) -> usize {
+        self.0.stride
+    }
+
+    /// Every tap, sample by sample: the source pixel it reads along the axis
+    /// and its weight, the weights of each sample summing to one shifted by
+    /// [`RESAMPLE_SHIFT`].
+    pub fn taps(&self) -> impl Iterator<Item = (u32, i32)> + '_ {
+        self.0.taps.iter().map(|tap| (tap.source, tap.weight))
     }
 }
 

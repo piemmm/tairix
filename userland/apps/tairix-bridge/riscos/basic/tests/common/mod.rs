@@ -20,9 +20,7 @@ pub struct Screen(pub Vec<u8>);
 
 /// The session's modules: the filing system's and BASIC's.
 static MODULES: std::sync::LazyLock<Vec<&'static Builtin>> = std::sync::LazyLock::new(|| {
-    let mut modules: Vec<&'static Builtin> = tairix_riscos_filing::MODULES.to_vec();
-    modules.extend(tairix_riscos_basic::MODULES.iter().copied());
-    modules
+    tairix_riscos_filing::session::modules_with(&[&tairix_riscos_basic::MODULES])
 });
 
 #[expect(clippy::unnecessary_wraps, reason = "the VDU drivers' signature")]

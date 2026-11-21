@@ -47,7 +47,7 @@ fn a_mode_the_monitor_lacks_becomes_its_recorded_substitute() {
 #[test]
 fn a_selector_s_text_follows_its_flags_and_its_timings_the_monitor() {
     let double = Selector::new(640, 480, 0, u32::MAX)
-        .with([(var::MODE_FLAGS, flag::DOUBLE_VERTICAL)])
+        .with([(var::MODE_FLAGS, Flags::DOUBLE_VERTICAL.bits())])
         .expect("held");
     let format = double.format().expect("described");
     assert_eq!(format.rows(), 30);
@@ -110,14 +110,14 @@ fn a_selector_naming_variables_no_screen_can_have_is_refused() {
         format(&[(var::LINE_LENGTH, 1024)]).is_some(),
         "lines longer than their pixels"
     );
-    let teletext = Format::selector(640, 480, 3, [(var::MODE_FLAGS, flag::TELETEXT)]);
+    let teletext = Format::selector(640, 480, 3, [(var::MODE_FLAGS, Flags::TELETEXT.bits())]);
     assert_eq!(teletext, None, "Teletext is drawn in sixteen colours");
     let page = Format::selector(
         640,
         500,
         2,
         [
-            (var::MODE_FLAGS, flag::TELETEXT | flag::GAP),
+            (var::MODE_FLAGS, Flags::TELETEXT.bits() | Flags::GAP.bits()),
             (var::N_COLOUR, 15),
         ],
     )
@@ -131,7 +131,7 @@ fn a_selector_naming_variables_no_screen_can_have_is_refused() {
         640,
         250,
         2,
-        [(var::MODE_FLAGS, flag::GAP), (var::N_COLOUR, 15)],
+        [(var::MODE_FLAGS, Flags::GAP.bits()), (var::N_COLOUR, 15)],
     )
     .expect("a gap mode");
     assert_eq!(gap.rows(), 25, "rows of ten lines");

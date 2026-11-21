@@ -6,6 +6,7 @@
 use tairix_riscos_arm::psr;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
 use tairix_riscos_kernel::output::workspace;
+use tairix_vdu::mode::vdu_var;
 
 use crate::mode::Format;
 use crate::select::{self, Outcome, Spec};
@@ -70,8 +71,8 @@ impl Vdu {
             170 => format.cell().space_y,
             171 => os.vector_base() + workspace::FOREGROUND,
             172 => 0,
-            256 => t.window.right - t.window.left,
-            257 => t.window.bottom - t.window.top,
+            vdu_var::WINDOW_WIDTH => t.window.right - t.window.left,
+            vdu_var::WINDOW_HEIGHT => t.window.bottom - t.window.top,
             _ => return None,
         })
     }

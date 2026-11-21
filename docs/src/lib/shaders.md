@@ -1,6 +1,6 @@
 # `tairix-shaders` — the pinned shader set
 
-The desktop's passes as GPU programs (`plans/GPU.md` GD6,
+The desktop's passes as GPU programs (`plans/GPU.md` GD6 and GP4,
 `plans/SHADER.md` SH3). Each module is written in Rust through
 [`lib/spirv`](./spirv.md)'s builder, which answers a module only once the
 validator admits it, and committed under `lib/shaders/spv/` as the SPIR-V the
@@ -19,6 +19,15 @@ is a change to its committed bytes.
 | `copy` | Copies a rectangle between surfaces | the rows it moves |
 | `fill` | Fills a rectangle with one pixel | the rows it lays |
 | `encode` | Writes pixels in a display's byte order | `ChannelOrder::encode_run` |
+| `resample` | Filters a window of a picture drawn at another size through its plan's taps, or copies it where the plan only copies | `Surface::resample_window_into` |
+| `body` | Lays one window over a rectangle of the frame: its client's pixels within their drawn extent, the plate past them, its furniture, the client's rounded cut and its opacity | `Body` laid through `Pixel::laid_over` |
+| `shadow` | Lays the drop shadow one caster casts at either level, or crossfaded while it eases between them | `shadow_row`'s `blend_into` |
+| `plate` | Lays a rounded rectangle over a surface, or replacing what it covers | `Surface::fill_round_rect`, `Surface::set_round_rect` |
+| `wash` | Washes a colour ramped down a rectangle's rows over it, at a weight a pixel from up to two planes | `Surface::fill_vertical_gradient`, `Surface::wash_region`, `Surface::wash_polygon_subpixel` |
+| `ring` | Washes a ring solid or lit by the key light, or lays it as a plate's rim | `Surface::wash_ring`, `Surface::frame_ring` |
+| `coverage` | Writes a scan-converted shape's alpha a pixel to a plane, from the converter's pieces of each row | `CoverageRows::row` |
+| `mask` | Lays an ink through a plane of coverage, at nearest | `cover_span`, `Surface::blit_tinted`, `Surface::fill_polygon_subpixel` and `fill_polygon` (with `coverage`), `Surface::stroke_polyline` (each of `stroke_quads` in turn) |
+| `picture` | Lays a picture cut to a rounded rectangle, or toned toward grey and weakened | `Surface::blit_rounded`, `Surface::blit_desaturated` |
 
 Every pass is a compute entry point `main` over workgroups `GROUP` (8)
 invocations square, one a pixel or cell; `groups(width, height)` covers a
@@ -27,6 +36,29 @@ byte, as `tairix_raster::Pixel` lies in memory — and its push constants are
 its `Push`'s `WORDS` words. An invocation outside the extent its push names
 reads and writes nothing. The modules are SPIR-V 1.3, the Vulkan 1.1
 baseline, so every backend takes them unchanged.
+
+The chrome passes and the resample are described in storage buffers of
+words the CPU fills: a window's `body::Layout`, more than portable push
+constants hold; the shadow's `shadow::Tables`, both levels' kernels and notch
+tiles as `lib/raster`'s `DropShadow`s build them, laid out once for as long
+as the theme and scale stand, with each caster's geometry and its levels'
+places in the pass's push (`Tables::push`); and a `ResamplePlan`'s `taps`,
+whose plans take 128-bit arithmetic and so are made on the CPU. Every pass computes in 32-bit integers, so every backend runs it
+unchanged; a description that would carry it past a word — a corner radius
+past `MAX_PASS_RADIUS`, a caster's edge past `MAX_PASS_COORDINATE` of the
+origin, an extent past `MAX_DRAWING_EXTENT`, a run of pixels past
+`MAX_SURFACE_PIXELS` — is refused (`Refused`), never wrapped. A source pixel
+whose alpha is nought lays nothing, whatever colour it carries, as in the
+compositor's every row.
+
+The furniture painter's passes (`paint`) each lay over a rectangle of a
+surface within the shape they paint, described in their push by
+`plate::Plate`, `wash::Wash`, `ring::Placed`, `mask::Mask` and
+`picture::Picture`, and a shape's coverage by `coverage::Shape`, the
+converter's pieces of each row laid out by the CPU, since an edge's crossing
+of a row boundary takes 64-bit products. A plane — a mask, a shape's coverage
+— is one word a pixel, its value in the low byte. A rectangle fill, a plain or
+faded picture and an overwrite are GD6's `fill`, `over` and `copy` already.
 
 The passes are `lib/raster`'s arithmetic to the bit: the tolerance their
 conformance cases state is zero. The ordered dither's biases and the rounding
@@ -55,7 +87,23 @@ bytes in.
   at the edges of a larger surface; the spread placed inside a larger surface
   and nowhere else; the over against `blend_span` at full, partial and no
   factor, dithered and not; copy and fill against the rectangles they lay;
-  the encode against `ChannelOrder::encode_run` in both orders.
+  the encode against `ChannelOrder::encode_run` in both orders; the body over
+  random windows — decorated and plain, cut and square, presented short,
+  translucent, partly off the frame, their clients' pixels premultiplied or
+  not — against `Body`, and at `MAX_PASS_RADIUS` across a cut's arc, at its
+  corners and far past its edges; the shadow over random casters at either
+  level and easing between them, rounded and square, with and without its
+  notch tiles, against `shadow_row`'s rows; the resample reducing, enlarging
+  and copying, a window and the whole, against `resample_window_into`.
+- The furniture painter's passes over random rectangles, partly off the
+  surface: plates over and replacing at radii up to twelve; gradients and
+  masked washes; rings solid, lit and framed, their top and bottom radii
+  apart; shapes of several contours, self-crossing, under both fill rules,
+  covered against `CoverageRows::row`, and laid as fills, strokes (each quad
+  in turn) and design-grid fills, and washed through a mask; tinted masks and
+  pictures rounded and toned, partly off the surface, against the `Surface`
+  calls each is.
+- Each description is refused just past each bound and taken at it.
 
 ## Stability
 

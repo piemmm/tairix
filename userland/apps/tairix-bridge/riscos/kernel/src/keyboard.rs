@@ -67,8 +67,6 @@ const EXTENSION_2: u32 = 15;
 /// `OS_Byte` 247's field Break's modifiers choose, and its actions.
 const BREAK_ESCAPES: u8 = 1;
 const BREAK_RESETS: u8 = 0;
-/// `Service_PreReset`.
-const PRE_RESET: u32 = 0x45;
 /// What a scan that finds no key leaves in R2, as RISC OS 5's does.
 const SCAN_MISSED: u32 = 0x2000_0000;
 
@@ -684,7 +682,7 @@ impl Os<'_> {
             }
             (BREAK_RESETS, false) => {
                 let mut regs = Regs::default();
-                regs.r[1] = PRE_RESET;
+                regs.r[1] = crate::service::PRE_RESET;
                 self.service(&mut regs)?;
                 return Err(Unwind::Ended(crate::os::Ended::Reset {
                     hard: ctrl,

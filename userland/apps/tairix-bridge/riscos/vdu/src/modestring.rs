@@ -9,7 +9,9 @@
 
 use alloc::string::String;
 
-use crate::mode::{flag, var, Format};
+use tairix_vdu::mode::Flags;
+
+use crate::mode::{var, Format};
 use crate::select::Selector;
 
 /// What each colours attribute gives: its depth, its highest colour and its
@@ -19,28 +21,41 @@ const COLOURS: [(&[u8], u32, u32, u32); 12] = [
     (b"4", 1, 3, 0),
     (b"16", 2, 15, 0),
     (b"64", 3, 63, 0),
-    (b"256", 3, 255, flag::FULL_PALETTE),
+    (b"256", 3, 255, Flags::FULL_PALETTE.bits()),
     (b"4K", 4, 0xFFF, 0),
     (b"4T", 4, 0xFFF, 0),
     (b"32K", 4, 0xFFFF, 0),
     (b"32T", 4, 0xFFFF, 0),
-    (b"64K", 4, 0xFFFF, flag::FULL_PALETTE),
-    (b"64T", 4, 0xFFFF, flag::FULL_PALETTE),
+    (b"64K", 4, 0xFFFF, Flags::FULL_PALETTE.bits()),
+    (b"64T", 4, 0xFFFF, Flags::FULL_PALETTE.bits()),
     (b"16M", 5, 0xFFFF_FFFF, 0),
 ];
+/// Whether `ncolour` is a colour format of depth `log2_bpp`: one a colours
+/// attribute names.
+pub(crate) fn is_colour_format(log2_bpp: u32, ncolour: u32) -> bool {
+    COLOURS
+        .iter()
+        .any(|&(_, depth, colours, _)| (depth, colours) == (log2_bpp, ncolour))
+}
+
 /// And each greys attribute.
 const GREYS: [(&[u8], u32, u32, u32); 4] = [
-    (b"2", 0, 1, flag::GREYSCALE),
-    (b"4", 1, 3, flag::GREYSCALE),
-    (b"16", 2, 15, flag::GREYSCALE),
-    (b"256", 3, 255, flag::GREYSCALE | flag::FULL_PALETTE),
+    (b"2", 0, 1, Flags::GREYSCALE.bits()),
+    (b"4", 1, 3, Flags::GREYSCALE.bits()),
+    (b"16", 2, 15, Flags::GREYSCALE.bits()),
+    (
+        b"256",
+        3,
+        255,
+        Flags::GREYSCALE.bits() | Flags::FULL_PALETTE.bits(),
+    ),
 ];
 /// Each pixel layout's flags.
 const LAYOUTS: [(&[u8], u32); 4] = [
     (b"TBGR", 0),
-    (b"TRGB", flag::RGB),
-    (b"ABGR", flag::ALPHA),
-    (b"ARGB", flag::ALPHA | flag::RGB),
+    (b"TRGB", Flags::RGB.bits()),
+    (b"ABGR", Flags::ALPHA.bits()),
+    (b"ARGB", Flags::ALPHA.bits() | Flags::RGB.bits()),
 ];
 
 /// What the attributes have said.
@@ -123,25 +138,27 @@ pub(crate) fn parse(text: &[u8]) -> Option<Selector> {
 /// The selector what was said makes.
 fn build(said: &Said) -> Option<Selector> {
     let base = said.base;
-    let width = said
-        .x
-        .or_else(|| base.map(|b| b.width() << (b.log2_bpc() - b.log2_bpp())))?;
+    let width = said.x.or_else(|| base.map(|b| b.shown_width()))?;
     let height = said.y.or_else(|| base.map(|b| b.height()))?;
     let (log2_bpp, ncolour, mut flags) = match (said.colours, said.teletext) {
         (Some(colours), None) => colours,
-        (None, Some((depth, ncolour))) => (depth, ncolour, flag::TELETEXT | flag::GAP),
+        (None, Some((depth, ncolour))) => {
+            (depth, ncolour, Flags::TELETEXT.bits() | Flags::GAP.bits())
+        }
         _ => {
             let b = base?;
             (
                 b.log2_bpp(),
                 b.ncolour(),
-                b.flags() & (flag::FULL_PALETTE | flag::GREYSCALE),
+                b.flags() & (Flags::FULL_PALETTE.bits() | Flags::GREYSCALE.bits()),
             )
         }
     };
     if let Some(layout) = said.layout {
         let spare = match (log2_bpp, ncolour) {
-            (4, 0xFFF | 0xFFFF) => flags & flag::FULL_PALETTE == 0 || layout & flag::ALPHA == 0,
+            (4, 0xFFF | 0xFFFF) => {
+                flags & Flags::FULL_PALETTE.bits() == 0 || layout & Flags::ALPHA.bits() == 0
+            }
             (5, _) => true,
             _ => layout == 0,
         };
@@ -185,18 +202,18 @@ pub(crate) fn write(selector: &Selector) -> Option<String> {
     let flags = find(var::MODE_FLAGS).unwrap_or(0);
     let ncolour = find(var::N_COLOUR);
     let depth = selector.log2_bpp;
-    let colours = if flags & flag::TELETEXT != 0 {
+    let colours = if flags & Flags::TELETEXT.bits() != 0 {
         COLOURS
             .iter()
             .find(|(_, d, n, _)| *d == depth && Some(*n) == ncolour)
             .map(|(name, ..)| ('T', *name))
-    } else if flags & flag::GREYSCALE != 0 {
+    } else if flags & Flags::GREYSCALE.bits() != 0 {
         GREYS
             .iter()
             .find(|(_, d, ..)| *d == depth)
             .map(|(name, ..)| ('G', *name))
     } else {
-        let full = flags & flag::FULL_PALETTE;
+        let full = flags & Flags::FULL_PALETTE.bits();
         COLOURS
             .iter()
             .find(|(_, d, n, f)| *d == depth && ncolour.is_none_or(|nc| nc == *n) && *f == full)
@@ -205,7 +222,7 @@ pub(crate) fn write(selector: &Selector) -> Option<String> {
     };
     let layout = LAYOUTS
         .iter()
-        .find(|(_, f)| *f != 0 && flags & (flag::RGB | flag::ALPHA) == *f)
+        .find(|(_, f)| *f != 0 && flags & (Flags::RGB.bits() | Flags::ALPHA.bits()) == *f)
         .map(|(name, _)| *name);
     let text = |name: &'static [u8]| core::str::from_utf8(name).unwrap_or_default();
     tairix_util::fallible::written(|out| {

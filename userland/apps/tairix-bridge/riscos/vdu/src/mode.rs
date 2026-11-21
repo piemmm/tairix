@@ -2,57 +2,14 @@
 //! made from a numbered mode, a mode selector or a sprite mode word, with the
 //! mode variables `OS_ReadModeVariable` reads from it.
 
-use tairix_vdu::mode::Mode;
+use tairix_vdu::mode::{Flags, Mode};
 
 use crate::teletext::{MOST_COLUMNS, MOST_ROWS};
 
 /// The most pixels across or down a screen named by a selector.
 const MOST_PIXELS: u32 = 0x4000;
 
-/// `ModeFlags`' bits beyond those `lib/vdu` names: the pixel layout the
-/// direct-colour formats take.
-pub(crate) mod flag {
-    /// Not a graphics mode.
-    pub(crate) const NON_GRAPHIC: u32 = 1;
-    /// Teletext.
-    pub(crate) const TELETEXT: u32 = 1 << 1;
-    /// Gaps between character rows.
-    pub(crate) const GAP: u32 = 1 << 2;
-    /// A BBC gap mode.
-    pub(crate) const BBC_GAP: u32 = 1 << 3;
-    /// Characters twice as tall.
-    pub(crate) const DOUBLE_VERTICAL: u32 = 1 << 5;
-    /// The 256-colour mode's palette is whole rather than in groups.
-    pub(crate) const FULL_PALETTE: u32 = 1 << 7;
-    /// The default palette is greys: a mode the current screen is in reads
-    /// it, never the table.
-    pub(crate) const GREYSCALE: u32 = 1 << 9;
-    /// Red and blue swapped in a direct-colour pixel.
-    pub(crate) const RGB: u32 = 1 << 14;
-    /// Alpha rather than unused in a direct-colour pixel's top bits.
-    pub(crate) const ALPHA: u32 = 1 << 15;
-}
-
-/// The mode variables there are: 0 to 13.
-pub(crate) const VARIABLES: u32 = 14;
-
-/// The variables' numbers.
-pub(crate) mod var {
-    pub(crate) const MODE_FLAGS: u32 = 0;
-    pub(crate) const SCR_R_COL: u32 = 1;
-    pub(crate) const SCR_B_ROW: u32 = 2;
-    pub(crate) const N_COLOUR: u32 = 3;
-    pub(crate) const X_EIG: u32 = 4;
-    pub(crate) const Y_EIG: u32 = 5;
-    pub(crate) const LINE_LENGTH: u32 = 6;
-    pub(crate) const SCREEN_SIZE: u32 = 7;
-    pub(crate) const Y_SHIFT: u32 = 8;
-    pub(crate) const LOG2_BPP: u32 = 9;
-    pub(crate) const LOG2_BPC: u32 = 10;
-    pub(crate) const X_WIND_LIMIT: u32 = 11;
-    pub(crate) const Y_WIND_LIMIT: u32 = 12;
-    pub(crate) const MIN_SCREEN_BANKS: u32 = 13;
-}
+pub(crate) use tairix_vdu::mode::{var, VARIABLES};
 
 /// A mode's variables, as `OS_ReadModeVariable` reads them for a mode named
 /// by number, selector or sprite mode word.
@@ -67,7 +24,7 @@ impl Format {
     pub(crate) const fn numbered(mode: &Mode) -> Self {
         Self {
             vars: [
-                mode.flags.bits() as u32,
+                mode.flags.bits(),
                 mode.columns as u32 - 1,
                 mode.rows as u32 - 1,
                 mode.ncolour as u32,
@@ -99,7 +56,11 @@ impl Format {
             return None;
         }
         let ncolour = default_ncolour(log2_bpp);
-        let flags = if log2_bpp == 3 { flag::FULL_PALETTE } else { 0 };
+        let flags = if log2_bpp == 3 {
+            Flags::FULL_PALETTE.bits()
+        } else {
+            0
+        };
         let y_eig = if height >= width / 2 { 1 } else { 2 };
         let line_length = (width << log2_bpp).div_ceil(8);
         let mut format = Self {
@@ -167,16 +128,13 @@ impl Format {
         let lines_fit = pixels_fit
             && self.line_length() >= (width << bpc).div_ceil(8)
             && self.line_length() <= (MOST_PIXELS << 5) / 8;
-        let colours = matches!(
-            (bpp, self.ncolour()),
-            (0, 1) | (1, 3) | (2, 15) | (3, 63 | 255) | (4, 0xFFF | 0xFFFF) | (5, 0xFFFF_FFFF)
-        );
+        let colours = crate::modestring::is_colour_format(bpp, self.ncolour());
         let cell = self.cell();
         let (columns, rows) = (
             self.vars[var::SCR_R_COL as usize],
             self.vars[var::SCR_B_ROW as usize],
         );
-        let text_fits = if self.has(flag::TELETEXT) {
+        let text_fits = if self.has(Flags::TELETEXT) {
             bpp == 2 && bpc == 2 && (columns as usize) < MOST_COLUMNS && (rows as usize) < MOST_ROWS
         } else {
             u64::from(columns) < u64::from(width / cell.size_x)
@@ -202,10 +160,7 @@ impl Format {
         };
         Some(SpriteFormat {
             log2_bpp,
-            ncolour: match log2_bpp {
-                3 => 255,
-                other => default_ncolour(other),
-            },
+            ncolour: default_ncolour(log2_bpp),
             x_eig: eig((word >> 1) & 0x1FFF)?,
             y_eig: eig((word >> 14) & 0x1FFF)?,
         })
@@ -261,25 +216,41 @@ impl Format {
         self.vars[var::X_WIND_LIMIT as usize] + 1
     }
 
+    /// How many pixels the screen shows for each one stored: its character
+    /// pixel's bits over its pixel's.
+    pub(crate) const fn doubling(&self) -> u32 {
+        1 << (self.log2_bpc() - self.log2_bpp())
+    }
+
+    /// Pixels across as the screen shows them.
+    pub(crate) const fn shown_width(&self) -> u32 {
+        self.width() * self.doubling()
+    }
+
+    /// The bits of a pixel value the mode keeps.
+    pub(crate) const fn pixel_mask(&self) -> u32 {
+        crate::canvas::mask_between(0, 1 << self.log2_bpp())
+    }
+
     /// Pixels down.
     pub(crate) const fn height(&self) -> u32 {
         self.vars[var::Y_WIND_LIMIT as usize] + 1
     }
 
-    pub(crate) const fn has(&self, bits: u32) -> bool {
-        self.flags() & bits != 0
+    pub(crate) const fn has(&self, flags: Flags) -> bool {
+        Flags::new(self.flags()).has(flags)
     }
 
     /// Whether it has pixels to draw.
     pub(crate) const fn graphic(&self) -> bool {
-        !self.has(flag::NON_GRAPHIC)
+        !self.has(Flags::NON_GRAPHIC)
     }
 
     /// The bytes the screen takes: the lines it shows, twice over for
     /// Teletext, whose flashing alternates two frames.
     pub(crate) const fn screen_bytes(&self) -> u32 {
         let frame = self.line_length() * self.height();
-        if self.has(flag::TELETEXT) {
+        if self.has(Flags::TELETEXT) {
             2 * frame
         } else {
             frame
@@ -290,7 +261,7 @@ impl Format {
     /// the default palette is black and white.
     pub(crate) const fn current_flags(&self) -> u32 {
         if self.ncolour() == 1 {
-            self.flags() | flag::GREYSCALE
+            self.flags() | Flags::GREYSCALE.bits()
         } else {
             self.flags()
         }
@@ -310,16 +281,16 @@ impl Format {
     /// row of text takes, its gap below the glyph included. A Teletext cell
     /// is always sixteen by twenty, its glyph's twenty half-dot lines.
     pub(crate) const fn cell(&self) -> Cell {
-        if self.has(flag::TELETEXT) {
+        if self.has(Flags::TELETEXT) {
             return Cell {
-                size_x: 16,
+                size_x: crate::teletext::CELL_WIDTH,
                 size_y: 16,
-                space_y: 20,
+                space_y: crate::teletext::CELL_HEIGHT,
             };
         }
-        let double = self.has(flag::DOUBLE_VERTICAL);
+        let double = self.has(Flags::DOUBLE_VERTICAL);
         let size_y = if double { 16 } else { 8 };
-        let gap = match (self.has(flag::GAP), double) {
+        let gap = match (self.has(Flags::GAP), double) {
             (false, _) => 0,
             (true, false) => 2,
             (true, true) => 4,

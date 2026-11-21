@@ -17,18 +17,15 @@ use tairix_inline::ArrayVec;
 use tairix_unicode::{normalize, Form};
 
 use crate::byte::var;
-use crate::international::{
-    self, reason, ALPHABET_BYTE, READ_ALPHABET, READ_KEYBOARD, SET_KEYBOARD, UTF8,
-};
+use crate::international::{ALPHABET_BYTE, READ_KEYBOARD, SET_KEYBOARD, UTF8};
 use crate::keyboard::{status, KEY_HANDLER, NO_KEYBOARD};
 use crate::memory::Bits;
 use crate::module::{Builtin, Services};
 use crate::os::{len32, Entry, Fail, Os, Regs, Unwind};
+use crate::service::{self, international as reason};
 use crate::swi::{os, X};
 use layouts::{Layout, FALLBACK, LAYOUTS};
 
-/// `Service_Reset`.
-const RESET: u32 = 0x27;
 /// The keyboards whose keys it knows: an Archimedes', a PC's, an RCMM's,
 /// and none yet, which numbers its keys as they do.
 const KEYBOARDS: [u8; 4] = [1, 2, 3, NO_KEYBOARD];
@@ -281,7 +278,7 @@ pub(crate) static INTERNATIONAL_KEYBOARD: Builtin = Builtin {
     bridge: false,
     swis: None,
     services: Some(Services {
-        numbers: &[RESET, international::SERVICE, KEY_HANDLER],
+        numbers: &[service::RESET, service::INTERNATIONAL, KEY_HANDLER],
         handler: service,
     }),
     commands: &[],
@@ -605,7 +602,7 @@ impl Os<'_> {
             return Ok(true);
         }
         let code = u32::from(c);
-        let alphabet = self.os_byte(ALPHABET_BYTE, READ_ALPHABET)?;
+        let alphabet = self.read_alphabet()?;
         if alphabet == UTF8 {
             let mut utf8 = [0; 4];
             let bytes = c.encode_utf8(&mut utf8).as_bytes();
@@ -618,7 +615,7 @@ impl Os<'_> {
             return Ok(true);
         }
         let mut ask = Regs::default();
-        ask.r[1..4].copy_from_slice(&[international::SERVICE, reason::UCS_TABLE, alphabet]);
+        ask.r[1..4].copy_from_slice(&[service::INTERNATIONAL, reason::UCS_TABLE, alphabet]);
         self.service(&mut ask)?;
         let found = if ask.r[1] == 0 {
             let table = ask.r[4];
@@ -686,7 +683,7 @@ impl Os<'_> {
                 None => Ok(()),
             };
         }
-        if self.os_byte(ALPHABET_BYTE, READ_ALPHABET)? == UTF8 {
+        if self.read_alphabet()? == UTF8 {
             if let Some(c) = char::from_u32(entry.value & 0x7FFF_FFFF) {
                 self.encode_key(c, out)?;
             }
@@ -867,8 +864,8 @@ fn finalise(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
 
 fn service(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Unwind> {
     let set_up = match regs.r[1] {
-        RESET | KEY_HANDLER => true,
-        international::SERVICE => regs.r[2] == reason::KEYBOARD,
+        service::RESET | KEY_HANDLER => true,
+        service::INTERNATIONAL => regs.r[2] == reason::KEYBOARD,
         _ => false,
     };
     if !set_up {

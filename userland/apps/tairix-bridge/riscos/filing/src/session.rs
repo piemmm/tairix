@@ -16,25 +16,21 @@ use core::cell::{Cell, RefCell};
 use tairix_fscopy::fixture::{Handle, Tree};
 use tairix_fscopy::tree::Roots;
 use tairix_riscos_kernel::input::InputEvent;
-use tairix_riscos_kernel::memory::layout::RISC_OS_5;
+use tairix_riscos_kernel::memory::layout::{APPLICATION, RISC_OS_5};
 use tairix_riscos_kernel::memory::policy::Ceiling;
 use tairix_riscos_kernel::memory::Bits;
 use tairix_riscos_kernel::module::Builtin;
 use tairix_riscos_kernel::os::{
-    Config, Ending, Fail, Host, Kernel, Os, Outcome, Pulse, Regs, Wait,
+    Config, Ending, Fail, Host, Kernel, Os, Outcome, Pulse, Regs, Wait, MILLENNIUM,
 };
 use tairix_riscos_kernel::output::VduDrivers;
-use tairix_riscos_kernel::swi::os::{CHANGE_ENVIRONMENT, CLI, FIND};
+use tairix_riscos_kernel::swi::os::{CHANGE_ENVIRONMENT, CHANGE_REDIRECTION, CLI, FIND};
 use tairix_riscos_kernel::swi::X;
 
 use crate::hostfs::server::{Given, Server};
 
 /// The folder of a test's tree that HostFS serves as `$`.
 pub const DISC: &str = "/disc";
-/// 1 January 2000, in centiseconds since 1900.
-const MILLENNIUM: u64 = 3_155_673_600 * 100;
-/// `OS_ChangeRedirection`.
-const CHANGE_REDIRECTION: u32 = 0x5E;
 
 /// A host whose clock moves on as the guest waits, whose keyboard types the
 /// keys a test gives, which stops a wait with nothing left to type, and
@@ -152,16 +148,23 @@ pub fn session(setup: &Setup<'_>) -> Session {
         log: &tairix_log::DiscardSink,
     };
     let mut kernel = Kernel::new(config).expect("a kernel");
+    application_slot(&mut kernel, setup.bytes);
+    Session { kernel, clock }
+}
+
+/// An application slot of `bytes` made current in `kernel`, the memory
+/// limit at its end, as the front end gives a program one.
+pub fn application_slot(kernel: &mut Kernel, bytes: u32) {
     let memory = kernel.memory();
     let slot = memory.create_slot(Bits::Bit32).expect("a slot");
-    memory.set_slot_size(slot, setup.bytes).expect("its memory");
+    memory.set_slot_size(slot, bytes).expect("its memory");
     memory.switch_slot(slot).expect("made current");
-    let mut os = kernel.os();
     let mut regs = Regs::default();
-    regs.r[..2].copy_from_slice(&[0, 0x8000 + setup.bytes]);
-    os.perform(X | CHANGE_ENVIRONMENT, &mut regs)
+    regs.r[..2].copy_from_slice(&[0, APPLICATION + bytes]);
+    kernel
+        .os()
+        .perform(X | CHANGE_ENVIRONMENT, &mut regs)
         .expect("its limit");
-    Session { kernel, clock }
 }
 
 /// `line` run as a command: the transfer to an application it started.
@@ -199,4 +202,15 @@ pub fn disc_file(tree: &Tree, name: &str) -> Option<Vec<u8>> {
         .into_iter()
         .find(|host| host.split(',').next() == Some(name))?;
     tree.bytes(&format!("{DISC}/{host}"))
+}
+
+/// The filing system's modules, then each of `others`' in turn: what a
+/// session of a crate above the filing system starts with.
+#[must_use]
+pub fn modules_with(others: &[&[&'static Builtin]]) -> Vec<&'static Builtin> {
+    let mut modules = crate::MODULES.to_vec();
+    for more in others {
+        modules.extend(more.iter().copied());
+    }
+    modules
 }

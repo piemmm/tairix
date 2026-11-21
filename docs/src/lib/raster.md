@@ -7,13 +7,16 @@ integer coverage or with `f64` set up once and evaluated in a fixed order, so a
 picture is the same bits on every target. Its README is the inventory of every
 call; this page is what the parts are for and the rules they share.
 
-## Three families
+## The families
 
 - **Coverage fills** — `Surface::fill_contours`, `fill_polygon`,
   `fill_polygon_subpixel` and the shapes in `shape` are one scan converter in
   `scan`. A pixel's alpha is the exact fraction of its area a shape covers,
   accumulated per row from each edge's signed extent; there is no sample grid
-  to quantise an edge.
+  to quantise an edge. `CoverageRows::pieces` hands a device the converter's
+  own pieces of a row, through the one clip its row walk takes, and
+  `stroke_quads` a stroke's quads, so the pinned `coverage` pass covers a
+  shape exactly as the CPU does.
 - **Compositing** — premultiplied `Pixel`s, the Porter–Duff `over`, and the
   span operations (`blend_span`, `mix_span`, `cover_span`) a compositor's blits
   and a fill's rows are built from, plus the one resampler and the one
@@ -29,6 +32,16 @@ call; this page is what the parts are for and the rules they share.
   level of its `Pyramid` — the picture at every halving — that sets no more
   than two of its pixels across a destination pixel, so a picture drawn far
   smaller is averaged rather than aliased.
+- **The compositor's rules** — what a window lays at a pixel (`Body`, laid
+  through `Pixel::laid_over`, which leaves a pixel as it was under a source
+  whose alpha is nought, alone or in a span), the rounded rectangle a window
+  is cut to (`RoundRect`, over `round_rect_coverage`'s grid of
+  `ROUND_RECT_SUBSAMPLES` a side), and the drop shadow beneath it
+  (`drop_shadow`: a silhouette dropped by its reach and softened by a biweight
+  kernel, exact by linearity — a `DropShadow` for each level, and
+  `shadow_row` casting a `Caster`'s at one level or crossfading the two).
+  `ResamplePlan` hands a device the taps the resampler filters a window with.
+  The pinned chrome passes (`lib/shaders`) are held to each bit for bit.
 - **The frame scaler** — `SharpScaler` enlarges an opaque picture that changes
   every frame, an emulated screen, into a rectangle with its pixels kept
   square: each source pixel a block of whole output pixels, blended only across

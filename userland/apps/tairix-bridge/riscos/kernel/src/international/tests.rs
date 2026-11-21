@@ -4,9 +4,10 @@
 
 use alloc::vec::Vec;
 
-use super::{reason, SERVICE};
+use super::reason;
 use crate::cli::tests::{cli, refused, session, written};
 use crate::msgtrans::tests::swi;
+use crate::service::INTERNATIONAL;
 use crate::testkit::{Session, DATA};
 
 const NAME: u32 = DATA + 0x700;
@@ -17,7 +18,7 @@ fn ask(s: &mut Session, reason: u32, r3: u32, r4: u32, r5: u32) -> Option<(u32, 
     let regs = swi(
         s,
         0x30,
-        [0, SERVICE, reason, r3, r4, r5, 0, 0, 0, 0, 0, 0, 0],
+        [0, INTERNATIONAL, reason, r3, r4, r5, 0, 0, 0, 0, 0, 0, 0],
     )
     .expect("issued");
     (regs.r[1] == 0).then_some((regs.r[4], regs.r[5]))

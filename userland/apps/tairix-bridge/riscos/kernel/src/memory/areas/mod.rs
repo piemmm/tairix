@@ -124,6 +124,22 @@ pub const fn access_privilege(number: u32) -> Option<Access> {
     }
 }
 
+/// The reasons a dynamic area's [`Handler`] is called with, in R0.
+pub mod handler_reason {
+    /// The area is to grow.
+    pub const PRE_GROW: u32 = 0;
+    /// The area has grown.
+    pub const POST_GROW: u32 = 1;
+    /// The area is to shrink.
+    pub const PRE_SHRINK: u32 = 2;
+    /// The area has shrunk.
+    pub const POST_SHRINK: u32 = 3;
+    /// How far the area could shrink.
+    pub const TEST_SHRINK: u32 = 4;
+    /// A physical-memory-pool area's pages to be resized.
+    pub const RESIZE_PMP: u32 = 6;
+}
+
 /// A dynamic area's handler: its code and the workspace it is given.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Handler {

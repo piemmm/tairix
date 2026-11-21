@@ -203,7 +203,7 @@ impl Os<'_> {
             }
         }
         let mut regs = Regs::default();
-        regs.r[1] = POST_INIT;
+        regs.r[1] = crate::service::POST_INIT;
         self.service(&mut regs).map_err(|_| BootError::NoMemory)?;
         Ok(())
     }
@@ -345,6 +345,3 @@ impl Os<'_> {
         Ok(())
     }
 }
-
-/// `Service_PostInit`, once every ROM module has started.
-const POST_INIT: u32 = 0x73;

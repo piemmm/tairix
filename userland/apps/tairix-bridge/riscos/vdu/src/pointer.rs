@@ -103,10 +103,7 @@ pub(crate) fn word_21(os: &mut Os<'_>, reason: u8, block: u32) -> Result<(), Fai
             })
         }
         5 => {
-            let mut bytes = [0; 4];
-            os.read_bytes(block + 1, &mut bytes)?;
-            let x = i32::from(i16::from_le_bytes([bytes[0], bytes[1]]));
-            let y = i32::from(i16::from_le_bytes([bytes[2], bytes[3]]));
+            let (x, y) = os.read_coordinates(block.wrapping_add(1))?;
             with(os, |vdu, _| {
                 let origin = vdu.graphics.origin;
                 vdu.pointer.position = (x + origin.0, y + origin.1);
@@ -118,10 +115,7 @@ pub(crate) fn word_21(os: &mut Os<'_>, reason: u8, block: u32) -> Result<(), Fai
                 let (x, y) = vdu.pointer.at(os);
                 Ok((x - vdu.graphics.origin.0, y - vdu.graphics.origin.1))
             })?;
-            let mut bytes = [0; 4];
-            bytes[..2].copy_from_slice(&x.to_le_bytes()[..2]);
-            bytes[2..].copy_from_slice(&y.to_le_bytes()[..2]);
-            os.write_bytes(block + 1, &bytes)
+            os.write_coordinates(block.wrapping_add(1), (x, y))
         }
         _ => Ok(()),
     }

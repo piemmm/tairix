@@ -16,17 +16,11 @@ use crate::filing::fs::{self as interface, block};
 use crate::module::{Builtin, Command, CommandKind, Help, Resource, Services, Swis};
 use crate::msgtrans::Own;
 use crate::os::{len32, Fail, Os, Regs, Unwind, World};
+use crate::service;
 use crate::swi::{os, X};
 
 use crate::swi::chunk::RESOURCE_FS as CHUNK;
 pub(crate) use crate::swi::resource_fs::{DEREGISTER_FILES, REGISTER_FILES};
-
-/// The services ResourceFS issues.
-const STARTED: u32 = 0x59;
-const DYING: u32 = 0x5A;
-const STARTING: u32 = 0x60;
-/// `Service_TerritoryStarted`: the upper-case table may have changed.
-pub(crate) const TERRITORY_STARTED: u32 = 0x75;
 
 /// ResourceFS's filing system number, and its information word: read-only.
 pub(crate) const FS_NUMBER: u32 = 46;
@@ -98,7 +92,7 @@ pub(crate) static RESOURCE_FS: Builtin = Builtin {
         handler: swi,
     }),
     services: Some(Services {
-        numbers: &[interface::REDECLARE, TERRITORY_STARTED],
+        numbers: &[service::FS_REDECLARE, service::TERRITORY_STARTED],
         handler: service,
     }),
     commands: &[Command {
@@ -638,7 +632,7 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     os.declare()?;
     if let Some(routine) = os.routine_of(&RESOURCE_FS, REGISTER_STARTING) {
         let mut starting = Regs::default();
-        starting.r[1] = STARTING;
+        starting.r[1] = service::RESOURCE_FS_STARTING;
         starting.r[2] = routine;
         starting.r[3] = workspace;
         os.service(&mut starting)?;
@@ -671,7 +665,7 @@ fn finalise(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
         os.world.resource_fs.blocks.remove(0);
     }
     let mut dying = Regs::default();
-    dying.r[1] = DYING;
+    dying.r[1] = service::RESOURCE_FS_DYING;
     os.service(&mut dying)?;
     os.world.resource_fs.workspace = None;
     Ok(())
@@ -697,8 +691,8 @@ fn swi(os: &mut Os<'_>, offset: u32, regs: &mut Regs) -> Result<(), Fail> {
 
 fn service(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Unwind> {
     match regs.r[1] {
-        TERRITORY_STARTED => os.read_upper_case(),
-        interface::REDECLARE => match os.declare() {
+        service::TERRITORY_STARTED => os.read_upper_case(),
+        service::FS_REDECLARE => match os.declare() {
             Ok(()) | Err(Fail::Error(_)) => Ok(()),
             Err(Fail::Unwind(unwind)) => Err(unwind),
         },
@@ -716,7 +710,7 @@ fn register_starting(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 fn started(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     os.world.resource_fs.started_pending = false;
     let mut regs = Regs::default();
-    regs.r[1] = STARTED;
+    regs.r[1] = service::RESOURCE_FS_STARTED;
     os.service(&mut regs)?;
     Ok(())
 }

@@ -14,8 +14,12 @@
 //! plain `cargo test` and `cargo xtask fuzz --soak` extends it to a
 //! wall-clock budget.
 
+mod common;
+
+use common::{answers, drivers};
 use tairix_fuzzseed::Prng;
-use tairix_riscos_filing::session::{session, Session, Setup};
+use tairix_riscos_filing::session::Session;
+use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::os::{Fail, Regs, Unwind};
 use tairix_riscos_kernel::swi::os::{
     BYTE, CHANGED_BOX, CHECK_MODE_VALID, CLAIM_SCREEN_MEMORY, PLOT, POINTER, READ_MODE_VARIABLE,
@@ -28,9 +32,6 @@ use tairix_riscos_kernel::swi::X;
 const SMOKE_RUNS: u64 = 6;
 /// Calls made in one run.
 const CALLS: usize = 300;
-/// The application slot's bytes, and where it starts.
-const BYTES: u32 = 0x10_0000;
-const APPLICATION: u32 = 0x8000;
 
 /// The SWIs the drivers perform.
 const SWIS: [u32; 15] = [
@@ -61,13 +62,7 @@ const WORDS_ASKED: [u32; 8] = [9, 10, 11, 12, 13, 21, 22, 23];
 /// A session with the drivers and their module, its application space
 /// salted with blocks hostile calls read.
 fn boot(rng: &mut Prng) -> Session {
-    let mut session = session(&Setup {
-        vdu: Some(tairix_riscos_vdu::DRIVERS),
-        modules: &tairix_riscos_vdu::MODULES,
-        bytes: BYTES,
-        keys: b"yyyyyyyyyyyyyyyy",
-        disc: None,
-    });
+    let mut session = drivers(b"yyyyyyyyyyyyyyyy");
     let mut bytes = vec![0u8; 0x4000];
     rng.fill(&mut bytes);
     for chunk in bytes.chunks_mut(64) {
@@ -212,15 +207,7 @@ fn call(session: &mut Session, rng: &mut Prng, bytes: &mut Vec<u8>) {
 
 /// The drivers still answer.
 fn still_answers(session: &mut Session, step: usize) {
-    let mut regs = Regs::new([u32::MAX, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    assert!(
-        session
-            .kernel
-            .os()
-            .perform(X | READ_MODE_VARIABLE, &mut regs)
-            .is_ok(),
-        "OS_ReadModeVariable after step {step}"
-    );
+    assert!(answers(session), "OS_ReadModeVariable after step {step}");
 }
 
 /// The calls fuzzing has found taking the drivers down, each answered now.
@@ -242,13 +229,7 @@ fn the_calls_fuzzing_found_are_answered() {
 #[test]
 fn a_page_s_end_with_nothing_left_to_type_is_stopped() {
     for keys in [&b""[..], b"yyyy"] {
-        let mut session = session(&Setup {
-            vdu: Some(tairix_riscos_vdu::DRIVERS),
-            modules: &tairix_riscos_vdu::MODULES,
-            bytes: BYTES,
-            keys,
-            disc: None,
-        });
+        let mut session = drivers(keys);
         let mut write = |byte: u8| {
             let mut regs = Regs::new([u32::from(byte), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
             session.kernel.os().perform(X | WRITE_C, &mut regs)

@@ -10,9 +10,8 @@ pub mod served;
 use tairix_riscos_kernel::corpus::StillHost;
 use tairix_riscos_kernel::memory::layout::RISC_OS_5;
 use tairix_riscos_kernel::memory::policy::Ceiling;
-use tairix_riscos_kernel::memory::Bits;
 use tairix_riscos_kernel::os::{Config, Fail, Host, Kernel, Os, Outcome, Regs};
-use tairix_riscos_kernel::swi::os::{CHANGE_DYNAMIC_AREA, CHANGE_ENVIRONMENT, CLI, FILE, GET_ENV};
+use tairix_riscos_kernel::swi::os::{CHANGE_DYNAMIC_AREA, CLI, FILE, GET_ENV};
 use tairix_riscos_kernel::swi::X;
 
 /// FileCore's "not found" as RamFS reports it: FileCore's errors beside
@@ -122,18 +121,11 @@ pub fn load(os: &mut Os<'_>, name: &[u8], length: usize) -> Result<Vec<u8>, (u32
 /// A session with a RAM disc and an application slot of `bytes`, as the
 /// front end gives a program one: its memory limit.
 pub fn session(kernel: &mut Kernel, bytes: u32) -> u32 {
-    let memory = kernel.memory();
-    let slot = memory.create_slot(Bits::Bit32).expect("a slot");
-    memory.set_slot_size(slot, bytes).expect("its memory");
-    memory.switch_slot(slot).expect("made current");
+    tairix_riscos_filing::session::application_slot(kernel, bytes);
     let mut os = kernel.os();
     call(&mut os, CHANGE_DYNAMIC_AREA, &[5, 0x4_0000]).expect("a RAM disc");
-    call(&mut os, CHANGE_ENVIRONMENT, &[0, APPLICATION + bytes]).expect("its limit");
     call(&mut os, GET_ENV, &[]).expect("the environment").r[1]
 }
-
-/// Application space's start.
-pub const APPLICATION: u32 = 0x8000;
 
 /// The ARM words of a program that exits at once: `OS_Exit` with no code.
 pub const EXITS: [u8; 16] = [

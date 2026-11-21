@@ -36,7 +36,7 @@ use tairix_util::{fallible, mathf};
 use crate::artwork::{Group, Image, MaskKind, Node, MAX_GROUP_DEPTH};
 use crate::color::{
     blend_solid_span, blend_span, blend_span_mapped, cover_span, dither_tiles, mix, scale8,
-    wash_weighted, Color, Pixel,
+    wash_weighted, Color, Pixel, ROUND_NEAREST,
 };
 use crate::dither::DitherRow;
 use crate::lent::{PixelMemory, Store};
@@ -1449,38 +1449,7 @@ impl Surface {
     /// Fewer than two points is not a line, and a zero or negative weight is
     /// not a stroke; both draw nothing rather than guessing.
     pub fn stroke_polyline(&mut self, points: &[(i32, i32)], weight: i32, color: Color) {
-        if points.len() < 2 || weight <= 0 {
-            return;
-        }
-        let half = weight / 2;
-        for pair in points.windows(2) {
-            let (ax, ay) = pair[0];
-            let (bx, by) = pair[1];
-            let dx = bx.saturating_sub(ax);
-            let dy = by.saturating_sub(ay);
-            // Widened before squaring: the sum of two squared `i32`
-            // components cannot overflow a `u64`, so a segment spanning a
-            // large surface keeps its true length instead of saturating to a
-            // shorter one and over-widening its own stroke.
-            let (mx, my) = (u64::from(dx.unsigned_abs()), u64::from(dy.unsigned_abs()));
-            // Coincident points are no segment, and a zero length has no
-            // perpendicular to offset along.
-            let Some(len) = NonZeroU64::new((mx * mx + my * my).isqrt()) else {
-                continue;
-            };
-            // Perpendicular to (dx, dy) is (-dy, dx), scaled to the half
-            // weight. Rounding, not truncating, is what keeps a hairline at its
-            // full width instead of fading it toward nothing.
-            let ox = -perpendicular(dy, half, len);
-            let oy = perpendicular(dx, half, len);
-            // A vertex at the edge of the coordinate range keeps its quad there
-            // rather than wrapping it across the plane.
-            let quad = [
-                (ax.saturating_add(ox), ay.saturating_add(oy)),
-                (ax.saturating_sub(ox), ay.saturating_sub(oy)),
-                (bx.saturating_sub(ox), by.saturating_sub(oy)),
-                (bx.saturating_add(ox), by.saturating_add(oy)),
-            ];
+        for quad in stroke_quads(points, weight) {
             self.fill_polygon_subpixel(&quad, color);
         }
     }
@@ -1656,7 +1625,7 @@ impl Surface {
                     255
                 };
                 if coverage != 0 {
-                    *dst = pixel.scale_alpha(coverage).over(*dst);
+                    *dst = pixel.laid_over(*dst, coverage, ROUND_NEAREST);
                 }
             }
         });
@@ -2830,6 +2799,46 @@ pub const SUBPIXEL: i32 = 8;
 ///
 /// `len` is the segment's own length, so it is never shorter than either
 /// component and the quotient never exceeds `half`.
+/// The quads [`Surface::stroke_polyline`] fills for the polyline through
+/// `points`, `weight` sub-pixel units wide, one a segment in order: each
+/// offset by half the weight along that segment's own perpendicular, nothing
+/// for coincident points, and none at all for fewer than two points or a
+/// weight that is not positive.
+pub fn stroke_quads(
+    points: &[(i32, i32)],
+    weight: i32,
+) -> impl Iterator<Item = [(i32, i32); 4]> + '_ {
+    let half = weight / 2;
+    let stroked = if weight > 0 { points } else { &[] };
+    stroked.windows(2).filter_map(move |pair| {
+        let (ax, ay) = pair[0];
+        let (bx, by) = pair[1];
+        let dx = bx.saturating_sub(ax);
+        let dy = by.saturating_sub(ay);
+        // Widened before squaring: the sum of two squared `i32` components
+        // cannot overflow a `u64`, so a segment spanning a large surface keeps
+        // its true length instead of saturating to a shorter one and
+        // over-widening its own stroke.
+        let (mx, my) = (u64::from(dx.unsigned_abs()), u64::from(dy.unsigned_abs()));
+        // Coincident points are no segment, and a zero length has no
+        // perpendicular to offset along.
+        let len = NonZeroU64::new((mx * mx + my * my).isqrt())?;
+        // Perpendicular to (dx, dy) is (-dy, dx), scaled to the half weight.
+        // Rounding, not truncating, is what keeps a hairline at its full width
+        // instead of fading it toward nothing.
+        let ox = -perpendicular(dy, half, len);
+        let oy = perpendicular(dx, half, len);
+        // A vertex at the edge of the coordinate range keeps its quad there
+        // rather than wrapping it across the plane.
+        Some([
+            (ax.saturating_add(ox), ay.saturating_add(oy)),
+            (ax.saturating_sub(ox), ay.saturating_sub(oy)),
+            (bx.saturating_sub(ox), by.saturating_sub(oy)),
+            (bx.saturating_add(ox), by.saturating_add(oy)),
+        ])
+    })
+}
+
 fn perpendicular(component: i32, half: i32, len: NonZeroU64) -> i32 {
     let scaled = i64::from(component) * i64::from(half);
     let rounded = (scaled.unsigned_abs() + len.get() / 2) / len.get();

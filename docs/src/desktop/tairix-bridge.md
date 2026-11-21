@@ -580,9 +580,12 @@ it goes to `UKSWIV`. `OS_CallASWI` and `OS_CallASWIR12` perform the SWI they
 carry, its X bit deciding; a chain of them stops after sixteen. Errors are
 written into a ring of sixteen 256-byte buffers in the system heap, so a block
 survives the next few errors. The numbers of the OS SWIs, their reasons and
-flags are one table, `swi::os`, and the built-in modules' SWI chunks another,
-`swi::chunk`, which the kernel, its modules, FileSwitch and their tests all
-read.
+flags are one table, `swi::os`, which the SWI dispatch table is keyed by; the
+built-in modules' SWI chunks are another, `swi::chunk`, and the sound modules'
+SWIs a third, `swi::sound`. The service calls' numbers and reasons are one
+table, `service`, and a dynamic area handler's reasons another,
+`memory::handler_reason`. The kernel, its modules, FileSwitch, BASIC, the VDU
+drivers and their tests all read them.
 
 An error's number is the one genuine RISC OS 5 was recorded giving. A
 condition it was never seen to report — it faults, or does not check — takes
@@ -1252,8 +1255,9 @@ shares with the vectors' defaults are the kernel's.
 - **Its texts.** Messages FileSwitch alone gives are in its own words; the
   numbers are RISC OS 5's.
 
-The SWI numbers, reasons and flags FileSwitch shares with the kernel are the
-kernel's one table, `tairix_riscos_kernel::swi::os`.
+The SWI and service numbers FileSwitch shares with the kernel are the
+kernel's tables, `tairix_riscos_kernel::swi::os` and
+`tairix_riscos_kernel::service`.
 
 ### HostFS
 

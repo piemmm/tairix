@@ -11,10 +11,6 @@ use super::header::Field;
 use super::{ModuleKey, ServiceCode, Shape};
 use crate::os::{Entry, Fail, Os, Regs, Target, Unwind};
 
-const RELEASE_FIQ: u32 = 0x0B;
-const CLAIM_FIQ: u32 = 0x0C;
-const CLAIM_FIQ_IN_BACKGROUND: u32 = 0x47;
-
 /// How a module is offered services.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Handler {
@@ -69,8 +65,10 @@ impl Os<'_> {
     /// them.
     pub fn service(&mut self, regs: &mut Regs) -> Result<(), Unwind> {
         match regs.r[1] {
-            CLAIM_FIQ | CLAIM_FIQ_IN_BACKGROUND => self.claim_fiq(regs),
-            RELEASE_FIQ => self.release_fiq(regs),
+            crate::service::CLAIM_FIQ | crate::service::CLAIM_FIQ_IN_BACKGROUND => {
+                self.claim_fiq(regs)
+            }
+            crate::service::RELEASE_FIQ => self.release_fiq(regs),
             _ => self.issue(regs).map(drop),
         }
     }

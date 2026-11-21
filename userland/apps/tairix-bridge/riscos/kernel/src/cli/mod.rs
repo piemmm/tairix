@@ -38,8 +38,6 @@ const NEST: u32 = 32;
 const BUFFERS: u32 = 16;
 pub(crate) const BUFFER: u32 = 1024;
 
-/// `Service_UKCommand`.
-const UK_COMMAND: u32 = 0x04;
 /// `OS_Byte` 117: the VDU status; VDU 14 and 15: paged mode on and off.
 const VDU_STATUS: u32 = 117;
 const PAGED: u8 = 14;
@@ -283,7 +281,7 @@ impl Os<'_> {
             return result;
         }
         let mut unknown = Regs::default();
-        unknown.r[..2].copy_from_slice(&[at, UK_COMMAND]);
+        unknown.r[..2].copy_from_slice(&[at, crate::service::UK_COMMAND]);
         self.service(&mut unknown)?;
         if unknown.r[1] == 0 {
             return match unknown.r[0] {

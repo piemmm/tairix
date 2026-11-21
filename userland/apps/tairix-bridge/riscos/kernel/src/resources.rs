@@ -11,8 +11,6 @@ use crate::os::{len32, Fail, Os, Regs, Unwind};
 use crate::resourcefs::{DEREGISTER_FILES, REGISTER_FILES};
 use crate::swi::X;
 
-/// `Service_ResourceFSStarting`: R2 the registration to call, R3 its R3.
-const STARTING: u32 = 0x60;
 /// A resource's attributes: readable and writable by its owner.
 const ATTRIBUTES: u32 = 3;
 
@@ -39,7 +37,7 @@ pub(crate) static MESSAGES: Builtin = Builtin {
     bridge: false,
     swis: None,
     services: Some(Services {
-        numbers: &[STARTING],
+        numbers: &[crate::service::RESOURCE_FS_STARTING],
         handler: service,
     }),
     commands: &[],

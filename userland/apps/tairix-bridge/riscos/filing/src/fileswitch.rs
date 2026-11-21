@@ -41,6 +41,7 @@ use alloc::vec::Vec;
 use tairix_riscos_kernel::module::{Builtin, Resource, Services, VectorDefault};
 use tairix_riscos_kernel::msgtrans::{Own, OWN_DESCRIPTOR, REQUEST};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, Unwind, World};
+use tairix_riscos_kernel::service;
 use tairix_riscos_kernel::vectors;
 
 use name::Directories;
@@ -169,14 +170,6 @@ fn own(world: &mut World) -> Option<&mut Own> {
     world.extension::<State>().map(|state| &mut state.own)
 }
 
-/// The services FileSwitch issues and takes.
-mod service {
-    /// `Service_CloseFile`: an object and everything beneath it to be closed.
-    pub(super) const CLOSE_FILE: u32 = 0x68;
-    /// `Service_LookupFileType`, offered a type no variable names.
-    pub(super) const LOOKUP_FILE_TYPE: u32 = 0x42;
-}
-
 /// The variables FileSwitch gives a value where none is set, as RISC OS 5
 /// starts with them: the file type names, the run and load actions of the
 /// types FileSwitch does not run itself, and the options `*Copy`, `*Wipe` and
@@ -261,7 +254,7 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         }
     }
     let mut redeclare = Regs::default();
-    redeclare.r[1] = tairix_riscos_kernel::filing::fs::REDECLARE;
+    redeclare.r[1] = tairix_riscos_kernel::service::FS_REDECLARE;
     os.service(&mut redeclare)?;
     Ok(())
 }

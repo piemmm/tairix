@@ -20,6 +20,7 @@ use crate::error::Error;
 use crate::module::{Builtin, Command, CommandKind, Help, Resource, Services, Swis};
 use crate::msgtrans::Own;
 use crate::os::{len32, Fail, Os, Regs, Unwind, World};
+use crate::service;
 use crate::swi::os::read_unsigned::{BYTE_SIZED, DECIMAL, TERMINATED};
 use crate::swi::{os, X};
 use calendar::Ordinals;
@@ -78,12 +79,6 @@ mod entry {
     pub(super) const COLLATE: usize = of(CHUNK + 0x1D);
     pub(super) const DAYLIGHT_RULES: usize = of(CHUNK + 0x23);
 }
-
-/// The services it takes and gives.
-const UK_CONFIG: u32 = 0x28;
-const POST_INIT: u32 = 0x73;
-const LOADED: u32 = 0x64;
-const STARTED: u32 = 0x75;
 
 /// The CMOS it keeps: the configured territory, the time zone and daylight
 /// saving in force.
@@ -237,7 +232,7 @@ pub(crate) static TERRITORY_MANAGER: Builtin = Builtin {
         handler: swi,
     }),
     services: Some(Services {
-        numbers: &[UK_CONFIG, POST_INIT],
+        numbers: &[service::UK_CONFIG, service::POST_INIT],
         handler: service,
     }),
     commands: &[
@@ -434,7 +429,7 @@ impl Os<'_> {
     /// `Service_TerritoryStarted`.
     fn territory_started(&mut self) -> Result<(), Fail> {
         let mut regs = Regs::default();
-        regs.r[1] = STARTED;
+        regs.r[1] = service::TERRITORY_STARTED;
         self.service(&mut regs)?;
         Ok(())
     }
@@ -616,7 +611,7 @@ fn finalise(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
 
 fn service(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Unwind> {
     let result = match regs.r[1] {
-        UK_CONFIG => match os.configure_zone(regs.r[0]) {
+        service::UK_CONFIG => match os.configure_zone(regs.r[0]) {
             Ok(true) => {
                 regs.r[0] = u32::MAX;
                 regs.r[1] = 0;
@@ -625,7 +620,7 @@ fn service(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Unwind> {
             Ok(false) => Ok(()),
             Err(fail) => Err(fail),
         },
-        POST_INIT => {
+        service::POST_INIT => {
             if os
                 .world
                 .territory
@@ -702,7 +697,7 @@ fn swi(os: &mut Os<'_>, offset: u32, regs: &mut Regs) -> Result<(), Fail> {
 /// register.
 fn loaded(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     let mut regs = Regs::default();
-    regs.r[1] = LOADED;
+    regs.r[1] = service::TERRITORY_MANAGER_LOADED;
     os.service(&mut regs)?;
     Ok(())
 }

@@ -10,20 +10,7 @@ use tairix_riscos_kernel::output::workspace;
 use crate::mode::Format;
 
 /// A box of pixels from the screen's bottom left, inclusive at every edge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Rect {
-    pub(crate) left: i32,
-    pub(crate) bottom: i32,
-    pub(crate) right: i32,
-    pub(crate) top: i32,
-}
-
-impl Rect {
-    /// Whether the pixel `(x, y)` lies within it.
-    pub(crate) const fn holds(&self, (x, y): (i32, i32)) -> bool {
-        x >= self.left && x <= self.right && y >= self.bottom && y <= self.top
-    }
-}
+pub(crate) use tairix_riscos_kernel::mouse::Bounds as Rect;
 
 /// Where the box is.
 const BOX: u32 = HIGH_ZERO_PAGE + workspace::CHANGED_BOX;

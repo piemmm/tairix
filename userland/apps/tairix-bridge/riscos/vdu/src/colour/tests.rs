@@ -23,14 +23,6 @@ fn a_six_bit_colour_and_tint_make_the_vidc1_byte_and_back() {
 }
 
 #[test]
-fn the_eight_bit_default_palette_shares_its_low_bits() {
-    assert_eq!(default_rgb_8(0), [0, 0, 0]);
-    assert_eq!(default_rgb_8(0xFF), [0xFF, 0xFF, 0xFF]);
-    assert_eq!(default_rgb_8(0x10), [0x88, 0, 0], "red's top bit");
-    assert_eq!(default_rgb_8(0x03), [0x33, 0x33, 0x33], "the tint's");
-}
-
-#[test]
 fn a_colour_fills_its_word_as_the_mode_s_pixels() {
     assert_eq!(replicate(&numbered(1), 1), 0x5555_5555);
     assert_eq!(replicate(&numbered(12), 7), 0x7777_7777);

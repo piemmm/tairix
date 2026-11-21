@@ -79,12 +79,7 @@ impl crate::state::Vdu {
         }
         let canvas = self.screen.canvas();
         let pixel = canvas.pixel(os, canvas.row_of(py), px.cast_unsigned())?;
-        let bits = 1u32 << format.log2_bpp();
-        let pixel = if bits >= 32 {
-            pixel
-        } else {
-            pixel & ((1 << bits) - 1)
-        };
+        let pixel = pixel & format.pixel_mask();
         Ok(Some(crate::vars::number_of(&format, pixel)))
     }
 }

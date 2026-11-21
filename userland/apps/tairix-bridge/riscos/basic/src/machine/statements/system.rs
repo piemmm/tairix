@@ -22,8 +22,6 @@ const SYS_REGISTERS: usize = 10;
 /// The flags `SYS`'s SWI is entered with, Z and C, as recorded: what `SYS`'s
 /// `;` variable gives where the SWI changes none.
 const SYS_FLAGS: u32 = tairix_riscos_arm::psr::Z | tairix_riscos_arm::psr::C;
-/// `OS_SWINumberFromString`.
-const SWI_NUMBER_FROM_STRING: u32 = 0x39;
 
 /// What follows a command BASIC runs once it returns.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -553,7 +551,8 @@ impl Machine<'_, '_> {
         self.os.write_byte(at + u32::from(name.len()), 0)?;
         let mut regs = Regs::default();
         regs.r[1] = at;
-        self.os.perform(X | SWI_NUMBER_FROM_STRING, &mut regs)?;
+        self.os
+            .perform(X | swi::SWI_NUMBER_FROM_STRING, &mut regs)?;
         Ok(regs.r[0])
     }
 

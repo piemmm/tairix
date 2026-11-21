@@ -3,7 +3,7 @@
 //! pseudo-variables a statement sets.
 
 use tairix_riscos_kernel::os::Regs;
-use tairix_riscos_kernel::swi::{os as swi, X};
+use tairix_riscos_kernel::swi::{os as swi, sound, X};
 
 use super::super::functions::{string_of, Guest};
 use super::super::lvalue::{Lvalue, Place};
@@ -165,24 +165,10 @@ impl Gathered {
     }
 }
 
-/// `OS_Plot`.
-const PLOT: u32 = 0x45;
 /// `OS_Byte` 19: the next vertical sync waited for.
 const WAIT_FOR_SYNC: u32 = 19;
 /// `OS_Word` 8: an envelope defined.
 const ENVELOPE: u32 = 8;
-/// `Sound_Control`.
-const SOUND_CONTROL: u32 = 0x4_0189;
-/// `Sound_QBeat`.
-const SOUND_QBEAT: u32 = 0x4_0186;
-/// `Sound_QTempo`.
-const SOUND_QTEMPO: u32 = 0x4_0185;
-/// `Sound_Configure`.
-const SOUND_CONFIGURE: u32 = 0x4_0140;
-/// `Sound_Stereo`.
-const SOUND_STEREO: u32 = 0x4_0142;
-/// `OS_ScreenMode`.
-const SCREEN_MODE: u32 = 0x65;
 /// The most VDU bytes one statement gathers: a containment bound, not a
 /// capacity.
 const VDU_MOST: usize = 1024;
@@ -410,7 +396,7 @@ impl Machine<'_, '_> {
         let mut regs = [0; 10];
         regs[..5].copy_from_slice(&[buffer, ws::LINE_ROOM - 1, u32::from(b' '), 0xFF, 0]);
         Ok(Next::Leave(Leave::Swi {
-            number: READ_LINE,
+            number: swi::READ_LINE32,
             regs,
             flags: 0,
         }))
@@ -750,14 +736,14 @@ impl Machine<'_, '_> {
                 let width = a[0].wrapping_sub(1).cast_unsigned();
                 self.os.write_word(ws::WIDTHLOC.at(), width)?;
             }
-            Gathered::Beats => self.sound_swi(SOUND_QBEAT, &[a[0]])?,
-            Gathered::Tempo => self.sound_swi(SOUND_QTEMPO, &[a[0]])?,
-            Gathered::Voices => self.sound_swi(SOUND_CONFIGURE, &[a[0], 0, 0, 0, 0])?,
-            Gathered::Stereo => self.sound_swi(SOUND_STEREO, &[a[0], a[1]])?,
+            Gathered::Beats => self.sound_swi(sound::Q_BEAT, &[a[0]])?,
+            Gathered::Tempo => self.sound_swi(sound::Q_TEMPO, &[a[0]])?,
+            Gathered::Voices => self.sound_swi(sound::CONFIGURE, &[a[0], 0, 0, 0, 0])?,
+            Gathered::Stereo => self.sound_swi(sound::STEREO, &[a[0], a[1]])?,
             Gathered::Sound => {
                 let after = if n == 5 { a[4] } else { -1 };
                 let _ = after;
-                self.sound_swi(SOUND_CONTROL, &[a[0], a[1], a[2], a[3]])?;
+                self.sound_swi(sound::CONTROL, &[a[0], a[1], a[2], a[3]])?;
             }
             Gathered::Line => {
                 self.plot(plot::MOVE, a[0], a[1])?;
@@ -773,7 +759,7 @@ impl Machine<'_, '_> {
     fn plot(&mut self, code: i32, x: i32, y: i32) -> Step {
         let mut regs = Regs::default();
         regs.r[..3].copy_from_slice(&[code.cast_unsigned(), x.cast_unsigned(), y.cast_unsigned()]);
-        self.os.perform(X | PLOT, &mut regs)?;
+        self.os.perform(X | swi::PLOT, &mut regs)?;
         Ok(())
     }
 
@@ -888,10 +874,10 @@ impl Machine<'_, '_> {
         self.os.write_byte(at + u32::from(text.len()), 0)?;
         let mut regs = Regs::default();
         regs.r[..2].copy_from_slice(&[15, at]);
-        self.os.perform(X | SCREEN_MODE, &mut regs)?;
+        self.os.perform(X | swi::SCREEN_MODE, &mut regs)?;
         let mut select = Regs::default();
         select.r[..2].copy_from_slice(&[0, regs.r[1]]);
-        self.os.perform(X | SCREEN_MODE, &mut select)?;
+        self.os.perform(X | swi::SCREEN_MODE, &mut select)?;
         self.os.write_word(ws::TALLY.at(), 0)?;
         Ok(())
     }
@@ -921,7 +907,7 @@ impl Machine<'_, '_> {
         }
         let mut regs = Regs::default();
         regs.r[..2].copy_from_slice(&[0, block]);
-        self.os.perform(X | SCREEN_MODE, &mut regs)?;
+        self.os.perform(X | swi::SCREEN_MODE, &mut regs)?;
         self.os.write_word(ws::TALLY.at(), 0)?;
         Ok(())
     }
@@ -959,11 +945,11 @@ impl Machine<'_, '_> {
     /// `SOUND`, `SOUND ON` and `SOUND OFF`.
     fn sound_statement(&mut self) -> Step<Next> {
         if self.take(token::ON)? {
-            self.sound_swi(SOUND_ENABLE, &[2])?;
+            self.sound_swi(sound::ENABLE, &[2])?;
             return Ok(Next::Done);
         }
         if self.take(token::OFF)? {
-            self.sound_swi(SOUND_ENABLE, &[1])?;
+            self.sound_swi(sound::ENABLE, &[1])?;
             return Ok(Next::Done);
         }
         self.evaluate(cont::GATHER, Payload::of(&[Gathered::Sound as u32, 0]))
@@ -1013,7 +999,7 @@ impl Machine<'_, '_> {
                 let at = ws::STRACC.at();
                 self.os.write_bytes(at, name.as_bytes())?;
                 self.os.write_byte(at + u32::from(name.len()), 0)?;
-                self.sound_swi(SOUND_ATTACH_NAMED_VOICE, &[channel, at.cast_signed()])?;
+                self.sound_swi(sound::ATTACH_NAMED_VOICE, &[channel, at.cast_signed()])?;
                 Ok(Next::Done)
             }
             which @ (setting::CRUNCH | setting::LISTO) => self.command_setting(which, value),
@@ -1444,41 +1430,42 @@ fn palette_entry(rgb: &[i32]) -> u32 {
 
 /// The plot codes BASIC's graphics statements give `OS_Plot`, as recorded.
 mod plot {
+    use tairix_vdu::plot as vdu;
+
+    const fn code(bits: u8) -> i32 {
+        i32::from_le_bytes([bits, 0, 0, 0])
+    }
+
     /// A move, relative and absolute.
-    pub(super) const MOVE_BY: i32 = 0;
-    pub(super) const MOVE: i32 = 4;
+    pub(super) const MOVE_BY: i32 = code(vdu::LINE);
+    pub(super) const MOVE: i32 = code(vdu::LINE | vdu::ABSOLUTE);
     /// A line in the foreground colour, relative and absolute.
-    pub(super) const DRAW_BY: i32 = 1;
-    pub(super) const DRAW: i32 = 5;
+    pub(super) const DRAW_BY: i32 = code(vdu::LINE | vdu::FOREGROUND);
+    pub(super) const DRAW: i32 = code(vdu::LINE | vdu::ABSOLUTE | vdu::FOREGROUND);
     /// An absolute line drawn without its last point: `RECTANGLE`'s sides.
-    pub(super) const LINE_SHORT: i32 = 13;
+    pub(super) const LINE_SHORT: i32 =
+        code(vdu::LINE_WITHOUT_LAST | vdu::ABSOLUTE | vdu::FOREGROUND);
     /// A point, relative and absolute.
-    pub(super) const POINT_BY: i32 = 65;
-    pub(super) const POINT: i32 = 69;
+    pub(super) const POINT_BY: i32 = code(vdu::POINT | vdu::FOREGROUND);
+    pub(super) const POINT: i32 = code(vdu::POINT | vdu::ABSOLUTE | vdu::FOREGROUND);
     /// A rectangle filled to the absolute point.
-    pub(super) const RECTANGLE_FILL: i32 = 101;
+    pub(super) const RECTANGLE_FILL: i32 = code(vdu::RECTANGLE | vdu::ABSOLUTE | vdu::FOREGROUND);
     /// A flood fill, relative and absolute.
-    pub(super) const FILL_BY: i32 = 129;
-    pub(super) const FILL: i32 = 133;
+    pub(super) const FILL_BY: i32 = code(vdu::FLOOD | vdu::FOREGROUND);
+    pub(super) const FILL: i32 = code(vdu::FLOOD | vdu::ABSOLUTE | vdu::FOREGROUND);
     /// A circle's outline and its fill, through the absolute point.
-    pub(super) const CIRCLE: i32 = 149;
-    pub(super) const CIRCLE_FILL: i32 = 157;
+    pub(super) const CIRCLE: i32 = code(vdu::CIRCLE | vdu::ABSOLUTE | vdu::FOREGROUND);
+    pub(super) const CIRCLE_FILL: i32 = code(vdu::CIRCLE_FILL | vdu::ABSOLUTE | vdu::FOREGROUND);
     /// The rectangle a move and a move bound moved, or copied, there.
-    pub(super) const BLOCK_MOVE: i32 = 189;
-    pub(super) const BLOCK_COPY: i32 = 190;
+    pub(super) const BLOCK_MOVE: i32 = code(vdu::BLOCK | vdu::ABSOLUTE | vdu::BLOCK_MOVE);
+    pub(super) const BLOCK_COPY: i32 = code(vdu::BLOCK | vdu::ABSOLUTE | vdu::BLOCK_COPY);
     /// An ellipse's outline and its fill, through its highest point.
-    pub(super) const ELLIPSE: i32 = 197;
-    pub(super) const ELLIPSE_FILL: i32 = 205;
+    pub(super) const ELLIPSE: i32 = code(vdu::ELLIPSE | vdu::ABSOLUTE | vdu::FOREGROUND);
+    pub(super) const ELLIPSE_FILL: i32 = code(vdu::ELLIPSE_FILL | vdu::ABSOLUTE | vdu::FOREGROUND);
 }
 
-/// `OS_ReadLine32`.
-pub(crate) const READ_LINE: u32 = 0x7D;
 /// `OS_Args` reason that reads whether a file is at its end.
 const ARGS_EOF_ERROR: u32 = 5;
-/// `Sound_Enable`.
-const SOUND_ENABLE: u32 = 0x4_0141;
-/// `Sound_AttachNamedVoice`.
-const SOUND_ATTACH_NAMED_VOICE: u32 = 0x4_0183;
 /// `ColourTrans_SetGCOL` and `ColourTrans_SetTextColour`, and their flag
 /// for the background.
 const COLOUR_TRANS_SET_GCOL: u32 = 0x4_0743;

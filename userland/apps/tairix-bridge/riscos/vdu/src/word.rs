@@ -21,7 +21,7 @@ pub(crate) fn reason(os: &mut Os<'_>, regs: &mut Regs) -> Option<Result<(), Fail
                 Ok(reason) => reason,
                 Err(fail) => return Some(Err(fail)),
             };
-            if (1..=4).contains(&reason) {
+            if tairix_riscos_kernel::mouse::MOUSE_REASONS.contains(&reason) {
                 return None;
             }
             crate::pointer::word_21(os, reason, block)
@@ -31,17 +31,10 @@ pub(crate) fn reason(os: &mut Os<'_>, regs: &mut Regs) -> Option<Result<(), Fail
     })
 }
 
-/// A signed 16-bit coordinate at `at`.
-fn half(os: &mut Os<'_>, at: u32) -> Result<i32, Fail> {
-    let mut bytes = [0; 2];
-    os.read_bytes(at, &mut bytes)?;
-    Ok(i32::from(i16::from_le_bytes(bytes)))
-}
-
 /// `OS_Word` 9: the logical colour at the block's point, in OS units from
 /// the origin, at +4; `&FF` off the screen or where nothing is drawn.
 fn read_point(os: &mut Os<'_>, block: u32) -> Result<(), Fail> {
-    let (x, y) = (half(os, block)?, half(os, block + 2)?);
+    let (x, y) = os.read_coordinates(block)?;
     let colour = with(os, |vdu, os| vdu.colour_at(os, x, y))?;
     let value = colour.map_or(0xFF, |(c, _)| c.to_le_bytes()[0]);
     os.write_byte(block + 4, value)
@@ -66,7 +59,14 @@ fn definition(os: &mut Os<'_>, block: u32) -> Result<(), Fail> {
 /// state shown now: how it was set at +1, red, green and blue at +2 to +4.
 fn read_palette(os: &mut Os<'_>, block: u32) -> Result<(), Fail> {
     let logical = os.read_byte(block)?;
-    let mut regs = Regs::new([u32::from(logical), 16, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let mut regs = Regs::default();
+    regs.r[..5].copy_from_slice(&[
+        u32::from(logical),
+        crate::palette::kind::NORMAL,
+        0,
+        0,
+        crate::palette::reason::READ,
+    ]);
     os.call_vector(PALETTE_V, &mut regs, Entry::Supervisor)?;
     let second = with(os, |vdu, _| Ok(vdu.palette.second))?;
     let shown = if second { regs.r[3] } else { regs.r[2] };

@@ -14,12 +14,14 @@ use tairix_riscos_arm::psr;
 use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::mouse::Bounds;
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
+use tairix_riscos_kernel::service;
 use tairix_riscos_kernel::swi::os::{CHANGE_DYNAMIC_AREA, READ_SYS_INFO};
 use tairix_riscos_kernel::swi::X;
+use tairix_vdu::mode::{Flags, DEFAULT_MODE};
 
 use crate::colour::Colours;
 use crate::frames::Frames;
-use crate::mode::{flag, var, Format};
+use crate::mode::{var, Format};
 use crate::palette::Palette;
 use crate::plot::Graphics;
 use crate::pointer::Pointer;
@@ -28,16 +30,6 @@ use crate::state::{with, Vdu};
 use crate::stream::Stream;
 use crate::teletext::Teletext;
 use crate::text::Text;
-
-/// The services around a mode change.
-mod service {
-    pub(super) const MODE_CHANGE: u32 = 0x46;
-    pub(super) const PRE_MODE_CHANGE: u32 = 0x4D;
-    pub(super) const MODE_EXTENSION: u32 = 0x50;
-    pub(super) const MODE_TRANSLATION: u32 = 0x51;
-    pub(super) const MODE_CHANGING: u32 = 0x89;
-    pub(super) const ENUMERATE_SCREEN_MODES: u32 = 0x8D;
-}
 
 /// "Bad mode": a mode the monitor cannot show and nothing provides.
 const BAD_MODE: Error = Error {
@@ -227,7 +219,7 @@ fn substitute(mode: u32, monitor: u32) -> Option<Spec> {
     let m = tairix_vdu::mode::numbered(mode)?;
     let format = Format::numbered(m);
     let (width, height) = standard_size(monitor);
-    let flags = format.flags() & !(1 << 4);
+    let flags = format.flags() & !Flags::HI_RES_MONO.bits();
     let same = tairix_vdu::mode::MODES
         .iter()
         .enumerate()
@@ -271,8 +263,8 @@ fn timed(selector: &Selector, format: &Format, monitor: u32) -> bool {
             && u32::from(m.width) << (m.log2_bpc - m.log2_bpp) == selector.width
             && u32::from(m.height) == selector.height
     });
-    let unsupported = (format.log2_bpp() == 5 && format.has(flag::RGB))
-        || (format.log2_bpp() == 3 && format.has(flag::GREYSCALE));
+    let unsupported = (format.log2_bpp() == 5 && format.has(Flags::RGB))
+        || (format.log2_bpp() == 3 && format.has(Flags::GREYSCALE));
     rate_ok && size_ok && !unsupported
 }
 
@@ -592,16 +584,7 @@ fn apply(
     vdu.screen.set_bank(false, bank);
     os.set_byte_var(tairix_riscos_kernel::byte::var::VDU_BANK, 0);
     os.set_byte_var(tairix_riscos_kernel::byte::var::DISPLAY_BANK, 0);
-    let cell = format.cell();
-    vdu.text = Text::for_screen(
-        format.columns(),
-        format.rows(),
-        cell.space_y,
-        vdu.text.flags,
-    );
-    vdu.graphics = Graphics::for_screen(format.width(), format.height());
-    vdu.colours = Colours::for_mode(&format);
-    vdu.palette = Palette::for_mode(&format);
+    (vdu.text, vdu.graphics, vdu.colours, vdu.palette) = fresh(&format, vdu.text.flags);
     vdu.teletext = Teletext::new();
     vdu.cursors_removed = 0;
     os.set_byte_var(tairix_riscos_kernel::byte::var::PAGE_LINES, 0);
@@ -610,6 +593,22 @@ fn apply(
     let w = vdu.text.window;
     vdu.clear_cells(os, w.left, w.top, w.right, w.bottom)?;
     crate::changed::reset(os)
+}
+
+/// What a mode change starts afresh for `format`: the text, its `flags`
+/// kept, the graphics, the colours and the palette.
+fn fresh(format: &Format, flags: u8) -> (Text, Graphics, Colours, Palette) {
+    (
+        Text::for_screen(
+            format.columns(),
+            format.rows(),
+            format.cell().space_y,
+            flags,
+        ),
+        Graphics::for_screen(format.width(), format.height()),
+        Colours::for_mode(format),
+        Palette::for_mode(format),
+    )
 }
 
 /// `OS_CheckModeValid`: R0 the mode, kept with C clear and Z set where it
@@ -773,11 +772,7 @@ fn enumerate(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     }
     for (n, m) in tairix_vdu::mode::MODES.iter().enumerate() {
         let format = Format::numbered(m);
-        let entry = (
-            format.width() << (format.log2_bpc() - format.log2_bpp()),
-            format.height(),
-            format.log2_bpp(),
-        );
+        let entry = (format.shown_width(), format.height(), format.log2_bpp());
         if shown_on(u32::try_from(n).unwrap_or(u32::MAX), monitor)
             && format.graphic()
             && !modes.contains(&entry)
@@ -850,7 +845,7 @@ pub(crate) fn start(os: &mut Os<'_>) -> Result<(), Fail> {
     let selector_copy = os.rma_claim(SELECTOR_BYTES)?;
     let check_copy = os.rma_claim(SELECTOR_BYTES)?;
     let format = resolved.format;
-    let cell = format.cell();
+    let (text, graphics, colours, palette) = fresh(&format, 0);
     let vdu = Vdu {
         screen: Screen {
             format,
@@ -866,10 +861,10 @@ pub(crate) fn start(os: &mut Os<'_>) -> Result<(), Fail> {
             check_copy,
             lent: false,
         },
-        text: Text::for_screen(format.columns(), format.rows(), cell.space_y, 0),
-        graphics: Graphics::for_screen(format.width(), format.height()),
-        colours: Colours::for_mode(&format),
-        palette: Palette::for_mode(&format),
+        text,
+        graphics,
+        colours,
+        palette,
         font: crate::font::Font::new(),
         stream: Stream::new(),
         pointer: Pointer::new(),
@@ -887,15 +882,15 @@ pub(crate) fn start(os: &mut Os<'_>) -> Result<(), Fail> {
 }
 
 /// The mode a configuration naming no mode the monitor can show starts in:
-/// RISC OS 5's own default, mode 28.
+/// RISC OS 5's own default.
 fn fallback() -> Resolved {
-    let format = tairix_vdu::mode::numbered(28).map_or_else(
+    let format = tairix_vdu::mode::numbered(DEFAULT_MODE).map_or_else(
         || Format::numbered(&tairix_vdu::mode::MODES[0]),
         Format::numbered,
     );
     Resolved {
         format,
-        spec: Spec::Number(28),
+        spec: Spec::Number(DEFAULT_MODE),
         frame_rate: VGA_RATE,
         shadow: false,
     }

@@ -24,8 +24,6 @@ use crate::swi::X;
 
 mod rules;
 
-/// `Service_TerritoryManagerLoaded`: the Manager is there to register with.
-const MANAGER_LOADED: u32 = 0x64;
 /// Its alphabet.
 const ALPHABET: u32 = crate::international::LATIN1;
 
@@ -182,7 +180,7 @@ pub(crate) static UK: Builtin = Builtin {
     bridge: false,
     swis: None,
     services: Some(Services {
-        numbers: &[MANAGER_LOADED],
+        numbers: &[crate::service::TERRITORY_MANAGER_LOADED],
         handler: service,
     }),
     commands: &[],
@@ -447,7 +445,7 @@ fn finalise(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
 }
 
 fn service(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Unwind> {
-    if regs.r[1] == MANAGER_LOADED {
+    if regs.r[1] == crate::service::TERRITORY_MANAGER_LOADED {
         if let Err(Fail::Unwind(unwind)) = register(os) {
             return Err(unwind);
         }

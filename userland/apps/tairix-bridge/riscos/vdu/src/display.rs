@@ -7,10 +7,11 @@
 use alloc::vec::Vec;
 
 use tairix_collections::BitVec;
+use tairix_colour::Rgb;
 use tairix_riscos_arm::mmu::GRANULE_SIZE;
 use tairix_riscos_kernel::os::{len32, Fail, Os};
 
-use crate::mode::flag;
+use crate::colour::Direct;
 use crate::screen::AREA;
 use crate::state::read;
 
@@ -67,19 +68,22 @@ pub fn view(os: &mut Os<'_>) -> Option<View> {
     read(os, |vdu, _| {
         let f = &vdu.screen.format;
         View {
-            width: f.width() << (f.log2_bpc() - f.log2_bpp()),
+            width: f.shown_width(),
             height: f.height(),
             x_eig: f.x_eig(),
             y_eig: f.y_eig(),
-            border: rgb(vdu.palette.border[usize::from(vdu.palette.second)] >> 8),
+            border: rgb(Rgb::from_riscos_word(
+                vdu.palette.border[usize::from(vdu.palette.second)],
+            )),
             blanked: vdu.palette.blanked,
         }
     })
 }
 
-/// `&BBGGRR` as `&RRGGBB`.
-const fn rgb(bbggrr: u32) -> u32 {
-    ((bbggrr & 0xFF) << 16) | (bbggrr & 0xFF00) | ((bbggrr >> 16) & 0xFF)
+/// `colour` as `&RRGGBB`.
+const fn rgb(colour: Rgb) -> u32 {
+    let [r, g, b] = colour.to_array();
+    u32::from_be_bytes([0, r, g, b])
 }
 
 /// Line `row` from the top of the screen on display, a colour as `&RRGGBB`
@@ -96,7 +100,7 @@ pub fn line(os: &mut Os<'_>, row: u32, out: &mut Vec<u32>) -> Result<(), Fail> {
             return Ok(());
         }
         let stored = format.width() as usize;
-        let doubled = 1usize << (format.log2_bpc() - format.log2_bpp());
+        let doubled = format.doubling() as usize;
         if out.try_reserve_exact(stored * doubled).is_err() {
             return Err(os.no_memory());
         }
@@ -105,13 +109,13 @@ pub fn line(os: &mut Os<'_>, row: u32, out: &mut Vec<u32>) -> Result<(), Fail> {
             .pixels(os, row, 0, format.width() - 1, out)?;
         out.resize(stored * doubled, 0);
         let bits = 1u32 << format.log2_bpp();
-        let mask = u32::MAX >> (32 - bits);
+        let mask = format.pixel_mask();
         let direct = format.direct().then(|| Direct::of(&format));
         let palette = &vdu.palette;
         let shown = |pixel: u32| {
             direct.map_or_else(
                 || rgb(palette.shown(pixel)),
-                |direct| direct.rgb(palette, pixel),
+                |direct| direct_rgb(direct, palette, pixel),
             )
         };
         for i in (0..stored).rev() {
@@ -125,65 +129,15 @@ pub fn line(os: &mut Os<'_>, row: u32, out: &mut Vec<u32>) -> Result<(), Fail> {
     .unwrap_or(Ok(()))
 }
 
-/// How a direct-colour pixel holds its red, green and blue, which order
-/// they come in, and how many bits each takes.
-#[derive(Clone, Copy)]
-struct Direct {
-    swapped: bool,
-    layout: Layout,
-}
-
-#[derive(Clone, Copy)]
-enum Layout {
-    /// Four bits each.
-    Twelve,
-    /// Five, six and five.
-    Sixteen,
-    /// Five each.
-    Fifteen,
-    /// Eight each.
-    TwentyFour,
-}
-
-impl Direct {
-    fn of(format: &crate::mode::Format) -> Self {
-        let layout = match (format.log2_bpp(), format.ncolour()) {
-            (4, 0xFFF) => Layout::Twelve,
-            (4, _) if format.has(flag::FULL_PALETTE) => Layout::Sixteen,
-            (4, _) => Layout::Fifteen,
-            _ => Layout::TwentyFour,
-        };
-        Self {
-            swapped: format.has(flag::RGB),
-            layout,
-        }
-    }
-
-    /// `pixel`'s colour, as `&RRGGBB` through the gamma ramp.
-    fn rgb(self, palette: &crate::palette::Palette, pixel: u32) -> u32 {
-        let (r, g, b) = match self.layout {
-            Layout::Twelve => (
-                (pixel & 0xF) * 17,
-                ((pixel >> 4) & 0xF) * 17,
-                ((pixel >> 8) & 0xF) * 17,
-            ),
-            Layout::Sixteen => (
-                (pixel & 0x1F) * 255 / 31,
-                ((pixel >> 5) & 0x3F) * 255 / 63,
-                ((pixel >> 11) & 0x1F) * 255 / 31,
-            ),
-            Layout::Fifteen => (
-                (pixel & 0x1F) * 255 / 31,
-                ((pixel >> 5) & 0x1F) * 255 / 31,
-                ((pixel >> 10) & 0x1F) * 255 / 31,
-            ),
-            Layout::TwentyFour => (pixel & 0xFF, (pixel >> 8) & 0xFF, (pixel >> 16) & 0xFF),
-        };
-        let (r, b) = if self.swapped { (b, r) } else { (r, b) };
-        let ramp =
-            |v: u32, shift: u32| (palette.entries[(v & 0xFF) as usize][0] >> (8 + shift)) & 0xFF;
-        (ramp(r, 0) << 16) | (ramp(g, 8) << 8) | ramp(b, 16)
-    }
+/// Direct-colour `pixel`'s colour, as `&RRGGBB` through the gamma ramp.
+fn direct_rgb(direct: Direct, palette: &crate::palette::Palette, pixel: u32) -> u32 {
+    let [r, g, b] = direct.unpack(pixel);
+    let ramp = |v: u32| Rgb::from_riscos_word(palette.entries[(v & 0xFF) as usize][0]);
+    rgb(Rgb::new(
+        ramp(r).to_array()[0],
+        ramp(g).to_array()[1],
+        ramp(b).to_array()[2],
+    ))
 }
 
 /// Hands `each` the first and last lines of the screen on display stored
@@ -291,7 +245,10 @@ pub fn pointer(os: &mut Os<'_>, pixels: &mut Vec<u8>) -> Result<Option<PointerVi
         Ok(Some(PointerView {
             width: u32::from(shape.width) * 4,
             height: u32::from(shape.height),
-            colours: vdu.palette.pointer.map(|[first, _]| rgb(first >> 8)),
+            colours: vdu
+                .palette
+                .pointer
+                .map(|[first, _]| rgb(Rgb::from_riscos_word(first))),
             at,
             active: (u32::from(shape.active.0), u32::from(shape.active.1)),
         }))

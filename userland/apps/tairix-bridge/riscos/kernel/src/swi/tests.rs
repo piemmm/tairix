@@ -6,13 +6,11 @@ use tairix_riscos_arm::psr::{self, Mode};
 use crate::memory::layout::RISC_OS_5;
 use crate::memory::Bits;
 use crate::os::{Ended, Outcome};
-use crate::swi::os::CALL_A_SWI;
 use crate::swi::os::{BYTE, CLAIM, DYNAMIC_AREA, GENERATE_ERROR, READ_MONOTONIC_TIME};
+use crate::swi::os::{CALL_A_SWI, SWI_NUMBER_FROM_STRING, SWI_NUMBER_TO_STRING};
 use crate::swi::X;
 use crate::testkit::{asm, with_application, Session, CODE, DATA, SWI_AT};
 
-const NUMBER_TO_STRING: u32 = 0x38;
-const NUMBER_FROM_STRING: u32 = 0x39;
 const UKSWIV: u32 = 0x18;
 
 fn session() -> Session {
@@ -147,18 +145,18 @@ fn generate_error_returns_its_block_unchecked_and_a_claimant_s_bad_pointer_is_re
 #[test]
 fn swi_names_and_numbers_convert_both_ways() {
     let mut s = session();
-    let (regs, _) = s.user_swi(X | NUMBER_TO_STRING, registers(&[X | BYTE, DATA, 64]));
+    let (regs, _) = s.user_swi(X | SWI_NUMBER_TO_STRING, registers(&[X | BYTE, DATA, 64]));
     assert!(!regs.flag(psr::V));
     assert_eq!(regs.r[2], 9, "the terminator counted");
     assert_eq!(s.read(DATA, 9), b"XOS_Byte\0");
-    let (regs, _) = s.user_swi(X | NUMBER_TO_STRING, registers(&[0x120 | X, DATA, 64]));
+    let (regs, _) = s.user_swi(X | SWI_NUMBER_TO_STRING, registers(&[0x120 | X, DATA, 64]));
     assert_eq!(s.read(DATA, regs.r[2] as usize), b"XOS_WriteI+\" \"\0");
     s.write(DATA, b"OS_ReadMonotonicTime\0");
-    let (regs, _) = s.user_swi(X | NUMBER_FROM_STRING, registers(&[0, DATA]));
+    let (regs, _) = s.user_swi(X | SWI_NUMBER_FROM_STRING, registers(&[0, DATA]));
     assert!(!regs.flag(psr::V));
     assert_eq!(regs.r[0], READ_MONOTONIC_TIME);
     s.write(DATA, b"OS_NoSuchThing\0");
-    let (regs, _) = s.user_swi(X | NUMBER_FROM_STRING, registers(&[0, DATA]));
+    let (regs, _) = s.user_swi(X | SWI_NUMBER_FROM_STRING, registers(&[0, DATA]));
     assert!(regs.flag(psr::V));
     assert_eq!(s.peek(regs.r[0]), 0x1E6);
 }
@@ -167,9 +165,46 @@ fn swi_names_and_numbers_convert_both_ways() {
 fn a_name_too_long_for_its_buffer_is_cut_and_overflow_is_pointed_at_with_v_clear() {
     let mut s = session();
     s.write(DATA, &[0xAA; 8]);
-    let (regs, _) = s.user_swi(X | NUMBER_TO_STRING, registers(&[BYTE, DATA, 4]));
+    let (regs, _) = s.user_swi(X | SWI_NUMBER_TO_STRING, registers(&[BYTE, DATA, 4]));
     assert!(!regs.flag(psr::V));
     assert_eq!(regs.r[2], 4);
     assert_eq!(s.read(DATA, 5), b"OS_B\xAA");
     assert_eq!(s.peek(regs.r[0]), 0x1E4);
+}
+
+#[test]
+fn each_sound_swi_lies_in_its_own_module_s_chunk() {
+    use crate::swi::chunk::{SOUND_CHANNELS, SOUND_DMA, SOUND_SCHEDULER};
+    use crate::swi::sound::{
+        ATTACH_NAMED_VOICE, CONFIGURE, CONTROL, CONTROL_PACKED, ENABLE, Q_BEAT, Q_INIT, Q_TEMPO,
+        STEREO,
+    };
+    let chunk_of = |swi: u32| swi & !(crate::swi::CHUNK - 1);
+    for swi in [CONFIGURE, ENABLE, STEREO] {
+        assert_eq!(chunk_of(swi), SOUND_DMA, "{swi:#X} is SoundDMA's");
+    }
+    for swi in [CONTROL_PACKED, CONTROL, ATTACH_NAMED_VOICE] {
+        assert_eq!(chunk_of(swi), SOUND_CHANNELS, "{swi:#X} is SoundChannels'");
+    }
+    for swi in [Q_INIT, Q_TEMPO, Q_BEAT] {
+        assert_eq!(
+            chunk_of(swi),
+            SOUND_SCHEDULER,
+            "{swi:#X} is SoundScheduler's"
+        );
+    }
+    let all = [
+        CONFIGURE,
+        ENABLE,
+        STEREO,
+        CONTROL_PACKED,
+        CONTROL,
+        ATTACH_NAMED_VOICE,
+        Q_INIT,
+        Q_TEMPO,
+        Q_BEAT,
+    ];
+    for (i, a) in all.iter().enumerate() {
+        assert!(all[i + 1..].iter().all(|b| b != a), "{a:#X} named twice");
+    }
 }

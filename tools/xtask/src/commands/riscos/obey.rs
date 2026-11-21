@@ -201,13 +201,7 @@ WHILE ?ta%>=32 AND LEN ts$<250:ts$+=CHR$?ta%:ta%+=1:ENDWHILE
 
 /// The answers file: the recording's provenance, then what it recorded.
 pub(super) fn answers(provenance: &[String], recorded: &str) -> String {
-    let mut text = String::new();
-    for line in provenance {
-        text.push_str("# ");
-        text.push_str(line);
-        text.push('\n');
-    }
-    text.push_str("# Never edit by hand.\n");
+    let mut text = tairix_riscos_kernel::corpus::answers_head(provenance);
     text.push_str(recorded);
     if !text.ends_with('\n') {
         text.push('\n');

@@ -35,6 +35,24 @@ pub const fn is_double_height(byte: u8) -> bool {
     byte & 0x7F == DOUBLE_HEIGHT
 }
 
+/// Whether the row after one is the lower half of a double-height pair: the
+/// row held the double-height code, and was not a lower half itself.
+#[must_use]
+pub const fn lower_after(lower: bool, double_seen: bool) -> bool {
+    double_seen && !lower
+}
+
+/// The first half-dot line of its glyph a double-height character shows in a
+/// row: its top half's, or its bottom half's in a pair's lower row.
+#[must_use]
+pub const fn double_first_line(lower: bool) -> usize {
+    if lower {
+        HALF_LINES / 2
+    } else {
+        0
+    }
+}
+
 /// Build a glyph from ten rows of five columns, `#` for a dot.
 const fn glyph(art: [&str; 10]) -> [u8; 10] {
     let mut rows = [0u8; 10];
@@ -303,6 +321,14 @@ pub struct Shown {
 }
 
 impl Attributes {
+    /// Whether a character with these attributes shows in a row, a
+    /// double-height pair's lower half if `lower`, where only double-height
+    /// characters show.
+    #[must_use]
+    pub const fn shows_in(&self, lower: bool) -> bool {
+        !lower || self.double
+    }
+
     /// A row's attributes at its start: white alphanumerics on black.
     pub const LINE_START: Self = Self {
         foreground: 7,

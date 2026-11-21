@@ -4676,6 +4676,7 @@ dependencies = [
  "tairix-riscos-filing",
  "tairix-riscos-kernel",
  "tairix-softfloat",
+ "tairix-vdu",
 ]
 
 [[package]]
@@ -4694,9 +4695,11 @@ dependencies = [
  "tairix-obey",
  "tairix-reclaim",
  "tairix-riscos-arm",
+ "tairix-riscos-filing",
  "tairix-riscos-kernel",
  "tairix-tz",
  "tairix-util",
+ "tairix-vdu",
 ]
 
 [[package]]
@@ -4724,6 +4727,7 @@ name = "tairix-riscos-vdu"
 version = "0.0.0"
 dependencies = [
  "tairix-collections",
+ "tairix-colour",
  "tairix-fscopy",
  "tairix-fuzzseed",
  "tairix-riscos-arm",

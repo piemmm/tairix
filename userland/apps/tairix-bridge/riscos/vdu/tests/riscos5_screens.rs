@@ -7,7 +7,7 @@
 use std::sync::LazyLock;
 
 use tairix_fscopy::fixture::Tree;
-use tairix_riscos_filing::session::{command, disc_file, session, Setup, DISC};
+use tairix_riscos_filing::session::{command, disc_file, modules_with, session, Setup, DISC};
 use tairix_riscos_kernel::module::Builtin;
 use tairix_riscos_kernel::os::{Fail, Unwind};
 use tairix_riscos_vdu::corpus::{self, Answer, Recorded};
@@ -16,12 +16,8 @@ const CASES: &str = include_str!("riscos5/screens.txt");
 const DRAWN: &str = include_str!("riscos5/drawn.txt");
 
 /// The session's modules: the filing system's, BASIC's and the drivers'.
-static MODULES: LazyLock<Vec<&'static Builtin>> = LazyLock::new(|| {
-    let mut modules: Vec<&'static Builtin> = tairix_riscos_filing::MODULES.to_vec();
-    modules.extend(tairix_riscos_basic::MODULES.iter().copied());
-    modules.extend(tairix_riscos_vdu::MODULES.iter().copied());
-    modules
-});
+static MODULES: LazyLock<Vec<&'static Builtin>> =
+    LazyLock::new(|| modules_with(&[&tairix_riscos_basic::MODULES, &tairix_riscos_vdu::MODULES]));
 
 /// How a case's recording differs from genuine RISC OS's, if it does.
 fn differs(ours: &Recorded, genuine: &Recorded) -> Option<String> {
@@ -84,7 +80,7 @@ fn every_screen_is_read_and_drawn_as_genuine_risc_os_did() {
     let mut tree = Tree::new().dir(DISC);
     for (n, case) in cases.iter().enumerate() {
         tree = tree.file(
-            &format!("{DISC}/Scr{n},fff"),
+            &format!("{DISC}/{},fff", corpus::program_name(n)),
             corpus::program(case, n).as_bytes(),
         );
     }
@@ -100,7 +96,7 @@ fn every_screen_is_read_and_drawn_as_genuine_risc_os_did() {
         assert_eq!(case.name, answer.name, "the answers in the cases' order");
         let entered = command(
             &mut session.kernel.os(),
-            &format!("BASIC -quit HostFS:$.Scr{n}"),
+            &corpus::run_command(&corpus::program_name(n)),
         );
         assert!(
             matches!(entered, Err(Fail::Unwind(Unwind::Transfer))),

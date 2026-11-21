@@ -14,8 +14,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{
-    resample, resample_window, Region, ResampleError, ResampleScratch, Rgba8Image, RowOrder,
-    RowReducer,
+    resample, resample_window, Region, ResampleError, ResamplePlan, ResampleScratch, Rgba8Image,
+    RowOrder, RowReducer, RESAMPLE_SHIFT,
 };
 use crate::Surface;
 
@@ -981,6 +981,140 @@ fn a_window_in_place_refuses_what_it_cannot_write_and_writes_nothing() {
         Err(ResampleError::OutOfMemory)
     );
     assert_eq!(dest.pixels(), untouched.pixels());
+}
+
+/// A `width`×`height` picture whose colour and alpha both vary with
+/// position, every pixel premultiplied.
+fn translucent(width: u32, height: u32) -> Surface {
+    let mut bytes = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            let wave = |scale: u32| u8::try_from((x * scale + y * 13) % 256).unwrap_or(255);
+            bytes.extend_from_slice(&[wave(7), wave(23), wave(41), wave(5) | 0x0f]);
+        }
+    }
+    surface(width, height, &bytes)
+}
+
+/// `window` filtered from `src` through `plan`'s taps by the arithmetic its
+/// rustdoc states, row by row.
+fn filtered_by(plan: &ResamplePlan, src: &Surface, window: Region) -> Vec<crate::Pixel> {
+    let columns: Vec<(u32, i32)> = plan.columns().taps().collect();
+    let rows: Vec<(u32, i32)> = plan.rows().taps().collect();
+    let (across, down) = (plan.columns().per_sample(), plan.rows().per_sample());
+    let half = 1i64 << (RESAMPLE_SHIFT - 1);
+    let descale = |value: i64| (value + half) >> RESAMPLE_SHIFT;
+    let mut out = Vec::new();
+    for y in 0..window.height as usize {
+        let row_taps = &rows[y * down..(y + 1) * down];
+        for x in 0..window.width as usize {
+            let column_taps = &columns[x * across..(x + 1) * across];
+            if plan.is_copy() {
+                out.push(src.get(column_taps[0].0, row_taps[0].0).expect("inside"));
+                continue;
+            }
+            let mut sums = [0i64; 4];
+            for &(row, row_weight) in row_taps {
+                let mut along = [0i64; 4];
+                for &(column, weight) in column_taps {
+                    let pixel = src.get(column, row).expect("inside");
+                    for (sum, channel) in along.iter_mut().zip([pixel.r, pixel.g, pixel.b, pixel.a])
+                    {
+                        *sum += i64::from(weight) * 255 * i64::from(channel);
+                    }
+                }
+                for (sum, along) in sums.iter_mut().zip(along) {
+                    *sum += i64::from(row_weight) * descale(along);
+                }
+            }
+            let level = |sum: i64| (descale(sum).max(0) + 127) / 255;
+            let alpha = level(sums[3]).min(255);
+            let byte = |sum: i64| u8::try_from(level(sum).min(alpha)).expect("a byte");
+            out.push(crate::Pixel {
+                r: byte(sums[0]),
+                g: byte(sums[1]),
+                b: byte(sums[2]),
+                a: u8::try_from(alpha).expect("a byte"),
+            });
+        }
+    }
+    out
+}
+
+#[test]
+fn a_plan_filters_its_window_exactly_as_the_resample_does() {
+    let mut copies = 0;
+    for ((sw, sh), (dw, dh)) in [
+        ((16, 12), (40, 30)),
+        ((40, 30), (16, 12)),
+        ((40, 30), (17, 45)),
+        ((23, 19), (23, 19)),
+        ((23, 19), (23, 31)),
+        ((5, 3), (64, 2)),
+    ] {
+        let src = translucent(sw, sh);
+        for window in [
+            whole(dw, dh),
+            Region {
+                x: dw / 3,
+                y: dh / 4,
+                width: dw / 2,
+                height: dh / 2,
+            },
+            Region {
+                x: dw - 1,
+                y: dh - 1,
+                width: 1,
+                height: 1,
+            },
+        ] {
+            let plan = ResamplePlan::new((sw, sh), (dw, dh), window).expect("a plan");
+            copies += usize::from(plan.is_copy());
+            let mut dest = Surface::new(dw, dh).expect("fits");
+            let mut scratch = [ResampleScratch::new()];
+            src.resample_window_into(&mut dest, window, &mut scratch, &tairix_parallel::SERIAL)
+                .expect("resamples");
+            let want: Vec<crate::Pixel> = (window.y..window.y + window.height)
+                .flat_map(|y| (window.x..window.x + window.width).map(move |x| (x, y)))
+                .map(|(x, y)| dest.get(x, y).expect("inside"))
+                .collect();
+            assert_eq!(
+                filtered_by(&plan, &src, window),
+                want,
+                "{sw}x{sh} onto {dw}x{dh}, {window:?}"
+            );
+        }
+    }
+    assert_eq!(copies, 3, "one to one copies, and nothing else does");
+}
+
+#[test]
+fn a_plan_refuses_the_geometry_the_resample_refuses() {
+    let one = whole(1, 1);
+    assert_eq!(
+        ResamplePlan::new((0, 4), (8, 8), one).err(),
+        Some(ResampleError::SourceSizeMismatch)
+    );
+    assert_eq!(
+        ResamplePlan::new((4, 4), (0, 8), one).err(),
+        Some(ResampleError::EmptyDestination)
+    );
+    for window in [
+        whole(9, 1),
+        whole(0, 1),
+        Region {
+            x: u32::MAX,
+            y: 0,
+            width: 2,
+            height: 1,
+        },
+    ] {
+        assert_eq!(
+            ResamplePlan::new((4, 4), (8, 8), window).err(),
+            Some(ResampleError::WindowOutOfBounds),
+            "{window:?}"
+        );
+    }
 }
 
 #[test]

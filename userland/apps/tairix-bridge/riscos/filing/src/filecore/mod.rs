@@ -26,10 +26,11 @@ mod swis;
 use alloc::vec::Vec;
 
 use tairix_riscos_kernel::error::Error;
-use tairix_riscos_kernel::filing::fs::{block, info, REDECLARE};
+use tairix_riscos_kernel::filing::fs::{block, info};
 use tairix_riscos_kernel::module::{Builtin, Resource, Services, Swis};
 use tairix_riscos_kernel::msgtrans::{Own, OWN_DESCRIPTOR, REQUEST};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, Target, Unwind, World};
+use tairix_riscos_kernel::service::FS_REDECLARE;
 use tairix_riscos_kernel::swi::os::{fs_control, FS_CONTROL};
 use tairix_riscos_kernel::swi::X;
 
@@ -137,7 +138,7 @@ pub static FILE_CORE: Builtin = Builtin {
         handler: swis::swi,
     }),
     services: Some(Services {
-        numbers: &[REDECLARE],
+        numbers: &[FS_REDECLARE],
         handler: service,
     }),
     commands: &commands::COMMANDS,
@@ -541,7 +542,7 @@ fn declare(os: &mut Os<'_>, workspace: u32, client: &Client) -> Result<(), Fail>
 /// Its service handler: `Service_FSRedeclare`, every instance's filing
 /// system registered again.
 fn service(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Unwind> {
-    if regs.r[1] != REDECLARE {
+    if regs.r[1] != FS_REDECLARE {
         return Ok(());
     }
     let Ok(instances) = with(os, |state| {

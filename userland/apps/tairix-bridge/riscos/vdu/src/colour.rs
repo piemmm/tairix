@@ -13,8 +13,9 @@
 use tairix_riscos_kernel::memory::layout::HIGH_ZERO_PAGE;
 use tairix_riscos_kernel::os::{Fail, Os};
 use tairix_riscos_kernel::output::workspace;
+use tairix_vdu::mode::Flags;
 
-use crate::mode::{flag, Format};
+use crate::mode::Format;
 
 /// A `GCOL`: its action, its colour number as the VDU variable reads it, and
 /// its tint; or a pixel value `OS_SetColour` gave.
@@ -108,7 +109,7 @@ impl Colours {
                 literal: false,
             },
             text_back: TextColour {
-                colour: if format.has(flag::TELETEXT) { 8 } else { 0 },
+                colour: if format.has(Flags::TELETEXT) { 8 } else { 0 },
                 tint: 0,
                 literal: false,
             },
@@ -132,7 +133,7 @@ impl Colours {
             literal: false,
         };
         self.text_back = TextColour {
-            colour: if format.has(flag::TELETEXT) { 8 } else { 0 },
+            colour: if format.has(Flags::TELETEXT) { 8 } else { 0 },
             tint: 0,
             literal: false,
         };
@@ -322,7 +323,7 @@ impl Colours {
 /// variable: the number within the mode's colours, or in the full-palette and
 /// direct-colour modes the byte as given.
 fn colour_var(format: &Format, c: u8, number: u8) -> u32 {
-    if format.direct() || (format.log2_bpp() == 3 && format.has(flag::FULL_PALETTE)) {
+    if format.direct() || (format.log2_bpp() == 3 && format.has(Flags::FULL_PALETTE)) {
         return u32::from(c);
     }
     let colours = if format.log2_bpp() == 3 {
@@ -384,47 +385,91 @@ pub(crate) const fn number_of_internal(pixel: u8) -> (u32, u32) {
     (colour, (p & 3) << 6)
 }
 
-/// The red, green and blue of the eight-bit default palette's entry
-/// `pixel`: four bits of each, the top one red's, green's or blue's own and
-/// the low two shared, widened to eight.
-pub(crate) const fn default_rgb_8(pixel: u8) -> [u8; 3] {
-    let p = pixel as u32;
-    let low = p & 3;
-    let red = ((p >> 4) & 1) << 3 | ((p >> 2) & 1) << 2 | low;
-    let green = ((p >> 6) & 1) << 3 | ((p >> 5) & 1) << 2 | low;
-    let blue = ((p >> 7) & 1) << 3 | ((p >> 3) & 1) << 2 | low;
-    [
-        (red * 17).to_le_bytes()[0],
-        (green * 17).to_le_bytes()[0],
-        (blue * 17).to_le_bytes()[0],
-    ]
-}
-
 /// The direct-colour pixel the eight-bit default palette's entry `pixel` is
 /// in `format`.
 pub(crate) fn direct_of_internal(format: &Format, pixel: u8) -> u32 {
-    pack(format, default_rgb_8(pixel))
+    Direct::of(format).pack(tairix_vdu::palette::default_256(pixel))
 }
 
-/// Red, green and blue packed into `format`'s direct-colour pixel.
-pub(crate) fn pack(format: &Format, [r, g, b]: [u8; 3]) -> u32 {
-    let swapped = format.has(flag::RGB);
-    let (low, high) = if swapped { (b, r) } else { (r, b) };
-    let (low, g, high) = (u32::from(low), u32::from(g), u32::from(high));
-    match (format.log2_bpp(), format.ncolour()) {
-        (4, 0xFFF) => (low >> 4) | ((g >> 4) << 4) | ((high >> 4) << 8),
-        (4, 0xFFFF) if format.has(flag::FULL_PALETTE) => {
-            (low >> 3) | ((g >> 2) << 5) | ((high >> 3) << 11)
+/// How a direct-colour pixel holds its red, green and blue: which order
+/// they come in, and how many bits each takes.
+#[derive(Clone, Copy)]
+pub(crate) struct Direct {
+    swapped: bool,
+    layout: Layout,
+}
+
+#[derive(Clone, Copy)]
+enum Layout {
+    /// Four bits each.
+    Twelve,
+    /// Five, six and five.
+    Sixteen,
+    /// Five each.
+    Fifteen,
+    /// Eight each.
+    TwentyFour,
+}
+
+impl Direct {
+    /// `format`'s.
+    pub(crate) fn of(format: &Format) -> Self {
+        let layout = match (format.log2_bpp(), format.ncolour()) {
+            (4, 0xFFF) => Layout::Twelve,
+            (4, _) if format.has(Flags::FULL_PALETTE) => Layout::Sixteen,
+            (4, _) => Layout::Fifteen,
+            _ => Layout::TwentyFour,
+        };
+        Self {
+            swapped: format.has(Flags::RGB),
+            layout,
         }
-        (4, _) => (low >> 3) | ((g >> 3) << 5) | ((high >> 3) << 10),
-        _ => low | (g << 8) | (high << 16),
+    }
+
+    /// Red, green and blue packed into a pixel.
+    pub(crate) fn pack(self, [r, g, b]: [u8; 3]) -> u32 {
+        let (low, high) = if self.swapped { (b, r) } else { (r, b) };
+        let (low, g, high) = (u32::from(low), u32::from(g), u32::from(high));
+        match self.layout {
+            Layout::Twelve => (low >> 4) | ((g >> 4) << 4) | ((high >> 4) << 8),
+            Layout::Sixteen => (low >> 3) | ((g >> 2) << 5) | ((high >> 3) << 11),
+            Layout::Fifteen => (low >> 3) | ((g >> 3) << 5) | ((high >> 3) << 10),
+            Layout::TwentyFour => low | (g << 8) | (high << 16),
+        }
+    }
+
+    /// A pixel's red, green and blue, each widened to eight bits.
+    pub(crate) fn unpack(self, pixel: u32) -> [u32; 3] {
+        let (low, g, high) = match self.layout {
+            Layout::Twelve => (
+                (pixel & 0xF) * 17,
+                ((pixel >> 4) & 0xF) * 17,
+                ((pixel >> 8) & 0xF) * 17,
+            ),
+            Layout::Sixteen => (
+                (pixel & 0x1F) * 255 / 31,
+                ((pixel >> 5) & 0x3F) * 255 / 63,
+                ((pixel >> 11) & 0x1F) * 255 / 31,
+            ),
+            Layout::Fifteen => (
+                (pixel & 0x1F) * 255 / 31,
+                ((pixel >> 5) & 0x1F) * 255 / 31,
+                ((pixel >> 10) & 0x1F) * 255 / 31,
+            ),
+            Layout::TwentyFour => (pixel & 0xFF, (pixel >> 8) & 0xFF, (pixel >> 16) & 0xFF),
+        };
+        if self.swapped {
+            [high, g, low]
+        } else {
+            [low, g, high]
+        }
     }
 }
 
 /// An eight-bit mode's simple pattern colour: the colour number's six bits
 /// and two bits of tint above them.
 fn simple_8(format: &Format, c: u8) -> u8 {
-    if format.has(flag::FULL_PALETTE) && format.log2_bpp() == 3 && format.ncolour() == 255 {
+    if format.has(Flags::FULL_PALETTE) && format.log2_bpp() == 3 && format.ncolour() == 255 {
         return c;
     }
     internal(u32::from(c), u32::from(c))
@@ -496,41 +541,28 @@ fn expand(format: &Format, byte: u8) -> u32 {
         let value = (u32::from(byte) >> (p << bpp)) & mask;
         part |= widen(value, bpp, bpc) << (p << bpc);
     }
-    let width = pixels << bpc;
-    let mut word = part;
-    let mut filled = width;
-    while filled < 32 {
-        word |= word << filled;
-        filled *= 2;
-    }
-    word
+    repeat(part, pixels << bpc, 32)
 }
 
 /// A pixel of `1 << bpp` bits widened to `1 << bpc` by repeating it.
 const fn widen(value: u32, bpp: u32, bpc: u32) -> u32 {
-    let mut out = value;
-    let mut bits = 1 << bpp;
-    while bits < (1 << bpc) {
-        out |= out << bits;
-        bits *= 2;
-    }
-    out
+    repeat(value, 1 << bpp, 1 << bpc)
 }
 
 /// A pixel value repeated across a word of `format`'s pixels.
 pub(crate) fn replicate(format: &Format, value: u32) -> u32 {
-    let bits = 1u32 << format.log2_bpp();
-    let mut word = if bits >= 32 {
-        value
-    } else {
-        value & ((1 << bits) - 1)
-    };
-    let mut filled = bits;
-    while filled < 32 {
-        word |= word << filled;
+    repeat(value & format.pixel_mask(), 1 << format.log2_bpp(), 32)
+}
+
+/// The low `width` bits of `part` repeated until `total` bits are filled.
+const fn repeat(part: u32, width: u32, total: u32) -> u32 {
+    let mut out = part;
+    let mut filled = width;
+    while filled < total {
+        out |= out << filled;
         filled *= 2;
     }
-    word
+    out
 }
 
 /// The OR and exclusive-OR words GCOL action `operation` takes on `word`.

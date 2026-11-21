@@ -1708,11 +1708,11 @@ fn tables(a: &mut Asm, model: Model) {
     });
     a.later(|a| {
         a.here("default_palette_2");
-        a.bytes(&[0, 7]);
+        a.bytes(&tairix_vdu::palette::DEFAULT_2);
     });
     a.later(|a| {
         a.here("default_palette_4");
-        a.bytes(&[0, 1, 3, 7]);
+        a.bytes(&tairix_vdu::palette::DEFAULT_4);
     });
     if model == Model::Electron {
         // Entry by entry, a pair's four together: its number, its place in

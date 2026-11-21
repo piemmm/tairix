@@ -39,11 +39,13 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GP3.4.2 | The interpreter's vertex and fragment stages: the stage interface and its built-ins, quads, derivatives and helper invocations, implicit-level samples and queries, and discards; the coverage test's fragment exception gone | done |
 | GP3.4.3 | Render pipelines, passes and draws on the software device: their fixed-function state and creation checks, the render features, format features, limits and the `GRAPHICS` queue; a pass's draws shaded, clipped and set up in bounded batches in parallel, its bins rasterised in parallel in place, cleared and resolved | done |
 | GP3.4.4 | Indirect draws, and `tests/fuzz_gpu.rs` generating images, bind sets, passes, draws and dispatches | done |
-| GP4 | The pinned first-party pipeline set past the desktop's passes (GD6): OS chrome's draws and the game's passes as build-time SPIR-V, with their conformance cases | planned |
+| GP4 | The pinned first-party chrome past the desktop's passes (GD6): the compositor's per-frame chrome and the furniture painter's draws as build-time SPIR-V, each with its conformance case | done |
+| GP4.1 | The compositor's per-frame chrome as pinned passes: a window's body cut to its shape and laid with the dithered over, its drop shadow at either level and easing between them, and the scaled desktop's resample — the body's rule and the shadow defined once in `lib/raster` for the compositor and the passes | done |
+| GP4.2 | The furniture painter's draws as pinned passes: plates and rounded rectangles, gradients, rings, polygons and strokes, glyph runs and icons, each `lib/raster`'s own primitive | done |
 | GP11 | The device channel: `gpu-v1`, a driver hosting GP2's model for every client process, the context-creation capability, per-context bounds on queued work, the watchdog's one-shot timer, and the IOMMU requirement — landing with the first hardware backend | planned |
 | GP5 | The Venus backend: a guest Vulkan ICD over virtio-gpu's Venus capset — arbitrary shaders on real host hardware | planned |
 | GP6 | Presentation: the swapchain, the accelerated layer path, fullscreen promotion, and the vsync flip | planned |
-| GP7 | `plans/WINTERSUN.md` WS19: the game's 3D view (WS32) — its terrain, entity, particle and light passes — offloaded | planned |
+| GP7 | `plans/WINTERSUN.md` WS19: the game's 3D view (WS32) — its terrain, entity, particle and light passes — as pinned SPIR-V, offloaded | planned |
 | GP8 | Untrusted-shader admission: `plans/SHADER.md`'s runtime path wired into pipeline creation | planned |
 | GP9 | `drivers/display/v3d`: the Raspberry Pi VideoCore VI backend | planned |
 | GP10 | The application-facing GPU library and its generated C surface — what a ported game links | planned |
@@ -74,7 +76,7 @@ proceed past a milestone whose criterion is unmet.
 | Milestone | Items | Exit criterion |
 |---|---|---|
 | **MG0 — pixels through hardware** | GP1 | `devmgr` autoloads `gpu_virtio` by discovery-match on all three bare-metal QEMU targets; a scanout resource is created, transferred and flipped; flip completion arrives as an interrupt and its waiter parks. |
-| **MG1 — one API, software-complete** | GP2, GP3, GP4 | Every seam method has a software implementation; the compositor draws its chrome through pinned SPIR-V pipelines on the software backend; a consumer compiled against the seam runs unchanged with no device present. |
+| **MG1 — one API, software-complete** | GP2, GP3, GP4 | Every seam method has a software implementation; every pass of the compositor's chrome is pinned SPIR-V whose conformance case, run on the software backend, equals what the compositor draws; a consumer compiled against the seam runs unchanged with no device present. |
 | **MG2 — real shaders on real hardware** | GP11, GP5, GP6, GP7 | The same pinned pipelines execute on the host GPU through Venus and produce the software backend's picture within tolerance; WinterSun's frame is drawn by the GPU and the gain is measured. |
 | **MG3 — untrusted shaders** | GP8 | A shader module supplied at run time by an unprivileged process is compiled in a sandbox, admitted, executed, and cannot read another context's memory; a malicious module is refused or contained, and the fuzz corpus is clean. |
 | **MG4 — native silicon** | GP9 | The Pi's V3D executes the pinned set from TAIRiX-generated ISA, conformant against the software reference. |
@@ -136,7 +138,7 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    result rather than a hope.
 6. **The OS's own pixels never depend on a runtime compiler.** The compositor's
    chrome, the desktop's effects and the game's passes are pinned, build-time
-   SPIR-V (GP4). A broken, absent or refused shader compiler degrades
+   SPIR-V (GD6, GP4, GP7). A broken, absent or refused shader compiler degrades
    third-party content; it can never fail to draw the desktop.
 7. **No ambient access to the device.** A GPU context is created through a
    capability-gated request, holds a context-local address space, and can reach
@@ -725,8 +727,8 @@ has.
 
 The same pipeline object, reached two ways.
 
-**Build time (GP4) — the pinned set.** The OS's chrome and the game's passes
-are first-party SPIR-V modules **built in Rust** by `plans/SHADER.md`'s builder,
+**Build time (GP4) — the pinned set.** The OS's chrome (GD6, GP4) and the
+game's passes (GP7) are first-party SPIR-V modules **built in Rust** by `plans/SHADER.md`'s builder,
 emitted by an xtask, committed to the tree, and verified on drift — the pattern
 `cargo xtask c-header --write` and `cargo xtask font-atlas` already establish.
 The consequences are the point: the desktop carries no runtime compiler surface
@@ -742,6 +744,83 @@ the one the threat model in §0a is written against.
 
 A consumer cannot tell the two apart at the seam, which is the property that
 keeps this one API rather than two.
+
+### 5.1 GP4 — the chrome's passes
+
+GP4 pins the chrome GD6 left to the CPU: first the compositor's per-frame
+chrome (GP4.1), then the furniture painter's draws (GP4.2); the game's passes
+are GP7's (User ruling, 2026-11-20).
+
+- **Compute passes, not fixed-function draws.** Every chrome pass reads the
+  pixel it lays over, because the compositor rounds its over at the frame's
+  ordered dither, which no fixed-function blend can. So each is a compute pass
+  over the rectangle it lays, written with `lib/shaders`' kit as GD6's are.
+- **One definition, two engines.** The rule a pass draws lives in
+  `lib/raster`: the compositor draws through it, and the pass's conformance
+  case holds the pass to it bit for bit on the software device. The window
+  manager keeps only its policy — which windows cast at which level, the ease,
+  the theme's reach and radii.
+- **GP4.1's passes**, each over one rectangle of the frame, its rectangle and
+  dither in its push:
+  - `body`: one window's client pixels within their drawable extent, the
+    backdrop plate past it on the client's rows, the four furniture strips,
+    the client's rounded cut and the window's opacity, described in a
+    storage buffer of words (more than portable push constants hold). A
+    pixel is what
+    `tairix_raster::Body` lays there, through `Pixel::laid_over`: a client
+    pixel the cut leaves partly uncovered gives way to the furniture, and a
+    source whose alpha is nought lays nothing on every row, the cut rows' per
+    column path included.
+  - `shadow`: one caster's drop shadow, `tairix_raster::drop_shadow` — the
+    biweight kernel's running sum and the blurred corner notches each
+    `DropShadow` builds, laid out once in a table buffer for as long as the
+    theme and scale stand, and the caster's bounds and silhouette, its
+    opacity and how far it has risen between the two levels in the push. A
+    pixel is the general evaluation; the CPU's straight-edge and solid fast
+    paths are proven equal to it. A level the lift gives no share is not
+    evaluated, nor any pixel the silhouette covers.
+  - `resample`: the desktop drawn at one size resampled into a window of the
+    output, as `Surface::resample_window_into` filters it. The plans are
+    `lib/raster`'s, computed on the CPU because they take 128-bit
+    arithmetic, and handed to the pass as taps; a pair of identity plans is a
+    copy, as on the CPU.
+- **Thirty-two bits, by stated bounds.** The passes compute in 32-bit words
+  so every backend, the V3D included, runs them unchanged. A corner radius of
+  at most `MAX_PASS_RADIUS` keeps the supersampled distances' squares in a
+  word, a caster's bounds within `MAX_PASS_COORDINATE` of the origin keep its
+  offsets in one, and the resampler's taps sum to at most 1.25 in magnitude,
+  which keeps both its accumulations below 2³¹. A layout past a bound is
+  refused when it is described, never wrapped.
+- **GP4.2's passes** are the furniture painter's primitives, each held to its
+  `lib/raster` call bit for bit; a rectangle fill, a plain or faded picture and
+  an overwrite are already GD6's `fill`, `over` and `copy`:
+  - `plate`: a rounded rectangle laid over what is there (`fill_round_rect`)
+    or replacing it (`set_round_rect`), square at a radius of nought.
+  - `wash`: a straight colour, ramped from a top colour to a bottom one down
+    its rows, washed over a rectangle at a weight per pixel taken from up to
+    two planes, rounding once at the frame's dither: a vertical gradient
+    (`fill_vertical_gradient`), a masked wash (`wash_region`) and a washed
+    shape (`wash_polygon_subpixel`). A mask is a caller's function, so it
+    reaches a device as the plane its caller fills.
+  - `ring`: a ring washed solid or lit by the key light (`wash_ring`), and
+    laid as a plate's rim (`frame_ring`); the bevel's normal length is an
+    integer square root taken a bit pair at a time in 32-bit words.
+  - `coverage`: a scan-converted shape's alpha a pixel, written to a plane,
+    from the converter's own pieces of each row
+    (`CoverageRows::pieces`): an edge's crossing of a row boundary takes
+    64-bit products, so the CPU clips the edges to the rows and the pass walks
+    each pixel's cells. A stroke is its quads (`stroke_quads`), each covered
+    and laid in turn.
+  - `mask`: an ink laid through a coverage plane at nearest (`cover_span`):
+    a glyph, a tinted mask (`blit_tinted`), and a covered shape
+    (`fill_polygon_subpixel`, `fill_polygon`).
+  - `picture`: a picture laid cut to a rounded rectangle (`blit_rounded`) or
+    toned toward grey and weakened (`blit_desaturated`).
+  - A plane is one word a pixel, its value in the low byte, so no two
+    invocations write one word. A shape's window is at most `MAX_PASS_SHAPE`
+    pixels a side, a piece runs at most that far across its row, and a row
+    holds at most `MAX_ROW_PIECES` pieces, which keep the walk's products and
+    its summed cover in a signed word.
 
 ## 6. Layering and what stays true
 
@@ -1172,8 +1251,18 @@ Each needs sign-off before the item that depends on it; none is assumed.
     dispatches as it does copies, an admitted one held to a twin of several
     participants drawing each record directly.
 - **GP4**: the pinned modules are regenerated reproducibly, verify-mode fails on
-  drift and runs in `ci`, and every pipeline's conformance case pins its
-  software output.
+  drift and runs in `ci`, and every pass's conformance case pins its software
+  output: the body over random layouts — decorated and plain, cut and square,
+  presented short of the client, translucent and opaque, partly off the frame
+  — against `Body`; the shadow at either level and easing between them, square
+  and rounded, beside, beneath and across its caster, against the CPU's rows;
+  the resample reducing and enlarging along each axis and at one to one,
+  against `resample_window_into`; plates over and replacing, gradients and
+  masked washes, rings solid, lit and framed, shapes of several self-crossing
+  contours under both fill rules covered against `CoverageRows::row` and laid
+  as fills, strokes and design-grid fills or washed through a mask, tinted
+  masks, and pictures rounded and toned, each against its `Surface` call; and
+  a layout past a bound is refused.
 - **GP5**: the pinned set executes through Venus and matches the software
   reference within its stated tolerance; a 2D-only device degrades to software
   rendering with accelerated transfer and flip, and *that* path is tested, not

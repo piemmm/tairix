@@ -5,32 +5,28 @@
 //! taken away.
 
 use tairix_riscos_arm::mmu::PAGE_SIZE;
-use tairix_riscos_kernel::memory::{Bits, Create};
+use tairix_riscos_kernel::memory::handler_reason as reason;
+use tairix_riscos_kernel::memory::{AreaFlags, Bits, Create};
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::READ_DYNAMIC_AREA;
 use tairix_riscos_kernel::swi::X;
+use tairix_vdu::mode::Flags;
 
 use crate::canvas::Canvas;
-use crate::mode::{flag, Format};
+use crate::mode::Format;
 use crate::state::read;
 
 /// The screen's dynamic area.
 pub(crate) const AREA: u32 = 2;
-/// Its flags: not cacheable, mapped twice, its pages its handler's to choose.
-const AREA_FLAGS: u32 = (1 << 5) | (1 << 6) | (1 << 8);
+/// Its flags.
+const AREA_FLAGS: u32 =
+    AreaFlags::NOT_CACHEABLE | AreaFlags::DOUBLY_MAPPED | AreaFlags::NEEDS_SPECIFIC_PAGES;
 /// The most it may reach, as RISC OS 5 has it, and in a layout that admits
 /// 26-bit code the most the 26-bit window spares it.
 const MOST: u32 = 0x80_0000;
 const MOST_26BIT: u32 = 0x20_0000;
 /// Its title.
 const TITLE: &[u8] = b"Screen memory";
-
-/// A dynamic area handler's reasons.
-mod reason {
-    pub(super) const PRE_SHRINK: u32 = 2;
-    pub(super) const POST_GROW: u32 = 1;
-    pub(super) const POST_SHRINK: u32 = 3;
-}
 
 /// How the current mode was named.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,7 +118,7 @@ impl Screen {
     /// Whether whole-screen text scrolls by moving the screen: not in
     /// Teletext, whose page the drivers redraw.
     pub(crate) const fn hardware_scrolls(&self) -> bool {
-        !self.format.has(flag::TELETEXT)
+        !self.format.has(Flags::TELETEXT)
     }
 
     /// Moves both screens' starts a text row of `lines` pixel lines, up or

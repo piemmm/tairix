@@ -6,7 +6,6 @@ mod data;
 mod io;
 mod system;
 
-pub(crate) use io::READ_LINE;
 pub(crate) use system::Then;
 
 use super::eval::FACTOR_ONLY;

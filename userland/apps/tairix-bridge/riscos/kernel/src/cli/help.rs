@@ -13,8 +13,6 @@ use crate::msgtrans::DICTIONARY;
 use crate::os::{Fail, Os, Regs};
 use crate::swi::{os, X};
 
-/// `Service_Help`.
-const HELP_SERVICE: u32 = 0x09;
 /// The buffer help code is given, and the most a list of names gathers
 /// before it is written out.
 const HELP_BUFFER: u32 = 512;
@@ -319,7 +317,7 @@ impl Os<'_> {
 /// gives it, paged.
 pub(crate) fn help(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let mut service = Regs::default();
-    service.r[..3].copy_from_slice(&[regs.r[0], HELP_SERVICE, regs.r[1]]);
+    service.r[..3].copy_from_slice(&[regs.r[0], crate::service::HELP, regs.r[1]]);
     os.service(&mut service)?;
     if service.r[1] == 0 {
         return Ok(());

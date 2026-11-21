@@ -1,9 +1,11 @@
 # `tairix-vdu`
 
 The Acorn VDU vocabulary the BBC Micro's MOS and RISC OS share. OpenMicro's
-MOS builds its character set and control-code table from it, `lib/image` reads
-a sprite's numbered mode through it, and TAIRiX Bridge's VDU drivers use all
-three parts (`plans/RISCOS-EMULATOR.md` RO8, RO21).
+MOS builds its character set, control-code table, plot codes and default
+palettes from it, `lib/image` reads a sprite's numbered mode and its
+256-colour palettes through it, TAIRiX Bridge's BASIC takes its plot codes
+from it, and its VDU drivers use every part (`plans/RISCOS-EMULATOR.md` RO8,
+RO21).
 
 ## Control codes
 
@@ -18,6 +20,16 @@ unknown-VDU 23 vector, where the font manager takes 25 and 26. From
 `code::FIRST_DEFINED`, 32, the first parameter is the character VDU 23
 defines.
 
+## Plot codes
+
+`plot` is VDU 25's code: the shape in its top five bits (`plot::SHAPE`) —
+the eight line shapes from `plot::LINE` to `plot::DOTTED_WITHOUT_ENDS`, the
+point, the horizontal line fills, the triangle, rectangle and parallelogram,
+the two flood fills, circles, arcs, segments and sectors, the block move and
+copy, and ellipses — and in its low three whether the point is given
+absolutely (`plot::ABSOLUTE`) and which colour plots (`plot::INK`): none, the
+foreground, inverted or the background.
+
 ## Numbered modes
 
 `mode::MODES` holds RISC OS 5's modes 0 to 53 by number. Each `Mode` holds the
@@ -26,10 +38,27 @@ factors, `Log2BPP` and `Log2BPC`, `NColour`, `LineLength`, `ScreenSize`,
 `YShftFactor` and `ModeFlags`. `mode::numbered` answers a mode by number, and
 `None` past 53, whose depth only the module that defined it knows.
 
+`mode::var` numbers the mode variables as `OS_ReadModeVariable` takes them,
+and `mode::vdu_var` the text window's size as `OS_ReadVduVariables` does.
+`Flags` is the whole `ModeFlags` word, the direct-colour formats' greys, red
+and blue swap and alpha among its bits. `mode::DEFAULT_MODE` is RISC OS 5's
+default, mode 28.
+
 Modes 3, 6 and 7 are text modes (`Flags::NON_GRAPHIC`). RISC OS refuses a
 sprite in one, so `Mode::graphic` says whether one may be in it. Mode 7 is
 Teletext as RISC OS 5.30 answers for it: sixteen colours at 640 by 500. Mode
 47's pixels are square, as RISC OS 5 defines them.
+
+## Palettes
+
+`palette::DEFAULT_2` and `palette::DEFAULT_4` are the physical colours the two-
+and four-colour modes' logical colours start as. `palette::default_256` is a
+256-colour mode's default palette: four bits of each channel, widened to
+eight, the low two shared. `palette::grouped` is the colour a 256-colour pixel
+shows when the entry its low four bits select is a given base: the pixel's
+top four bits give red's bit 3, green's bits 2 and 3 and blue's bit 3 in both
+nibbles of each channel, the rest the base's, as RISC OS 5.30 reads its own
+palette back.
 
 ## The system character set
 

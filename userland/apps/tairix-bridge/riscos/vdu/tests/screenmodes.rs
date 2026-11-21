@@ -6,7 +6,7 @@
 use std::sync::LazyLock;
 
 use tairix_fscopy::fixture::Tree;
-use tairix_riscos_filing::session::{command, session, Setup, DISC};
+use tairix_riscos_filing::session::{command, modules_with, session, Setup, DISC};
 use tairix_riscos_kernel::module::Builtin;
 use tairix_riscos_kernel::os::Regs;
 use tairix_riscos_kernel::swi::os::SERVICE_CALL;
@@ -20,11 +20,8 @@ const MODE_EXTENSION: u32 = 0x50;
 const SELECTOR: [u32; 6] = [1, 640, 480, 3, u32::MAX, u32::MAX];
 const SELECTOR_AT: u32 = 0x9000;
 
-static MODULES: LazyLock<Vec<&'static Builtin>> = LazyLock::new(|| {
-    let mut modules: Vec<&'static Builtin> = tairix_riscos_filing::MODULES.to_vec();
-    modules.extend(tairix_riscos_vdu::MODULES.iter().copied());
-    modules
-});
+static MODULES: LazyLock<Vec<&'static Builtin>> =
+    LazyLock::new(|| modules_with(&[&tairix_riscos_vdu::MODULES]));
 
 #[test]
 fn a_loaded_file_answers_for_its_modes_and_a_wild_selector_is_passed_on() {

@@ -3,7 +3,7 @@
 //! arguments are bracketed, with the keywords that begin an operand.
 
 use tairix_riscos_kernel::os::Regs;
-use tairix_riscos_kernel::swi::{os as swi, X};
+use tairix_riscos_kernel::swi::{os as swi, sound, X};
 
 use super::eval::truth_value;
 use super::lvalue::{Element, Lvalue};
@@ -344,7 +344,7 @@ impl Machine<'_, '_> {
             token::function::BEAT => {
                 let mut regs = Regs::default();
                 regs.r[0] = 0;
-                self.os.perform(X | BEAT_SWI, &mut regs)?;
+                self.os.perform(X | sound::Q_BEAT, &mut regs)?;
                 self.operand_is(&Value::Int(regs.r[0].cast_signed()))
             }
             _ => Err(Error::Mistake.into()),
@@ -773,7 +773,7 @@ impl Machine<'_, '_> {
     fn point(&mut self, x: i32, y: i32) -> Step<i32> {
         let mut regs = Regs::default();
         regs.r[..2].copy_from_slice(&[x.cast_unsigned(), y.cast_unsigned()]);
-        self.os.perform(X | READ_POINT, &mut regs)?;
+        self.os.perform(X | swi::READ_POINT, &mut regs)?;
         Ok(if regs.r[4] == 0 {
             regs.r[2].cast_signed()
         } else {
@@ -884,11 +884,6 @@ impl Guest {
         Self::ALL.into_iter().find(|&g| g as u8 == byte)
     }
 }
-
-/// `OS_ReadPoint`: a graphics point's colour, R4 non-zero off the screen.
-const READ_POINT: u32 = 0x32;
-/// `Sound_QBeat`, which `BEAT` reads.
-const BEAT_SWI: u32 = 0x4_0186;
 
 /// The most subscripts an array has.
 pub(crate) const SUBSCRIPTS_MOST: usize = 64;

@@ -9,11 +9,17 @@ use alloc::vec::Vec;
 
 use tairix_riscos_kernel::os::{Fail, Os};
 use tairix_teletext::{is_double_height, Attributes, GLYPHS, HALF_DOTS, HALF_LINES};
+use tairix_vdu::mode::Flags;
 
 use crate::changed;
 use crate::state::Vdu;
 use crate::text::{Shift, Window};
 
+/// A cell's pixels across.
+pub(crate) const CELL_WIDTH: u32 = 16;
+/// A cell's pixels down: one for each of its glyph's half-dot lines.
+#[expect(clippy::cast_possible_truncation, reason = "twenty lines")]
+pub(crate) const CELL_HEIGHT: u32 = HALF_LINES as u32;
 /// The page's size most a mode may give it.
 pub(crate) const MOST_COLUMNS: usize = 255;
 pub(crate) const MOST_ROWS: usize = 255;
@@ -208,7 +214,7 @@ impl Vdu {
         if let Some(slot) = self.teletext.controls.get_mut(usize::from(action)) {
             *slot = value;
         }
-        if self.screen.format.has(crate::mode::flag::TELETEXT) {
+        if self.screen.format.has(Flags::TELETEXT) {
             self.teletext_page(os)?;
             self.teletext_draw(os, 0, true)?;
         }
@@ -265,7 +271,7 @@ impl Vdu {
                     }
                 }
             }
-            lower = double_seen && !lower;
+            lower = tairix_teletext::lower_after(lower, double_seen);
         }
         changed::cover_screen(os, &format)
     }
@@ -284,9 +290,10 @@ fn fill_line(
     line.fill(0);
     for (column, s) in shown.iter().enumerate() {
         let a = s.attributes;
-        let visible = (!a.conceal || revealed) && (!a.flash || flash_on) && (!lower || a.double);
+        let visible = (!a.conceal || revealed) && (!a.flash || flash_on) && a.shows_in(lower);
         let half_line = if a.double {
-            (if lower { 10 } else { 0 } + pixel_line as usize / 2).min(HALF_LINES - 1)
+            (tairix_teletext::double_first_line(lower) + pixel_line as usize / 2)
+                .min(HALF_LINES - 1)
         } else {
             (pixel_line as usize).min(HALF_LINES - 1)
         };
@@ -294,11 +301,11 @@ fn fill_line(
             Some(index) => GLYPHS[index][half_line],
             None => 0,
         };
-        for p in 0..16u32 {
-            let half_dot = (6 * p + 3) / 8;
+        for p in 0..CELL_WIDTH {
+            let half_dot = (2 * p + 1) * HALF_DOTS / (2 * CELL_WIDTH);
             let lit = bits >> (HALF_DOTS - 1 - half_dot) & 1 != 0;
             let colour = if lit { a.foreground } else { a.background };
-            let x = column * 16 + p as usize;
+            let x = column * CELL_WIDTH as usize + p as usize;
             if let Some(byte) = line.get_mut(x / 2) {
                 *byte |= colour << (4 * (x % 2));
             }

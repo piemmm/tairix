@@ -121,8 +121,6 @@ const INITIAL: [u8; 0x5B] = [
 pub(crate) const OS_IDENTIFIER: u32 = 0xAA;
 /// The version number `OS_Byte` 0 with R1 non-zero gives.
 const OS_VERSION: u32 = 6;
-/// `Service_UKByte`.
-const UK_BYTE: u32 = 0x07;
 
 /// `OS_Byte` 0's version error: the number RISC OS gives it, the text
 /// naming the release and the emulator.
@@ -153,6 +151,14 @@ impl Os<'_> {
         regs.r[..2].copy_from_slice(&[number, r1]);
         self.perform(crate::swi::X | crate::swi::os::BYTE, &mut regs)?;
         Ok(regs.r[1])
+    }
+
+    /// The current alphabet, as `OS_Byte` 71 reads it for a module.
+    pub fn read_alphabet(&mut self) -> Result<u32, Fail> {
+        self.os_byte(
+            crate::international::ALPHABET_BYTE,
+            crate::international::READ_ALPHABET,
+        )
     }
 
     /// The variables at reset, then those the CMOS configures.
@@ -411,16 +417,26 @@ impl Os<'_> {
         r5: u32,
     ) -> Result<Option<u32>, Unwind> {
         let mut service = Regs::default();
-        service.r[1..6].copy_from_slice(&[crate::international::SERVICE, reason, r3, r4, r5]);
+        service.r[1..6].copy_from_slice(&[crate::service::INTERNATIONAL, reason, r3, r4, r5]);
         self.service(&mut service)?;
         Ok((service.r[1] == 0).then_some(service.r[4]))
     }
 
-    /// Every character of `alphabet` defined by `Service_International` 5:
-    /// whether a module knows the alphabet.
+    /// Characters `first` to `last` of `alphabet` defined by
+    /// `Service_International` 5: whether a module knows the alphabet.
+    pub fn define_characters(
+        &mut self,
+        alphabet: u32,
+        first: u32,
+        last: u32,
+    ) -> Result<bool, Unwind> {
+        let define = crate::service::international::DEFINE;
+        Ok(self.international(define, alphabet, first, last)?.is_some())
+    }
+
+    /// Every character of `alphabet` defined: whether a module knows it.
     pub(crate) fn define_alphabet_fully(&mut self, alphabet: u32) -> Result<bool, Unwind> {
-        let define = crate::international::reason::DEFINE;
-        Ok(self.international(define, alphabet, 32, 255)?.is_some())
+        self.define_characters(alphabet, 32, 255)
     }
 
     /// The keyboard selected, and the modules told.
@@ -428,7 +444,7 @@ impl Os<'_> {
         self.world.country.keyboard = keyboard;
         self.world.country.key_alphabet = alphabet;
         self.international(
-            crate::international::reason::KEYBOARD,
+            crate::service::international::KEYBOARD,
             keyboard,
             alphabet,
             0,
@@ -445,7 +461,7 @@ impl Os<'_> {
             return Ok(());
         }
         let country = self.default_country(regs.r[1]);
-        let reason = crate::international::reason::COUNTRY_ALPHABET;
+        let reason = crate::service::international::COUNTRY_ALPHABET;
         regs.r[2] = reason;
         let Some(alphabet) = self.international(reason, country, 0, 0)? else {
             regs.r[1] = 0;
@@ -455,10 +471,9 @@ impl Os<'_> {
         self.set_byte_var(var::COUNTRY, u8::try_from(country).unwrap_or(0));
         self.world.country.alphabet = alphabet;
         self.select_keyboard(country, alphabet)?;
-        let define = crate::international::reason::DEFINE;
-        self.international(define, alphabet, 32, 255)?;
+        self.define_alphabet_fully(alphabet)?;
         regs.r[1] = old;
-        regs.r[2] = define;
+        regs.r[2] = crate::service::international::DEFINE;
         Ok(())
     }
 
@@ -466,7 +481,7 @@ impl Os<'_> {
     /// alphabet set for 0 to 126, a country naming its own, and a keyboard
     /// for 128 more than its number; R1 the old one, nought if none answers.
     fn alphabet_or_keyboard(&mut self, regs: &mut Regs) -> Result<(), Unwind> {
-        let country_alphabet = crate::international::reason::COUNTRY_ALPHABET;
+        let country_alphabet = crate::service::international::COUNTRY_ALPHABET;
         match regs.r[1] {
             127 => regs.r[1] = self.world.country.alphabet,
             255 => regs.r[1] = self.world.country.keyboard,
@@ -475,7 +490,7 @@ impl Os<'_> {
                 let alphabet = self
                     .international(country_alphabet, number, 0, 0)?
                     .unwrap_or(number);
-                regs.r[2] = crate::international::reason::DEFINE;
+                regs.r[2] = crate::service::international::DEFINE;
                 if !self.define_alphabet_fully(alphabet)? {
                     regs.r[1] = 0;
                     return Ok(());
@@ -506,16 +521,27 @@ impl Os<'_> {
         self.set_country(&mut regs)
     }
 
-    /// The reasons that write one variable: R1 its old value, R2 the next.
-    fn write_variable(&mut self, number: u8, regs: &mut Regs) {
+    /// Variable `number` set to R1's low byte: R1 its old value.
+    pub fn swap_byte_var(&mut self, number: u8, regs: &mut Regs) {
         let old = self.byte_var(number);
         self.set_byte_var(number, regs.byte(1));
         regs.r[1] = u32::from(old);
-        regs.r[2] = if number == 0xFF {
+    }
+
+    /// The reasons that write one variable: R1 its old value, R2 the next.
+    fn write_variable(&mut self, number: u8, regs: &mut Regs) {
+        self.swap_byte_var(number, regs);
+        regs.r[2] = self.next_variable(number);
+    }
+
+    /// The variable after `number`, as a reason hands it back in R2: after the
+    /// last, the byte past the table.
+    fn next_variable(&mut self, number: u8) -> u32 {
+        if number == 0xFF {
             u32::from(self.peek_byte(Self::byte_address(0xFF) + 1).unwrap_or(0))
         } else {
             u32::from(self.byte_var(number + 1))
-        };
+        }
     }
 
     /// `OS_Byte` &A8 to &FF: the variable becomes (old AND R2) EOR R1, R1
@@ -525,18 +551,26 @@ impl Os<'_> {
         let new = (old & regs.byte(2)) ^ regs.byte(1);
         self.set_byte_var(number, new);
         regs.r[1] = u32::from(old);
-        regs.r[2] = if number == 0xFF {
-            u32::from(self.peek_byte(Self::byte_address(0xFF) + 1).unwrap_or(0))
-        } else {
-            u32::from(self.byte_var(number + 1))
-        };
+        regs.r[2] = self.next_variable(number);
     }
 
     /// An `OS_Byte` the kernel does not know: offered as `Service_UKByte`,
     /// which a claimant answers in R2 to R4.
     fn unknown_byte(&mut self, regs: &mut Regs) -> Result<(), Fail> {
         let mut service = Regs::new([
-            0, UK_BYTE, regs.r[0], regs.r[1], regs.r[2], 0, 0, 0, 0, 0, 0, 0, 0,
+            0,
+            crate::service::UK_BYTE,
+            regs.r[0],
+            regs.r[1],
+            regs.r[2],
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
         ]);
         self.service(&mut service)?;
         if service.r[1] == 0 {
@@ -605,7 +639,10 @@ impl Os<'_> {
         let pending = self.escape_set();
         if pending && self.byte_var(var::ESCAPE_EFFECT) == 0 {
             let mut init = Regs::default();
-            if self.perform(crate::swi::X | SOUND_QINIT, &mut init).is_ok() {
+            if self
+                .perform(crate::swi::X | crate::swi::sound::Q_INIT, &mut init)
+                .is_ok()
+            {
                 for channel in (1..=8).rev() {
                     let mut stop = Regs::new([
                         0x0101_0000 | channel,
@@ -622,7 +659,10 @@ impl Os<'_> {
                         0,
                         0,
                     ]);
-                    self.perform_quietly(crate::swi::X | SOUND_CONTROL_PACKED, &mut stop)?;
+                    self.perform_quietly(
+                        crate::swi::X | crate::swi::sound::CONTROL_PACKED,
+                        &mut stop,
+                    )?;
                 }
             }
             self.set_byte_var(var::PAGE_LINES, 0);
@@ -749,11 +789,6 @@ impl Country {
         }
     }
 }
-
-/// `Sound_QInit`.
-const SOUND_QINIT: u32 = 0x4_01C0;
-/// `Sound_ControlPacked`.
-pub(crate) const SOUND_CONTROL_PACKED: u32 = 0x4_0186;
 
 /// The `OS_Byte` variables' place in zero page, for `OS_ReadSysInfo` 6.
 pub(crate) const VARIABLES: u32 = TABLE;

@@ -179,9 +179,11 @@ in some pixels and the higher one in others, and the area mean carries the
 fraction. The row is resolved once per **screen** row, and a span composite
 resolves the eight biases of its own first column once more (the pattern's
 period is eight) rather than deriving a screen column per pixel;
-`WindowRow::sample` scales window opacity and
-rounded-corner coverage at the same bias, so a translucent window's own
-gradients survive too. This is one shared definition with the rest of the
+a window row's per-column path (`WindowRow::body`, resolved into
+`tairix_raster::Body`) scales window opacity and rounded-corner coverage at
+the same bias, through the same `Pixel::laid_over` the runs lay with, so a
+translucent window's own gradients survive too and a source whose alpha is
+nought lays nothing on a corner row exactly as on any other. This is one shared definition with the rest of the
 rasteriser — the login screen's entry veil, a translucent plate, and
 `frost_region`'s mix-back all round the same way — not a compositor-local
 trick.
@@ -486,7 +488,8 @@ same colour algebra without depending on the window manager (`AGENTS.md`
 ## Rounded corners
 
 `Corners::Rounded { radius }` rounds a window's corners; `Corners::Square`
-is the opt-out. Coverage in `0..=255` is computed by deterministic
+is the opt-out. The shape is a `tairix_raster::RoundRect` of the radius the
+style names. Coverage in `0..=255` is computed by deterministic
 supersampling on a fixed grid (no `sqrt`, which `core` lacks), so a pixel
 on a corner arc receives anti-aliased partial coverage and the
 anti-aliasing is exactly reproducible in tests. The radius is clamped to
@@ -692,7 +695,9 @@ the silhouette — its weight is multiplied by the share of the pixel the
 silhouette leaves uncovered — so a translucent or frosted surface never shows
 its own shadow through itself.
 
-**Exact, and cheap, by linearity** (`shadow.rs`). Blurring is linear, and a
+**Exact, and cheap, by linearity** (`tairix_raster::drop_shadow`, the one
+definition the pinned `shadow` pass is held to as well; `shadow.rs` holds the
+theme's levels and the ease). Blurring is linear, and a
 rounded silhouette is its rectangle less four corner notches. The rectangle's
 blur is separable, a horizontal and a vertical running sum of the kernel
 (`H(x)·V(y)`), and each notch's blur is one small tile per corner radius,
@@ -712,7 +717,7 @@ working in — the window holding the focus with its transients — stands
 *lifted*, and every other decorated window *rests*: its shadow is lighter
 (`Palette::inactive_drop_shadow`) and shorter (`Metrics::inactive_drop_shadow_reach`),
 so it reads as standing lower. Every other floating surface stays lifted
-whatever holds the focus. The kit (`ShadowKit`) holds an exact `Level` for each,
+whatever holds the focus. The kit (`ShadowKit`) holds an exact `DropShadow` for each,
 and a window whose height changes eases between them over the theme's
 window-activation timing (`MotionInteraction::WindowActivate`), casting both
 shadows at once weighted by how far it has risen — a crossfade between two

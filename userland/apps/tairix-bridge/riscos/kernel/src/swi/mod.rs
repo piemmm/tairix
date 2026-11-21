@@ -36,6 +36,36 @@ pub mod chunk {
     pub const RESOURCE_FS: u32 = 0x4_1B40;
     /// `Territory`.
     pub const TERRITORY: u32 = 0x4_3040;
+    /// `SoundDMA`.
+    pub const SOUND_DMA: u32 = 0x4_0140;
+    /// `SoundChannels`.
+    pub const SOUND_CHANNELS: u32 = 0x4_0180;
+    /// `SoundScheduler`.
+    pub const SOUND_SCHEDULER: u32 = 0x4_01C0;
+}
+
+/// The sound modules' SWIs.
+pub mod sound {
+    use super::chunk::{SOUND_CHANNELS, SOUND_DMA, SOUND_SCHEDULER};
+
+    /// `Sound_Configure`.
+    pub const CONFIGURE: u32 = SOUND_DMA;
+    /// `Sound_Enable`.
+    pub const ENABLE: u32 = SOUND_DMA + 1;
+    /// `Sound_Stereo`.
+    pub const STEREO: u32 = SOUND_DMA + 2;
+    /// `Sound_ControlPacked`.
+    pub const CONTROL_PACKED: u32 = SOUND_CHANNELS + 6;
+    /// `Sound_Control`.
+    pub const CONTROL: u32 = SOUND_CHANNELS + 9;
+    /// `Sound_AttachNamedVoice`.
+    pub const ATTACH_NAMED_VOICE: u32 = SOUND_CHANNELS + 10;
+    /// `Sound_QInit`.
+    pub const Q_INIT: u32 = SOUND_SCHEDULER;
+    /// `Sound_QTempo`.
+    pub const Q_TEMPO: u32 = SOUND_SCHEDULER + 5;
+    /// `Sound_QBeat`.
+    pub const Q_BEAT: u32 = SOUND_SCHEDULER + 6;
 }
 
 /// ResourceFS's SWIs.
@@ -77,14 +107,32 @@ pub mod os {
     pub const GBPB: u32 = 0x0C;
     /// `OS_Find`.
     pub const FIND: u32 = 0x0D;
+    /// `OS_ReadLine`.
+    pub const READ_LINE: u32 = 0x0E;
+    /// `OS_Control`.
+    pub const CONTROL: u32 = 0x0F;
     /// `OS_GetEnv`.
     pub const GET_ENV: u32 = 0x10;
     /// `OS_Exit`.
     pub const EXIT: u32 = 0x11;
+    /// `OS_SetEnv`.
+    pub const SET_ENV: u32 = 0x12;
     /// `OS_IntOn`.
     pub const INT_ON: u32 = 0x13;
     /// `OS_IntOff`.
     pub const INT_OFF: u32 = 0x14;
+    /// `OS_CallBack`.
+    pub const CALL_BACK: u32 = 0x15;
+    /// `OS_EnterOS`.
+    pub const ENTER_OS: u32 = 0x16;
+    /// `OS_BreakPt`.
+    pub const BREAK_PT: u32 = 0x17;
+    /// `OS_BreakCtrl`.
+    pub const BREAK_CTRL: u32 = 0x18;
+    /// `OS_UnusedSWI`.
+    pub const UNUSED_SWI: u32 = 0x19;
+    /// `OS_UpdateMEMC`.
+    pub const UPDATE_MEMC: u32 = 0x1A;
     /// `OS_SetCallBack`.
     pub const SET_CALLBACK: u32 = 0x1B;
     /// `OS_Mouse`.
@@ -119,6 +167,8 @@ pub mod os {
     pub const CHANGE_DYNAMIC_AREA: u32 = 0x2A;
     /// `OS_GenerateError`.
     pub const GENERATE_ERROR: u32 = 0x2B;
+    /// `OS_ReadEscapeState`.
+    pub const READ_ESCAPE_STATE: u32 = 0x2C;
     /// `OS_EvaluateExpression`.
     pub const EVALUATE_EXPRESSION: u32 = 0x2D;
     /// `OS_SpriteOp`.
@@ -141,6 +191,10 @@ pub mod os {
     pub const REMOVE_CURSORS: u32 = 0x36;
     /// `OS_RestoreCursors`.
     pub const RESTORE_CURSORS: u32 = 0x37;
+    /// `OS_SWINumberToString`.
+    pub const SWI_NUMBER_TO_STRING: u32 = 0x38;
+    /// `OS_SWINumberFromString`.
+    pub const SWI_NUMBER_FROM_STRING: u32 = 0x39;
     /// `OS_ValidateAddress`.
     pub const VALIDATE_ADDRESS: u32 = 0x3A;
     /// `OS_CallAfter`.
@@ -169,18 +223,38 @@ pub mod os {
     pub const WRITE_N: u32 = 0x46;
     /// `OS_AddToVector`.
     pub const ADD_TO_VECTOR: u32 = 0x47;
+    /// `OS_WriteEnv`.
+    pub const WRITE_ENV: u32 = 0x48;
     /// `OS_ReadArgs`.
     pub const READ_ARGS: u32 = 0x49;
+    /// `OS_ReadRAMFsLimits`.
+    pub const READ_RAM_FS_LIMITS: u32 = 0x4A;
+    /// `OS_ClaimDeviceVector`.
+    pub const CLAIM_DEVICE_VECTOR: u32 = 0x4B;
+    /// `OS_ReleaseDeviceVector`.
+    pub const RELEASE_DEVICE_VECTOR: u32 = 0x4C;
+    /// `OS_DelinkApplication`.
+    pub const DELINK_APPLICATION: u32 = 0x4D;
+    /// `OS_RelinkApplication`.
+    pub const RELINK_APPLICATION: u32 = 0x4E;
     /// `OS_HeapSort`.
     pub const HEAP_SORT: u32 = 0x4F;
+    /// `OS_ExitAndDie`.
+    pub const EXIT_AND_DIE: u32 = 0x50;
     /// `OS_ReadMemMapInfo`.
     pub const READ_MEM_MAP_INFO: u32 = 0x51;
+    /// `OS_ReadMemMapEntries`.
+    pub const READ_MEM_MAP_ENTRIES: u32 = 0x52;
+    /// `OS_SetMemMapEntries`.
+    pub const SET_MEM_MAP_ENTRIES: u32 = 0x53;
     /// `OS_AddCallBack`.
     pub const ADD_CALLBACK: u32 = 0x54;
     /// `OS_ReadDefaultHandler`.
     pub const READ_DEFAULT_HANDLER: u32 = 0x55;
     /// `OS_SetECFOrigin`.
     pub const SET_ECF_ORIGIN: u32 = 0x56;
+    /// `OS_SerialOp`.
+    pub const SERIAL_OP: u32 = 0x57;
     /// `OS_ReadSysInfo`.
     pub const READ_SYS_INFO: u32 = 0x58;
     /// `OS_Confirm`.
@@ -193,8 +267,12 @@ pub mod os {
     pub const READ_DYNAMIC_AREA: u32 = 0x5C;
     /// `OS_PrintChar`.
     pub const PRINT_CHAR: u32 = 0x5D;
+    /// `OS_ChangeRedirection`.
+    pub const CHANGE_REDIRECTION: u32 = 0x5E;
     /// `OS_RemoveCallBack`.
     pub const REMOVE_CALLBACK: u32 = 0x5F;
+    /// `OS_FindMemMapEntries`.
+    pub const FIND_MEM_MAP_ENTRIES: u32 = 0x60;
     /// `OS_SetColour`.
     pub const SET_COLOUR: u32 = 0x61;
     /// `OS_Pointer`.
@@ -209,10 +287,16 @@ pub mod os {
     pub const MEMORY: u32 = 0x68;
     /// `OS_ClaimProcessorVector`.
     pub const CLAIM_PROCESSOR_VECTOR: u32 = 0x69;
+    /// `OS_Reset`.
+    pub const RESET: u32 = 0x6A;
     /// `OS_MMUControl`.
     pub const MMU_CONTROL: u32 = 0x6B;
+    /// `OS_ResyncTime`.
+    pub const RESYNC_TIME: u32 = 0x6C;
     /// `OS_PlatformFeatures`.
     pub const PLATFORM_FEATURES: u32 = 0x6D;
+    /// `OS_SynchroniseCodeAreas`.
+    pub const SYNCHRONISE_CODE_AREAS: u32 = 0x6E;
     /// `OS_CallASWI`.
     pub const CALL_A_SWI: u32 = 0x6F;
     /// `OS_AMBControl`.
@@ -221,6 +305,14 @@ pub mod os {
     pub const CALL_A_SWI_R12: u32 = 0x71;
     /// `OS_NVMemory`.
     pub const NV_MEMORY: u32 = 0x76;
+    /// `OS_TaskControl`.
+    pub const TASK_CONTROL: u32 = 0x78;
+    /// `OS_Hardware`.
+    pub const HARDWARE: u32 = 0x7A;
+    /// `OS_IICOp`.
+    pub const IIC_OP: u32 = 0x7B;
+    /// `OS_LeaveOS`.
+    pub const LEAVE_OS: u32 = 0x7C;
     /// `OS_ReadLine32`.
     pub const READ_LINE32: u32 = 0x7D;
     /// `OS_SubstituteArgs32`.

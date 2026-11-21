@@ -142,24 +142,10 @@ const DESKTOP_256: [[u8; 3]; 256] = tint_palette();
 
 const fn tint_palette() -> [[u8; 3]; 256] {
     let mut table = [[0u8; 3]; 256];
-    let mut byte = 0u32;
-    while byte < 256 {
-        let tint = byte & 0x3;
-        let red = (byte >> 4 & 1) << 3 | (byte >> 2 & 1) << 2 | tint;
-        let green = (byte >> 6 & 1) << 3 | (byte >> 5 & 1) << 2 | tint;
-        let blue = (byte >> 7 & 1) << 3 | (byte >> 3 & 1) << 2 | tint;
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "a nibble times seventeen is at most 255"
-        )]
-        {
-            table[byte as usize] = [
-                (red * 0x11) as u8,
-                (green * 0x11) as u8,
-                (blue * 0x11) as u8,
-            ];
-        }
-        byte += 1;
+    let mut pixel = 0;
+    while pixel < 256 {
+        table[pixel] = tairix_vdu::palette::default_256(pixel.to_le_bytes()[0]);
+        pixel += 1;
     }
     table
 }
@@ -925,7 +911,10 @@ impl IndexedPalette {
         for (index, slot) in (0u32..).zip(table.iter_mut().take(count)) {
             let [r, g, b] = match (vidc, entries >= VIDC_ENTRIES) {
                 (false, _) => Self::stored(palette, index),
-                (true, true) => Self::supremacy(Self::stored(palette, base + (index & 0xF)), index),
+                (true, true) => tairix_vdu::palette::grouped(
+                    Self::stored(palette, base + (index & 0xF)),
+                    index.to_le_bytes()[0],
+                ),
                 (true, false) => desktop[index as usize],
             };
             *slot = [r, g, b, u8::MAX];
@@ -945,17 +934,6 @@ impl IndexedPalette {
             return [0, 0, 0];
         };
         Rgb::from_riscos_word(u32::from_le_bytes(*entry)).to_array()
-    }
-
-    /// Override the supremacy bits a 256-colour pixel's top four carry: red
-    /// bit three, green bits two and three, and blue bit three.
-    fn supremacy(rgb: [u8; 3], pixel: u32) -> [u8; 3] {
-        let widen = |nibble: u32| u8::try_from(nibble * 0x11).unwrap_or(u8::MAX);
-        [
-            widen((u32::from(rgb[0]) >> 4 & 0x7) | (pixel >> 4 & 1) << 3),
-            widen((u32::from(rgb[1]) >> 4 & 0x3) | (pixel >> 5 & 1) << 2 | (pixel >> 6 & 1) << 3),
-            widen((u32::from(rgb[2]) >> 4 & 0x7) | (pixel >> 7 & 1) << 3),
-        ]
     }
 }
 

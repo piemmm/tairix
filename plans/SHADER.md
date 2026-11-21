@@ -299,8 +299,8 @@ names every `GLSL.std.450` instruction (`GlslStd450`) for it.
 The pinned set lives in `lib/shaders`: each module's source beside its
 committed SPIR-V under `lib/shaders/spv/`, and the bindings and push words
 its consumer binds. Its first members are the desktop's passes
-(`plans/GPU.md` GD6); the chrome's draws join with GP4, the game's passes with
-GP7. `cargo xtask shaders` builds every module of the set and fails closed in
+(`plans/GPU.md` GD6); the compositor's per-frame chrome and the furniture
+painter's draws join with GP4, the game's passes with GP7. `cargo xtask shaders` builds every module of the set and fails closed in
 `ci` where a committed one has drifted, is missing, or names no module;
 `--write` commits what the sources build. That is the pattern
 `cargo xtask c-header --write` and `cargo xtask font-atlas` established, and

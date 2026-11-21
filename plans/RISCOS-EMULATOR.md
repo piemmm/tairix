@@ -1158,7 +1158,8 @@ is fuzzed.
     exit by halving — so a guest's shape far larger than the screen costs
     what the window holds. A point more than 2²⁸ pixels out is held there.
   - Sprite plots, `PLOT` &E8–&EF, pass to `UKPlotV` with the codes the
-    drivers lack until RO22 draws them.
+    drivers lack, and sprites' `VDU 23,27` to `UKVDU23V`, until RO22 draws
+    them.
 - **The cursors** are drawn over the screen by the front end, never EORed
   into its memory as genuine RISC OS does, so a program reading its screen
   never meets them there: the one deliberate departure from RISC OS 5's
@@ -1627,17 +1628,23 @@ with tests that fail before and pass after (`AGENTS.md` §2.2, §2.18). A new
     the BBC and RISC OS define alike, and VDU 23's operations: those RISC OS 5
     performs, the rest passed to the unknown-VDU 23 vector, and characters
     defined from 32.
+  - VDU 25's plot codes: the shapes, and how a point is given and coloured.
   - RISC OS 5's numbered modes 0–53 with every mode variable
-    `OS_ReadModeVariable` reads. Mode 7 is RISC OS 5's sixteen-colour
+    `OS_ReadModeVariable` reads, the variables' numbers, the `ModeFlags`
+    bits and the default mode. Mode 7 is RISC OS 5's sixteen-colour
     Teletext, 640 by 500.
+  - The default palettes, and the 256-colour modes' arrangement of a pixel's
+    top four bits over the entry its low four select, as RISC OS 5.30 reads
+    its palette back; `lib/image`'s sixteen-entry sprite palettes take it.
     Modes 3, 6 and 7 are text modes, in which no sprite may be.
   - The 8×8 system character set in TAIRiX's own designs: OpenMicro's for
     32–126, and new ones in its style for the rest. RISC OS's arrangement runs
     32–255, ISO 8859-1 with RISC OS's own characters at 128–159 and its
     unassigned codes showing their number. The BBC's runs 32–127, with the
     pound sign at 96 and a hatched block at 127.
-  - OpenMicro's MOS builds its font, its control-code table, DELETE and VDU
-    23's tests from it, for the Model B and the Electron alike.
+  - OpenMicro's MOS builds its font, its control-code table, DELETE, VDU
+    23's tests, its plot codes and its default palettes from it, for the
+    Model B and the Electron alike.
   - `lib/image` reads a sprite's numbered mode through it, so modes 3 and 6 are
     refused as mode 7 is, and mode 47's pixels are square, as RISC OS 5 has
     them.

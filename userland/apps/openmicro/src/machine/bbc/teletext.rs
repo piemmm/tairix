@@ -6,7 +6,7 @@
 //! its own: held at zero by VSYNC, stepped by every line's sync, ten lines to
 //! a row.
 
-use tairix_teletext::{self as teletext, Attributes, HALF_LINES};
+use tairix_teletext::{self as teletext, Attributes, HALF_DOTS, HALF_LINES};
 
 use super::ula::SLOTS_PER_CYCLE;
 use crate::machine::canvas::encode;
@@ -55,7 +55,8 @@ const fn slots(lines: &[u16; HALF_LINES]) -> Cell {
             // [4h, 4h + 4).
             let mut quarter = 3 * slot;
             while quarter < 3 * slot + 3 {
-                cell[line][slot] += (lines[line] >> (11 - quarter / 4) & 1) as u8;
+                cell[line][slot] +=
+                    (lines[line] >> (HALF_DOTS as usize - 1 - quarter / 4) & 1) as u8;
                 quarter += 1;
             }
             slot += 1;
@@ -128,7 +129,7 @@ impl Saa5050 {
         self.line += 1;
         if self.line == LINES_PER_ROW {
             self.line = 0;
-            self.lower_row = self.double_seen && !self.lower_row;
+            self.lower_row = teletext::lower_after(self.lower_row, self.double_seen);
             self.double_seen = false;
         }
     }
@@ -145,7 +146,7 @@ impl Saa5050 {
             self.double_seen = true;
         }
         let flash_hidden = shown.flash && self.fields % FLASH_PERIOD >= FLASH_SHOWN;
-        let visible = !(shown.conceal || flash_hidden || (self.lower_row && !shown.double));
+        let visible = !(shown.conceal || flash_hidden) && shown.shows_in(self.lower_row);
         let line = self.half_line(shown.double, rounding_line);
         match cell.filter(|_| visible) {
             Some(index) => {
@@ -162,8 +163,7 @@ impl Saa5050 {
     fn half_line(&self, double: bool, rounding_line: bool) -> usize {
         let line = usize::from(self.line);
         if double {
-            let half = if self.lower_row { 10 } else { 0 };
-            half + line
+            teletext::double_first_line(self.lower_row) + line
         } else {
             2 * line + usize::from(rounding_line)
         }

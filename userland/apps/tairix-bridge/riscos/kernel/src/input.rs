@@ -16,7 +16,7 @@ use tairix_riscos_arm::reg::Reg;
 
 use crate::byte::var;
 use crate::memory::layout::HIGH_ZERO_PAGE;
-use crate::mouse::PACKET;
+use crate::mouse::Packet;
 use crate::os::{len32, Ending, Entry, Fail, Os, Regs, Unwind, Wait};
 use crate::vectors::{self, Carry};
 use crate::zeropage;
@@ -167,9 +167,9 @@ impl Input {
     }
 
     /// Buffers a mouse packet where the whole of it fits.
-    pub(crate) fn buffer_mouse_packet(&mut self, packet: [u8; PACKET]) {
+    pub(crate) fn buffer_mouse_packet(&mut self, packet: [u8; Packet::BYTES]) {
         if let Some(ring) = self.ring(MOUSE) {
-            if ring.capacity() - ring.len >= PACKET {
+            if ring.capacity() - ring.len >= Packet::BYTES {
                 for byte in packet {
                     ring.push(byte);
                 }
@@ -177,21 +177,17 @@ impl Input {
         }
     }
 
-    /// The next buffered mouse packet: position, buttons and time.
-    pub(crate) fn take_mouse_packet(&mut self) -> Option<(i32, i32, u32, u32)> {
+    /// The next buffered mouse packet.
+    pub(crate) fn take_mouse_packet(&mut self) -> Option<Packet> {
         let ring = self.rings.get_mut(MOUSE as usize)?;
-        if ring.len < PACKET {
+        if ring.len < Packet::BYTES {
             return None;
         }
-        let mut packet = [0u8; PACKET];
+        let mut packet = [0u8; Packet::BYTES];
         for slot in &mut packet {
             *slot = ring.pop().unwrap_or(0);
         }
-        let x = i32::from(i16::from_le_bytes([packet[0], packet[1]]));
-        let y = i32::from(i16::from_le_bytes([packet[2], packet[3]]));
-        let buttons = u32::from(packet[4]);
-        let time = u32::from_le_bytes([packet[5], packet[6], packet[7], packet[8]]);
-        Some((x, y, buttons, time))
+        Some(Packet::from_bytes(packet))
     }
 }
 

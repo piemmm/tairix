@@ -17,7 +17,10 @@ workspace = true
 tairix-riscos-kernel = { path = "../kernel", version = "=0.0.0" }
 # The processor's flags, which some calls answer in.
 tairix-riscos-arm = { path = "../arm", version = "=0.0.0" }
-# RISC OS 5's numbered modes, the control codes and the system font.
+# A palette entry's colour and the RISC OS colour word that holds it.
+tairix-colour = { path = "../../../../../lib/colour", version = "=0.0.0" }
+# RISC OS 5's numbered modes, the control codes, the system font and the
+# palettes' arithmetic.
 tairix-vdu = { path = "../../../../../lib/vdu", version = "=0.0.0" }
 # Mode 7's character generator.
 tairix-teletext = { path = "../../../../../lib/teletext", version = "=0.0.0" }

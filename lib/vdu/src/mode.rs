@@ -4,7 +4,7 @@
 
 /// A mode's `ModeFlags`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Flags(u16);
+pub struct Flags(u32);
 
 impl Flags {
     /// None.
@@ -23,16 +23,22 @@ impl Flags {
     pub const DOUBLE_VERTICAL: Self = Self(1 << 5);
     /// A full palette, each of its colours its own.
     pub const FULL_PALETTE: Self = Self(1 << 7);
+    /// A default palette of greys.
+    pub const GREYSCALE: Self = Self(1 << 9);
+    /// Red and blue swapped in a direct-colour pixel.
+    pub const RGB: Self = Self(1 << 14);
+    /// Alpha rather than unused in a direct-colour pixel's top bits.
+    pub const ALPHA: Self = Self(1 << 15);
 
     /// The flags `bits` hold.
     #[must_use]
-    pub const fn new(bits: u16) -> Self {
+    pub const fn new(bits: u32) -> Self {
         Self(bits)
     }
 
     /// The bits.
     #[must_use]
-    pub const fn bits(self) -> u16 {
+    pub const fn bits(self) -> u32 {
         self.0
     }
 
@@ -47,6 +53,53 @@ impl Flags {
     pub const fn has(self, flags: Self) -> bool {
         self.0 & flags.0 == flags.0
     }
+}
+
+/// RISC OS 5's default mode: 640 by 480 in 256 colours.
+pub const DEFAULT_MODE: u32 = 28;
+
+/// The mode variables there are: 0 to 13.
+pub const VARIABLES: u32 = 14;
+
+/// The mode variables' numbers, as `OS_ReadModeVariable` takes them.
+pub mod var {
+    /// `ModeFlags`.
+    pub const MODE_FLAGS: u32 = 0;
+    /// `ScrRCol`.
+    pub const SCR_R_COL: u32 = 1;
+    /// `ScrBRow`.
+    pub const SCR_B_ROW: u32 = 2;
+    /// `NColour`.
+    pub const N_COLOUR: u32 = 3;
+    /// `XEigFactor`.
+    pub const X_EIG: u32 = 4;
+    /// `YEigFactor`.
+    pub const Y_EIG: u32 = 5;
+    /// `LineLength`.
+    pub const LINE_LENGTH: u32 = 6;
+    /// `ScreenSize`.
+    pub const SCREEN_SIZE: u32 = 7;
+    /// `YShftFactor`.
+    pub const Y_SHIFT: u32 = 8;
+    /// `Log2BPP`.
+    pub const LOG2_BPP: u32 = 9;
+    /// `Log2BPC`.
+    pub const LOG2_BPC: u32 = 10;
+    /// `XWindLimit`.
+    pub const X_WIND_LIMIT: u32 = 11;
+    /// `YWindLimit`.
+    pub const Y_WIND_LIMIT: u32 = 12;
+    /// `MinScreenBanks`.
+    pub const MIN_SCREEN_BANKS: u32 = 13;
+}
+
+/// The VDU variables the text window's size is read from, as
+/// `OS_ReadVduVariables` takes them.
+pub mod vdu_var {
+    /// `WindowWidth`.
+    pub const WINDOW_WIDTH: u32 = 256;
+    /// `WindowHeight`.
+    pub const WINDOW_HEIGHT: u32 = 257;
 }
 
 /// One numbered mode's variables.

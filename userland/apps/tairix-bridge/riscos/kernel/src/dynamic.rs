@@ -15,6 +15,7 @@ use tairix_riscos_arm::psr;
 use crate::error::Error;
 use crate::host::Routine;
 use crate::kheap::KernelHeap;
+use crate::memory::handler_reason as reason;
 use crate::memory::{
     Allowed, AreaError, Clamps, Create, Failure, Guest, GuestError, Handler, Located, LogicalOp,
     Memory, PageEntry, PageQuery, PhysicalOp, Service, FREE_POOL,
@@ -30,16 +31,6 @@ const RESV: u32 = u32::from_le_bytes(*b"RESV");
 const ENTRY: u32 = 12;
 /// A service's 64-bit page block entry.
 const ENTRY_64: u32 = 20;
-
-/// The handler reasons.
-pub(crate) mod reason {
-    pub(super) const PRE_GROW: u32 = 0;
-    pub(super) const POST_GROW: u32 = 1;
-    pub(super) const PRE_SHRINK: u32 = 2;
-    pub(super) const POST_SHRINK: u32 = 3;
-    pub(super) const TEST_SHRINK: u32 = 4;
-    pub(crate) const RESIZE_PMP: u32 = 6;
-}
 
 /// "No such dynamic area handler call".
 pub(crate) const UNKNOWN_AREA_HANDLER: Error = Error {

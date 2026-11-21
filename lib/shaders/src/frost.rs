@@ -33,20 +33,6 @@ fn accumulate(
     Ok(())
 }
 
-/// Four `Function`-class sums, each started at nought.
-fn sums(f: &mut Function<'_>, kit: &Kit) -> Result<[Id; 4], BuildError> {
-    let pointer = f
-        .module()
-        .pointer(tairix_spirv::enumerant::StorageClass::FUNCTION, kit.uint)?;
-    let zero = f.module().uint(0)?;
-    let mut sums = [zero; 4];
-    for sum in &mut sums {
-        *sum = f.local(pointer)?;
-        f.emit(Op::STORE, &[*sum, zero])?;
-    }
-    Ok(sums)
-}
-
 /// The pixel whose channels are `sums` plus `rounding`, over `divisor`.
 fn mean(
     f: &mut Function<'_>,
@@ -67,7 +53,7 @@ fn mean(
 /// The cells of a rectangle of a surface: each the rounded mean of its two
 /// by two pixels, edges replicated.
 pub mod reduce {
-    use super::{accumulate, mean, sums, Admitted, BuildError, Op, Pass};
+    use super::{accumulate, mean, Admitted, BuildError, Op, Pass};
 
     /// The module as committed.
     pub const SPIRV: &[u8] = include_bytes!("../spv/frost_reduce.spv");
@@ -152,7 +138,7 @@ pub mod reduce {
                 kit.op_by(f, Op::SHIFT_LEFT_LOGICAL, at.x, 1)?,
                 kit.op_by(f, Op::SHIFT_LEFT_LOGICAL, at.y, 1)?,
             );
-            let sums = sums(f, kit)?;
+            let sums = kit.sums(f)?;
             for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                 let x = kit.op_by(f, Op::I_ADD, origin.0, dx)?;
                 let y = kit.op_by(f, Op::I_ADD, origin.1, dy)?;
@@ -174,7 +160,7 @@ pub mod reduce {
 /// One axis of the box blur over the cells: each the rounded mean of the
 /// `2 · reach + 1` cells about it along the axis, edges replicated.
 pub mod blur {
-    use super::{accumulate, mean, sums, Admitted, BuildError, Op, Pass};
+    use super::{accumulate, mean, Admitted, BuildError, Op, Pass};
 
     /// The module as committed.
     pub const SPIRV: &[u8] = include_bytes!("../spv/frost_blur.spv");
@@ -238,39 +224,20 @@ pub mod blur {
             let last = kit.op(f, Op::I_SUB, extent, one)?;
             let doubled = kit.op_by(f, Op::SHIFT_LEFT_LOGICAL, reach, 1)?;
             let count = kit.op(f, Op::I_ADD, doubled, one)?;
-            let sums = sums(f, kit)?;
-            let counter = {
-                let pointer = f
-                    .module()
-                    .pointer(tairix_spirv::enumerant::StorageClass::FUNCTION, kit.uint)?;
-                f.local(pointer)?
-            };
-            f.emit(Op::STORE, &[counter, zero])?;
-            f.while_loop(
-                |f| {
-                    let step = f.op(Op::LOAD, kit.uint, &[counter])?;
-                    f.op(Op::U_LESS_THAN, kit.boolean, &[step, count])
-                },
-                |f| {
-                    let step = f.op(Op::LOAD, kit.uint, &[counter])?;
-                    let ahead = kit.op(f, Op::I_ADD, along, step)?;
-                    let short = f.op(Op::U_LESS_THAN, kit.boolean, &[ahead, reach])?;
-                    let back = kit.op(f, Op::I_SUB, ahead, reach)?;
-                    let behind = f.op(Op::SELECT, kit.uint, &[short, zero, back])?;
-                    let taken = kit.min(f, behind, last)?;
-                    let x = f.op(Op::SELECT, kit.uint, &[downward, at.x, taken])?;
-                    let y = f.op(Op::SELECT, kit.uint, &[downward, taken, at.y])?;
-                    let row = kit.op(f, Op::I_MUL, y, across)?;
-                    let index = kit.op(f, Op::I_ADD, row, x)?;
-                    let word = kit.load(f, source, index)?;
-                    accumulate(f, kit, sums, word, None)
-                },
-                |f| {
-                    let step = f.op(Op::LOAD, kit.uint, &[counter])?;
-                    let next = kit.op(f, Op::I_ADD, step, one)?;
-                    f.emit(Op::STORE, &[counter, next])
-                },
-            )?;
+            let sums = kit.sums(f)?;
+            kit.repeat(f, count, |f, step| {
+                let ahead = kit.op(f, Op::I_ADD, along, step)?;
+                let short = f.op(Op::U_LESS_THAN, kit.boolean, &[ahead, reach])?;
+                let back = kit.op(f, Op::I_SUB, ahead, reach)?;
+                let behind = f.op(Op::SELECT, kit.uint, &[short, zero, back])?;
+                let taken = kit.min(f, behind, last)?;
+                let x = f.op(Op::SELECT, kit.uint, &[downward, at.x, taken])?;
+                let y = f.op(Op::SELECT, kit.uint, &[downward, taken, at.y])?;
+                let row = kit.op(f, Op::I_MUL, y, across)?;
+                let index = kit.op(f, Op::I_ADD, row, x)?;
+                let word = kit.load(f, source, index)?;
+                accumulate(f, kit, sums, word, None)
+            })?;
             let half = kit.op_by(f, Op::SHIFT_RIGHT_LOGICAL, count, 1)?;
             let cell = mean(f, kit, sums, half, count)?;
             let row = kit.op(f, Op::I_MUL, at.y, across)?;
@@ -284,7 +251,7 @@ pub mod blur {
 /// bilinear sample a quarter of a cell up and left of its centre, weighted
 /// in sixteenths and rounded.
 pub mod spread {
-    use super::{accumulate, mean, sums, Admitted, BuildError, Function, Id, Kit, Op, Pass};
+    use super::{accumulate, mean, Admitted, BuildError, Function, Id, Kit, Op, Pass};
 
     /// The module as committed.
     pub const SPIRV: &[u8] = include_bytes!("../spv/frost_spread.spv");
@@ -375,7 +342,7 @@ pub mod spread {
             let (across, down) = (kit.field(f, ACROSS)?, kit.field(f, DOWN)?);
             let columns = taps(f, kit, at.x, across)?;
             let rows = taps(f, kit, at.y, down)?;
-            let sums = sums(f, kit)?;
+            let sums = kit.sums(f)?;
             for (row, row_weight) in rows {
                 let start = kit.op(f, Op::I_MUL, row, across)?;
                 for (column, column_weight) in columns {

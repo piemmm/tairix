@@ -6,8 +6,43 @@
 
 use crate::os::{Fail, Os, Regs, Unwind};
 
-/// The mouse buffer's packet: the position, the buttons and the time.
-pub(crate) const PACKET: usize = 9;
+/// `OS_Word` 21's reasons the mouse answers: its bounds, its multipliers, and
+/// its position set and read.
+pub const MOUSE_REASONS: core::ops::RangeInclusive<u8> = 1..=4;
+/// A mouse buffer packet: the position, the buttons and the time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Packet {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) buttons: u32,
+    pub(crate) time: u32,
+}
+
+impl Packet {
+    /// The bytes a packet takes in the buffer.
+    pub(crate) const BYTES: usize = 9;
+
+    /// The packet as the buffer holds it: each coordinate's low 16 bits, the
+    /// buttons' low byte, then the time.
+    pub(crate) fn to_bytes(self) -> [u8; Self::BYTES] {
+        let mut bytes = [0u8; Self::BYTES];
+        bytes[..2].copy_from_slice(&self.x.to_le_bytes()[..2]);
+        bytes[2..4].copy_from_slice(&self.y.to_le_bytes()[..2]);
+        bytes[4] = self.buttons.to_le_bytes()[0];
+        bytes[5..].copy_from_slice(&self.time.to_le_bytes());
+        bytes
+    }
+
+    /// The packet `bytes` hold.
+    pub(crate) fn from_bytes(bytes: [u8; Self::BYTES]) -> Self {
+        Self {
+            x: i32::from(i16::from_le_bytes([bytes[0], bytes[1]])),
+            y: i32::from(i16::from_le_bytes([bytes[2], bytes[3]])),
+            buttons: u32::from(bytes[4]),
+            time: u32::from_le_bytes([bytes[5], bytes[6], bytes[7], bytes[8]]),
+        }
+    }
+}
 /// The mouse event.
 const MOUSE_EVENT: u32 = 10;
 /// A box no position can leave: the most a packet's 16-bit coordinates hold.
@@ -19,7 +54,7 @@ const UNBOUNDED: Bounds = Bounds {
 };
 
 /// A box on the screen, inclusive at every edge, from the screen's bottom
-/// left in OS units.
+/// left: in OS units, or in pixels where its holder counts them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Bounds {
     /// The leftmost position.
@@ -41,7 +76,9 @@ impl Bounds {
         )
     }
 
-    const fn holds(self, x: i32, y: i32) -> bool {
+    /// Whether `(x, y)` lies within it.
+    #[must_use]
+    pub const fn holds(self, x: i32, y: i32) -> bool {
         x >= self.left && x <= self.right && y >= self.bottom && y <= self.top
     }
 }
@@ -104,12 +141,13 @@ impl Os<'_> {
             return Ok(());
         }
         let time = self.now32();
-        let mut packet = [0u8; PACKET];
-        packet[..2].copy_from_slice(&x.to_le_bytes()[..2]);
-        packet[2..4].copy_from_slice(&y.to_le_bytes()[..2]);
-        packet[4] = buttons.to_le_bytes()[0];
-        packet[5..].copy_from_slice(&time.to_le_bytes());
-        self.world.input.buffer_mouse_packet(packet);
+        let packet = Packet {
+            x,
+            y,
+            buttons,
+            time,
+        };
+        self.world.input.buffer_mouse_packet(packet.to_bytes());
         let (ox, oy) = self.mouse_origin();
         let mut event = Regs::new([
             MOUSE_EVENT,
@@ -146,7 +184,7 @@ impl Os<'_> {
     #[expect(clippy::unnecessary_wraps, reason = "a vector default's signature")]
     pub(crate) fn default_mouse(&mut self, regs: &mut Regs) -> Result<(), Fail> {
         let (x, y, buttons, time) = if let Some(packet) = self.world.input.take_mouse_packet() {
-            packet
+            (packet.x, packet.y, packet.buttons, packet.time)
         } else {
             let mouse = &self.world.input.mouse;
             (mouse.x, mouse.y, mouse.buttons, self.now32())
@@ -179,19 +217,16 @@ impl Os<'_> {
     /// `OS_Word` 21's mouse reasons, 1 to 4, at `block`: whether `reason`
     /// is one.
     pub(crate) fn mouse_word(&mut self, reason: u8, block: u32) -> Result<bool, Fail> {
-        let half = |os: &mut Self, at: u32| -> Result<i32, Fail> {
-            let mut bytes = [0; 2];
-            os.read_bytes(block.wrapping_add(at), &mut bytes)?;
-            Ok(i32::from(i16::from_le_bytes(bytes)))
-        };
         match reason {
             1 => {
                 let (ox, oy) = self.mouse_origin();
+                let (left, bottom) = self.read_coordinates(block.wrapping_add(1))?;
+                let (right, top) = self.read_coordinates(block.wrapping_add(5))?;
                 let bounds = Bounds {
-                    left: half(self, 1)? + ox,
-                    bottom: half(self, 3)? + oy,
-                    right: half(self, 5)? + ox,
-                    top: half(self, 7)? + oy,
+                    left: left + ox,
+                    bottom: bottom + oy,
+                    right: right + ox,
+                    top: top + oy,
                 };
                 if bounds.left <= bounds.right && bounds.bottom <= bounds.top {
                     self.set_mouse_bounds(bounds);
@@ -204,7 +239,8 @@ impl Os<'_> {
             }
             3 => {
                 let (ox, oy) = self.mouse_origin();
-                let (x, y) = (half(self, 1)? + ox, half(self, 3)? + oy);
+                let (x, y) = self.read_coordinates(block.wrapping_add(1))?;
+                let (x, y) = (x + ox, y + oy);
                 let mouse = &mut self.world.input.mouse;
                 if mouse.bounds.holds(x, y) {
                     (mouse.x, mouse.y) = (x, y);
@@ -213,10 +249,10 @@ impl Os<'_> {
             4 => {
                 let (ox, oy) = self.mouse_origin();
                 let (x, y) = self.mouse_position();
-                let mut bytes = [0; 4];
-                bytes[..2].copy_from_slice(&x.wrapping_sub(ox).to_le_bytes()[..2]);
-                bytes[2..].copy_from_slice(&y.wrapping_sub(oy).to_le_bytes()[..2]);
-                self.write_bytes(block.wrapping_add(1), &bytes)?;
+                self.write_coordinates(
+                    block.wrapping_add(1),
+                    (x.wrapping_sub(ox), y.wrapping_sub(oy)),
+                )?;
             }
             _ => return Ok(false),
         }

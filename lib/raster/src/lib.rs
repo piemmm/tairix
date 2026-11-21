@@ -49,10 +49,12 @@ pub mod accel;
 pub mod artwork;
 pub mod blend;
 pub mod blur;
+pub mod body;
 pub mod clip;
 pub mod color;
 pub mod depth;
 pub mod dither;
+pub mod drop_shadow;
 mod lent;
 pub mod mesh;
 pub mod paint;
@@ -84,12 +86,18 @@ pub use blur::{
     box_blur, box_blur16, box_blur_coverage, cast_shadow, halved_reach, soften_coverage,
     BlurScratch, Blurring, ShadowCast, SOFTEN_PASSES,
 };
+pub use body::Body;
 pub use color::{
     blend_solid_span, blend_span, cover_span, div255, div255_biased, leading_opaque,
-    leading_translucent, mix_span, unpremultiply_span, Color, Pixel, Pixel16, ROUND_NEAREST,
+    leading_translucent, mix_span, unpremultiply_span, Color, Pixel, Pixel16, LUMA_SHIFT,
+    LUMA_WEIGHTS, ROUND_NEAREST,
 };
 pub use depth::{CompareOp, DepthBias, DepthFormat};
 pub use dither::DitherRow;
+pub use drop_shadow::{
+    shadow_reach, shadow_row, Caster, DropShadow, Notch, ShadowRow, MAX_REACH, SHADOW_ONE,
+    SHADOW_SHIFT,
+};
 pub use lent::PixelMemory;
 pub use mesh::{
     Depth, DepthBand, DepthBuffer, DepthPlane, DepthTest, EdgeNear, EdgeRecord, Footprint,
@@ -104,18 +112,22 @@ pub use primitive::{Interpolation, Primitive};
 pub use pyramid::Pyramid;
 pub use reorient::Reorient;
 pub use resample::{
-    resample, resample_reach, resample_window, resample_window_in, Region, ResampleError,
-    ResampleScratch, Rgba8Image, RowOrder, RowReducer,
+    resample, resample_reach, resample_window, resample_window_in, AxisTaps, Region, ResampleError,
+    ResamplePlan, ResampleScratch, Rgba8Image, RowOrder, RowReducer, RESAMPLE_SHIFT,
 };
 pub use ring::{Ring, RingInk};
-pub use round::{round_rect_coverage, round_rect_radius};
-pub use scan::{Coverage, CoverageRows, FillRule, ScanScratch, MAX_DRAWING_EXTENT};
+pub use round::{
+    round_rect_coverage, round_rect_radius, RoundRect, ROUND_RECT_SCALE, ROUND_RECT_SUBSAMPLES,
+};
+pub use scan::{
+    Coverage, CoverageRows, FillRule, RowPiece, ScanScratch, MAX_DRAWING_EXTENT, SCAN_UNIT,
+};
 pub use shape::{Placed, Shape};
 pub use sharp::{SharpError, SharpScaler};
 pub use stencil::{Outcome, StencilFace, StencilOp};
 pub use surface::{
-    band_rows, pointwise, BandScratch, Canvas, ColumnBand, ColumnBands, RowBand, RowBands, Surface,
-    BAND_GRAIN, MAX_SURFACE_PIXELS, SUBPIXEL,
+    band_rows, pointwise, stroke_quads, BandScratch, Canvas, ColumnBand, ColumnBands, RowBand,
+    RowBands, Surface, BAND_GRAIN, MAX_SURFACE_PIXELS, SUBPIXEL,
 };
 pub use tairix_bezier::Affine;
 pub use transformed::{Mosaic, Picture};

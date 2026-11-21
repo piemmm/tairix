@@ -385,7 +385,21 @@ impl Os<'_> {
     /// `OS_ResyncTime`: the real time taken from the host's clock again.
     pub(crate) fn resync_time(&mut self, _regs: &mut Regs) -> Result<(), Fail> {
         self.world.clock.real_offset = 0;
-        let mut regs = Regs::new([0, 0xDD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let mut regs = Regs::new([
+            0,
+            crate::service::RTC_SYNCHRONISED,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]);
         self.service(&mut regs)?;
         Ok(())
     }

@@ -10,6 +10,7 @@
 //! newline held over, which the next character takes.
 
 use tairix_riscos_kernel::os::{Fail, Os};
+use tairix_vdu::mode::Flags;
 
 use crate::changed::Rect;
 use crate::state::Vdu;
@@ -429,7 +430,7 @@ impl Vdu {
         row: u32,
         c: u8,
     ) -> Result<(), Fail> {
-        if self.screen.format.has(crate::mode::flag::TELETEXT) {
+        if self.screen.format.has(Flags::TELETEXT) {
             return self.teletext_put(os, column, row, c);
         }
         let format = self.screen.format;
@@ -465,7 +466,7 @@ impl Vdu {
         right: u32,
         bottom: u32,
     ) -> Result<(), Fail> {
-        if self.screen.format.has(crate::mode::flag::TELETEXT) {
+        if self.screen.format.has(Flags::TELETEXT) {
             return self.teletext_clear(os, left, top, right, bottom);
         }
         let format = self.screen.format;
@@ -562,7 +563,7 @@ impl Vdu {
         shift: Shift,
         count: u32,
     ) -> Result<(), Fail> {
-        if self.screen.format.has(crate::mode::flag::TELETEXT) {
+        if self.screen.format.has(Flags::TELETEXT) {
             return self.teletext_shift(os, window, shift, count);
         }
         let format = self.screen.format;
@@ -761,7 +762,7 @@ impl Vdu {
     /// text background, matched to the soft character set; nought where none
     /// matches.
     pub(crate) fn read_char(&self, os: &mut Os<'_>, column: u32, row: u32) -> Result<u8, Fail> {
-        if self.screen.format.has(crate::mode::flag::TELETEXT) {
+        if self.screen.format.has(Flags::TELETEXT) {
             return Ok(self.teletext.char_at(column, row));
         }
         let format = self.screen.format;
@@ -835,11 +836,7 @@ impl Vdu {
 /// line wholly in `gap`.
 fn glyph_line(out: &mut [u8], bits: u8, fore: u32, back: u32, log2_bpc: u32, gap: Option<u32>) {
     let unit = 1u32 << log2_bpc;
-    let mask = if unit >= 32 {
-        u32::MAX
-    } else {
-        (1 << unit) - 1
-    };
+    let mask = crate::canvas::mask_between(0, unit);
     out.fill(0);
     for p in 0..8u32 {
         let lit = bits & (0x80 >> p) != 0;
@@ -869,7 +866,7 @@ fn gap_word(vdu: &Vdu, gap: bool, back: u32) -> Option<u32> {
         return None;
     }
     let format = &vdu.screen.format;
-    if format.has(crate::mode::flag::BBC_GAP) {
+    if format.has(Flags::BBC_GAP) {
         let pixel = crate::colour::Colours::text_pixel(format, &vdu.colours.text_back) | 2;
         return Some(crate::colour::replicate(format, pixel));
     }

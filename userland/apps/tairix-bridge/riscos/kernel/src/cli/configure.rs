@@ -19,15 +19,11 @@ use crate::cmos::{self, Spread};
 use crate::error::{Error, SYNTAX};
 use crate::module::ModuleKey;
 use crate::os::{Fail, Os, Regs};
+use crate::service;
 use crate::swi::os::read_unsigned::DECIMAL;
 use crate::swi::os::{POINTER, READ_SYS_INFO};
 use crate::swi::X;
 
-/// `Service_UKConfig` and `Service_UKStatus`.
-const UK_CONFIG: u32 = 0x28;
-const UK_STATUS: u32 = 0x29;
-/// `Service_ModeFileChanged`.
-const MODE_FILE_CHANGED: u32 = 0x94;
 /// `OS_Pointer` 1: the pointing device's type set.
 const SET_POINTER_TYPE: u32 = 1;
 /// The page a size counts in, but for the font cache's 4 KiB.
@@ -455,7 +451,7 @@ impl Os<'_> {
                     (vdu.set_monitor)(self, monitor);
                 }
                 let mut changed = Regs::default();
-                changed.r[1] = MODE_FILE_CHANGED;
+                changed.r[1] = service::MODE_FILE_CHANGED;
                 self.service(&mut changed)?;
                 Ok(())
             }
@@ -756,7 +752,11 @@ impl Os<'_> {
         }
         self.list_module_keywords(u32::from(status))?;
         let mut service = Regs::default();
-        service.r[1] = if status { UK_STATUS } else { UK_CONFIG };
+        service.r[1] = if status {
+            service::UK_STATUS
+        } else {
+            service::UK_CONFIG
+        };
         self.service(&mut service)?;
         let tails: &[&[u8]] = if status {
             &[b"StatusFooter"]
@@ -806,7 +806,7 @@ pub(crate) fn configure(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         };
     }
     let mut service = Regs::default();
-    service.r[..2].copy_from_slice(&[regs.r[0], UK_CONFIG]);
+    service.r[..2].copy_from_slice(&[regs.r[0], service::UK_CONFIG]);
     os.service(&mut service)?;
     if service.r[1] != 0 {
         return Err(os.error(BAD_OPTION));
@@ -836,7 +836,7 @@ pub(crate) fn status(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         return os.call_keyword(&item, key, &mut call);
     }
     let mut service = Regs::default();
-    service.r[..2].copy_from_slice(&[regs.r[0], UK_STATUS]);
+    service.r[..2].copy_from_slice(&[regs.r[0], service::UK_STATUS]);
     os.service(&mut service)?;
     if service.r[1] == 0 {
         Ok(())

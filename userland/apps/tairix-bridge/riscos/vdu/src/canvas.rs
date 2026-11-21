@@ -25,12 +25,27 @@ impl Block {
     /// [`workspace::BACKGROUND_STORE`].
     pub(crate) fn read(os: &mut Os<'_>, offset: u32) -> Result<Self, Fail> {
         let (words, at) = os.page_words(HIGH_ZERO_PAGE + offset)?;
-        let mut rows = [[0; 2]; 8];
-        for (i, row) in rows.iter_mut().enumerate() {
-            *row = [words[at + 2 * i], words[at + 2 * i + 1]];
+        let words: [u32; 16] = core::array::from_fn(|i| words[at + i]);
+        Self::of_words(os, words)
+    }
+
+    /// The block of the sixteen words at `address`, wherever it lies.
+    pub(crate) fn read_at(os: &mut Os<'_>, address: u32) -> Result<Self, Fail> {
+        let mut words = [0u32; 16];
+        for (i, word) in (0u32..).zip(words.iter_mut()) {
+            *word = os.read_word(address.wrapping_add(4 * i))?;
         }
+        Self::of_words(os, words)
+    }
+
+    /// Eight rows of an action word and a colour word each, at the ECF
+    /// pattern's vertical offset now.
+    fn of_words(os: &mut Os<'_>, words: [u32; 16]) -> Result<Self, Fail> {
         let y_offset = os.read_word(HIGH_ZERO_PAGE + workspace::ECF_Y_OFFSET)?;
-        Ok(Self { rows, y_offset })
+        Ok(Self {
+            rows: core::array::from_fn(|r| [words[2 * r], words[2 * r + 1]]),
+            y_offset,
+        })
     }
 
     /// A block of one colour word under one action throughout.
@@ -113,17 +128,12 @@ impl Canvas {
 
     /// The pixel `x` of line `row`.
     pub(crate) fn pixel(&self, os: &mut Os<'_>, row: u32, x: u32) -> Result<u32, Fail> {
-        let bits = x << self.log2_bpc;
-        let address = self.address(row, bits / 8);
+        let bit = x << self.log2_bpc;
         let unit = 1u32 << self.log2_bpc;
-        if unit >= 8 {
-            let mut bytes = [0; 4];
-            let length = (unit / 8) as usize;
-            os.read_bytes(address, &mut bytes[..length])?;
-            return Ok(u32::from_le_bytes(bytes));
-        }
-        let byte = os.read_byte(address)?;
-        Ok((u32::from(byte) >> (bits % 8)) & ((1 << unit) - 1))
+        let mut bytes = [0; 4];
+        let length = unit.div_ceil(8) as usize;
+        os.read_bytes(self.address(row, bit / 8), &mut bytes[..length])?;
+        Ok(bits_at(&bytes, bit % 8, unit))
     }
 
     /// Writes `bytes` at byte `byte` of line `row`.

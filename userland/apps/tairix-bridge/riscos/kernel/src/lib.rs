@@ -54,6 +54,7 @@ pub mod ramdisc;
 pub mod release;
 mod resourcefs;
 mod resources;
+pub mod service;
 pub mod swi;
 mod system;
 mod territory;

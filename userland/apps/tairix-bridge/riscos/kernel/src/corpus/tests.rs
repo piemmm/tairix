@@ -273,3 +273,52 @@ fn observations_round_trip_through_their_format() {
         "a line outside a scenario"
     );
 }
+
+#[test]
+fn a_listing_corpus_reads_names_numbered_lines_and_trailers() {
+    let say = Trailer {
+        keyword: "say",
+        what: "a word",
+        read: &|rest: &str| (!rest.is_empty()).then(|| rest.to_string()),
+    };
+    let corpus = "# c\nset one\n10 A\n20 B\nsay hi\nset two\n5 C\n";
+    let read = listings(corpus, "set", 0..=99, Some(&say)).expect("read");
+    assert_eq!(read.len(), 2);
+    assert_eq!(
+        (read[0].name.as_str(), read[0].text.as_str()),
+        ("one", "10 A\n20 B\n")
+    );
+    assert_eq!(read[0].trailers, ["hi"]);
+    assert_eq!(read[1].text, "5 C\n");
+    for refused in [
+        "set a\n100 A\n",
+        "set a\n20 A\n10 B\n",
+        "set a\nset b\n10 A\n",
+        "10 A\n",
+    ] {
+        assert!(
+            listings::<()>(refused, "set", 0..=99, None).is_err(),
+            "{refused:?}"
+        );
+    }
+    assert!(listings(
+        corpus.replace("5 C", "say hi\n5 C").as_str(),
+        "set",
+        0..=99,
+        Some(&say)
+    )
+    .is_err());
+    assert!(listings("set a\n10 A\nsay \n", "set", 0..=99, Some(&say)).is_err());
+}
+
+#[test]
+fn hex_pairs_and_an_answers_head_are_spelt_once() {
+    assert_eq!(hex_bytes("0aFF"), Some(alloc::vec![0x0A, 0xFF]));
+    assert_eq!(hex_bytes("0"), None);
+    assert_eq!(hex_bytes(""), None);
+    assert_eq!(hex_bytes("0G"), None);
+    assert_eq!(
+        answers_head(&["a", "b"]),
+        "# a\n# b\n# Never edit by hand.\n"
+    );
+}

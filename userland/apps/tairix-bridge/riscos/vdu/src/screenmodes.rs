@@ -12,6 +12,7 @@ use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::module::{Builtin, Command, CommandKind, Help, Resource, Services, Swis};
 use tairix_riscos_kernel::msgtrans::{Own, OWN_DESCRIPTOR, REQUEST};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, Unwind, World};
+use tairix_riscos_kernel::service;
 use tairix_riscos_kernel::swi::os::FILE;
 use tairix_riscos_kernel::swi::X;
 
@@ -50,13 +51,6 @@ const MODE_FILE_TOO_LARGE: Error = Error {
     number: 0xBE8,
     token: "ModeFileTooLarge",
 };
-
-/// The services it takes.
-mod service {
-    pub(super) const MODE_EXTENSION: u32 = 0x50;
-    pub(super) const MODE_TRANSLATION: u32 = 0x51;
-    pub(super) const ENUMERATE_SCREEN_MODES: u32 = 0x8D;
-}
 
 /// ScreenModes.
 pub static SCREEN_MODES: Builtin = Builtin {

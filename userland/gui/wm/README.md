@@ -28,6 +28,8 @@ router**:
   the rectangle's blur is a separable product of one cumulative kernel, each
   rounded corner subtracts a notch tile computed once per radius and mirrored,
   so a shadow pixel is a few table reads and nothing per window is retained.
+  That arithmetic is `tairix_raster::drop_shadow`'s, shared with the pinned
+  `shadow` pass; this crate picks each window's level and eases between them.
   The footprint (`shadow_footprint`) replaces the bounds for damage, for which
   windows a dirty rectangle considers, and for the rectangle a layer spans;
   the bounds keep hit-testing, layout, furniture, frost and content.
@@ -148,7 +150,9 @@ router**:
   a translucent window or a frosted panel. Every blended pixel therefore
   rounds at its own share of `tairix_raster::DitherRow`, resolved once per
   row from the **screen** row and read at the screen column, and
-  `WindowRow::sample` scales opacity and corner coverage at the same bias.
+  a corner row's per-column path, resolving each pixel into
+  `tairix_raster::Body` and laying it through `Pixel::laid_over`, scales
+  opacity and corner coverage at the same bias as the runs do.
   The pattern is a pure function of the screen position, so a recomposited
   rectangle matches the frame it replaces exactly and two damage rectangles
   that meet cannot seam; its mean is plain nearest rounding, so nothing

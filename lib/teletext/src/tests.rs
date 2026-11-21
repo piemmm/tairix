@@ -62,3 +62,19 @@ fn a_colour_code_takes_effect_on_the_next_cell_and_hold_keeps_the_mosaic() {
     assert!(is_double_height(0x0D) && is_double_height(0x8D));
     assert!(!is_double_height(0x0C) && !is_double_height(b'M'));
 }
+
+#[test]
+fn a_row_after_a_double_height_one_is_its_pair_s_lower_half() {
+    assert!(lower_after(false, true));
+    assert!(!lower_after(true, true), "a lower half starts no pair");
+    assert!(!lower_after(false, false));
+    assert_eq!(double_first_line(false), 0);
+    assert_eq!(double_first_line(true), HALF_LINES / 2);
+    let double = Attributes {
+        double: true,
+        ..Attributes::LINE_START
+    };
+    assert!(double.shows_in(true) && double.shows_in(false));
+    assert!(!Attributes::LINE_START.shows_in(true));
+    assert!(Attributes::LINE_START.shows_in(false));
+}

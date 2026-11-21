@@ -28,8 +28,6 @@ const KIND: u32 = FILING | CONFIGURE;
 /// The longest name in a command table the kernel reads.
 const NAME_MOST: usize = 256;
 
-/// `Service_SyntaxError`.
-const SYNTAX_SERVICE: u32 = 0x8C;
 /// The token of the message a command with no syntax of its own gives.
 const NO_SYNTAX: &[u8] = b"WrongNumberOfParameters";
 /// The kernel's commands whose number may run on from their name.
@@ -459,7 +457,13 @@ impl Os<'_> {
     /// module's answer to `Service_SyntaxError`, or its syntax message.
     pub(crate) fn syntax_error(&mut self, item: &Item, tail: u32) -> Fail {
         let mut regs = Regs::default();
-        regs.r[..5].copy_from_slice(&[tail, SYNTAX_SERVICE, item.words, item.base, item.name]);
+        regs.r[..5].copy_from_slice(&[
+            tail,
+            crate::service::SYNTAX_ERROR,
+            item.words,
+            item.base,
+            item.name,
+        ]);
         match self.service(&mut regs) {
             Err(unwind) => return Fail::Unwind(unwind),
             Ok(()) if regs.r[1] == 0 => return Fail::Error(regs.r[0]),

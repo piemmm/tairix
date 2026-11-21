@@ -846,14 +846,7 @@ fn memory_streams(observed: &str) -> Vec<Vec<u8>> {
         .filter_map(|token| {
             let (key, hex) = token.split_once('=')?;
             key.contains(':').then_some(())?;
-            hex.as_bytes()
-                .chunks(2)
-                .map(|pair| {
-                    std::str::from_utf8(pair)
-                        .ok()
-                        .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-                })
-                .collect::<Option<Vec<u8>>>()
+            tairix_riscos_kernel::corpus::hex_bytes(hex)
         })
         .flat_map(|bytes| {
             bytes

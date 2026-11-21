@@ -35,13 +35,13 @@ use alloc::vec::Vec;
 use tairix_hash::BuildFastHash;
 use tairix_log::Sink;
 use tairix_parallel::JobRunner;
-use tairix_raster::{BlurScratch, Blurring};
+use tairix_raster::{BlurScratch, Blurring, RoundRect};
 use tairix_reclaim::{stacked_ui_cache, CachedBytes, PressureGauge, ReclaimCache};
 
 use crate::color::Pixel;
 use crate::geometry::{Rect, Region};
 use crate::surface::{self, Surface};
-use crate::window::{WindowId, WindowShape};
+use crate::window::WindowId;
 
 /// The most separate rectangles one frost blurs or is seen through at once:
 /// the slabs a shifted field enters, or the parts of a damaged rectangle the
@@ -372,7 +372,7 @@ impl FrostField {
         &self,
         back: &mut Surface,
         area: Rect,
-        (bounds, shape): (Rect, Option<WindowShape>),
+        (bounds, shape): (Rect, Option<RoundRect>),
         interior: bool,
     ) {
         let area = area.intersection(&bounds);
@@ -474,8 +474,8 @@ impl FrostField {
 
 /// The squares at the corners of a window at `bounds` where `shape` covers it
 /// by less than full: none for a window with no shape or square corners.
-pub(crate) fn corners(bounds: Rect, shape: Option<WindowShape>) -> [Rect; 4] {
-    let reach = shape.map_or(0, WindowShape::corner_reach);
+pub(crate) fn corners(bounds: Rect, shape: Option<RoundRect>) -> [Rect; 4] {
+    let reach = shape.map_or(0, RoundRect::corner_reach);
     if reach == 0 {
         return [Rect::EMPTY; 4];
     }
@@ -494,8 +494,8 @@ pub(crate) fn corners(bounds: Rect, shape: Option<WindowShape>) -> [Rect; 4] {
 /// corner squares, as the full-height middle and the sides between the
 /// corners. The pieces are disjoint, so a frost laid piece by piece copies no
 /// pixel twice.
-pub(crate) fn interior(bounds: Rect, shape: Option<WindowShape>) -> [Rect; 3] {
-    let reach = shape.map_or(0, WindowShape::corner_reach);
+pub(crate) fn interior(bounds: Rect, shape: Option<RoundRect>) -> [Rect; 3] {
+    let reach = shape.map_or(0, RoundRect::corner_reach);
     if reach == 0 {
         return [bounds, Rect::EMPTY, Rect::EMPTY];
     }

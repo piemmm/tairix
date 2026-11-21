@@ -144,6 +144,26 @@ impl Os<'_> {
         self.write_bytes(address, &[value])
     }
 
+    /// The pair of signed 16-bit coordinates at `address`, as an `OS_Word`
+    /// block holds a point.
+    pub fn read_coordinates(&mut self, address: u32) -> Result<(i32, i32), Fail> {
+        let mut bytes = [0; 4];
+        self.read_bytes(address, &mut bytes)?;
+        let [x0, x1, y0, y1] = bytes;
+        Ok((
+            i32::from(i16::from_le_bytes([x0, x1])),
+            i32::from(i16::from_le_bytes([y0, y1])),
+        ))
+    }
+
+    /// `(x, y)` written at `address` as a pair of 16-bit coordinates, each
+    /// cut to its low 16 bits.
+    pub fn write_coordinates(&mut self, address: u32, (x, y): (i32, i32)) -> Result<(), Fail> {
+        let [x0, x1, ..] = x.to_le_bytes();
+        let [y0, y1, ..] = y.to_le_bytes();
+        self.write_bytes(address, &[x0, x1, y0, y1])
+    }
+
     /// The word at `address`, which need not be aligned: its four bytes in
     /// order, as a SWI reading a block takes them.
     pub fn read_word(&mut self, address: u32) -> Result<u32, Fail> {

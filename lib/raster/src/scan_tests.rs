@@ -975,3 +975,57 @@ fn coverage_rows_of_a_window_and_of_nothing() {
         .coverage_rows(&flat, 256, FillRule::NonZero, super::Coverage::Area)
         .is_none());
 }
+
+/// A row's pieces are its edges clipped to it, in sub-units from the
+/// drawing's origin, each travelling down with its contour's winding.
+#[test]
+fn a_rows_pieces_are_its_edges_clipped_to_it() {
+    let mut scratch = super::ScanScratch::new();
+    // A square two pixels in from the origin and four across, at one unit a
+    // pixel, so its vertical sides cross every row it spans.
+    let rows = scratch
+        .coverage_rows(&[square(2, 4)], 1, FillRule::NonZero, super::Coverage::Area)
+        .expect("a shape");
+    assert_eq!(rows.rule(), FillRule::NonZero);
+    let unit = i64::from(super::SCAN_UNIT);
+    let pieces: Vec<super::RowPiece> = rows.pieces(3).collect();
+    assert_eq!(pieces.len(), 2, "two sides cross row 3");
+    for piece in &pieces {
+        assert_eq!(piece.from.1, 3 * unit, "clipped to the row's top");
+        assert_eq!(piece.to.1, 4 * unit, "and its bottom");
+        assert_eq!(piece.from.0, piece.to.0, "a vertical side");
+        assert!([2 * unit, 6 * unit].contains(&piece.from.0));
+    }
+    let windings: Vec<i32> = pieces.iter().map(|piece| piece.winding).collect();
+    assert!(
+        windings.contains(&1) && windings.contains(&-1),
+        "{windings:?}"
+    );
+    assert_eq!(rows.pieces(1).count(), 0, "a row above the square");
+    assert_eq!(rows.pieces(6).count(), 0, "and one below it");
+}
+
+/// Design-space rows cover exactly what `fill_polygon` lays from the same
+/// grid over the same rectangle.
+#[test]
+fn design_rows_cover_what_the_design_fill_lays() {
+    let shape = vec![(10, 4), (60, 30), (22, 58), (4, 20)];
+    let (width, height) = (24, 20);
+    let mut filled = Surface::new(width, height).expect("fits");
+    filled.fill_polygon(&shape, 64, WHITE);
+    let mut scratch = super::ScanScratch::new();
+    let mut rows = scratch
+        .design_rows(&[&shape], 64, (0, 0, width, height), FillRule::EvenOdd)
+        .expect("a shape");
+    let mut row = vec![0u8; width as usize];
+    for y in 0..height {
+        rows.row(y, 0, &mut row);
+        for (x, &alpha) in (0..width).zip(&row) {
+            assert_eq!(
+                filled.get(x, y).map(|pixel| pixel.a),
+                Some(alpha),
+                "({x}, {y})"
+            );
+        }
+    }
+}

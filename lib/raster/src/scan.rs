@@ -42,7 +42,11 @@ pub use tairix_bezier::FillRule;
 /// The grid every vertex is snapped to, so it is also the finest edge
 /// placement the coverage can distinguish: a 256th of a pixel, far below the
 /// 255 alpha levels the result is quoted in.
-pub(crate) const UNIT: i64 = 256;
+pub(crate) const UNIT: i64 = SCAN_UNIT as i64;
+
+/// Sub-units per pixel along each axis inside the converter: what a
+/// [`RowPiece`]'s ends are counted in.
+pub const SCAN_UNIT: u32 = 256;
 
 /// What a wholly covered pixel accumulates: twice its area, in sub-units
 /// squared.
@@ -516,6 +520,57 @@ impl ScanScratch {
         let fill = ScanFill::new(contours, SampleSpace::per_pixel(units), rule, self)?;
         Some(CoverageRows { fill, coverage })
     }
+
+    /// [`coverage_rows`](Self::coverage_rows) for contours authored on a
+    /// square `design`×`design` grid stretched over the `(x, y, width,
+    /// height)` rectangle `rect` of the drawing, as
+    /// [`Surface::fill_polygon`](crate::Surface::fill_polygon) places them,
+    /// covered by area.
+    pub fn design_rows<C: AsRef<[(i32, i32)]>>(
+        &mut self,
+        contours: &[C],
+        design: u32,
+        rect: (u32, u32, u32, u32),
+        rule: FillRule,
+    ) -> Option<CoverageRows<'_>> {
+        let fill = ScanFill::new(contours, SampleSpace::design(design, rect), rule, self)?;
+        Some(CoverageRows {
+            fill,
+            coverage: Coverage::Area,
+        })
+    }
+}
+
+/// One edge of a shape clipped to one pixel row, travelling downward: its
+/// ends in [`SCAN_UNIT`] sub-units a pixel from the drawing's origin, and the
+/// winding the coverage accumulates along it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct RowPiece {
+    /// Its upper end.
+    pub from: (i64, i64),
+    /// Its lower end.
+    pub to: (i64, i64),
+    /// `1` where the contour ran downward through it, `-1` where upward.
+    pub winding: i32,
+}
+
+/// The pieces of `edges`, sorted by their tops, that cross row `row`, each
+/// clipped to it: what the row's coverage accumulates.
+fn row_pieces(edges: &[Edge], row: u32) -> impl Iterator<Item = RowPiece> + '_ {
+    let top = i64::from(row) * UNIT;
+    let bottom = top + UNIT;
+    edges
+        .iter()
+        .take_while(move |edge| edge.top < bottom)
+        .filter_map(move |edge| {
+            let from_y = edge.top.max(top);
+            let to_y = edge.bottom.min(bottom);
+            (from_y < to_y).then(|| RowPiece {
+                from: (edge.x_at(from_y), from_y),
+                to: (edge.x_at(to_y), to_y),
+                winding: edge.direction,
+            })
+        })
 }
 
 /// A shape's coverage, a row at a time: what [`ScanScratch::coverage_rows`]
@@ -532,6 +587,19 @@ impl CoverageRows<'_> {
     #[must_use]
     pub fn bounds(&self, within: (u32, u32, u32, u32)) -> Option<(u32, u32, u32, u32)> {
         self.fill.bounds(within)
+    }
+
+    /// Row `y`'s pieces: every edge crossing it, clipped to it, in the order
+    /// the converter accumulates them.
+    pub fn pieces(&self, y: u32) -> impl Iterator<Item = RowPiece> + '_ {
+        row_pieces(self.fill.edges, y)
+    }
+
+    /// The rule that decides which of the regions the edges enclose is
+    /// inside.
+    #[must_use]
+    pub const fn rule(&self) -> FillRule {
+        self.fill.rule
     }
 
     /// Write row `y`'s coverage of the pixels from column `x` into `out`, a
@@ -809,8 +877,6 @@ impl<'s> ScanFill<'s> {
             return 0..0;
         };
 
-        let top = i64::from(row) * UNIT;
-        let bottom = top + UNIT;
         let origin = i64::from(first_pixel) * UNIT;
         let mut cells = Cells {
             cover,
@@ -819,19 +885,11 @@ impl<'s> ScanFill<'s> {
             right: span * UNIT,
             touched: None,
         };
-        for edge in *edges {
-            if edge.top >= bottom {
-                break;
-            }
-            let from_y = edge.top.max(top);
-            let to_y = edge.bottom.min(bottom);
-            if from_y >= to_y {
-                continue;
-            }
+        for piece in row_pieces(edges, row) {
             cells.segment(
-                (edge.x_at(from_y) - origin, from_y),
-                (edge.x_at(to_y) - origin, to_y),
-                i64::from(edge.direction),
+                (piece.from.0 - origin, piece.from.1),
+                (piece.to.0 - origin, piece.to.1),
+                i64::from(piece.winding),
             );
         }
 

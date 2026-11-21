@@ -12,6 +12,12 @@ use tairix_collections::BitVec;
 use tairix_riscos_kernel::os::{Fail, Os};
 use tairix_riscos_kernel::output::workspace;
 use tairix_util::fallible::try_push;
+use tairix_vdu::plot::{
+    self as codes, ARC, BLOCK, CIRCLE, CIRCLE_FILL, DOTTED_WITHOUT_ENDS, ELLIPSE_FILL,
+    FILL_RIGHT_TO_BACKGROUND, FILL_RIGHT_TO_NON_FOREGROUND, FILL_TO_FOREGROUND,
+    FILL_TO_NON_BACKGROUND, FLOOD, FLOOD_TO_FOREGROUND, LINE, PARALLELOGRAM, POINT, RECTANGLE,
+    SECTOR, SEGMENT, TRIANGLE,
+};
 
 use crate::arc::{self, Circle};
 use crate::canvas::{Block, Canvas};
@@ -66,10 +72,23 @@ impl Graphics {
 
 /// Which colour a code plots in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Ink {
+pub(crate) enum Ink {
     Foreground,
     Inverse,
     Background,
+}
+
+impl Ink {
+    /// The ink a plot code's low two bits name, as `HLineAddr`'s R3 names
+    /// it: `None` for nothing plotted.
+    pub(crate) const fn of(bits: u32) -> Option<Self> {
+        match bits.to_le_bytes()[0] & codes::INK {
+            codes::FOREGROUND => Some(Self::Foreground),
+            codes::INVERSE => Some(Self::Inverse),
+            codes::BACKGROUND => Some(Self::Background),
+            _ => None,
+        }
+    }
 }
 
 /// The furthest a point's pixels may lie from the screen's corner: far past
@@ -119,8 +138,8 @@ impl Vdu {
     }
 
     /// The point a code at `(x, y)` names, absolute or from the cursor.
-    fn point_named(&self, code: u8, x: i16, y: i16) -> (i32, i32) {
-        if code & 4 == 0 {
+    fn point_named(&self, plot: u8, x: i16, y: i16) -> (i32, i32) {
+        if plot & codes::ABSOLUTE == 0 {
             (
                 self.graphics.cursor.0.wrapping_add(i32::from(x)),
                 self.graphics.cursor.1.wrapping_add(i32::from(y)),
@@ -150,8 +169,8 @@ impl Vdu {
     ) -> Result<Option<Effect>, Fail> {
         let point = self.point_named(code, x, y);
         self.graphics.new_point = self.pixels_of(point.0, point.1);
-        let shape = code & 0xF8;
-        if shape >= 0xD0 && !(0xB8..0xD0).contains(&shape) {
+        let shape = code & codes::SHAPE;
+        if shape > ELLIPSE_FILL {
             self.graphics.cursor = point;
             return Ok(Some(Effect::UnknownPlot {
                 code,
@@ -160,14 +179,9 @@ impl Vdu {
             }));
         }
         self.visit(point);
-        let ink = match code & 3 {
-            0 => None,
-            1 => Some(Ink::Foreground),
-            2 => Some(Ink::Inverse),
-            _ => Some(Ink::Background),
-        };
-        if shape == 0xB8 {
-            return self.block_copy(os, code & 7).map(|()| None);
+        let ink = Ink::of(u32::from(code));
+        if shape == BLOCK {
+            return self.block_copy(os, code & !codes::SHAPE).map(|()| None);
         }
         let Some(ink) = ink else {
             return Ok(None);
@@ -184,30 +198,33 @@ impl Vdu {
         let window = self.graphics.window;
         let rows = self.view((0, 0));
         match shape {
-            0x00..=0x38 => self.plot_line(os, shape >> 3, old, new, &block)?,
-            0x40 => self.draw_spans(os, [(new.1, new.0, new.0)], &block)?,
-            0x48 | 0x58 | 0x68 | 0x78 => self.line_fill(os, shape, &block)?,
-            0x50 => {
+            LINE..=DOTTED_WITHOUT_ENDS => self.plot_line(os, shape >> 3, old, new, &block)?,
+            POINT => self.draw_spans(os, [(new.1, new.0, new.0)], &block)?,
+            FILL_TO_NON_BACKGROUND
+            | FILL_RIGHT_TO_BACKGROUND
+            | FILL_TO_FOREGROUND
+            | FILL_RIGHT_TO_NON_FOREGROUND => self.line_fill(os, shape, &block)?,
+            TRIANGLE => {
                 let filled =
                     raster::polygon(&[older, old, new], rows).map_err(|Full| os.no_memory())?;
                 self.draw_spans(os, filled.spans(), &block)?;
             }
-            0x60 => self.draw_spans(os, rectangle(old, new, window), &block)?,
-            0x70 => {
+            RECTANGLE => self.draw_spans(os, rectangle(old, new, window), &block)?,
+            PARALLELOGRAM => {
                 let fourth = (older.0 + new.0 - old.0, older.1 + new.1 - old.1);
                 let filled = raster::polygon(&[older, old, new, fourth], rows)
                     .map_err(|Full| os.no_memory())?;
                 self.draw_spans(os, filled.spans(), &block)?;
             }
-            0x80 | 0x88 => self.flood(os, shape == 0x88, &block)?,
-            0x90 | 0x98 => {
+            FLOOD | FLOOD_TO_FOREGROUND => self.flood(os, shape == FLOOD_TO_FOREGROUND, &block)?,
+            CIRCLE | CIRCLE_FILL => {
                 let circle = self.circle(old, new);
-                self.draw_round(os, &circle.round, old, shape == 0x98, &block)?;
+                self.draw_round(os, &circle.round, old, shape == CIRCLE_FILL, &block)?;
             }
-            0xA0..=0xB0 => self.plot_arc(os, shape, older, old, new, &block)?,
+            ARC..=SECTOR => self.plot_arc(os, shape, older, old, new, &block)?,
             _ => {
                 let round = Round::ellipse(old.0 - older.0, (new.0 - older.0, new.1 - older.1));
-                self.draw_round(os, &round, older, shape == 0xC8, &block)?;
+                self.draw_round(os, &round, older, shape == ELLIPSE_FILL, &block)?;
             }
         }
         Ok(None)
@@ -349,11 +366,11 @@ impl Vdu {
         );
         let view = self.view(centre);
         let spans = match shape {
-            0xA0 => {
+            ARC => {
                 let mut runs = Vec::new();
                 arc::arc(&circle, from, toward, view, &mut runs).map(|()| runs)
             }
-            0xA8 => arc::segment(&circle, from, toward, view),
+            SEGMENT => arc::segment(&circle, from, toward, view),
             _ => arc::sector(&circle, from, toward, view),
         }
         .map_err(|Full| os.no_memory())?;
@@ -366,17 +383,17 @@ impl Vdu {
     fn line_fill(&mut self, os: &mut Os<'_>, shape: u8, block: &Block) -> Result<(), Fail> {
         let (x, y) = self.graphics.cursor_pixels;
         let window = self.graphics.window;
-        if !window.holds((x, y)) {
+        if !window.holds(x, y) {
             return Ok(());
         }
         let format = self.screen.format;
-        let mask = pixel_mask(&format);
+        let mask = format.pixel_mask();
         let back = Colours::gcol_pixel(&format, &self.colours.back) & mask;
         let fore = Colours::gcol_pixel(&format, &self.colours.fore) & mask;
         let fills = |p: u32| match shape {
-            0x48 => p & mask == back,
-            0x58 => p & mask != back,
-            0x68 => p & mask != fore,
+            FILL_TO_NON_BACKGROUND => p & mask == back,
+            FILL_RIGHT_TO_BACKGROUND => p & mask != back,
+            FILL_TO_FOREGROUND => p & mask != fore,
             _ => p & mask == fore,
         };
         let canvas = self.screen.canvas();
@@ -385,7 +402,8 @@ impl Vdu {
         if !fills(line.at(os, x)?) {
             return Ok(());
         }
-        let (left, right) = line.run(os, x, matches!(shape, 0x48 | 0x68), |_, p| fills(p))?;
+        let both_ways = matches!(shape, FILL_TO_NON_BACKGROUND | FILL_TO_FOREGROUND);
+        let (left, right) = line.run(os, x, both_ways, |_, p| fills(p))?;
         span(os, &canvas, y, left, right, block)?;
         cover(
             os,
@@ -409,11 +427,11 @@ impl Vdu {
     fn flood(&mut self, os: &mut Os<'_>, to_foreground: bool, block: &Block) -> Result<(), Fail> {
         let (x, y) = self.graphics.cursor_pixels;
         let window = self.graphics.window;
-        if !window.holds((x, y)) {
+        if !window.holds(x, y) {
             return Ok(());
         }
         let format = self.screen.format;
-        let mask = pixel_mask(&format);
+        let mask = format.pixel_mask();
         let colour = if to_foreground {
             &self.colours.fore
         } else {
@@ -496,7 +514,7 @@ impl Vdu {
     /// source is what lies on the screen, the destination what lies in the
     /// window.
     fn block_copy(&mut self, os: &mut Os<'_>, form: u8) -> Result<(), Fail> {
-        if matches!(form, 0 | 4) || !self.screen.format.graphic() {
+        if form & codes::INK == 0 || !self.screen.format.graphic() {
             return Ok(());
         }
         let (a, b, to) = (
@@ -533,7 +551,7 @@ impl Vdu {
             )?;
         }
         let window = self.graphics.window;
-        if matches!(form, 1 | 5) {
+        if form & codes::INK == codes::BLOCK_MOVE {
             let clear = Block::read(os, workspace::BACKGROUND_STORE)?;
             self.draw_spans(
                 os,
@@ -886,21 +904,11 @@ fn widen(drawn: Option<Rect>, r: Rect) -> Rect {
 }
 
 /// The colour block an ink plots with.
-fn ink_block(os: &mut Os<'_>, ink: Ink) -> Result<Block, Fail> {
+pub(crate) fn ink_block(os: &mut Os<'_>, ink: Ink) -> Result<Block, Fail> {
     match ink {
         Ink::Foreground => Block::read(os, workspace::FOREGROUND),
         Ink::Background => Block::read(os, workspace::BACKGROUND),
         Ink::Inverse => Ok(Block::solid(0, u32::MAX)),
-    }
-}
-
-/// The bits of a pixel value a mode keeps.
-fn pixel_mask(format: &crate::mode::Format) -> u32 {
-    let bits = 1u32 << format.log2_bpp();
-    if bits >= 32 {
-        u32::MAX
-    } else {
-        (1 << bits) - 1
     }
 }
 

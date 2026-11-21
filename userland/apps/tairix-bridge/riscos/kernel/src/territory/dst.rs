@@ -19,9 +19,6 @@ pub(super) const NO_RULE: Error = Error {
     token: "NoDaylightRule",
 };
 
-/// `Service_TimeZoneChanged`.
-pub(super) const TIME_ZONE_CHANGED: u32 = 0x8_1080;
-
 /// The state flags: daylight saving in force, and kept by the rules.
 const ON: u32 = 1;
 pub(super) const AUTOMATIC: u32 = 2;
@@ -307,7 +304,7 @@ impl Os<'_> {
         let mut zone = Regs::default();
         self.read_current_time_zone(&mut zone)?;
         let mut service = Regs::default();
-        service.r[1..4].copy_from_slice(&[TIME_ZONE_CHANGED, state, zone.r[1]]);
+        service.r[1..4].copy_from_slice(&[crate::service::TIME_ZONE_CHANGED, state, zone.r[1]]);
         self.service(&mut service)?;
         Ok(())
     }

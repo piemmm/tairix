@@ -14,7 +14,9 @@ use core::fmt::Write;
 /// A program opens `program NAME`; its numbered lines follow, then any
 /// `input "TEXT"`, bytes its keyboard types, printable ASCII but for `\xHH`.
 pub mod language {
-    use super::{format, String, ToString, Vec};
+    use tairix_riscos_kernel::corpus::{listings, Trailer};
+
+    use super::{String, Vec};
 
     /// A program of the corpus.
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,59 +36,20 @@ pub mod language {
     /// The line of the corpus that is not a program's name, line or input,
     /// and why.
     pub fn programs(corpus: &str) -> Result<Vec<Program>, String> {
-        let mut programs: Vec<Program> = Vec::new();
-        let mut last_number: Option<u32> = None;
-        for (index, line) in corpus.lines().enumerate() {
-            let refused = |reason: &str| format!("line {}: {reason}", index + 1);
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some(name) = line.strip_prefix("program ") {
-                let named = !name.is_empty()
-                    && name
-                        .bytes()
-                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
-                if !named || programs.iter().any(|p| p.name == name) {
-                    return Err(refused("a program has a name of its own"));
-                }
-                if programs.last().is_some_and(|p| p.text.is_empty()) {
-                    return Err(refused("a program has lines"));
-                }
-                programs.push(Program {
-                    name: name.to_string(),
-                    text: Vec::new(),
-                    input: Vec::new(),
-                });
-                last_number = None;
-                continue;
-            }
-            let Some(program) = programs.last_mut() else {
-                return Err(refused("a line within a program"));
-            };
-            if let Some(rest) = line.strip_prefix("input ") {
-                let typed = super::unquoted(rest).ok_or_else(|| refused("one quoted text"))?;
-                program.input.extend_from_slice(&typed);
-                continue;
-            }
-            if !program.input.is_empty() {
-                return Err(refused("a program's input follows its lines"));
-            }
-            let digits = line.bytes().take_while(u8::is_ascii_digit).count();
-            let number: Option<u32> = line[..digits].parse().ok();
-            let ascending = number.is_some_and(|n| last_number.is_none_or(|last| n > last));
-            if !ascending || !line.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
-                return Err(refused(
-                    "a numbered line of printable ASCII, after the one before",
-                ));
-            }
-            last_number = number;
-            program.text.extend_from_slice(line.as_bytes());
-            program.text.push(b'\n');
-        }
-        if programs.last().is_some_and(|p| p.text.is_empty()) {
-            return Err("a program has lines".into());
-        }
-        Ok(programs)
+        let input = Trailer {
+            keyword: "input",
+            what: "one quoted text",
+            read: &super::unquoted,
+        };
+        let numbers = 0..=u32::from(tairix_openbasic::basic5::LAST_LINE);
+        Ok(listings(corpus, "program", numbers, Some(&input))?
+            .into_iter()
+            .map(|listing| Program {
+                name: listing.name,
+                text: listing.text.into_bytes(),
+                input: listing.trailers.concat(),
+            })
+            .collect())
     }
 }
 
@@ -258,11 +221,7 @@ pub mod assembler {
     /// laid down.
     #[must_use]
     pub fn answers(provenance: &[String], lines: &[Line], v: &[String], vi: &[String]) -> String {
-        let mut out = String::new();
-        for line in provenance {
-            let _ = writeln!(out, "# {line}");
-        }
-        out.push_str("# Never edit by hand.\n");
+        let mut out = tairix_riscos_kernel::corpus::answers_head(provenance);
         for ((line, v), vi) in lines.iter().zip(v).zip(vi) {
             out.push_str(&line.spelt());
             out.push('\n');
@@ -488,11 +447,7 @@ pub mod session {
         v: &[Vec<String>],
         vi: &[Vec<String>],
     ) -> String {
-        let mut out = String::new();
-        for line in provenance {
-            let _ = writeln!(out, "# {line}");
-        }
-        out.push_str("# Never edit by hand.\n");
+        let mut out = tairix_riscos_kernel::corpus::answers_head(provenance);
         for ((session, v), vi) in sessions.iter().zip(v).zip(vi) {
             let _ = writeln!(out, "session {}", session.name);
             for (dialect, lines) in [("v", v), ("vi", vi)] {

@@ -23,6 +23,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write;
 
+use tairix_riscos_kernel::corpus::{answers_head, hex_bytes, listings};
 use tairix_riscos_kernel::os::len32;
 
 /// The case's lines: the first and last numbers a case may use.
@@ -49,52 +50,27 @@ pub struct Case {
 /// The line of the corpus that is neither a case's name nor one of its
 /// lines, and why.
 pub fn cases(corpus: &str) -> Result<Vec<Case>, String> {
-    let mut cases: Vec<Case> = Vec::new();
-    let mut last: Option<u32> = None;
-    for (index, line) in corpus.lines().enumerate() {
-        let refused = |reason: &str| format!("line {}: {reason}", index + 1);
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(name) = line.strip_prefix("case ") {
-            let named = !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
-            if !named || cases.iter().any(|case| case.name == name) {
-                return Err(refused("a case has a name of its own"));
-            }
-            if cases.last().is_some_and(|case| case.text.is_empty()) {
-                return Err(refused("a case has lines"));
-            }
-            cases.push(Case {
-                name: name.to_string(),
-                text: String::new(),
-            });
-            last = None;
-            continue;
-        }
-        let Some(case) = cases.last_mut() else {
-            return Err(refused("a line within a case"));
-        };
-        let digits = line.bytes().take_while(u8::is_ascii_digit).count();
-        let number: Option<u32> = line[..digits].parse().ok();
-        let fits = number.is_some_and(|n| {
-            (FIRST_LINE..=LAST_LINE).contains(&n) && last.is_none_or(|before| n > before)
-        });
-        if !fits || !line.bytes().all(|b| (0x20..=0x7E).contains(&b)) {
-            return Err(refused(
-                "a line numbered 10 to 8999 of printable ASCII, after the one before",
-            ));
-        }
-        last = number;
-        case.text.push_str(line);
-        case.text.push('\n');
-    }
-    if cases.last().is_some_and(|case| case.text.is_empty()) {
-        return Err("a case has lines".into());
-    }
-    Ok(cases)
+    Ok(
+        listings::<()>(corpus, "case", FIRST_LINE..=LAST_LINE, None)?
+            .into_iter()
+            .map(|listing| Case {
+                name: listing.name,
+                text: listing.text,
+            })
+            .collect(),
+    )
+}
+
+/// The HostFS name case `index`'s program is staged under.
+#[must_use]
+pub fn program_name(index: usize) -> String {
+    format!("Scr{index}")
+}
+
+/// The command that runs the program staged as `name`.
+#[must_use]
+pub fn run_command(name: &str) -> String {
+    format!("BASIC -quit HostFS:$.{name}")
 }
 
 /// The HostFS name case `index` records its readings under.
@@ -262,11 +238,7 @@ pub fn recorded(record: &[u8], dump: Option<&[u8]>) -> Result<Recorded, String> 
 /// more pixels alike as `NxHH`.
 #[must_use]
 pub fn answers(provenance: &[String], cases: &[Case], recorded: &[Recorded]) -> String {
-    let mut out = String::new();
-    for line in provenance {
-        let _ = writeln!(out, "# {line}");
-    }
-    out.push_str("# Never edit by hand.\n");
+    let mut out = answers_head(provenance);
     for (case, recorded) in cases.iter().zip(recorded) {
         let _ = writeln!(out, "case {}", case.name);
         for line in &recorded.lines {
@@ -366,7 +338,7 @@ pub fn decode_row(text: &str, length: usize, unit: usize) -> Result<Vec<u8>, Str
             }
             None => (1, word),
         };
-        let bytes = unhex(digits).ok_or_else(|| format!("hexadecimal, not {word:?}"))?;
+        let bytes = hex_bytes(digits).ok_or_else(|| format!("hexadecimal, not {word:?}"))?;
         let whole = if count == 1 {
             bytes.len() % unit.max(1) == 0
         } else {
@@ -384,21 +356,6 @@ pub fn decode_row(text: &str, length: usize, unit: usize) -> Result<Vec<u8>, Str
         }
     }
     Ok(out)
-}
-
-fn unhex(digits: &str) -> Option<Vec<u8>> {
-    if digits.is_empty() || !digits.len().is_multiple_of(2) {
-        return None;
-    }
-    digits
-        .as_bytes()
-        .chunks(2)
-        .map(|pair| {
-            core::str::from_utf8(pair)
-                .ok()
-                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
-        })
-        .collect()
 }
 
 /// A case's answer, as the answers file gives it.

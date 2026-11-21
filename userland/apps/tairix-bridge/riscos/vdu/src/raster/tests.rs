@@ -126,7 +126,7 @@ fn a_line_within_a_window_is_the_part_of_it_there() {
         for window in windows {
             let expected: Vec<(u64, Point)> = (0..walk.len())
                 .map(|place| (place, walk.at(place)))
-                .filter(|&(_, p)| window.holds(p))
+                .filter(|&(_, (x, y))| window.holds(x, y))
                 .collect();
             assert_eq!(
                 walk.within(window).collect::<Vec<_>>(),
@@ -172,7 +172,7 @@ fn a_line_far_longer_than_a_window_costs_what_the_window_holds() {
     };
     let seen: Vec<_> = walk.within(window).collect();
     assert!(!seen.is_empty() && seen.len() <= 640);
-    assert!(seen.iter().all(|&(_, p)| window.holds(p)));
+    assert!(seen.iter().all(|&(_, (x, y))| window.holds(x, y)));
 }
 
 #[test]

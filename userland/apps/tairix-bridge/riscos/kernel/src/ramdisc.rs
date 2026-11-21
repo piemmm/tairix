@@ -10,9 +10,10 @@ use tairix_riscos_arm::mmu::PAGE_SIZE;
 use tairix_riscos_arm::psr;
 use tairix_riscos_arm::reg::Reg;
 
-use crate::dynamic::{reason, UNKNOWN_AREA_HANDLER};
+use crate::dynamic::UNKNOWN_AREA_HANDLER;
 use crate::error::Error;
 use crate::host::Routine;
+use crate::memory::handler_reason as reason;
 use crate::memory::{AreaFlags, Bits, Create, LogicalOp, PageQuery, PhysicalOp};
 use crate::os::{Fail, Os, Unwind};
 

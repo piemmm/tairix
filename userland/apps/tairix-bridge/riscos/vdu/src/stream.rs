@@ -11,7 +11,7 @@
 use tairix_riscos_kernel::byte::var;
 use tairix_riscos_kernel::os::{Entry, Fail, Os, Regs};
 use tairix_riscos_kernel::vectors::Vector;
-use tairix_vdu::code::Control;
+use tairix_vdu::code::{Control, Operation, FIRST_DEFINED};
 
 use crate::state::{with, Vdu};
 use crate::text::Needs;
@@ -19,8 +19,6 @@ use crate::text::Needs;
 /// `UKVDU23V` and `UKPlotV`.
 const UK_VDU23: Vector = Vector(0x17);
 const UK_PLOT: Vector = Vector(0x19);
-/// `Sound_Control`.
-const SOUND_CONTROL: u32 = 0x4_0189;
 
 /// The stream's own state: the code being gathered and its parameters, and
 /// the switches its codes set.
@@ -330,57 +328,64 @@ impl Vdu {
     fn vdu_23(&mut self, os: &mut Os<'_>, q: [u8; 9]) -> Result<Option<Effect>, Fail> {
         let format = self.screen.format;
         let rows = [q[1], q[2], q[3], q[4], q[5], q[6], q[7], q[8]];
-        match q[0] {
-            0 => self.vdu_23_0(q),
-            1 => match q[1] {
+        let Some(operation) = Operation::of(q[0]) else {
+            if q[0] < FIRST_DEFINED {
+                return Ok(Some(Effect::UnknownVdu23(q)));
+            }
+            self.font.define(q[0], rows);
+            return Ok(None);
+        };
+        match operation {
+            Operation::Controller => self.vdu_23_0(q),
+            Operation::Cursor => match q[1] {
                 0 => self.text.cursor.shown = false,
                 1 => self.text.cursor.shown = true,
                 2 => self.text.cursor.appearance = 0,
                 3 => self.text.cursor.appearance = 2,
                 _ => {}
             },
-            2..=5 => {
-                self.colours
-                    .define_pattern(&format, usize::from(q[0] - 2), rows);
+            Operation::Pattern1
+            | Operation::Pattern2
+            | Operation::Pattern3
+            | Operation::Pattern4 => {
+                let pattern = usize::from(q[0] - Operation::Pattern1 as u8);
+                self.colours.define_pattern(&format, pattern, rows);
                 self.colours.publish(os, &format)?;
             }
-            6 => {
+            Operation::LinePattern => {
                 self.colours.dot = u64::from_be_bytes(rows);
                 self.colours.dot_at = 0;
             }
-            7 => self.scroll_23_7(os, q[1], q[2], q[3])?,
-            8 => self.clear_block(
+            Operation::Scroll => self.scroll_23_7(os, q[1], q[2], q[3])?,
+            Operation::ClearBlock => self.clear_block(
                 os,
                 q[1],
                 q[2],
                 (q[3].cast_signed(), q[4].cast_signed()),
                 (q[5].cast_signed(), q[6].cast_signed()),
             )?,
-            9 | 10 => {
-                let which = if q[0] == 9 {
-                    var::FIRST_DURATION
-                } else {
-                    var::SECOND_DURATION
-                };
-                os.set_byte_var(which, q[1]);
-            }
-            11 => {
+            Operation::FirstFlash => os.set_byte_var(var::FIRST_DURATION, q[1]),
+            Operation::SecondFlash => os.set_byte_var(var::SECOND_DURATION, q[1]),
+            Operation::DefaultPatterns => {
                 self.colours.default_patterns(&format);
                 self.colours.publish(os, &format)?;
             }
-            12..=15 => {
-                self.colours
-                    .define_simple(&format, usize::from(q[0] - 12), rows);
+            Operation::SimplePattern1
+            | Operation::SimplePattern2
+            | Operation::SimplePattern3
+            | Operation::SimplePattern4 => {
+                let pattern = usize::from(q[0] - Operation::SimplePattern1 as u8);
+                self.colours.define_simple(&format, pattern, rows);
                 self.colours.publish(os, &format)?;
             }
-            16 => {
+            Operation::CursorMovement => {
                 let flags = (self.text.flags & q[2]) ^ q[1];
                 self.text.set_flags(flags);
             }
-            17 => return self.vdu_23_17(os, q).map(|()| None),
-            18 => self.teletext_control(os, q[1], q[2])?,
-            code @ 32..=255 => self.font.define(code, rows),
-            _ => return Ok(Some(Effect::UnknownVdu23(q))),
+            Operation::Colours => return self.vdu_23_17(os, q).map(|()| None),
+            Operation::Teletext => self.teletext_control(os, q[1], q[2])?,
+            // Sprites are RO22's: their VDU 23 passes on, as their plot codes do.
+            Operation::Sprites => return Ok(Some(Effect::UnknownVdu23(q))),
         }
         Ok(None)
     }
@@ -449,7 +454,10 @@ fn perform(os: &mut Os<'_>, effect: Effect) -> Result<(), Fail> {
                 0,
             ]);
             // A machine with no sound modules rings no bell.
-            let _ = os.perform(tairix_riscos_kernel::swi::X | SOUND_CONTROL, &mut sound);
+            let _ = os.perform(
+                tairix_riscos_kernel::swi::X | tairix_riscos_kernel::swi::sound::CONTROL,
+                &mut sound,
+            );
             Ok(())
         }
         Effect::Mode(mode) => crate::select::vdu_22(os, mode),

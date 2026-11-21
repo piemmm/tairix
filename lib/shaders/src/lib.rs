@@ -1,5 +1,5 @@
 //! The pinned shader set: the desktop's passes as GPU programs (`plans/GPU.md`
-//! GD6, `plans/SHADER.md` SH3).
+//! GD6 and GP4, `plans/SHADER.md` SH3).
 //!
 //! Each module is written in Rust through `lib/spirv`'s builder, which hands
 //! it back only once the validator admits it, and committed under `spv/` as
@@ -11,9 +11,14 @@
 //!
 //! The passes are `lib/raster`'s own arithmetic, held to it bit for bit by
 //! this crate's conformance cases: the frost's [`frost::reduce`],
-//! [`frost::blur`], [`frost::spread`] and [`frost::mix`], and the
-//! compositor's [`compose::over`], [`compose::copy`], [`compose::fill`] and
-//! [`compose::encode`].
+//! [`frost::blur`], [`frost::spread`] and [`frost::mix`], the compositor's
+//! [`compose::over`], [`compose::copy`], [`compose::fill`],
+//! [`compose::encode`] and [`compose::resample`], its chrome,
+//! [`chrome::body`] and [`chrome::shadow`], and the furniture painter's
+//! [`paint::plate`], [`paint::wash`], [`paint::ring`], [`paint::coverage`],
+//! [`paint::mask`] and [`paint::picture`]. Every one computes in 32-bit
+//! integers, within the bounds its description is refused past
+//! ([`Refused`]).
 //!
 //! # What a pass takes
 //!
@@ -28,14 +33,15 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-#[cfg(test)]
 extern crate alloc;
 
+pub mod chrome;
 pub mod compose;
 pub mod frost;
 mod kit;
+pub mod paint;
 
-pub use kit::{groups, GROUP};
+pub use kit::{groups, Refused, GROUP, MAX_PASS_COORDINATE, MAX_PASS_RADIUS};
 
 use tairix_spirv::{Admitted, BuildError};
 
@@ -52,7 +58,7 @@ pub struct Pinned {
 }
 
 /// Every module of the set.
-pub const SET: [Pinned; 8] = [
+pub const SET: [Pinned; 17] = [
     Pinned {
         name: "frost_reduce",
         build: frost::reduce::build,
@@ -92,6 +98,51 @@ pub const SET: [Pinned; 8] = [
         name: "encode",
         build: compose::encode::build,
         spirv: compose::encode::SPIRV,
+    },
+    Pinned {
+        name: "resample",
+        build: compose::resample::build,
+        spirv: compose::resample::SPIRV,
+    },
+    Pinned {
+        name: "body",
+        build: chrome::body::build,
+        spirv: chrome::body::SPIRV,
+    },
+    Pinned {
+        name: "shadow",
+        build: chrome::shadow::build,
+        spirv: chrome::shadow::SPIRV,
+    },
+    Pinned {
+        name: "plate",
+        build: paint::plate::build,
+        spirv: paint::plate::SPIRV,
+    },
+    Pinned {
+        name: "wash",
+        build: paint::wash::build,
+        spirv: paint::wash::SPIRV,
+    },
+    Pinned {
+        name: "ring",
+        build: paint::ring::build,
+        spirv: paint::ring::SPIRV,
+    },
+    Pinned {
+        name: "coverage",
+        build: paint::coverage::build,
+        spirv: paint::coverage::SPIRV,
+    },
+    Pinned {
+        name: "mask",
+        build: paint::mask::build,
+        spirv: paint::mask::SPIRV,
+    },
+    Pinned {
+        name: "picture",
+        build: paint::picture::build,
+        spirv: paint::picture::SPIRV,
     },
 ];
 

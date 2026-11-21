@@ -839,11 +839,7 @@ fn data(case: &Case) -> String {
 /// BASIC answered it, from the files the programs left in `hostfs`.
 pub(super) fn answers(provenance: &[String], hostfs: &Path) -> Result<String, String> {
     let cases = cases();
-    let mut out = String::new();
-    for line in provenance {
-        let _ = writeln!(out, "# {line}");
-    }
-    out.push_str("# Never edit by hand.\n");
+    let mut out = tairix_riscos_kernel::corpus::answers_head(provenance);
     for (dialect, name) in [(Dialect::V, "AnswersV"), (Dialect::Vi, "AnswersVI")] {
         let path = find(hostfs, name).ok_or_else(|| format!("riscos: BASIC left no {name}"))?;
         let bytes = std::fs::read(&path).map_err(|e| format!("riscos: {}: {e}", path.display()))?;

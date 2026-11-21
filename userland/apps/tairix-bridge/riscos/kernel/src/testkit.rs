@@ -15,7 +15,7 @@ use crate::input::InputEvent;
 use crate::memory::layout::{Layout, APPLICATION};
 use crate::memory::policy::Ceiling;
 use crate::memory::Bits;
-use crate::os::{len32, Config, Ending, Host, Kernel, Outcome, Pulse, Regs};
+use crate::os::{len32, Config, Ending, Host, Kernel, Outcome, Pulse, Regs, MILLENNIUM};
 
 /// Input events and the times they arrive.
 type Arrivals = Rc<RefCell<VecDeque<(u64, InputEvent)>>>;
@@ -32,9 +32,6 @@ struct TestHost {
     /// The real time at the monotonic clock's nought.
     epoch: u64,
 }
-
-/// 1 January 2000, 00:00:00 UTC, in centiseconds since 1900.
-pub(crate) const MILLENNIUM: u64 = 3_155_673_600 * 100;
 
 impl Host for TestHost {
     fn monotonic(&mut self) -> u64 {

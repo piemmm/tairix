@@ -447,7 +447,7 @@ impl Os<'_> {
     pub(crate) fn window_width(&mut self) -> Result<u32, Unwind> {
         let block = self.world.scratch;
         let (Some(()), Some(())) = (
-            self.poke_word(block, 0x100),
+            self.poke_word(block, tairix_vdu::mode::vdu_var::WINDOW_WIDTH),
             self.poke_word(block + 4, u32::MAX),
         ) else {
             return Ok(80);

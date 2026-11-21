@@ -12,9 +12,6 @@ use crate::state::with;
 /// `OS_Byte` 163,242,65's report that sprites and flood fills are always
 /// there.
 const SPRITES_AND_FLOODS: u32 = 0xC0;
-/// `Service_International` and its reason that defines characters.
-const INTERNATIONAL: u32 = 0x43;
-const DEFINE: u32 = 5;
 
 /// The VDU drivers' `OS_Byte` reasons.
 pub(crate) fn reason(os: &mut Os<'_>, regs: &mut Regs) -> Option<Result<(), Fail>> {
@@ -96,9 +93,7 @@ fn flash_duration(os: &mut Os<'_>, regs: &mut Regs, first: bool) {
     } else {
         var::SECOND_DURATION
     };
-    let old = os.byte_var(which);
-    os.set_byte_var(which, regs.byte(1));
-    regs.r[1] = u32::from(old);
+    os.swap_byte_var(which, regs);
 }
 
 /// Characters `first` to `last` reset: those below 128 to the system font,
@@ -109,30 +104,8 @@ fn reset_font(os: &mut Os<'_>, first: u8, last: u8) -> Result<(), Fail> {
         Ok(())
     })?;
     if last >= 0x80 {
-        let alphabet = {
-            let mut regs = Regs::new([71, 127, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-            os.perform(
-                tairix_riscos_kernel::swi::X | tairix_riscos_kernel::swi::os::BYTE,
-                &mut regs,
-            )?;
-            regs.r[1]
-        };
-        let mut define = Regs::new([
-            0,
-            INTERNATIONAL,
-            DEFINE,
-            alphabet,
-            u32::from(first.max(0x80)),
-            u32::from(last),
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ]);
-        os.service(&mut define)?;
+        let alphabet = os.read_alphabet()?;
+        os.define_characters(alphabet, u32::from(first.max(0x80)), u32::from(last))?;
     }
     Ok(())
 }

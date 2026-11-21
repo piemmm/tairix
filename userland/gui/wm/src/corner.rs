@@ -5,13 +5,11 @@
 //! alpha by a *coverage* value in `0..=255`: `255` deep inside the rounded
 //! rectangle, `0` outside it, and a smooth ramp across the corner arc.
 //!
-//! The coverage arithmetic itself is **not** defined here: it is the shared
-//! `tairix_raster::round_rect_coverage`, the single rounded-rectangle
-//! definition the compositor and the Reactive Alloy control plates both round
-//! through, so window corners and control corners can never diverge. This type
-//! only carries the per-window corner *choice*.
-
-use tairix_raster::{round_rect_coverage, round_rect_radius};
+//! The coverage arithmetic itself is **not** defined here: a window's shape is
+//! a `tairix_raster::RoundRect` of the radius its style names, the single
+//! rounded-rectangle definition the compositor and the Reactive Alloy control
+//! plates both round through, so window corners and control corners can never
+//! diverge. This type only carries the per-window corner *choice*.
 
 /// Per-window corner-rounding selection.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -70,47 +68,5 @@ impl Corners {
     #[must_use]
     pub(crate) const fn cuts_content(self) -> bool {
         matches!(self, Self::Rounded { .. })
-    }
-
-    /// The radius this style rounds a `width`×`height` surface by: the
-    /// requested radius clamped to what that surface can carry, `0` where it
-    /// rounds nothing.
-    #[must_use]
-    pub(crate) fn radius(self, width: u32, height: u32) -> u32 {
-        match self {
-            Self::Square => 0,
-            Self::Rounded { radius } | Self::Painted { radius } => {
-                round_rect_radius(width, height, radius)
-            }
-        }
-    }
-
-    /// Whether row `y` of a `width`×`height` surface carries an arc at all:
-    /// `false` where the style covers every column of it fully.
-    ///
-    /// Partial coverage lives only in the corner bands, so a caller that
-    /// decides once per row whether the corners can reach it — the compositor
-    /// resolving a window row — skips nothing by trusting this.
-    #[must_use]
-    pub(crate) fn clips_row(self, y: u32, width: u32, height: u32) -> bool {
-        let radius = self.radius(width, height);
-        radius > 0 && (y < radius || y >= height.saturating_sub(radius))
-    }
-
-    /// Coverage in `0..=255` for pixel `(x, y)` of a `width`×`height`
-    /// surface, from the shared rounded-rectangle definition.
-    ///
-    /// A pixel wholly outside the rounded region returns `0`, one wholly
-    /// inside returns `255`, and a pixel straddling a corner arc returns the
-    /// fraction of its area that is inside. A [`Square`](Self::Square)
-    /// selection is fully opaque everywhere.
-    #[must_use]
-    pub fn coverage(self, x: u32, y: u32, width: u32, height: u32) -> u8 {
-        match self {
-            Self::Square => 255,
-            Self::Rounded { radius } | Self::Painted { radius } => {
-                round_rect_coverage(x, y, width, height, radius)
-            }
-        }
     }
 }

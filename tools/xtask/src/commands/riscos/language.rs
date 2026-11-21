@@ -109,11 +109,7 @@ pub(super) fn answers(
     programs: &[Program],
     hostfs: &Path,
 ) -> Result<String, String> {
-    let mut out = String::new();
-    for line in provenance {
-        let _ = writeln!(out, "# {line}");
-    }
-    out.push_str("# Never edit by hand.\n");
+    let mut out = tairix_riscos_kernel::corpus::answers_head(provenance);
     for (n, program) in programs.iter().enumerate() {
         let _ = writeln!(out, "program {}", program.name);
         for (_, dialect, suffix) in DIALECTS {

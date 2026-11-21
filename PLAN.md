@@ -337,8 +337,9 @@ backends the PC emulator's translator and the browser's compiled tiers share,
 total and bounded decoder over the generated Khronos grammar, its validator,
 its encoder, and the builder a first-party module is written from Rust
 through, `plans/SHADER.md`),
-`lib/shaders` (the pinned shader set: the desktop's passes as committed
-SPIR-V, each `lib/raster`'s arithmetic to the bit, `plans/GPU.md` GD6),
+`lib/shaders` (the pinned shader set: the desktop's passes, the compositor's
+chrome and the furniture painter's primitives as committed SPIR-V, each
+`lib/raster`'s arithmetic to the bit, `plans/GPU.md` GD6 and GP4),
 `lib/video` (the one VP8 codec, which a lossy WebP picture and a screen
 recording are made of, and the WebM container a recording is kept in,
 `plans/CAPTURE.md`),

@@ -1068,6 +1068,28 @@ fn a_rounded_blit_is_masking_the_source_and_blitting_it_wherever_it_lands() {
     );
 }
 
+/// A source pixel whose alpha is nought lays nothing, whatever colour it
+/// carries, in a rounded blit's corner rows as in its others.
+#[test]
+fn a_transparent_source_pixel_lays_nothing_on_a_rounded_blits_corner_row() {
+    let ghost = Pixel {
+        r: 90,
+        g: 60,
+        b: 30,
+        a: 0,
+    };
+    let mut src = Surface::filled(20, 20, Color::rgb(10, 200, 10).premultiply()).expect("fits");
+    for y in [2, 10] {
+        src.set(10, y, ghost);
+    }
+    let ground = Color::rgb(0, 0, 255).premultiply();
+    let mut blitted = Surface::filled(20, 20, ground).expect("fits");
+    blitted.blit_rounded(0, 0, &src, 8);
+    for y in [2, 10] {
+        assert_eq!(blitted.get(10, y), Some(ground), "row {y}");
+    }
+}
+
 #[test]
 fn a_rounded_blit_with_no_radius_is_the_plain_blit() {
     let mut src = Surface::new(3, 3).expect("allocates");
@@ -3078,4 +3100,25 @@ fn a_wash_band_by_band_is_the_wash_whole() {
         }
         assert_eq!(banded, whole, "bands of {rows_per_band} rows");
     }
+}
+
+/// A stroke's quads are one a segment, in order, none for a coincident pair
+/// or a weight that is not positive, each the segment widened either side of
+/// it — the shapes the stroke fills.
+#[test]
+fn a_strokes_quads_are_its_segments_widened() {
+    let points = [(0, 0), (80, 0), (80, 0), (80, 40)];
+    let quads: alloc::vec::Vec<[(i32, i32); 4]> = crate::stroke_quads(&points, 8).collect();
+    assert_eq!(quads.len(), 2, "the coincident pair is no segment");
+    assert_eq!(quads[0], [(0, 4), (0, -4), (80, -4), (80, 4)]);
+    assert_eq!(quads[1], [(76, 0), (84, 0), (84, 40), (76, 40)]);
+    assert_eq!(crate::stroke_quads(&points, 0).count(), 0);
+    assert_eq!(crate::stroke_quads(&points[..1], 8).count(), 0);
+    let mut stroked = Surface::new(16, 8).expect("fits");
+    stroked.stroke_polyline(&points, 8, Color::rgb(255, 255, 255));
+    let mut filled = Surface::new(16, 8).expect("fits");
+    for quad in &quads {
+        filled.fill_polygon_subpixel(quad, Color::rgb(255, 255, 255));
+    }
+    assert_eq!(stroked.pixels(), filled.pixels());
 }

@@ -23,6 +23,7 @@ use crate::filing::{IS_A_DIRECTORY, NOT_FOUND as FILE_NOT_FOUND};
 use crate::module::{Builtin, Resource, Services, Swis};
 use crate::os::{len32, Fail, Os, Regs, Unwind, World};
 use crate::resourcefs::{Object, FS_NUMBER};
+use crate::service;
 use crate::swi::{os, X};
 
 /// The SWI chunk and each SWI.
@@ -38,10 +39,6 @@ pub(crate) const GS_LOOKUP: u32 = CHUNK + 7;
 pub(crate) const COPY_ERROR: u32 = CHUNK + 8;
 pub(crate) const DICTIONARY: u32 = CHUNK + 9;
 
-/// The services it takes.
-const RESOURCE_FS_STARTED: u32 = 0x59;
-const RESOURCE_FS_DYING: u32 = 0x5A;
-const MESSAGE_FILE_CLOSED: u32 = 0x5E;
 /// Its routines: the callback that tells clients, once it is up, that every
 /// file they had open is closed.
 const CLOSED_CALLBACK: usize = 0;
@@ -162,9 +159,9 @@ pub(crate) static MESSAGE_TRANS: Builtin = Builtin {
     }),
     services: Some(Services {
         numbers: &[
-            RESOURCE_FS_STARTED,
-            RESOURCE_FS_DYING,
-            crate::resourcefs::TERRITORY_STARTED,
+            service::RESOURCE_FS_STARTED,
+            service::RESOURCE_FS_DYING,
+            service::TERRITORY_STARTED,
         ],
         handler: service,
     }),
@@ -1066,7 +1063,7 @@ impl Os<'_> {
         }
         if changed && !dying {
             let mut regs = Regs::default();
-            regs.r[1] = MESSAGE_FILE_CLOSED;
+            regs.r[1] = service::MESSAGE_FILE_CLOSED;
             self.service(&mut regs)?;
         }
         Ok(())
@@ -1137,7 +1134,7 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 /// descriptor from before it started opens its file again.
 fn announce_closed(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     let mut closed = Regs::default();
-    closed.r[1] = MESSAGE_FILE_CLOSED;
+    closed.r[1] = service::MESSAGE_FILE_CLOSED;
     os.service(&mut closed)?;
     Ok(())
 }
@@ -1165,9 +1162,11 @@ fn finalise(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
 
 fn service(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Unwind> {
     let result = match regs.r[1] {
-        RESOURCE_FS_STARTED => os.refind_in_place(false).and_then(|()| os.open_own_files()),
-        RESOURCE_FS_DYING => os.refind_in_place(true),
-        crate::resourcefs::TERRITORY_STARTED => os.refind_in_place(false),
+        service::RESOURCE_FS_STARTED => {
+            os.refind_in_place(false).and_then(|()| os.open_own_files())
+        }
+        service::RESOURCE_FS_DYING => os.refind_in_place(true),
+        service::TERRITORY_STARTED => os.refind_in_place(false),
         _ => Ok(()),
     };
     match result {
