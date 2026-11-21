@@ -130,5 +130,5 @@ pub use surface::{
     RowBands, Surface, BAND_GRAIN, MAX_SURFACE_PIXELS, SUBPIXEL,
 };
 pub use tairix_bezier::Affine;
-pub use transformed::{bilinear_weights, Mosaic, Picture};
+pub use transformed::{bilinear_weights, Mosaic, Picture, BILINEAR_ONE, BILINEAR_SHIFT};
 pub use view::{Clipped, Perspective, Projected, MAX_CLIPPED};

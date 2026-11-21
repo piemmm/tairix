@@ -246,6 +246,54 @@ fn a_paint_covers_its_square_on_the_screen_and_nothing_else() {
     }
 }
 
+/// A square the screen clips on every side shows, pixel for pixel, what the
+/// same square shows drawn whole: its dots, glow and tone are read at their
+/// place in the square whichever of its columns and rows are shown, at every
+/// size of dot. The whole square is drawn a whole number of dither periods
+/// away, so every pixel is rounded alike.
+#[test]
+fn a_clipped_square_shows_what_the_whole_square_shows_there() {
+    const SHIFT: u32 = 32;
+    let (square, offset) = (280, i32::try_from(SHIFT).expect("small"));
+    let clipped = Placed {
+        frame: Rect::new(-offset, -offset, square, square),
+        painted: Rect::new(0, 0, 200, 180),
+    };
+    let whole = Placed {
+        frame: Rect::new(0, 0, square, square),
+        painted: Rect::new(0, 0, square, square),
+    };
+    let spots = scattered(5, 6_000, Rect::new(20 - offset, 20 - offset, 240, 240));
+    let moved: Vec<Spot> = spots
+        .iter()
+        .map(|spot| Spot {
+            x: spot.x + offset * SUB,
+            y: spot.y + offset * SUB,
+            ..*spot
+        })
+        .collect();
+    for radius in 1..=MAX_RADIUS {
+        for glowing in [true, false] {
+            let size = (square, radius, glowing);
+            let mut shown = Surface::new(200, 180).expect("a surface");
+            light(size, (&spots, 4, clipped.painted), (&SERIAL, u64::MAX))
+                .paint(&spots, &clipped, &mut shown, &SERIAL);
+            let mut drawn = Surface::new(square, square).expect("a surface");
+            light(size, (&moved, 4, whole.painted), (&SERIAL, u64::MAX))
+                .paint(&moved, &whole, &mut drawn, &SERIAL);
+            for y in 0..180 {
+                for x in 0..200 {
+                    assert_eq!(
+                        shown.get(x, y),
+                        drawn.get(x + SHIFT, y + SHIFT),
+                        "radius {radius} glowing {glowing}: ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// A paint split into bands of rows across cores, whichever band runs first
 /// and when they run at once, is the paint drawn on one, pixel for pixel, at
 /// every size of dot.

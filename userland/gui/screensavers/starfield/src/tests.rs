@@ -204,6 +204,42 @@ fn a_frame_leaves_only_its_own_stars_lit() {
     }
 }
 
+/// A streak is the path its star covers over the scene clock's shutter, so a
+/// late frame, which carries the flight further, draws it no longer.
+#[test]
+fn a_streak_spans_the_clock_s_shutter_however_late_its_frame() {
+    let mut screen = screen();
+    let mut stars = field();
+    let mut now = fly_until(&mut screen, &mut stars, 20 * SEC);
+    let shown = Star {
+        x: 0.3,
+        y: 0.2,
+        z: 0.6,
+        tint: (0xFF, 0xFF, 0xFF),
+        glow: 1.0,
+    };
+    for late in [1, SceneClock::MOST_FRAMES] {
+        stars.stars.clear();
+        stars.stars.push(shown);
+        now += late * FRAME_NS;
+        draw(&mut screen, &mut stars, now);
+        assert!(
+            (speed_at(stars.clock.moved()) - WARP_SPEED).abs() < 1e-9,
+            "in warp"
+        );
+        let (star, streak) = (stars.stars[0], stars.painted.streaks[0]);
+        let exposure = WARP_SPEED * SceneClock::SHUTTER * seconds(stars.clock.frame_ns());
+        let (across, down) = (streak.head.0 - streak.tail.0, streak.head.1 - streak.tail.1);
+        let length = mathf::sqrt(across * across + down * down);
+        let reach = mathf::sqrt(shown.x * shown.x + shown.y * shown.y) * stars.focal;
+        let expected = reach * (1.0 / star.z - 1.0 / (star.z + exposure));
+        assert!(
+            (length - expected).abs() < 1e-6,
+            "{late} frames on: {length} against {expected}"
+        );
+    }
+}
+
 const MARK: Color = Color::rgb(1, 2, 3);
 
 /// However coarsely a frame's damage is kept — a field this dense passes the

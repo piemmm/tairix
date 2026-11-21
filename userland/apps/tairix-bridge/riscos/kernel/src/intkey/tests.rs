@@ -14,6 +14,7 @@ use crate::cli::tests::{cli, session};
 use crate::keyboard::status;
 use crate::msgtrans::tests::swi;
 use crate::swi::os::{BYTE, CALL_A_VECTOR, INSTALL_KEY_HANDLER};
+use crate::swi::X;
 use crate::testkit::Session;
 
 /// Keys the tests press.
@@ -37,6 +38,12 @@ const KEYPAD_5: u32 = 0x49;
 const KEYPAD_7: u32 = 0x37;
 const KEYPAD_9: u32 = 0x39;
 const KEYPAD_PLUS: u32 = 0x4B;
+
+/// The keypad's decimal point the handler names is RISC OS's low-level key.
+#[test]
+fn the_keypad_decimal_point_is_risc_os_s_key() {
+    assert_eq!(DECIMAL, 0x66);
+}
 
 /// A low-level key as its tables hold it.
 fn low(key: u32) -> u8 {
@@ -471,7 +478,7 @@ fn break_is_the_escape_key_or_a_reset_as_os_byte_247_says() {
     press(&mut s, key::LEFT_CTRL, true);
     press(&mut s, key::BREAK, true);
     let up = s.start_swi(
-        0x2_0000 | CALL_A_VECTOR,
+        X | CALL_A_VECTOR,
         [
             1,
             key::BREAK,

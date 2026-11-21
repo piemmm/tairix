@@ -27,6 +27,13 @@ const SMOKE_ITERATIONS: u64 = 2_000;
 /// their noughts, a point and an exponent.
 const LONGEST_TEXT: usize = 64;
 
+/// A string holds at most 255 bytes, as BBC BASIC's does: the bound the
+/// texts here are drawn under.
+#[test]
+fn a_string_holds_at_most_255_bytes() {
+    assert_eq!(STRING_MOST, 255);
+}
+
 /// Text a number may be read from: mostly number-shaped, sometimes any bytes.
 fn text(rng: &mut Prng) -> Vec<u8> {
     const SHAPED: &[u8] = b"0123456789.E+- ";

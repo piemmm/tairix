@@ -9,7 +9,7 @@ use tairix_openbasic::program::{self as image, HEADER};
 use tairix_openbasic::tokenise::{tokenise, Start};
 use tairix_openbasic::{lineref, Dialect, Error as BasicError};
 use tairix_riscos_kernel::filing::filetype;
-use tairix_riscos_kernel::filing::fs::kind;
+use tairix_riscos_kernel::filing::fs::{kind, stamp};
 use tairix_riscos_kernel::os::Regs;
 use tairix_riscos_kernel::swi::{os as swi, X};
 
@@ -274,18 +274,13 @@ impl Machine<'_, '_> {
         let mut regs = Regs::default();
         regs.r[..2].copy_from_slice(&[swi::file::READ_INFO, at]);
         self.os.perform(X | swi::FILE, &mut regs)?;
-        if regs.r[0] & kind::FILE == 0 {
+        if !matches!(regs.r[0], kind::FILE | kind::IMAGE) {
             let mut raise = Regs::default();
             raise.r[..3].copy_from_slice(&[swi::file::MAKE_ERROR, at, regs.r[0]]);
             self.os.perform(X | swi::FILE, &mut raise)?;
             return Err(Error::BadProgram.into());
         }
-        let file_type = if regs.r[2] >> 20 == 0xFFF {
-            (regs.r[2] >> 8) & 0xFFF
-        } else {
-            0
-        };
-        Ok((regs.r[4], file_type))
+        Ok((regs.r[4], stamp::type_of(regs.r[2]).unwrap_or(0)))
     }
 
     /// The file `name` loaded at `at`.

@@ -3,7 +3,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{bilinear_weights, Mosaic, Picture};
+use super::{bilinear_weights, Mosaic, Picture, BILINEAR_ONE, BILINEAR_SHIFT};
 use crate::color::{Color, Pixel};
 use crate::surface::Surface;
 use tairix_bezier::Affine;
@@ -389,21 +389,31 @@ fn a_mirrored_mosaic_with_a_tile_missing_is_drawn_seamlessly() {
 }
 
 /// A sample's four weights share the whole between them wherever it falls,
-/// and one lying on a place takes all of that place's.
+/// one lying on a place takes all of that place's, and a weight past the
+/// whole way is held to it rather than breaking the share.
 #[test]
 fn a_sample_s_weights_share_the_whole_wherever_it_falls() {
-    for wy in 0..=256 {
-        for wx in 0..=256 {
+    const WHOLE: u32 = 1 << BILINEAR_SHIFT;
+    for wy in 0..=BILINEAR_ONE + 64 {
+        for wx in 0..=BILINEAR_ONE + 64 {
             assert_eq!(
                 bilinear_weights(wx, wy).iter().sum::<u32>(),
-                1 << 16,
+                WHOLE,
                 "({wx}, {wy})"
             );
         }
     }
-    assert_eq!(bilinear_weights(0, 0), [1 << 16, 0, 0, 0]);
-    assert_eq!(bilinear_weights(256, 0), [0, 1 << 16, 0, 0]);
-    assert_eq!(bilinear_weights(0, 256), [0, 0, 1 << 16, 0]);
-    assert_eq!(bilinear_weights(256, 256), [0, 0, 0, 1 << 16]);
-    assert_eq!(bilinear_weights(128, 128), [1 << 14; 4]);
+    let half = BILINEAR_ONE / 2;
+    assert_eq!(bilinear_weights(0, 0), [WHOLE, 0, 0, 0]);
+    assert_eq!(bilinear_weights(BILINEAR_ONE, 0), [0, WHOLE, 0, 0]);
+    assert_eq!(bilinear_weights(0, BILINEAR_ONE), [0, 0, WHOLE, 0]);
+    assert_eq!(
+        bilinear_weights(BILINEAR_ONE, BILINEAR_ONE),
+        [0, 0, 0, WHOLE]
+    );
+    assert_eq!(bilinear_weights(half, half), [WHOLE / 4; 4]);
+    assert_eq!(
+        bilinear_weights(u32::MAX, 0),
+        bilinear_weights(BILINEAR_ONE, 0)
+    );
 }

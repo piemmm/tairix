@@ -19,8 +19,8 @@ use tairix_theme::motion::{seconds, SceneClock};
 use tairix_util::mathf;
 
 use super::{
-    colours, traced_at, BubbleUniverse, Pace, Sizing, Universe, CURVES, EXPOSURES, STEPS, STILL_NS,
-    TIME_RATE,
+    colours, traced_at, BubbleUniverse, Pace, Sizing, Universe, BUBBLE, CURVES, EXPOSURES, STEPS,
+    STILL_NS, TIME_RATE,
 };
 use crate::palette::Palette;
 
@@ -222,6 +222,69 @@ fn every_dot_lies_whole_inside_the_square_a_frame_paints() {
                         && down.end <= painted.bottom(),
                     "{size:?} at {seconds}: {across:?} by {down:?} outside {painted:?}"
                 );
+            }
+        }
+    }
+}
+
+/// A screen of any shape the host may send, a single pixel among them, is
+/// drawn within it: the bubble is its shorter side's share and stays on the
+/// screen as it wanders, a frame paints every pixel of its square's part on
+/// the screen and touches nothing past what it reports, and the cores draw it
+/// as one does.
+#[test]
+fn a_screen_of_any_shape_down_to_one_pixel_is_drawn_within_it() {
+    let threaded = Threaded::new(4);
+    for size in [(1, 1), (3, 2), (2, 7), (720, 1280), (2400, 40), (40, 2400)] {
+        let bounds = Rect::new(0, 0, size.0, size.1);
+        for glow in [true, false] {
+            let given = start(size, "nebula", "fast", glow);
+            let mut one = made(&given, 6);
+            {
+                let course = &one.universe.course;
+                let shorter = f64::from(size.0.min(size.1));
+                assert!((course.radius - BUBBLE * shorter).abs() < 1e-9, "{size:?}");
+                for second in 0..400 {
+                    let (x, y) = course.at(f64::from(second) * 1.7).centre;
+                    assert!(
+                        x >= course.radius && x + course.radius <= f64::from(size.0),
+                        "{size:?}: {x}"
+                    );
+                    assert!(
+                        y >= course.radius && y + course.radius <= f64::from(size.1),
+                        "{size:?}: {y}"
+                    );
+                }
+            }
+            let mut split = across(&given, 6, &threaded);
+            let (mut whole, mut banded) = (Screen::new(given.clone()), Screen::new(given.clone()));
+            for frame in 1..=3 {
+                if frame == 3 {
+                    whole.surface.fill(MARK);
+                    banded.surface.fill(MARK);
+                }
+                draw(&mut whole, &mut one, frame * FRAME_NS);
+                draw(&mut banded, &mut split, frame * FRAME_NS);
+                assert!(
+                    banded.surface == whole.surface,
+                    "{size:?}: the cores drew the frame"
+                );
+                assert_eq!(banded.damage, whole.damage, "{size:?}");
+            }
+            let (painted, reported) = (one.universe.painted, whole.damage.bounds());
+            assert!(!painted.is_empty(), "{size:?}");
+            assert_eq!(painted.intersection(&bounds), painted, "{size:?}");
+            assert_eq!(reported.intersection(&bounds), reported, "{size:?}");
+            let mark = MARK.premultiply();
+            for y in 0..size.1 {
+                for x in 0..size.0 {
+                    let pixel = whole.surface.get(x, y).expect("inside");
+                    if painted.contains(point(x, y)) {
+                        assert_eq!(pixel.a, u8::MAX, "{size:?}: ({x}, {y}) painted");
+                    } else if !reported.contains(point(x, y)) {
+                        assert_eq!(pixel, mark, "{size:?}: ({x}, {y}) untouched");
+                    }
+                }
             }
         }
     }

@@ -5,6 +5,7 @@
 use tairix_riscos_kernel::os::Regs;
 use tairix_riscos_kernel::swi::os::set_colour::{ACTION, BACKGROUND, TEXT};
 use tairix_riscos_kernel::swi::{os as swi, sound, X};
+use tairix_riscos_kernel::word;
 
 use super::super::functions::{string_of, Guest};
 use super::super::lvalue::{Lvalue, Place};
@@ -1252,7 +1253,7 @@ impl Machine<'_, '_> {
                 self.os.write_byte(at, text.len())?;
                 self.os.write_bytes(at + 1, text.as_bytes())?;
                 let mut regs = Regs::default();
-                regs.r[..2].copy_from_slice(&[15, at]);
+                regs.r[..2].copy_from_slice(&[word::SET_CLOCK, at]);
                 self.os.perform(X | swi::WORD, &mut regs)?;
             }
             token::TIME_LHS => {
@@ -1261,7 +1262,7 @@ impl Machine<'_, '_> {
                 self.os.write_word(at, n.cast_unsigned())?;
                 self.os.write_byte(at + 4, if n < 0 { 0xFF } else { 0 })?;
                 let mut regs = Regs::default();
-                regs.r[..2].copy_from_slice(&[2, at]);
+                regs.r[..2].copy_from_slice(&[word::WRITE_SYSTEM_CLOCK, at]);
                 self.os.perform(X | swi::WORD, &mut regs)?;
             }
             token::PAGE_LHS => {

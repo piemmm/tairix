@@ -33,6 +33,13 @@ fn string(s: &mut Session, at: u32) -> alloc::vec::Vec<u8> {
         .0
 }
 
+/// `OS_Memory` 19 and its flags, a transfer writing to RAM and one over, are
+/// RISC OS's.
+#[test]
+fn the_dma_reason_and_its_flags_are_risc_os_s() {
+    assert_eq!([DMA, DMA_WRITES, COMPLETE], [0x13, 1 << 9, 1 << 10]);
+}
+
 #[test]
 fn read_sys_info_names_the_release_and_refuses_the_reasons_it_has_not() {
     let mut s = session();

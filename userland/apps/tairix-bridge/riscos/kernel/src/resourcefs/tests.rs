@@ -6,12 +6,12 @@ use tairix_riscos_arm::psr;
 use super::{Object, DEREGISTER_FILES, REGISTER_FILES};
 use crate::filing::filetype;
 use crate::filing::fs::{attribute, kind, stamp};
-
-/// The attributes every ResourceFS object has: its owner may read and write it.
-const OWNER_READ_WRITE: u32 = attribute::OWNER_READ | attribute::OWNER_WRITE;
 use crate::msgtrans::tests::{block, register, session, swi, BLOCK};
 use crate::swi::X;
 use crate::testkit::{asm, Session, CODE, DATA};
+
+/// The attributes every ResourceFS object has: its owner may read and write it.
+const OWNER_READ_WRITE: u32 = attribute::OWNER_READ | attribute::OWNER_WRITE;
 
 /// What `name` finds.
 fn found(s: &mut Session, name: &[u8]) -> Option<Object> {

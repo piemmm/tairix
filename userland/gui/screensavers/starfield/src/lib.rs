@@ -4,8 +4,9 @@
 //! reduced motion it only cruises and does not turn.
 //!
 //! Each star is a point in a unit volume ahead of the viewer, projected with
-//! perspective and drawn as the path it travelled over the frame: a dot while
-//! cruising, a streak dimming to its tail in warp. Nearer stars are brighter
+//! perspective and drawn as the path it covers over the scene clock's shutter:
+//! a dot while cruising, a streak dimming to its tail in warp, however late
+//! its frame. Nearer stars are brighter
 //! and wider; a star is respawned far away once it passes the viewer or
 //! leaves the screen, and fades up from the dark as it approaches, so none
 //! appears from nowhere.
@@ -31,7 +32,7 @@ use tairix_parallel::{JobRunner, Pool};
 use tairix_raster::{BandScratch, Canvas, Color, ScanScratch, Surface, SUBPIXEL};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_saver::{erase, Frame, Host, NextFrame, Scene, Setup};
-use tairix_theme::motion::SceneClock;
+use tairix_theme::motion::{seconds, SceneClock};
 use tairix_util::{fallible, mathf};
 
 /// Stars per million screen pixels at the field's own density, and the bounds
@@ -161,7 +162,8 @@ impl Starfield {
             _ => return Err(Errno::OutOfRange),
         };
         let start = setup.start;
-        let (width, height) = (start.region.width(), start.region.height());
+        let screen = setup.screen();
+        let (width, height) = (screen.width, screen.height);
         let pixels = u64::from(width) * u64::from(height);
         let density = |stars: u64| stars * percent / 100;
         let count = (pixels * density(STARS_PER_MEGAPIXEL) / 1_000_000)
@@ -178,7 +180,7 @@ impl Starfield {
             },
             runner: setup.pool(),
             rng: NonCryptoRng::seed_from_u64(setup.seed),
-            screen: Rect::new(0, 0, width, height),
+            screen,
             centre: (f64::from(width) / 2.0, half_height),
             focal: half_height,
             spread: (aspect * 1.15, 1.15),
@@ -272,12 +274,14 @@ impl Starfield {
             (false, false) => (CRUISE_SPEED, ROLL_RATE * flight),
             (false, true) => (speed_at(flight), ROLL_RATE * flight),
         };
-        self.fly(speed * (flight - before), speed, roll);
+        let exposure = speed * SceneClock::SHUTTER * seconds(self.clock.frame_ns());
+        self.fly(speed * (flight - before), exposure, speed, roll);
     }
 
     /// Move every star `travel` nearer at `speed` and project it into this
-    /// frame's streaks, the field turned `roll` radians.
-    fn fly(&mut self, travel: f64, speed: f64, roll: f64) {
+    /// frame's streaks, each the depth `exposure` its star covers over the
+    /// clock's shutter, the field turned `roll` radians.
+    fn fly(&mut self, travel: f64, exposure: f64, speed: f64, roll: f64) {
         let (sin, cos) = (mathf::sin(roll), mathf::cos(roll));
         let warp = ((speed - CRUISE_SPEED) / (WARP_SPEED - CRUISE_SPEED)).clamp(0.0, 1.0);
         self.painted.streaks.clear();
@@ -294,7 +298,7 @@ impl Starfield {
                 continue;
             }
             self.stars[index] = star;
-            let tail = self.project(x, y, (star.z + travel).min(Z_FAR));
+            let tail = self.project(x, y, (star.z + exposure).min(Z_FAR));
             if let Some(streak) = self.streak(&star, head, tail, warp) {
                 self.painted.streaks.push(streak);
             }

@@ -578,12 +578,27 @@ fn reach(
     (x1 > x0 && y1 > y0).then_some((x0, y0, x1, y1))
 }
 
+/// The whole a bilinear weight is counted out of along one axis: a sample on
+/// a place gives it all of it, and its neighbour none.
+pub const BILINEAR_ONE: u32 = 256;
+
+/// The shift that takes a sum weighed by the four [`bilinear_weights`] back
+/// to the scale of what it weighs, derived from [`BILINEAR_ONE`] so the two
+/// cannot drift apart.
+pub const BILINEAR_SHIFT: u32 = 2 * BILINEAR_ONE.trailing_zeros();
+
+const _: () = assert!(
+    BILINEAR_ONE.is_power_of_two(),
+    "the four weights' sum comes back by a shift"
+);
+
 /// Where a sample at `at` — pixel `i`'s centre is `i` here — falls along one
-/// axis: the pixel at or before it, and the weight out of 256 its successor
-/// takes.
+/// axis: the pixel at or before it, and the weight out of [`BILINEAR_ONE`]
+/// its successor takes.
 fn tap(at: f64) -> (i64, u32) {
     let floor = mathf::floor(at);
-    let weight = u32::try_from(mathf::round_i32((at - floor) * 256.0).clamp(0, 256)).unwrap_or(0);
+    let weight = mathf::round_i32((at - floor) * f64::from(BILINEAR_ONE));
+    let weight = u32::try_from(weight).unwrap_or(0).min(BILINEAR_ONE);
     (i64::from(mathf::round_i32(floor)), weight)
 }
 
@@ -598,11 +613,14 @@ fn sample<P: Picture + ?Sized>(src: &P, (left, wx): (i64, u32), (top, wy): (i64,
 }
 
 /// What each of the four places about a sample weighs, the sample `wx` and
-/// `wy` 256ths of the way past the first along each axis, both at most 256:
-/// above left, above right, below left and below right, summing to `1 << 16`.
+/// `wy` [`BILINEAR_ONE`]ths of the way past the first along each axis, either
+/// held to the whole way: above left, above right, below left and below
+/// right, summing to `1 << BILINEAR_SHIFT`.
 #[must_use]
 pub const fn bilinear_weights(wx: u32, wy: u32) -> [u32; 4] {
-    let (left, top) = (256u32.saturating_sub(wx), 256u32.saturating_sub(wy));
+    let wx = if wx < BILINEAR_ONE { wx } else { BILINEAR_ONE };
+    let wy = if wy < BILINEAR_ONE { wy } else { BILINEAR_ONE };
+    let (left, top) = (BILINEAR_ONE - wx, BILINEAR_ONE - wy);
     [left * top, wx * top, left * wy, wx * wy]
 }
 
@@ -616,8 +634,10 @@ fn weigh(quad: [Pixel; 4], wx: u32, wy: u32) -> Pixel {
         red_blue += (u64::from(pixel.r) | u64::from(pixel.b) << 32) * weight;
         green_alpha += (u64::from(pixel.g) | u64::from(pixel.a) << 32) * weight;
     }
-    let channel =
-        |sum: u64| u8::try_from(((sum & 0xffff_ffff) + (1 << 15)) >> 16).unwrap_or(u8::MAX);
+    let channel = |sum: u64| {
+        let rounded = (sum & 0xffff_ffff) + (1 << (BILINEAR_SHIFT - 1));
+        u8::try_from(rounded >> BILINEAR_SHIFT).unwrap_or(u8::MAX)
+    };
     Pixel {
         r: channel(red_blue),
         g: channel(green_alpha),

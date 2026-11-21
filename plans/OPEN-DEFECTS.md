@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 533 open, 1474 closed, 2007 total.
+**closed**, and a partial fix stays **open**. 534 open, 1474 closed, 2008 total.
 
-### Open (533)
+### Open (534)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -561,6 +561,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D2020 | OpenMicro's MOS and Electron OS count a ROM image fitted in two slots twice, where MOS 1.20 and Electron OS 1.00 count it once, in the higher slot, calling two images the same where their first &400 bytes and as many more as the higher slot's number agree (observed with copies in 13 and 12 or 5 on the Model B, 1 and 0 on the Electron); so the Electron's table holds BASIC as ROMs 10 and 11 where the original's holds it as 11 alone | needs about 100 bytes; the Model B MOS has under ten free |
 | D2022 | OpenMicro's Model B MOS flushes a buffer back to its last slot and marks every busy flag &FF, where MOS 1.20 empties it where it stands, marks a flushed sound queue &80, clears a sound queue's flag as SOUND or the bell fills it and starts with the four clear, so page 2's offsets and sound flags (&2CF–&2E9) differ after a flush, as Electron OS 1.00's and the Electron's do not | needs about 20 bytes, for the reset's fill of the offsets the flush no longer sets; the Model B MOS has one free |
 | D2023 | nanoseconds per second is spelled `1_000_000_000` about 305 times in some 120 files outside the ray tracer, landscape, countryside and WinterSun (`lib/abi` 35, `kernel/core` 21, `lib/net` 17, the switchboard 16, the desktop session 14, `kernel/arch/api` 12, …), and some 25 crates re-declare `tairix_abi::time::NANOS_PER_SEC as u64` as a private constant (`lib/log`, `lib/util`'s `seconds`, `lib/net`, `lib/greeter`, `ping`, `flock`, `telnet`, `smbfs`, the greeter, …), where the one definition is `tairix_abi::time::NANOS_PER_SEC`, a `u32` because it bounds `Time64`'s sub-second field and is exported to C as `TAIRIX_NANOS_PER_SEC` | open; noticed reviewing the Bubble Universe merge (`47cc6232c`), whose own test copy and the six other screensaver suites' are now `tairix_saver::testing::SEC`; recorded rather than swept by the user's decision for that change, as the sweep turns on the shared constant's type: a `u64` sibling beside `NANOS_PER_MILLI`, or `NANOS_PER_SEC` itself made `u64` with the C header regenerated. The sweep replaces per-second conversions and one-second spans, leaves gigahertz rates and decimal scales, and lands with a static check keeping the literal out; the ray tracer's, landscape's and WinterSun's copies are logged here with the rest |
+| D2024 | xtask's budget kill can signal a process group that is no longer the step's: `children::kill` sends `SIGTERM`, sleeps a fixed two seconds, then sends `SIGKILL`, while the step's waiter thread reaps the leader the moment it exits, so the `SIGKILL` most often reaches a group already reaped and empty, whose id a cyclic pid allocator may hand a new group leader within the window, one of xtask's own children among them; and every kill costs the whole two seconds however soon the step exits | noticed reviewing the riscos emulator wait, which shares the pattern with `await_within`; not reproduced; the fix waits on the leader's exit without reaping it (`waitid` with `WNOWAIT`), so its pid stays reserved through the kill, and reaps after |
 
 ### Closed (1474)
 

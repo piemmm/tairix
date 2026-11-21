@@ -10,9 +10,10 @@
 //! first has BASIC V type `lib/openbasic`'s programs ([`basic`]), then has
 //! BASIC V and BASIC VI answer `tairix-riscos-basic`'s cases ([`numbers`]),
 //! run its programs ([`language`]), assemble its assembler's lines
-//! ([`assembler`]) and type its sessions ([`session`]), then runs it. Where `<dir>` holds RPCEmu it is run
-//! headless until the harness is done: the harness ends by opening `Done`,
-//! which here is a named pipe the command waits on. Otherwise the harness is left for the developer to run,
+//! ([`assembler`]) and type its sessions ([`session`]), then runs it. Where
+//! `<dir>` holds RPCEmu it is run headless until the harness is done: the
+//! harness ends by writing a byte to `Done`, which here is a named pipe the
+//! command waits on. Otherwise the harness is left for the developer to run,
 //! and a later run imports what it recorded. Each recorded observation
 //! becomes its scenario's fixture; a scenario marked `ours`, whose fixture
 //! is the emulator's own, is not run, so nothing it does to genuine RISC OS
@@ -24,11 +25,12 @@
 //! corpus's own files hold it or it is mostly `&00`, spaces and `&FF`.
 
 use std::fmt::Write as _;
-use std::io::Read as _;
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::fs::{File, OpenOptions};
+use std::io::{Read as _, Write as _};
+use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, SystemTime};
 
 use tairix_openbasic::program::{self, Line};
@@ -499,7 +501,7 @@ fn harness_program<'a>(
     text.push(obey::run());
     text.extend([
         "CLOSE#O%:PROCdone:END".into(),
-        "DEF PROCdone:LOCAL D%:D%=OPENOUT\"HostFS:$.Done\":CLOSE#D%:ENDPROC".into(),
+        "DEF PROCdone:LOCAL D%:D%=OPENOUT\"HostFS:$.Done\":BPUT#D%,0:CLOSE#D%:ENDPROC".into(),
         "DEF FNh(N%)=\"&\"+RIGHT$(\"0000000\"+STR$~N%,8)".into(),
         "DEF FNr(R$,N%,F%)=\" \"+R$+\"=\"+FNh(N%)".into(),
         // An item an error leaves undefined, `S%` set, gives way to it.
@@ -679,73 +681,128 @@ fn scenario_lines(scenario: &Scenario, text: &mut Vec<String>) -> Result<(), Str
 
 /// What ended the wait for the harness.
 enum Ended {
-    /// The harness opened `Done` and closed it: whether it read cleanly.
+    /// A byte reached `Done`: whether it was read cleanly.
     Done(bool),
     /// The emulator exited first.
     Exited,
+    /// The deadline passed first.
+    Overdue,
 }
 
-/// Runs `<dir>`'s RPCEmu headless until the harness opens `Done`, a named
-/// pipe here, the emulator exits, or the deadline passes.
+/// Runs `<dir>`'s RPCEmu headless until the harness writes a byte to `Done`,
+/// a named pipe here, the emulator exits, or the deadline passes.
 fn run_emulator(ctx: &Context, dir: &Path, hostfs: &Path) -> Result<(), String> {
     let done = hostfs.join("Done,ffd");
     let mut mkfifo = Command::new("mkfifo");
     mkfifo.arg(&done);
     ctx.run("riscos: mkfifo", mkfifo)?;
-    let (said, heard) = mpsc::channel();
-    let pipe = done.clone();
-    let read = said.clone();
-    // Opening the pipe blocks until the harness opens it; its close ends the
-    // read.
-    let reader = std::thread::spawn(move || {
-        let ended =
-            std::fs::File::open(&pipe).and_then(|mut file| file.read_to_end(&mut Vec::new()));
-        let _ = read.send(Ended::Done(ended.is_ok()));
-    });
-    let mut emulator = Command::new(dir.join(EMULATOR));
-    emulator
-        .current_dir(dir)
-        .env("QT_QPA_PLATFORM", "offscreen")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let outcome = match ctx.children.spawn(&mut emulator) {
-        Ok(mut child) => {
-            let pid = child.id();
-            std::thread::spawn(move || {
-                let _ = child.wait();
-                let _ = said.send(Ended::Exited);
-            });
-            let outcome = heard.recv_timeout(DEADLINE);
-            // The emulator runs until it is stopped, unless it already has.
-            if !matches!(outcome, Ok(Ended::Exited)) {
-                crate::children::kill(pid);
-            }
-            ctx.children.release(pid);
-            Ok(outcome)
-        }
-        Err(e) => Err(format!("riscos: {}: {e}", dir.join(EMULATOR).display())),
-    };
-    release_reader(&done);
-    let _ = reader.join();
+    let outcome = DonePipe::hold(&done)
+        .map_err(|e| format!("riscos: {}: {e}", done.display()))
+        .and_then(|pipe| emulate(ctx, dir, &pipe));
     let _ = std::fs::remove_file(&done);
     match outcome? {
-        Ok(Ended::Done(true)) => Ok(()),
-        Ok(Ended::Done(false)) => Err(format!("riscos: {} could not be read", done.display())),
-        Ok(Ended::Exited) => Err("riscos: the emulator ended before the harness did".into()),
-        Err(_) => Err(format!(
+        Ended::Done(true) => Ok(()),
+        Ended::Done(false) => Err(format!("riscos: {} could not be read", done.display())),
+        Ended::Exited => Err("riscos: the emulator ended before the harness did".into()),
+        Ended::Overdue => Err(format!(
             "riscos: the harness did not finish within {} s",
             DEADLINE.as_secs()
         )),
     }
 }
 
-/// Opens `done`'s writing end without waiting, which frees a reader still
-/// waiting for the harness and, with no reader left, opens nothing.
-fn release_reader(done: &Path) {
-    let _ = std::fs::OpenOptions::new()
-        .write(true)
-        .custom_flags(libc::O_NONBLOCK)
-        .open(done);
+/// Runs the emulator until a byte reaches `pipe`, it exits, or the deadline
+/// passes, then stops it and ends the wait on `pipe`.
+fn emulate(ctx: &Context, dir: &Path, pipe: &DonePipe) -> Result<Ended, String> {
+    let (said, heard) = mpsc::channel();
+    let reader = pipe
+        .await_byte(said.clone())
+        .map_err(|e| format!("riscos: could not start the wait for the harness ({e})"))?;
+    let mut emulator = Command::new(dir.join(EMULATOR));
+    emulator
+        .current_dir(dir)
+        .env("QT_QPA_PLATFORM", "offscreen")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let ended = match ctx.children.spawn(&mut emulator) {
+        Ok(mut child) => {
+            let pid = child.id();
+            let waiting = std::thread::Builder::new().spawn(move || {
+                let _ = child.wait();
+                let _ = said.send(Ended::Exited);
+            });
+            let ended = match waiting {
+                Ok(_) => Ok(heard.recv_timeout(DEADLINE).unwrap_or(Ended::Overdue)),
+                Err(e) => Err(format!(
+                    "riscos: could not start the wait for the emulator ({e}); pid {pid} was \
+                     killed and is not waited for"
+                )),
+            };
+            // The emulator runs until it is stopped, unless it already has.
+            if !matches!(ended, Ok(Ended::Exited)) {
+                crate::children::kill(pid);
+            }
+            ctx.children.release(pid);
+            ended
+        }
+        Err(e) => Err(format!("riscos: {}: {e}", dir.join(EMULATOR).display())),
+    };
+    pipe.release();
+    let _ = reader.join();
+    ended
+}
+
+/// `Done`, held open from before the emulator starts. The harness's open then
+/// finds a reader and never waits on this side, the byte it writes stays in
+/// the pipe until read, and the pipe never reads as ended. No open waits on
+/// another, a rendezvous macOS can lose under load.
+struct DonePipe {
+    /// Read here, by a wait on a thread of its own.
+    reading: Arc<File>,
+    /// Written here, never waiting, to end that wait.
+    waking: File,
+}
+
+impl DonePipe {
+    /// The named pipe at `path`, held for reading and for writing; refused
+    /// where `path` is not one named pipe at both opens, as a wake written
+    /// anywhere else would leave the wait waiting.
+    fn hold(path: &Path) -> std::io::Result<Self> {
+        // Linux and macOS open a FIFO for reading and writing at once, with
+        // no other side yet; the writing end below then finds this reader.
+        let reading = OpenOptions::new().read(true).write(true).open(path)?;
+        let waking = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)?;
+        let (read, woken) = (reading.metadata()?, waking.metadata()?);
+        if !read.file_type().is_fifo() || (read.dev(), read.ino()) != (woken.dev(), woken.ino()) {
+            return Err(std::io::Error::other("not one named pipe"));
+        }
+        Ok(Self {
+            reading: Arc::new(reading),
+            waking,
+        })
+    }
+
+    /// Waits on a thread of its own for the pipe's first byte, whenever it
+    /// was written, then says so on `said`.
+    fn await_byte(
+        &self,
+        said: mpsc::Sender<Ended>,
+    ) -> std::io::Result<std::thread::JoinHandle<()>> {
+        let reading = Arc::clone(&self.reading);
+        std::thread::Builder::new().spawn(move || {
+            let byte = (&*reading).read_exact(&mut [0; 1]);
+            let _ = said.send(Ended::Done(byte.is_ok()));
+        })
+    }
+
+    /// Ends the wait, whether it has begun or not: the byte waits in the pipe
+    /// for it, and a pipe too full to take one holds a byte for it already.
+    fn release(&self) {
+        let _ = (&self.waking).write(&[0]);
+    }
 }
 
 /// A ROM image in `<dir>`'s `roms/`.
@@ -1031,8 +1088,8 @@ mod tests {
     }
 
     #[test]
-    fn the_emulator_runs_until_the_harness_opens_done() {
-        let (scratch, ctx) = emulated(": > hostfs/Done,ffd\nexec sleep 60");
+    fn the_emulator_runs_until_the_harness_writes_to_done() {
+        let (scratch, ctx) = emulated("printf x > hostfs/Done,ffd\nexec sleep 60");
         let started = Instant::now();
         let dir = scratch.path();
         assert_eq!(run_emulator(&ctx, dir, &dir.join("hostfs")), Ok(()));
@@ -1058,6 +1115,113 @@ mod tests {
         assert!(
             find(&dir.join("hostfs"), "Done").is_none(),
             "the pipe removed"
+        );
+    }
+
+    /// A held `Done` in a scratch directory of its own, and its path.
+    fn held() -> (tairix_fuzzseed::scratch::Scratch, PathBuf, DonePipe) {
+        let scratch =
+            tairix_fuzzseed::scratch::Scratch::under(&std::env::temp_dir(), "riscos-done");
+        let path = scratch.path().join("Done,ffd");
+        let made = Command::new("mkfifo").arg(&path).status();
+        assert!(made.is_ok_and(|status| status.success()), "a named pipe");
+        let pipe = DonePipe::hold(&path).expect("held");
+        (scratch, path, pipe)
+    }
+
+    /// `path` opened as the harness opens it, refused rather than waited on
+    /// where no reader holds it.
+    fn as_the_harness(path: &Path) -> File {
+        OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+            .expect("held, so the harness never waits for a reader")
+    }
+
+    /// Whether the wait on `pipe` ended on a byte read cleanly, within a
+    /// minute.
+    fn ended_on_a_byte(pipe: &DonePipe) -> bool {
+        let (said, heard) = mpsc::channel();
+        let reader = pipe.await_byte(said).expect("a wait");
+        let ended = matches!(
+            heard.recv_timeout(crate::process::MINUTE),
+            Ok(Ended::Done(true))
+        );
+        pipe.release();
+        reader.join().is_ok() && ended
+    }
+
+    /// The harness finishing before the wait has begun is still seen: the byte
+    /// waits in the pipe, so nothing hangs on when the waiting thread runs.
+    #[test]
+    fn a_byte_written_before_the_wait_begins_ends_it() {
+        let (_scratch, path, pipe) = held();
+        as_the_harness(&path).write_all(&[0]).expect("written");
+        assert!(ended_on_a_byte(&pipe));
+    }
+
+    /// An emulator that ends before the waiting thread has run still has its
+    /// wait ended, rather than leaving that thread waiting for good.
+    #[test]
+    fn a_release_before_the_wait_begins_ends_it() {
+        let (_scratch, _path, pipe) = held();
+        pipe.release();
+        assert!(ended_on_a_byte(&pipe));
+    }
+
+    /// Only a byte ends the wait: an open and close that wrote nothing does
+    /// not, and the pipe does not read as ended once it is closed.
+    #[test]
+    fn an_open_and_close_writing_nothing_leaves_the_wait_under_way() {
+        let (_scratch, path, pipe) = held();
+        drop(as_the_harness(&path));
+        let (said, heard) = mpsc::channel();
+        let reader = pipe.await_byte(said).expect("a wait");
+        assert!(
+            heard.recv_timeout(crate::tests::NO_ANSWER).is_err(),
+            "still waiting"
+        );
+        pipe.release();
+        assert!(matches!(
+            heard.recv_timeout(crate::process::MINUTE),
+            Ok(Ended::Done(true))
+        ));
+        reader.join().expect("the wait ended");
+    }
+
+    /// A `Done` that is not a named pipe is refused rather than held, as no
+    /// wake written to it could end the wait.
+    #[test]
+    fn a_done_that_is_no_named_pipe_is_refused() {
+        let scratch =
+            tairix_fuzzseed::scratch::Scratch::under(&std::env::temp_dir(), "riscos-done");
+        let path = scratch.path().join("Done,ffd");
+        std::fs::write(&path, b"").expect("a plain file");
+        let refused = DonePipe::hold(&path).err().map(|e| e.to_string());
+        assert_eq!(refused.as_deref(), Some("not one named pipe"));
+    }
+
+    /// The harness's last act is the one the command waits on.
+    #[test]
+    fn the_harness_ends_by_writing_a_byte_to_done() {
+        use tairix_openbasic::list::{Lister, Options};
+
+        let image = harness_program(std::iter::empty()).unwrap();
+        let mut lister = Lister::new(Dialect::BasicV, Options::new(0));
+        let mut out = Vec::new();
+        for line in program::lines(&image) {
+            let line = line.unwrap();
+            lister.line(line.number, line.text, &mut out).unwrap();
+        }
+        let text = String::from_utf8(out).unwrap();
+        let done = text
+            .lines()
+            .find(|line| line.contains("DEF PROCdone"))
+            .expect("PROCdone");
+        assert!(
+            done.contains("D%=OPENOUT\"HostFS:$.Done\":BPUT#D%,0:CLOSE#D%"),
+            "{done}"
         );
     }
 

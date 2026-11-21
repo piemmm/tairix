@@ -98,8 +98,9 @@ relaying each call.
   painted a band of columns at a time across the saver's threads. Under reduced
   motion the ribbon holds still and only the minute turning redraws.
 - **Starfield** (`Starfield.app`): stars flown through, projected with
-  perspective and drawn as the path each travelled over the frame — a dot
-  while cruising, a streak in warp — the flight cruising, surging into warp,
+  perspective and drawn as the path each covers over the scene clock's
+  shutter — a dot while cruising, a streak in warp, however late the frame —
+  the flight cruising, surging into warp,
   holding and settling back as the field turns slowly about the line of
   flight. A frame erases where its stars were and draws where they are a band
   of rows at a time across the saver's threads, each streak's brightness

@@ -12,6 +12,10 @@ use crate::territory::{
 };
 use crate::vectors::{self, Carry};
 
+/// `OS_Word` 1: the system clock's centiseconds read, as five bytes.
+pub const READ_SYSTEM_CLOCK: u32 = 1;
+/// `OS_Word` 2: the system clock set, from five bytes.
+pub const WRITE_SYSTEM_CLOCK: u32 = 2;
 /// `OS_Word` 14: the real-time clock read, by one of [`read`]'s reasons.
 pub const READ_CLOCK: u32 = 14;
 /// `OS_Word` 15: the real-time clock set, by one of [`set`]'s reasons.
@@ -67,12 +71,12 @@ impl Os<'_> {
                 self.word_read_line(regs)?;
                 true
             }
-            1 => {
+            READ_SYSTEM_CLOCK => {
                 let time = self.time();
                 self.write_five(block, time)?;
                 true
             }
-            2 => {
+            WRITE_SYSTEM_CLOCK => {
                 let time = self.read_five(block)?;
                 self.set_time(time);
                 true

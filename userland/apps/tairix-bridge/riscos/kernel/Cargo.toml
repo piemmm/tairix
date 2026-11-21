@@ -20,9 +20,11 @@ tairix-collections = { path = "../../../../../lib/collections", version = "=0.0.
 tairix-inline = { path = "../../../../../lib/inline", version = "=0.0.0" }
 # GSTrans, system variables, expressions and argument templates.
 tairix-obey = { path = "../../../../../lib/obey", version = "=0.0.0" }
-# RISC OS's Latin-1, which names and keys are folded through.
+# RISC OS's Latin-1, which names and keys are folded through, and
+# FileSwitch's attribute bits.
 tairix-fsmeta = { path = "../../../../../lib/fsmeta", version = "=0.0.0" }
-# The one civil-calendar arithmetic: days from a date, and back.
+# The one civil-calendar arithmetic, days from a date and back, the 64-bit
+# time it is read in, and the data file type TAIRiX's own files share.
 tairix-abi = { path = "../../../../../lib/abi", version = "=0.0.0" }
 # The TAIRiX locale's time zone, which the UK territory's zone is.
 tairix-tz = { path = "../../../../../lib/tz", version = "=0.0.0" }

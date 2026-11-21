@@ -206,3 +206,103 @@ fn each_sound_swi_lies_in_its_own_module_s_chunk() {
         assert!(all[i + 1..].iter().all(|b| b != a), "{a:#X} named twice");
     }
 }
+
+/// The numbers the kernel shares with RISC OS — SWIs and their flags, the
+/// vectors, the environment's handlers, services, areas, file types and
+/// `OS_Word`'s reasons — are RISC OS's own. Every other test names them, so
+/// each is pinned to its value here, once.
+#[test]
+fn the_numbers_shared_with_risc_os_are_its_own() {
+    use crate::filing::filetype;
+    use crate::filing::fs::{attribute, stamp};
+    use crate::swi::os::{self as swi, find};
+    use crate::{env, service, vectors, word};
+
+    let pinned: &[(&str, u32, u32)] = &[
+        ("X", X, 0x2_0000),
+        ("WRITE_I", crate::swi::WRITE_I, 0x100),
+        ("OS_Byte", swi::BYTE, 0x06),
+        ("OS_BPut", swi::BPUT, 0x0B),
+        ("OS_Find", swi::FIND, 0x0D),
+        ("OS_Exit", swi::EXIT, 0x11),
+        ("OS_Claim", swi::CLAIM, 0x1F),
+        ("OS_ValidateAddress", swi::VALIDATE_ADDRESS, 0x3A),
+        ("OS_ChangeEnvironment", swi::CHANGE_ENVIRONMENT, 0x40),
+        ("OS_Plot", swi::PLOT, 0x45),
+        ("OS_ClaimDeviceVector", swi::CLAIM_DEVICE_VECTOR, 0x4B),
+        ("OS_ReleaseDeviceVector", swi::RELEASE_DEVICE_VECTOR, 0x4C),
+        ("OS_ExitAndDie", swi::EXIT_AND_DIE, 0x50),
+        ("OS_ReadDefaultHandler", swi::READ_DEFAULT_HANDLER, 0x55),
+        ("OS_NVMemory", swi::NV_MEMORY, 0x76),
+        (
+            "ResourceFS's chunk",
+            crate::swi::chunk::RESOURCE_FS,
+            0x4_1B40,
+        ),
+        (
+            "ResourceFS_DeregisterFiles",
+            crate::swi::resource_fs::DEREGISTER_FILES,
+            0x4_1B41,
+        ),
+        ("an input open", find::INPUT, 0x40),
+        ("an output open", find::OUTPUT, 0x80),
+        ("an update open", find::UPDATE, 0xC0),
+        ("an open that must find a file", find::MUST_OPEN, 0x0C),
+        ("ByteV", vectors::BYTE.0, 0x06),
+        ("BPutV", vectors::BPUT.0, 0x0B),
+        ("FindV", vectors::FIND.0, 0x0D),
+        ("FSCV", vectors::FSC.0, 0x0F),
+        ("EventV", vectors::EVENT.0, 0x10),
+        ("KeyV", vectors::KEY.0, 0x13),
+        ("InsV", vectors::INS.0, 0x14),
+        ("RemV", vectors::REM.0, 0x15),
+        ("UKSWIV", vectors::UKSWI.0, 0x18),
+        ("TickerV", vectors::TICKER.0, 0x1C),
+        ("UpCallV", vectors::UPCALL.0, 0x1D),
+        ("the error handler", env::ERROR, 6),
+        ("the escape handler", env::ESCAPE, 9),
+        ("the event handler", env::EVENT, 10),
+        ("the exit handler", env::EXIT, 11),
+        ("the current active object", env::CURRENT_ACTIVE_OBJECT, 15),
+        ("the UpCall handler", env::UPCALL, 16),
+        ("ABEX", env::ABEX, 0x5845_4241),
+        ("a buffer insertion's block", crate::input::BLOCK, 1 << 31),
+        ("Service_ModeExtension", service::MODE_EXTENSION, 0x50),
+        ("Service_PostInit", service::POST_INIT, 0x73),
+        ("Service_TerritoryStarted", service::TERRITORY_STARTED, 0x75),
+        ("the system heap's area", crate::memory::SYSTEM, 7),
+        ("the RAM disc's area", crate::ramdisc::AREA, 5),
+        ("a page", tairix_riscos_arm::mmu::PAGE_SIZE, 0x1000),
+        ("the owner's read", attribute::OWNER_READ, 0x01),
+        ("the owner's write", attribute::OWNER_WRITE, 0x02),
+        ("locked", attribute::LOCKED, 0x08),
+        ("the public's read", attribute::PUBLIC_READ, 0x10),
+        ("the public's write", attribute::PUBLIC_WRITE, 0x20),
+        ("Obey", filetype::OBEY, 0xFEB),
+        ("Absolute", filetype::ABSOLUTE, 0xFF8),
+        ("Sprite", filetype::SPRITE, 0xFF9),
+        ("Module", filetype::MODULE, 0xFFA),
+        ("BASIC", filetype::BASIC, 0xFFB),
+        ("Utility", filetype::UTILITY, 0xFFC),
+        ("Data", filetype::DATA, 0xFFD),
+        ("Text", filetype::TEXT, 0xFFF),
+        (
+            "a module's load address",
+            stamp::typed(filetype::MODULE, 0),
+            0xFFFF_FA00,
+        ),
+        (
+            "a text file's load address",
+            stamp::typed(filetype::TEXT, 0),
+            0xFFFF_FF00,
+        ),
+        ("OS_Word 1", word::READ_SYSTEM_CLOCK, 1),
+        ("OS_Word 2", word::WRITE_SYSTEM_CLOCK, 2),
+        ("OS_Word 14", word::READ_CLOCK, 14),
+        ("OS_Word 15", word::SET_CLOCK, 15),
+        ("OS_Word 14's UTC", u32::from(word::read::UTC), 3),
+    ];
+    for &(name, number, value) in pinned {
+        assert_eq!(number, value, "{name}");
+    }
+}

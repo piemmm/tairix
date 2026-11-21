@@ -3,19 +3,66 @@
 
 mod common;
 
-use common::{block, call, read, text};
+use common::{block, call, read, text, FILECORE_NOT_FOUND};
 use tairix_riscos_filing::filecore::swi::{
-    DESCRIBE_DISC, DISC_FORMAT, DISC_OP, DISC_OP_64, DRIVES, FEATURES, FLOPPY_STRUCTURE,
+    CREATE, DESCRIBE_DISC, DISC_FORMAT, DISC_OP, DISC_OP_64, DRIVES, FEATURES, FLOPPY_STRUCTURE,
     FREE_SPACE, FREE_SPACE_64, LAYOUT_STRUCTURE, MISC_OP, SECTOR_DISC_OP,
 };
 use tairix_riscos_filing::filecore::{code, numbered, MODULE_NUMBER};
+use tairix_riscos_filing::fileswitch::error;
 use tairix_riscos_filing::ramfs::{self, State};
+use tairix_riscos_filing::session::SLOT_BYTES;
 use tairix_riscos_kernel::os::{Kernel, Os};
 use tairix_riscos_kernel::swi::os::{fs_control, FS_CONTROL, READ_DYNAMIC_AREA};
 use tairix_riscos_kernel::swi::X;
 
 /// FileCore's own "bad parameters".
 const BAD_PARMS: u32 = numbered(MODULE_NUMBER, code::BAD_PARMS);
+
+/// The numbers FileCore, RamFS and FileSwitch share with RISC OS — FileCore's
+/// SWIs, the errors FileCore and RamFS raise, RamFS's filing system and
+/// FileSwitch's own errors — are RISC OS's. Every other test names them, so
+/// each is pinned to its value here, once.
+#[test]
+fn the_numbers_shared_with_risc_os_are_its_own() {
+    let system = u32::from(ramfs::NUMBER);
+    let pinned: &[(&str, u32, u32)] = &[
+        ("FileCore_DiscOp", DISC_OP, 0x4_0540),
+        ("FileCore_Create", CREATE, 0x4_0541),
+        ("FileCore_Drives", DRIVES, 0x4_0542),
+        ("FileCore_FreeSpace", FREE_SPACE, 0x4_0543),
+        ("FileCore_FloppyStructure", FLOPPY_STRUCTURE, 0x4_0544),
+        ("FileCore_DescribeDisc", DESCRIBE_DISC, 0x4_0545),
+        ("FileCore_DiscFormat", DISC_FORMAT, 0x4_0547),
+        ("FileCore_LayoutStructure", LAYOUT_STRUCTURE, 0x4_0548),
+        ("FileCore_MiscOp", MISC_OP, 0x4_0549),
+        ("FileCore_SectorDiscOp", SECTOR_DISC_OP, 0x4_054A),
+        ("FileCore_FreeSpace64", FREE_SPACE_64, 0x4_054B),
+        ("FileCore_DiscOp64", DISC_OP_64, 0x4_054C),
+        ("FileCore_Features", FEATURES, 0x4_054D),
+        ("XOS_ValidateAddress", VALIDATE_ADDRESS, 0x2_003A),
+        ("FileCore's bad parameters", BAD_PARMS, 0x1_08A1),
+        ("RamFS's filing system", system, 0x17),
+        ("RamFS's not found", FILECORE_NOT_FOUND, 0x1_17D6),
+        ("RamFS's file open", numbered(system, code::OPEN), 0x1_17C2),
+        ("FileSwitch's wildcards", error::WILDCARDS.number, 0xFD),
+        (
+            "FileSwitch's nothing matched",
+            error::NOTHING_MATCHED.number,
+            0x416,
+        ),
+        (
+            "FileSwitch's not for update",
+            error::NOT_FOR_UPDATE.number,
+            0xC1,
+        ),
+        ("FileSwitch's wrong kind", error::WRONG_KIND.number, 0xAF),
+        ("a session's application slot", SLOT_BYTES, 0x10_0000),
+    ];
+    for &(name, number, value) in pinned {
+        assert_eq!(number, value, "{name}");
+    }
+}
 
 /// A session with a RAM disc of 256K, and FileCore's instance for it.
 fn session() -> (Kernel, u32) {
@@ -157,6 +204,39 @@ fn misc_op_6_describes_the_client() {
     let described = with_instance(&mut os, MISC_OP, instance, &[6]).expect("described");
     let words = read(&mut os, described[0], 20);
     assert_eq!(words[3], ramfs::NUMBER, "RamFS's filing system number");
+}
+
+/// A client's entries are offsets from its module's base, added as the
+/// processor adds them: from a base above what they name they reach round the
+/// top of the address space to it, as RamFS's do whenever its workspace lies
+/// below its module.
+#[test]
+fn a_client_s_entries_reach_round_the_address_space_from_its_base() {
+    let (mut kernel, _) = session();
+    let mut os = kernel.os();
+    let title = text(&mut os, b"Wrapped");
+    let routine = block(&mut os, &[0; 4]);
+    let base = 0xFFFF_FF00_u32;
+    let from_base = |at: u32| at.wrapping_sub(base);
+    let words = [
+        0x88 << 24,
+        from_base(title),
+        from_base(title),
+        from_base(routine),
+        from_base(routine),
+    ];
+    let descriptor = block(&mut os, &words.map(u32::to_le_bytes).concat());
+    let private_word = block(&mut os, &[0; 4]);
+    let created = call(&mut os, CREATE, &[descriptor, base, private_word, 1]).expect("created");
+    let described = with_instance(&mut os, MISC_OP, created.r[0], &[6]).expect("described");
+    let bytes = read(&mut os, described[0] + 4, 16);
+    let entries: Vec<u32> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&word| u32::from_le_bytes(word))
+        .collect();
+    assert_eq!(entries, [title, title, routine, routine]);
 }
 
 /// `XOS_ValidateAddress`, the vetting SWI a caller with no controller of its

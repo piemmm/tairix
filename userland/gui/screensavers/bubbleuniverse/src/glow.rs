@@ -14,13 +14,34 @@
 //! [`RANGE`] light at the most an opaque channel holds.
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_parallel::{for_each_drawn, piece_len, JobRunner};
-use tairix_raster::{bilinear_weights, soften16, Pixel16, SOFTEN_PASSES};
+use tairix_raster::{
+    bilinear_weights, soften16, Pixel16, BILINEAR_ONE, BILINEAR_SHIFT, SOFTEN_PASSES,
+};
 use tairix_util::fallible;
 
-use crate::light::{pixel_centre, Shed};
+use crate::light::{pixel_centre, Shed, SUB, SUB_SHIFT};
 use crate::tone::LIGHT_ONE;
+
+/// A whole cell, counted in the steps a position's fraction is: the weight
+/// the further of two cells takes once a position reaches it.
+const WHOLE: u32 = SUB.unsigned_abs();
+
+const _: () = assert!(
+    WHOLE == BILINEAR_ONE,
+    "a weight between two cells is one a bilinear sample takes"
+);
+
+/// The fraction bits an axis holds the reciprocal of a cell's width in.
+const RECIPROCAL_SHIFT: u32 = 32;
+
+/// The fraction bits a deposit is held in.
+const DEPOSIT_SHIFT: u32 = 16;
+
+/// The whole a gain is counted out of.
+const GAIN_ONE: u64 = 256;
 
 /// The light a full channel of a glow grid counts.
 const RANGE: u64 = 4;
@@ -33,7 +54,8 @@ const HALO_RADIUS: usize = 1;
 const HAZE_CELLS: usize = 4;
 const HAZE_RADIUS: usize = 2;
 
-/// How much of the gathered light the halo and the haze give back, in 256ths.
+/// How much of the gathered light the halo and the haze give back, in
+/// [`GAIN_ONE`]ths.
 const HALO_GAIN: u64 = 128;
 const HAZE_GAIN: u64 = 192;
 
@@ -58,7 +80,7 @@ pub(crate) const GLOW_CELLS: usize = {
 };
 
 /// Where a position lies between the centres of two neighbouring cells: the
-/// nearer one's index, and the further's weight in 256ths.
+/// nearer one's index, and the further's weight out of [`WHOLE`].
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Between {
     cell: usize,
@@ -71,7 +93,7 @@ impl Between {
         self.cell
     }
 
-    /// The further cell's weight, in 256ths.
+    /// The further cell's weight, out of [`WHOLE`].
     pub(crate) const fn weight(self) -> u32 {
         self.weight
     }
@@ -94,8 +116,9 @@ impl Between {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Axis {
     cells: usize,
-    /// `2³² / width` rounded up: a position times this, shifted down 32, is
-    /// its place in cells, exactly for any position a screen holds.
+    /// `(1 << RECIPROCAL_SHIFT) / width` rounded up: a position times this,
+    /// shifted down as far, is its place in cells, exactly for any position a
+    /// screen holds.
     reciprocal: u64,
 }
 
@@ -103,15 +126,15 @@ impl Axis {
     fn new(pixels: u32, width: u32) -> Option<Self> {
         Some(Self {
             cells: usize::try_from(pixels.div_ceil(width)).ok()?.max(2),
-            reciprocal: (1u64 << 32).div_ceil(u64::from(width)),
+            reciprocal: (1u64 << RECIPROCAL_SHIFT).div_ceil(u64::from(width)),
         })
     }
 
-    /// Where `at`, in 256ths of a pixel from the axis's start, lies between
-    /// its cells.
+    /// Where `at`, in a position's fraction of a pixel from the axis's start,
+    /// lies between its cells.
     #[inline]
     fn between(self, at: u32) -> Between {
-        let in_cells = (u64::from(at) * self.reciprocal) >> 32;
+        let in_cells = (u64::from(at) * self.reciprocal) >> RECIPROCAL_SHIFT;
         clamped(u32::try_from(in_cells).unwrap_or(u32::MAX), self.cells)
     }
 }
@@ -146,8 +169,8 @@ pub(crate) struct Glow {
     haze: Vec<Pixel16>,
     haze_aux: Vec<Pixel16>,
     /// What one light of a spot leaves across the four cells about it, in
-    /// grid channels with sixteen fraction bits: its dot's energy over a
-    /// cell's area.
+    /// grid channels held [`DEPOSIT_SHIFT`] bits finer: its dot's energy over
+    /// a cell's area.
     deposit: u64,
     /// The bits a spot's light is held to past light's own.
     shift: u32,
@@ -208,7 +231,7 @@ impl Glow {
             haze_size,
             haze: fallible::filled(haze_cells, Pixel16::BLACK)?,
             haze_aux: fallible::filled(haze_cells, Pixel16::BLACK)?,
-            deposit: ((energy * u64::from(Pixel16::FULL)) << 16) / area,
+            deposit: ((energy * u64::from(Pixel16::FULL)) << DEPOSIT_SHIFT) / area,
             shift: shed.shift(),
             columns,
             haze_columns,
@@ -220,7 +243,8 @@ impl Glow {
         self.gathered.fill(Pixel16::BLACK);
     }
 
-    /// Gather `light` at `x` and `y`, 256ths of a pixel inside the frame.
+    /// Gather `light` at `x` and `y`, in a position's fraction of a pixel
+    /// inside the frame.
     #[inline]
     pub(crate) fn gather(&mut self, (x, y): (u32, u32), light: [u16; 3]) {
         let (left, top) = (self.across.between(x), self.down.between(y));
@@ -235,7 +259,7 @@ impl Glow {
             let index = (top.cell + dy) * self.across.cells + left.cell + dx;
             if let Some(cell) = self.gathered.get_mut(index) {
                 let add = |channel: u16, carried: u64| {
-                    let share = (carried * u64::from(weight)) >> 32;
+                    let share = (carried * u64::from(weight)) >> (DEPOSIT_SHIFT + BILINEAR_SHIFT);
                     u16::try_from((u64::from(channel) + share).min(u64::from(Pixel16::FULL)))
                         .unwrap_or(Pixel16::FULL)
                 };
@@ -301,19 +325,22 @@ impl Glow {
     }
 
     /// Row `row` of cells, the halo and the haze summed as light, read out
-    /// into `out` at each pixel column of the frame from `first` on, by way
-    /// of `cells`, which holds [`Self::across`] of them.
+    /// into `out` at the frame's pixel columns `columns`, by way of `cells`,
+    /// which holds [`Self::across`] of them.
     pub(crate) fn row(
         &self,
         row: usize,
-        first: usize,
+        columns: Range<usize>,
         cells: &mut [[u16; 3]],
         out: &mut [[u16; 3]],
     ) {
         let across = self.across.cells;
         let (haze_across, haze_down) = self.haze_size;
         let haze_row = clamped(centre_of(row, HAZE_CELLS), haze_down);
-        let Some(halo) = self.halo.get(row * across..(row + 1) * across) else {
+        let (Some(halo), Some(columns)) = (
+            self.halo.get(row * across..(row + 1) * across),
+            self.columns.get(columns),
+        ) else {
             out.fill([0; 3]);
             return;
         };
@@ -321,7 +348,8 @@ impl Glow {
             let haze = haze_at(&self.haze, haze_across, haze_column, haze_row);
             let glow = |halo: u16, haze: u32| {
                 let sum = HALO_GAIN * u64::from(halo) + HAZE_GAIN * u64::from(haze);
-                let light = sum * RANGE * u64::from(LIGHT_ONE) / (256 * u64::from(Pixel16::FULL));
+                let light =
+                    sum * RANGE * u64::from(LIGHT_ONE) / (GAIN_ONE * u64::from(Pixel16::FULL));
                 u16::try_from(light).unwrap_or(u16::MAX)
             };
             *light = [
@@ -330,7 +358,6 @@ impl Glow {
                 glow(halo.b, haze[2]),
             ];
         }
-        let columns = self.columns.get(first..).unwrap_or(&[]);
         for (out, column) in out.iter_mut().zip(columns) {
             *out = column.sample(cells);
         }
@@ -409,37 +436,37 @@ fn softened(cell: Pixel16) -> Pixel16 {
     }
 }
 
-/// The centre of cell `index`, in 256ths of a cell `per` times as wide.
+/// The centre of cell `index`, in [`WHOLE`]ths of a cell `per` times as wide.
 fn centre_of(index: usize, per: usize) -> u32 {
     let (index, per) = (
         u32::try_from(index).unwrap_or(u32::MAX),
         u32::try_from(per).unwrap_or(1).max(1),
     );
-    index.saturating_mul(256).saturating_add(128) / per
+    pixel_centre(index) / per
 }
 
-/// The two cells of an axis of `cells` either side of `at`, in 256ths of a
-/// cell from the axis's start; a position before the first centre or past the
-/// last is held at it.
+/// The two cells of an axis of `cells` either side of `at`, in [`WHOLE`]ths
+/// of a cell from the axis's start; a position before the first centre or
+/// past the last is held at it.
 fn clamped(at: u32, cells: usize) -> Between {
-    let centred = at.saturating_sub(128);
+    let centred = at.saturating_sub(WHOLE / 2);
     let last = cells.saturating_sub(2);
-    match usize::try_from(centred >> 8) {
+    match usize::try_from(centred >> SUB_SHIFT) {
         Ok(cell) if cell <= last => Between {
             cell,
-            weight: centred & 255,
+            weight: centred % WHOLE,
         },
         _ => Between {
             cell: last,
-            weight: 256,
+            weight: WHOLE,
         },
     }
 }
 
-/// `from` carried `weight` 256ths of the way to `to`.
+/// `from` carried `weight` [`WHOLE`]ths of the way to `to`.
 #[inline]
 pub(crate) fn lerp(from: u32, to: u32, weight: u32) -> u32 {
-    (from * (256 - weight) + to * weight + 128) >> 8
+    (from * (WHOLE - weight) + to * weight + WHOLE / 2) >> SUB_SHIFT
 }
 
 #[cfg(test)]

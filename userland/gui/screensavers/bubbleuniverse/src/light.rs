@@ -31,6 +31,10 @@ pub(crate) const SUB: i32 = 1 << SUB_SHIFT;
 /// A pixel's centre, from its top left corner.
 const HALF: i32 = SUB / 2;
 
+/// The bits a dot's tap weights are scaled to before they weigh its light,
+/// so each cell's share comes back by one shift.
+const TAP_SHIFT: u32 = 32;
+
 /// The centre of pixel `pixel`, in a position's fraction from the first's
 /// edge.
 pub(crate) const fn pixel_centre(pixel: u32) -> u32 {
@@ -368,18 +372,18 @@ struct GlowRows {
 }
 
 impl GlowRows {
-    /// Hold `glow`'s cell rows `row` and the one after it, read out from
-    /// frame column `first`, reading only a row not already held.
-    fn hold(&mut self, glow: &Glow, row: usize, first: usize) {
+    /// Hold `glow`'s cell rows `row` and the one after it, read out at frame
+    /// columns `columns`, reading only a row not already held.
+    fn hold(&mut self, glow: &Glow, row: usize, columns: &Range<usize>) {
         match self.held {
             Some(held) if held == row => return,
             Some(held) if held + 1 == row => {
                 self.rows.swap(0, 1);
-                glow.row(row + 1, first, &mut self.cells, &mut self.rows[1]);
+                glow.row(row + 1, columns.clone(), &mut self.cells, &mut self.rows[1]);
             }
             _ => {
-                glow.row(row, first, &mut self.cells, &mut self.rows[0]);
-                glow.row(row + 1, first, &mut self.cells, &mut self.rows[1]);
+                glow.row(row, columns.clone(), &mut self.cells, &mut self.rows[0]);
+                glow.row(row + 1, columns.clone(), &mut self.cells, &mut self.rows[1]);
             }
         }
         self.held = Some(row);
@@ -557,6 +561,7 @@ impl Drawn<'_> {
             return;
         };
         let first = usize::try_from(frame_offset(left, self.frame.left())).unwrap_or(0);
+        let columns = first..first + width;
         scratch.glow.held = None;
         for strip in self.bins.layout.reached(start..end) {
             let held = self.bins.layout.rows(strip);
@@ -579,7 +584,7 @@ impl Drawn<'_> {
                 };
                 if let Some(glow) = self.glow {
                     let between = glow.rows_about(frame_offset(y, self.frame.top()));
-                    scratch.glow.hold(glow, between.cell(), first);
+                    scratch.glow.hold(glow, between.cell(), &columns);
                     let [upper, lower] = &scratch.glow.rows;
                     brighten(light, (upper, lower), between.weight());
                 }
@@ -635,10 +640,11 @@ fn splat<const TAPS: usize>(
         return;
     }
     let shed = spot.light.map(u64::from);
-    // The taps weigh in 256ths squared and the light is held `shift` bits
-    // finer still: a row's taps are scaled once to weigh in 2³²nds, so each
-    // cell's light comes back by a fixed shift.
-    let (up, down_by) = (16u32.saturating_sub(shift), shift.saturating_sub(16));
+    // The taps weigh in a position's fraction squared and the light is held
+    // `shift` bits finer still: a row's taps are scaled once to weigh in
+    // `TAP_SHIFT` bits, so each cell's light comes back by a fixed shift.
+    let room = TAP_SHIFT - 2 * SUB_SHIFT;
+    let (up, down_by) = (room.saturating_sub(shift), shift.saturating_sub(room));
     let across = across.map(|height| (u64::from(height) << up) >> down_by);
     for (row, down) in (row..).zip(down) {
         let start = row * stride + column;
@@ -648,7 +654,7 @@ fn splat<const TAPS: usize>(
         for (cell, across) in cells.iter_mut().zip(across) {
             let weight = across * u64::from(down);
             for (channel, shed) in cell.iter_mut().zip(shed) {
-                let lit = (shed * weight + (1 << 31)) >> 32;
+                let lit = (shed * weight + (1 << (TAP_SHIFT - 1))) >> TAP_SHIFT;
                 *channel = channel.saturating_add(u16::try_from(lit).unwrap_or(u16::MAX));
             }
         }

@@ -181,8 +181,6 @@ impl Bracketed {
     }
 }
 
-/// `OS_Word` 1: the system clock read.
-const READ_SYSTEM_CLOCK: u32 = 1;
 /// `OS_Byte` 134: the text cursor's position.
 const CURSOR_POSITION: u32 = 134;
 /// `OS_Byte` 128: an ADC channel or buffer's state.
@@ -698,7 +696,7 @@ impl Machine<'_, '_> {
     pub(crate) fn clock(&mut self) -> Step<i32> {
         let block = ws::STRACC.at();
         let mut regs = Regs::default();
-        regs.r[..2].copy_from_slice(&[READ_SYSTEM_CLOCK, block]);
+        regs.r[..2].copy_from_slice(&[tairix_riscos_kernel::word::READ_SYSTEM_CLOCK, block]);
         self.os.perform(X | swi::WORD, &mut regs)?;
         Ok(self.os.read_word(block)?.cast_signed())
     }

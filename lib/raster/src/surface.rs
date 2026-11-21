@@ -47,6 +47,7 @@ use crate::resample::{
 };
 use crate::round::{round_rect_coverage, round_rect_radius};
 use crate::scan::{FillRule, SampleSpace, ScanFill, ScanScratch, MAX_DRAWING_EXTENT};
+use crate::transformed::{bilinear_weights, BILINEAR_ONE, BILINEAR_SHIFT};
 
 /// The most pixels one surface may hold.
 ///
@@ -1863,9 +1864,10 @@ impl Surface {
     /// `ready` makes each band what `paint` is handed. Rows too few to split
     /// are one band, painted on the calling thread.
     ///
-    /// A pass whose work comes in groups of rows — a strip of them gathered
-    /// once and drawn whole — names the group as its unit, so no band repeats
-    /// another's gathering.
+    /// A pass whose work comes in groups of rows counted from that first
+    /// admitted row — a strip of them gathered once and drawn whole — names
+    /// the group as its unit, so no band repeats another's gathering. Groups
+    /// counted from a row the clip cuts off fall across the bands instead.
     pub fn paint_bands<'s, T: Send>(
         &'s mut self,
         rows: Range<u32>,
@@ -2637,13 +2639,6 @@ fn scaled(rect: Region, factor: u32) -> Option<Region> {
     })
 }
 
-/// The fixed-point scale one axis of a bilinear tile weight is carried in.
-const TILE_WEIGHT: u32 = 256;
-
-/// The shift that takes a product of two [`TILE_WEIGHT`]s back to a channel,
-/// derived from it so the two cannot drift apart.
-const TILE_SHIFT: u32 = 2 * TILE_WEIGHT.trailing_zeros();
-
 /// Render one period of `pattern` at the density `space` reads pixels at.
 ///
 /// A tile is a small drawing of its own: the design grid stretched across the
@@ -2730,18 +2725,17 @@ fn sample_tile(pattern: &Pattern, tile: &Surface, point: (f64, f64)) -> Pixel {
         at(left, bottom),
         at(right, bottom),
     ];
-    let (back, up) = (TILE_WEIGHT - across, TILE_WEIGHT - down);
-    let weights = [back * up, across * up, back * down, across * down];
+    let weights = bilinear_weights(across, down);
     let channel = |of: fn(Pixel) -> u8| {
         let sum: u32 = corners
             .iter()
             .zip(weights)
             .map(|(pixel, weight)| weight * u32::from(of(*pixel)))
             .sum();
-        // The weights sum to exactly `TILE_WEIGHT²`, so this is a convex
-        // combination: the result keeps `r`, `g`, `b` no greater than `a` and
-        // stays premultiplied.
-        u8::try_from((sum + (1 << (TILE_SHIFT - 1))) >> TILE_SHIFT).unwrap_or(u8::MAX)
+        // The weights sum to exactly `1 << BILINEAR_SHIFT`, so this is a
+        // convex combination: the result keeps `r`, `g`, `b` no greater than
+        // `a` and stays premultiplied.
+        u8::try_from((sum + (1 << (BILINEAR_SHIFT - 1))) >> BILINEAR_SHIFT).unwrap_or(u8::MAX)
     };
     Pixel {
         r: channel(|pixel| pixel.r),
@@ -2753,7 +2747,7 @@ fn sample_tile(pattern: &Pattern, tile: &Surface, point: (f64, f64)) -> Pixel {
 
 /// The two texel indices a `0..=1` tile coordinate falls between on one axis
 /// of an `extent`-texel tile, and how far it lies toward the second in
-/// [`TILE_WEIGHT`]ths.
+/// [`BILINEAR_ONE`]ths.
 ///
 /// Texel centres sit half a texel in, so the sample is taken half a texel
 /// back; a coordinate inside the first half-texel therefore reads across the
@@ -2762,7 +2756,7 @@ fn tile_axis(fraction: f64, extent: u32) -> (u32, u32, u32) {
     let last = extent.saturating_sub(1);
     let scaled = fraction * f64::from(extent) - 0.5;
     let base = mathf::floor(scaled);
-    let weight = mathf::round_i32((scaled - base) * f64::from(TILE_WEIGHT));
+    let weight = mathf::round_i32((scaled - base) * f64::from(BILINEAR_ONE));
     let first = if base < 0.0 {
         last
     } else {
@@ -2772,7 +2766,7 @@ fn tile_axis(fraction: f64, extent: u32) -> (u32, u32, u32) {
     (
         first,
         second,
-        u32::try_from(weight).unwrap_or(0).min(TILE_WEIGHT),
+        u32::try_from(weight).unwrap_or(0).min(BILINEAR_ONE),
     )
 }
 

@@ -79,8 +79,9 @@ reciprocal of its window, at either width.
 The fills draw into a `Surface` or one `RowBand` of it, and the mesh path into
 a `DepthBuffer` or one `DepthBand` of it, handing each fragment to the caller's
 shader, so a pass cut into bands on several cores draws the picture the whole
-surface would. `Surface::paint_bands` cuts the bands for a runner, each a whole
-number of the pass's unit of rows, and
+surface would. `Surface::paint_bands` cuts the bands for a runner, each but the
+last a whole number of the pass's unit of rows counted from the first row the
+surface admits, and
 `BandScratch` gives each band a scan converter of its own. A pass whose work runs down its columns, as the ribbon of light
 sums its, is cut into `ColumnBand`s instead, so no band repeats another's
 column.

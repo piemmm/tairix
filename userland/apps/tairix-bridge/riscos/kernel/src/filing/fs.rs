@@ -202,8 +202,8 @@ pub mod args {
     pub const IOCTL: u32 = 11;
 }
 
-/// `FSEntry_Func`'s reasons; 25 to 37 are a disc's, which FileSwitch passes
-/// on from `OS_FSControl` 46 to 58.
+/// `FSEntry_Func`'s reasons; 25 to 33 and 35 to 37 are a disc's, which
+/// FileSwitch passes on from `OS_FSControl` 41, 42, 46 to 52 and 55 to 57.
 pub mod func {
     /// Set the current directory.
     pub const SET_DIRECTORY: u32 = 0;

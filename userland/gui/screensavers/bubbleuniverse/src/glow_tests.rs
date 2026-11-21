@@ -9,7 +9,10 @@ use tairix_parallel::{JobRunner, Reversed, Threaded, SERIAL};
 use tairix_raster::Pixel16;
 use tairix_rng::{NonCryptoRng, RandU64};
 
-use super::{clamped, gather_haze, lerp, soften, Between, Glow, GLOW_CELLS, HAZE_CELLS, SOFTEN};
+use super::{
+    clamped, gather_haze, lerp, soften, Between, Glow, DEPOSIT_SHIFT, GLOW_CELLS, HAZE_CELLS,
+    SOFTEN,
+};
 use crate::light::Shed;
 
 /// A square frame of `side` pixels with cells of `cell`, for dots of one
@@ -33,8 +36,8 @@ fn row(glow: &Glow, row: u32, side: u32) -> Vec<[u32; 3]> {
     let between = glow.rows_about(row);
     let mut cells = alloc::vec![[0; 3]; glow.across()];
     let (mut upper, mut lower) = (alloc::vec![[0; 3]; width], alloc::vec![[0; 3]; width]);
-    glow.row(between.cell(), 0, &mut cells, &mut upper);
-    glow.row(between.cell() + 1, 0, &mut cells, &mut lower);
+    glow.row(between.cell(), 0..width, &mut cells, &mut upper);
+    glow.row(between.cell() + 1, 0..width, &mut cells, &mut lower);
     upper
         .iter()
         .zip(&lower)
@@ -52,7 +55,7 @@ fn row(glow: &Glow, row: u32, side: u32) -> Vec<[u32; 3]> {
 fn a_spot_leaves_its_whole_deposit_wherever_it_falls() {
     let mut glow = glow(240, 6, &SERIAL);
     let light = [60_000, 15_000, 3_750];
-    let point = 16 + glow.shift;
+    let point = DEPOSIT_SHIFT + glow.shift;
     let whole: u64 = light
         .iter()
         .map(|&l| (u64::from(l) * glow.deposit) >> point)
@@ -158,6 +161,33 @@ fn a_spot_s_glow_falls_away_from_where_it_fell() {
     );
     let far = row(&glow, 4, side);
     assert!(far.iter().all(|light| *light == [0; 3]), "past it, nothing");
+}
+
+/// A row read out at some of the frame's columns is those columns of the row
+/// read out whole, and nothing past them is written; columns past the frame
+/// read out dark.
+#[test]
+fn a_row_read_at_some_columns_is_those_columns_of_the_whole_row() {
+    const MARK: [u16; 3] = [7, 7, 7];
+    let (side, cell) = (240, 6);
+    let mut glow = glow(side, cell, &SERIAL);
+    glow.clear();
+    glow.gather((120 * 256, 120 * 256), [u16::MAX; 3]);
+    glow.spread(&SERIAL);
+    let width = usize::try_from(side).expect("small");
+    let mut cells = alloc::vec![[0; 3]; glow.across()];
+    let mut whole = alloc::vec![[0; 3]; width];
+    glow.row(20, 0..width, &mut cells, &mut whole);
+    assert!(whole.iter().any(|light| *light != [0; 3]), "the row glows");
+    let mut part = alloc::vec![MARK; width];
+    glow.row(20, 50..170, &mut cells, &mut part);
+    assert_eq!(part[..120], whole[50..170]);
+    assert!(
+        part[120..].iter().all(|light| *light == MARK),
+        "nothing past"
+    );
+    glow.row(20, 200..width + 1, &mut cells, &mut part);
+    assert!(part.iter().all(|light| *light == [0; 3]), "past the frame");
 }
 
 /// The halo spread a band of rows at a time across cores, whichever band runs

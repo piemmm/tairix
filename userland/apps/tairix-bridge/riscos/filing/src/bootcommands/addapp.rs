@@ -19,6 +19,7 @@ use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::{self as swi, file, fs_control};
 use tairix_riscos_kernel::swi::resource_fs;
 use tairix_riscos_kernel::swi::X;
+use tairix_riscos_kernel::word;
 
 use super::objects::{object_kind, objects};
 use super::State;
@@ -30,8 +31,6 @@ const APPS: &[u8] = b"Apps.";
 const ATTRIBUTES: u32 = OWNER_READ | OWNER_WRITE;
 /// The room a canonical name is read into.
 const NAME_ROOM: u32 = 1024;
-/// `OS_Word` 14's reason that reads the five-byte time.
-const READ_TIME: u8 = 3;
 
 /// `*AddApp`.
 pub(super) fn add_app(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
@@ -134,9 +133,9 @@ fn canonical(os: &mut Os<'_>, name: &[u8]) -> Result<Vec<u8>, Fail> {
 /// The load and execution words of an Obey file stamped with the time.
 fn stamped(os: &mut Os<'_>) -> Result<(u32, u32), Fail> {
     os.below_supervisor_stack(8, |os, block| {
-        os.write_byte(block, READ_TIME)?;
+        os.write_byte(block, word::read::UTC)?;
         let mut regs = Regs::default();
-        regs.r[..2].copy_from_slice(&[14, block]);
+        regs.r[..2].copy_from_slice(&[word::READ_CLOCK, block]);
         os.perform(X | swi::WORD, &mut regs)?;
         let exec = os.read_word(block)?;
         let high = u32::from(os.read_byte(block.wrapping_add(4))?);

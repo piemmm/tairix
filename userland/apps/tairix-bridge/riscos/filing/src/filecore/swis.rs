@@ -15,8 +15,8 @@ use tairix_riscos_kernel::swi::X;
 
 use super::disc::{enter_client, op, with_volume};
 use super::{
-    capped, code, described_at, fail, handed, names, record_at, space_of, split64, structure, with,
-    Client, DRIVES, FIRST_HARD_DISC, RECORD_ROOM,
+    capped, code, described_at, fail, handed, names, read_descriptor, record_at, space_of, split64,
+    structure, with, Client, DRIVES, FIRST_HARD_DISC, RECORD_ROOM,
 };
 
 /// Its SWIs, by their offset in its chunk.
@@ -54,8 +54,6 @@ pub mod number {
     pub const FLOPPY_STRUCTURE: u32 = CHUNK + offset::FLOPPY_STRUCTURE;
     /// `FileCore_DescribeDisc`.
     pub const DESCRIBE_DISC: u32 = CHUNK + offset::DESCRIBE_DISC;
-    /// `FileCore_DiscardReadSectorsCache`.
-    pub const DISCARD_READ_SECTORS_CACHE: u32 = CHUNK + offset::DISCARD_READ_SECTORS_CACHE;
     /// `FileCore_DiscFormat`.
     pub const DISC_FORMAT: u32 = CHUNK + offset::DISC_FORMAT;
     /// `FileCore_LayoutStructure`.
@@ -130,22 +128,21 @@ fn instance_of(os: &mut Os<'_>, private_word: u32) -> Result<(u32, Client), Fail
 /// its filing system. R0 the instance's private word, R1 to R3 the routines
 /// a client calls back.
 fn create(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    let (descriptor, base) = (regs.r[0], regs.r[1]);
+    let base = regs.r[1];
     let bits = os.caller_bits();
-    let flags = os.read_word(descriptor)? & 0x00FF_FFFF;
-    let number = os.read_byte(descriptor.wrapping_add(3))?;
+    let (flags, number, [title, boot_text, disc_op, misc_op]) = read_descriptor(os, regs.r[0])?;
     let at = |offset: u32| base.wrapping_add(offset);
     let client = Client {
         flags,
         number,
-        title: at(os.read_word(descriptor.wrapping_add(4))?),
-        boot_text: at(os.read_word(descriptor.wrapping_add(8))?),
+        title: at(title),
+        boot_text: at(boot_text),
         disc_op: Target {
-            address: at(os.read_word(descriptor.wrapping_add(12))?),
+            address: at(disc_op),
             bits,
         },
         misc_op: Target {
-            address: at(os.read_word(descriptor.wrapping_add(16))?),
+            address: at(misc_op),
             bits,
         },
         private_word: regs.r[2],

@@ -101,9 +101,24 @@ const INFO_AT: u32 = 0;
 const EMPTY_AT: u32 = INFO_AT + 4 * len32(block::WORDS);
 const DESCRIBED_AT: u32 = EMPTY_AT + 4;
 const RECORDS_AT: u32 = DESCRIBED_AT + 4 * len32(DESCRIPTOR_WORDS);
+/// A disc record's room, as `FileCore_DescribeDisc` fills it.
+pub(crate) const RECORD_ROOM: u32 = 64;
+const BOOT_BLOCKS_AT: u32 = RECORDS_AT + RECORD_ROOM * DRIVES as u32;
+/// A hard disc's boot block.
+pub(crate) const BOOT_BLOCK_ROOM: u32 = len32(tairix_filecore::record::BOOT_BLOCK_SIZE);
+const BOUNCE_AT: u32 = BOOT_BLOCKS_AT + BOOT_BLOCK_ROOM * (DRIVES - FIRST_HARD_DISC) as u32;
+/// The buffer a transfer passes through: whole sectors of every size.
+pub(crate) const BOUNCE: u32 = 4096;
+const INSTANCE_WORKSPACE: u32 = BOUNCE_AT + BOUNCE;
+
 /// A descriptor block's words: its flags and filing system number, then its
 /// title's, boot text's, `DiscOp`'s and `MiscOp`'s.
 pub(crate) const DESCRIPTOR_WORDS: usize = 5;
+/// The bits of a descriptor block's first word its flags take; the filing
+/// system's number is the byte above them.
+const DESCRIPTOR_FLAGS: u32 = 0x00FF_FFFF;
+/// Where a descriptor block's first word holds its filing system's number.
+const DESCRIPTOR_NUMBER_SHIFT: u32 = 24;
 
 /// A descriptor block written at `at`: `flags` beneath the filing system's
 /// `number`, then `entries`, the title's, boot text's, `DiscOp`'s and
@@ -117,7 +132,7 @@ pub(crate) fn write_descriptor(
 ) -> Result<(), Fail> {
     let [title, boot_text, disc_op, misc_op] = entries;
     let words = [
-        (flags & 0x00FF_FFFF) | u32::from(number) << 24,
+        (flags & DESCRIPTOR_FLAGS) | u32::from(number) << DESCRIPTOR_NUMBER_SHIFT,
         title,
         boot_text,
         disc_op,
@@ -128,15 +143,22 @@ pub(crate) fn write_descriptor(
     }
     Ok(())
 }
-/// A disc record's room, as `FileCore_DescribeDisc` fills it.
-pub(crate) const RECORD_ROOM: u32 = 64;
-const BOOT_BLOCKS_AT: u32 = RECORDS_AT + RECORD_ROOM * DRIVES as u32;
-/// A hard disc's boot block.
-pub(crate) const BOOT_BLOCK_ROOM: u32 = len32(tairix_filecore::record::BOOT_BLOCK_SIZE);
-const BOUNCE_AT: u32 = BOOT_BLOCKS_AT + BOOT_BLOCK_ROOM * (DRIVES - FIRST_HARD_DISC) as u32;
-/// The buffer a transfer passes through: whole sectors of every size.
-pub(crate) const BOUNCE: u32 = 4096;
-const INSTANCE_WORKSPACE: u32 = BOUNCE_AT + BOUNCE;
+
+/// The descriptor block a client hands over at `at`: its flags, its filing
+/// system's number, and its title's, boot text's, `DiscOp`'s and `MiscOp`'s
+/// entries.
+pub(crate) fn read_descriptor(
+    os: &mut Os<'_>,
+    at: u32,
+) -> Result<(u32, u8, [u32; DESCRIPTOR_WORDS - 1]), Fail> {
+    let first = os.read_word(at)?;
+    let mut entries = [0; DESCRIPTOR_WORDS - 1];
+    for (n, entry) in (1..).zip(&mut entries) {
+        *entry = os.read_word(at.wrapping_add(4 * n))?;
+    }
+    let number = u8::try_from(first >> DESCRIPTOR_NUMBER_SHIFT).unwrap_or(u8::MAX);
+    Ok((first & DESCRIPTOR_FLAGS, number, entries))
+}
 
 /// The routines each filing system's information block names, by its word.
 const ENTRIES: [(usize, usize); 7] = [

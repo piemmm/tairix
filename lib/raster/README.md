@@ -177,9 +177,10 @@ This crate owns:
   that is bit-identical to the picture drawn whole. `RowBand::narrowed` confines a fill to fewer rows than its band holds
   (a figure standing in water is drawn only above the surface), with no window
   to set and restore. `Surface::paint_bands` hands a runner those bands, at
-  most so many, each worth a grain of pixels and each a whole number of a
-  pass's unit of rows, so a pass that gathers a strip of rows at once never
-  gathers one twice, and `BandScratch` holds a
+  most so many, each worth a grain of pixels and each but the last a whole
+  number of a pass's unit of rows counted from the first row the surface
+  admits, so a pass that gathers a strip of rows at once never gathers one
+  twice, and `BandScratch` holds a
   `ScanScratch` for each band a runner may split a paint into, so a scene's
   fills run on every core with no two bands sharing a converter.
 - `wash_polygon_subpixel` — a placed polygon whose colour's alpha is scaled by
@@ -417,8 +418,9 @@ This crate owns:
 - `Surface::blit_transformed` — a picture drawn through an `Affine`, the one
   transformed blit: each destination pixel it can touch maps its centre back
   and samples the source bilinearly in premultiplied space (`bilinear_weights`,
-  the four weights every bilinear sample shares), everything outside
-  the source transparent, so a turned edge anti-aliases against what lies
+  the four weights every bilinear sample shares, counted out of
+  `BILINEAR_ONE` an axis and brought back by `BILINEAR_SHIFT`), everything
+  outside the source transparent, so a turned edge anti-aliases against what lies
   beneath it. A transform that collapses area draws nothing. The source is
   any `Picture`: a `Surface`, or a `Mosaic` of equal power-of-two square tiles,
   some absent, sampled across their seams as the one picture they make — a

@@ -49,6 +49,15 @@ mod swis {
     const CONVERT_SPACED_CARDINAL4: u32 = 0xE4;
     const OUT: u32 = DATA + 0x100;
 
+    /// The conversions the kernel names for its own callers are RISC OS's.
+    #[test]
+    fn the_named_conversions_are_risc_os_s() {
+        assert_eq!(
+            [CONVERT_FIXED_FILE_SIZE, CONVERT_FILE_SIZE, CONVERT_VARIFORM],
+            [0xEB, 0xEC, 0xED]
+        );
+    }
+
     fn session() -> Session {
         with_application(&RISC_OS_5, Bits::Bit32)
     }

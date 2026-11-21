@@ -26,6 +26,8 @@ use tairix_fuzzseed::Prng;
 use tairix_riscos_kernel::input::InputEvent;
 use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::os::{Ending, Fail, Host, Kernel, Pulse, Regs};
+use tairix_riscos_kernel::swi::os::exit::ABEX;
+use tairix_riscos_kernel::swi::os::{self as swi, environment};
 use tairix_riscos_kernel::swi::X;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -206,17 +208,28 @@ fn perform(run: &mut Run, rng: &mut Prng) {
 /// Runs the salted code from User mode, entered as the exit handler.
 fn run_code(run: &mut Run, rng: &mut Prng) {
     let entry = CODE + 4 * u32::try_from(rng.below(CODE_WORDS as usize)).unwrap_or(0);
-    let mut change = Regs::new([11, entry, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    let _ = run.kernel.os().perform(X | 0x40, &mut change);
-    let mut exit = Regs::new([0, 0x5845_4241, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    let _ = run.kernel.os().perform(0x11, &mut exit);
+    let mut change = Regs::new([environment::EXIT, entry, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let _ = run
+        .kernel
+        .os()
+        .perform(X | swi::CHANGE_ENVIRONMENT, &mut change);
+    let mut exit = Regs::new([0, ABEX, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let _ = run.kernel.os().perform(swi::EXIT, &mut exit);
     run.pulses.set(WORDS);
     let _ = run.kernel.run(BUDGET);
-    let mut restore = Regs::new([11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    let mut read = Regs::new([11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    if run.kernel.os().perform(X | 0x55, &mut read).is_ok() {
+    let mut restore = Regs::new([environment::EXIT, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let mut read = Regs::new([environment::EXIT, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    if run
+        .kernel
+        .os()
+        .perform(X | swi::READ_DEFAULT_HANDLER, &mut read)
+        .is_ok()
+    {
         restore.r[1] = read.r[1];
-        let _ = run.kernel.os().perform(X | 0x40, &mut restore);
+        let _ = run
+            .kernel
+            .os()
+            .perform(X | swi::CHANGE_ENVIRONMENT, &mut restore);
     }
 }
 

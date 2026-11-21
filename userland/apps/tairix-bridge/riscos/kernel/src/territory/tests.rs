@@ -24,6 +24,26 @@ use crate::testkit::{asm, boot_in, Session, CODE, DATA};
 const BUFFER: u32 = DATA + 0x100;
 const TIME: u32 = DATA + 0x80;
 
+/// The Territory SWIs, the time formats' flags and the hour the manager
+/// names are RISC OS's.
+#[test]
+fn the_numbers_the_manager_names_are_risc_os_s() {
+    assert_eq!(
+        [
+            DAYLIGHT_RULES,
+            SELECT,
+            DAYLIGHT_SAVING,
+            CONVERT_TIME_FORMATS
+        ],
+        [0x23, 0x36, 0x37, 0x38]
+    );
+    assert_eq!(
+        [AS_SUMMER, STANDARD_UNRULED, BY_THE_RULES, ADJUSTMENT],
+        [1 << 16, 1 << 17, 1 << 18, 1 << 19]
+    );
+    assert_eq!(HOUR, 360_000, "an hour in centiseconds");
+}
+
 /// `name` from the shipped zone store.
 fn zone(name: &str) -> Zone<'static> {
     static STORE: OnceLock<Vec<u8>> = OnceLock::new();

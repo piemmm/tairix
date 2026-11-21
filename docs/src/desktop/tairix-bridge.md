@@ -585,7 +585,7 @@ built-in modules' SWI chunks are another, `swi::chunk`, and the sound modules'
 SWIs a third, `swi::sound`. The service calls' numbers and reasons are one
 table, `service`, and a dynamic area handler's reasons another,
 `memory::handler_reason`. File types are `filing::filetype`, an object's kind
-and attributes `filing::fs`, the real-time clock's `OS_Word` numbers `word`,
+and attributes `filing::fs`, the clocks' `OS_Word` numbers `word`,
 a `*Configure` or `*Status` listing's value column `module::VALUE_COLUMN`, and
 the page the processor's, `tairix_riscos_arm::mmu::PAGE_SIZE`. The kernel, its
 modules, FileSwitch, BASIC, the VDU drivers and their tests all read them.
@@ -1896,11 +1896,11 @@ directory the machine boots from (`*Configure FileSystem HostFS`,
   formats are the crate's `corpus` module's, so the harness and the replays
   read them alike.
 - **Running.** Where `<dir>` holds RPCEmu, it runs headless, as one of the
-  command's own children, until the harness opens a named pipe once it is
-  done, the emulator exits, or twenty minutes pass. Otherwise the harness is
-  left in `hostfs/`; boot the machine from it and run the command again to
-  import what it recorded. Every scenario runs on the one machine in the
-  corpus's order, but one marked `lasting`, which changes the machine in a
+  command's own children, until the harness writes a byte to a named pipe
+  once it is done, the emulator exits, or twenty minutes pass. Otherwise the
+  harness is left in `hostfs/`; boot the machine from it and run the command
+  again to import what it recorded. Every scenario runs on the one machine in
+  the corpus's order, but one marked `lasting`, which changes the machine in a
   way RISC OS gives no means to undo, runs after all the others.
 - **Importing.** Each observation becomes its scenario's fixture. A scenario
   marked `ours`, whose fixture states this emulator's own behaviour, is left
