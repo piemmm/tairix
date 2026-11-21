@@ -8,9 +8,10 @@ mod common;
 
 use std::collections::HashMap;
 
-use common::{disc_file, run_hosted, unquote, DISC};
+use common::{run_hosted, unquote};
 use tairix_fscopy::fixture::Tree;
 use tairix_riscos_basic::corpus::language::Program;
+use tairix_riscos_filing::session::{disc_file, DISC};
 
 const PROGRAMS: &str = include_str!("riscos5/programs.txt");
 const PRINTED: &str = include_str!("riscos5/printed.txt");

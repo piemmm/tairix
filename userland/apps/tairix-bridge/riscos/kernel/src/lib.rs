@@ -22,7 +22,7 @@
 extern crate alloc;
 
 mod amb;
-mod byte;
+pub mod byte;
 mod callbacks;
 mod cli;
 mod clock;
@@ -46,6 +46,7 @@ mod keyboard;
 mod kheap;
 pub mod memory;
 pub mod module;
+pub mod mouse;
 pub mod msgtrans;
 pub mod os;
 pub mod output;

@@ -58,11 +58,18 @@ fn the_text_and_teletext_modes_are_not_graphic() {
     }
     let teletext = MODES[7];
     assert!(teletext.flags.has(Flags::TELETEXT));
-    assert!(teletext.flags.has(Flags::FULL_PALETTE));
+    assert!(!teletext.flags.has(Flags::FULL_PALETTE));
     assert!(!Flags::TELETEXT.has(Flags::TELETEXT.union(Flags::FULL_PALETTE)));
     assert_eq!(
-        (teletext.width, teletext.height, teletext.ncolour),
-        (640, 500, 255)
+        (
+            teletext.width,
+            teletext.height,
+            teletext.ncolour,
+            teletext.log2_bpp,
+            teletext.flags.bits()
+        ),
+        (640, 500, 15, 2, 0x27),
+        "as RISC OS 5.30 answers"
     );
     assert!(MODES[3].flags.has(Flags::BBC_GAP) && MODES[6].flags.has(Flags::BBC_GAP));
 }

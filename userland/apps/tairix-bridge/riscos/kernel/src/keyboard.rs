@@ -705,7 +705,8 @@ impl Os<'_> {
             .cpu()
             .reg(tairix_riscos_arm::reg::Reg::field(0))
             & 7;
-        let (x, y, held) = self.world.input.pointer;
+        let mouse = &self.world.input.mouse;
+        let (x, y, held) = (mouse.x, mouse.y, mouse.buttons);
         self.pointer_moved(x, y, (held & !7) | buttons)?;
         self.return_to_lr();
         Ok(())

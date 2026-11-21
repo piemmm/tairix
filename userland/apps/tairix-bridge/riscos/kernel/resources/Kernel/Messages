@@ -85,6 +85,11 @@ PageNumberOutOfRange:Page number out of range
 AreaRenumberRefused:That dynamic area cannot be renumbered
 BadSparseOperation:Sparse claim or release not allowed there
 
+# The screen.
+BadMode:This screen mode cannot be shown
+BadModeString:The screen mode is not described in a way that can be read
+BadScreenModeReason:OS_ScreenMode has no such reason
+
 # The machine.
 UnknownReadSysInfoReason:Reason code not known to OS_ReadSysInfo
 UnknownPlatformFeaturesReason:Reason code not known to OS_PlatformFeatures

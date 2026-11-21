@@ -393,12 +393,12 @@ fn escape_and_the_mouse_buttons_take_the_kernel_s_exits() {
     );
     let _ = byte(&mut s, 126, 0, 0);
     press(&mut s, key::SELECT, true);
-    assert_eq!(s.kernel.os().world.input.pointer.2, 4, "Select held");
+    assert_eq!(s.kernel.os().world.input.mouse.buttons, 4, "Select held");
     press(&mut s, key::ADJUST, true);
     press(&mut s, key::SELECT, false);
-    assert_eq!(s.kernel.os().world.input.pointer.2, 1, "Adjust held");
+    assert_eq!(s.kernel.os().world.input.mouse.buttons, 1, "Adjust held");
     press(&mut s, key::ADJUST, false);
-    assert_eq!(s.kernel.os().world.input.pointer.2, 0);
+    assert_eq!(s.kernel.os().world.input.mouse.buttons, 0);
 }
 
 #[test]

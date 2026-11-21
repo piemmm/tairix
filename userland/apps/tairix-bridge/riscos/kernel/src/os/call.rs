@@ -12,7 +12,7 @@ use tairix_riscos_arm::cpu::{Exception, State, Stop, Unmodelled};
 use tairix_riscos_arm::psr::{self, Mode};
 use tairix_riscos_arm::reg::Reg;
 
-use super::{Os, Outcome, Pulse, Regs};
+use super::{Ending, Os, Outcome, Pulse, Regs};
 use crate::host::Routine;
 use crate::memory::Bits;
 
@@ -102,6 +102,12 @@ pub enum Wait {
     Input {
         /// When it stops waiting regardless, in monotonic centiseconds.
         until: Option<u64>,
+    },
+    /// The clock reaching `until` and nothing else: it waits in a SWI such
+    /// as `OS_Byte` 19, which is performed again then.
+    Clock {
+        /// When, in monotonic centiseconds.
+        until: u64,
     },
 }
 
@@ -441,12 +447,13 @@ impl Os<'_> {
     }
 
     /// The processor waits for an interrupt with none pending: the host
-    /// waits for the clock's next deadline, so an idle guest costs nothing.
+    /// waits for the clock's next deadline or input, so an idle guest costs
+    /// nothing, and its waking is the interrupt.
     fn idle(&mut self) -> Result<(), Unwind> {
         let until = self.next_deadline();
-        match self.world.host.wait(until) {
+        match self.world.host.wait(until, Ending::Clock) {
             Pulse::Continue => {
-                self.tick();
+                self.world.processor.set_irq(true);
                 Ok(())
             }
             Pulse::Stop => Err(Unwind::Stopped),

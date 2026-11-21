@@ -25,6 +25,9 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The machine's monitor in its window: the 4:3 picture, sharp or smooth, and
 # the scan lines over it.
 tairix-crt = { path = "../../../lib/crt", version = "=0.0.0" }
+# The SAA5050's glyphs, mosaics and serial attributes, shared with TAIRiX
+# Bridge's mode 7.
+tairix-teletext = { path = "../../../lib/teletext", version = "=0.0.0" }
 # The identifiers the emulator's diagnostic records are stated under.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The machine library the record, the assistant and the card menus are

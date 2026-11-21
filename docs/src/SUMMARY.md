@@ -151,6 +151,7 @@
   - [`tairix-supervisor`](./lib/supervisor.md)
   - [`tairix-syntax`](./lib/syntax.md)
   - [`tairix-sysconfig`](./lib/sysconfig.md)
+  - [`tairix-teletext`](./lib/teletext.md)
   - [`tairix-termcap`](./lib/termcap.md)
   - [`tairix-terrain`](./lib/terrain.md)
   - [`tairix-timesync`](./lib/timesync.md)

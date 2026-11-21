@@ -555,7 +555,8 @@ caches its modules keep give way to and record their decisions in.
   calls, `UnthreadV`. A key therefore reaches the kernel, Escape included,
   while a program reads nothing.
   Work is never polled: an idle guest's `WFI` waits on the host until the next
-  deadline.
+  deadline or input, and a wait's waking asserts the line, so input the host
+  gives before the clock moves is taken at once.
 - **Waiting for input.** A program's own SWI that finds nothing to read, has
   run no guest code and is not one the kernel performs for another, unwinds
   with the processor back at it and is performed again when input comes,
@@ -563,7 +564,9 @@ caches its modules keep give way to and record their decisions in.
   read keeps its characters. Deeper, the host waits in place, so a command
   reading lines keeps what it has done, and the processor takes the
   interrupts the clock raises meanwhile, as RISC OS's waiting SWIs enable
-  them. No callback runs while a SWI waits.
+  them. No callback runs while a SWI waits. The host is told whether only
+  input can end a wait, so a scripted host with nothing left to type stops
+  one rather than running the clock on through the timed work due meanwhile.
 
 ### SWIs and errors
 
@@ -1750,6 +1753,86 @@ wrote. `fuzz_basic` runs programs of BASIC's keywords and operands, or any
 text, in both dialects, and holds any assembler statement under any `OPT` to
 raising an error or moving `P%` and `O%` on by no more than a string after an
 alignment.
+
+## The VDU drivers
+
+The VDU drivers are the `userland/apps/tairix-bridge/riscos/vdu` crate, which
+the kernel reaches through its `VduDrivers` seam: they start at reset, before
+any module, take the VDU stream, perform the VDU SWIs, answer their `OS_Byte`
+and `OS_Word` reasons, count the screen's frames on the clock's interrupt and
+are `PaletteV`'s default. Their state is the session's screen; what software
+reads in zero page — the colour blocks at `&1480`, `&14C0` and `&1500`, the
+ECF offsets at `&11F8` and `&11FC`, the changed box at `&165C` — is kept
+there.
+
+- **Modes.** Numbered modes come from `lib/vdu`, selectors and mode strings
+  from `OS_ScreenMode`. The current monitor type starts as the configured one;
+  on a VGA monitor a numbered mode it lacks is shown as the 640 by 480 mode of
+  its depth where that keeps its eigen factors and flags, else as a 640 by 480
+  selector keeping them. A selector is shown where the monitor has timings for
+  its size, or a module gives them; ScreenModes, after `*LoadModeFile`, gives
+  them for its file's modes and makes the monitor type 7. A change issues
+  `Service_PreModeChange`, `Service_ModeChanging` and `Service_ModeChange`.
+  A selector's text not set by its variables is as many whole cells as fit
+  the screen. One whose variables make no screen the drivers can draw — eigen
+  factors past 3, colours its depth lacks, a pixel wider than a word or
+  narrower than its colours, lines too short for their pixels, text past the
+  screen, or Teletext in other than sixteen colours or past a page of 255 by
+  255 cells — is refused as a bad mode.
+- **Screen memory.** Dynamic area 2, mapped twice, so a screen a hardware
+  scroll has moved reads on past the area's end; it grows for a mode that
+  needs more and shrinks no further than the current screen's banks.
+  `OS_Byte` 112 and 113 choose the banks, `OS_Word` 22 their starts; every
+  page is watched, and the display takes the lines written since it last
+  asked.
+- **Text.** The text window and cursor run the directions `VDU 23,16` sets;
+  VDU 5 prints at the graphics cursor in the graphics colour, wrapping where
+  the cursor leaves the window. A full-screen window scrolls by moving the
+  screen; any other by copying. Paged mode waits for Shift before about three
+  quarters of a window, and Ctrl with Shift holds any scroll. The copy cursor
+  turns with the window's axes as the text cursor does, and copy-cursor
+  editing ends when `VDU 28` or `VDU 26` sets a window.
+- **Colours.** A colour number is masked to the mode's colours below eight
+  bits; in eight bits it is the VIDC1 form, the tint the two low bits; in
+  sixteen and thirty-two bits that form's default colour, packed. The colour
+  blocks are each GCOL action on the colour or ECF pattern row, rotated for
+  the ECF origin: the shift is `-(x << Log2BPC)` modulo 32, the row offset
+  the screen's height less `y`, modulo 8.
+- **`OS_Plot`.** Lines walk from their leftmost or lowest end; polygons fill
+  between their edges' lines; circles soften their squared radius by its
+  root. Ellipses are worked in RISC OS's fixed point — the width's ratio to
+  the height to eight fractional bits, each row's root to eight, the shear
+  stepped at sixteen — so a tall, narrow ellipse is drawn a little narrower
+  than its width point says. An arc ends where the ray toward its end point
+  leaves the circle; a sector's rays run one pixel past a corner of the
+  circle where the sweep closes on them; a segment's chord runs to where the
+  end direction meets the circle, each coordinate cut toward nought. Every
+  shape is worked out within the window alone: a line's pixels and a
+  polygon's edges from their places along them, a round shape's rows as each
+  is asked for, and where a ray leaves a circle by halving, so a shape far
+  larger than the screen costs what the window holds. A point more than 2²⁸
+  pixels from the screen's corner is held there, where genuine RISC OS's
+  sums would wrap. Then the flood and line fills, block copy and move, and
+  the dotted lines, whose dots restart when the pattern or its length is set
+  and run on across a line's part beyond the window.
+- **Segments** differ from genuine RISC OS by a pixel or a few at the
+  chord's end in about one geometry in eight, mostly where the arc ends in
+  the second or fourth quadrant: a known difference
+  (`plans/RISCOS-EMULATOR.md` RO21.2).
+- **The cursor** is drawn by the front end over the screen, never into its
+  memory, so a program reading its screen never finds it there, where genuine
+  RISC OS EORs it in.
+- **Teletext.** Mode 7, or a Teletext selector, is a page of characters drawn
+  into a sixteen-colour screen from `lib/teletext`, each cell 16 by 20 pixels
+  whatever the mode's flags, twice over, the second frame without its
+  flashing characters; a page taller than the screen is drawn to its bottom
+  line.
+
+The screen corpus, `vdu/tests/riscos5/screens.txt`, is BASIC programs genuine
+RISC OS 5.30 ran on its screen for the reference harness, each defining the
+whole character set from the first-party font first, so no RISC OS glyph is
+in any screen; `drawn.txt` holds what each read and every line of the screen
+it drew, which the replay holds the drivers to byte for byte.
 
 ## The reference harness
 

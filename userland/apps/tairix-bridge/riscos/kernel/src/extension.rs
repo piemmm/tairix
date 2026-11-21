@@ -69,6 +69,38 @@ impl Os<'_> {
         Ok(())
     }
 
+    /// `work` on the session's `T` and the rest of the session together,
+    /// while a `T` is held. The value is set aside meanwhile, so nothing
+    /// `work` calls finds it, and `work` must neither hold nor release a `T`.
+    pub fn with_extension<T: Any, R>(
+        &mut self,
+        work: impl FnOnce(&mut T, &mut Self) -> R,
+    ) -> Option<R> {
+        let place = self.world.extensions.place::<T>()?;
+        let aside: Box<dyn Any> = Box::new(());
+        let slot = &mut self.world.extensions.values[place].1;
+        let mut value = match core::mem::replace(slot, aside).downcast::<T>() {
+            Ok(value) => value,
+            Err(other) => {
+                *slot = other;
+                return None;
+            }
+        };
+        let answer = work(&mut value, self);
+        let extensions = &mut self.world.extensions;
+        match extensions.place::<T>() {
+            Some(place) => extensions.values[place].1 = value,
+            // Only `work` releasing its own `T` empties the slot; the value
+            // it set aside is the session's again.
+            None => {
+                if extensions.values.try_reserve(1).is_ok() {
+                    extensions.values.push((TypeId::of::<T>(), value));
+                }
+            }
+        }
+        Some(answer)
+    }
+
     /// Lets go of the session's `T`, handing it back.
     pub fn release_extension<T: Any>(&mut self) -> Option<T> {
         let extensions = &mut self.world.extensions;

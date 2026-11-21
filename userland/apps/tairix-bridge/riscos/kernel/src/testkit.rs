@@ -15,7 +15,7 @@ use crate::input::InputEvent;
 use crate::memory::layout::{Layout, APPLICATION};
 use crate::memory::policy::Ceiling;
 use crate::memory::Bits;
-use crate::os::{len32, Config, Host, Kernel, Outcome, Pulse, Regs};
+use crate::os::{len32, Config, Ending, Host, Kernel, Outcome, Pulse, Regs};
 
 /// Input events and the times they arrive.
 type Arrivals = Rc<RefCell<VecDeque<(u64, InputEvent)>>>;
@@ -69,7 +69,7 @@ impl Host for TestHost {
         false
     }
 
-    fn wait(&mut self, until: Option<u64>) -> Pulse {
+    fn wait(&mut self, until: Option<u64>, _: Ending) -> Pulse {
         let arrival = self.input.borrow().front().map(|&(at, _)| at);
         if arrival.is_none() && self.stop_without_input.get() {
             return Pulse::Stop;

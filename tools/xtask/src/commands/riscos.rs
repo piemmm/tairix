@@ -48,6 +48,7 @@ mod basic;
 mod language;
 mod numbers;
 mod obey;
+mod screens;
 mod session;
 mod sprites;
 
@@ -133,6 +134,8 @@ struct Corpora {
     assembler: Vec<tairix_riscos_basic::corpus::assembler::Line>,
     session_text: String,
     sessions: Vec<tairix_riscos_basic::corpus::session::Session>,
+    screens_text: String,
+    screens: Vec<tairix_riscos_vdu::corpus::Case>,
     numbers: Vec<(&'static str, Vec<u8>)>,
 }
 
@@ -146,17 +149,20 @@ impl Corpora {
         let language_text = read(language::PROGRAMS)?;
         let assembler_text = read(assembler::LINES)?;
         let session_text = read(session::SESSIONS)?;
+        let screens_text = read(screens::CASES)?;
         Ok(Self {
             cases: read(obey::CASES)?,
             programs: basic::programs(&programs_text)?,
             language: language::programs(&language_text)?,
             assembler: assembler::lines(&assembler_text)?,
             sessions: session::sessions(&session_text)?,
+            screens: screens::cases(&screens_text)?,
             numbers: numbers::staged(),
             programs_text,
             language_text,
             assembler_text,
             session_text,
+            screens_text,
         })
     }
 
@@ -169,6 +175,7 @@ impl Corpora {
             .chain(language::left(&self.language))
             .chain(assembler::left(&self.assembler))
             .chain(session::left(&self.sessions))
+            .chain(screens::left(&self.screens))
             .collect()
     }
 }
@@ -184,16 +191,19 @@ fn reference(ctx: &Context, dir: &Path) -> Result<(), String> {
     let language_staged = language::staged(&corpora.language);
     let assembler_staged = assembler::staged(&corpora.assembler);
     let session_staged = session::staged(&corpora.sessions);
+    let screens_staged = screens::staged(&corpora.screens);
     staged.extend(
         language_staged
             .iter()
             .chain(&assembler_staged)
             .chain(&session_staged)
+            .chain(&screens_staged)
             .map(|(name, bytes)| (name.as_str(), bytes.clone())),
     );
     let mut commands = language::run(&corpora.language);
     commands.extend(assembler::run(&corpora.assembler));
     commands.extend(session::run(&corpora.sessions));
+    commands.extend(screens::run(&corpora.screens));
     let ours = boot(&commands);
     let hostfs = dir.join("hostfs");
     let harness = hostfs.join("Harness,ffb");
@@ -252,12 +262,14 @@ fn import(
     let printed = language::answers(&provenance, &corpora.language, &hostfs)?;
     let assembled = assembler::answers(&provenance, &corpora.assembler, &hostfs)?;
     let typed = session::answers(&provenance, &corpora.sessions, &hostfs)?;
+    let (drawn, readings) = screens::answers(&provenance, &corpora.screens, &hostfs)?;
     let texts = [
         corpora.cases.as_str(),
         &corpora.programs_text,
         &corpora.language_text,
         &corpora.assembler_text,
         &corpora.session_text,
+        &corpora.screens_text,
     ];
     let held = held_runs(groups, &texts, &corpora.numbers);
     let mut streams = vec![
@@ -268,6 +280,7 @@ fn import(
         printed.as_bytes().to_vec(),
         assembled.as_bytes().to_vec(),
         typed.as_bytes().to_vec(),
+        readings.into_bytes(),
     ];
     streams.extend(register_streams(observed));
     streams.extend(memory_streams(observed));
@@ -290,13 +303,14 @@ fn import(
         (language::ANSWERS, printed),
         (assembler::ANSWERS, assembled),
         (session::ANSWERS, typed),
+        (screens::ANSWERS, drawn),
     ] {
         let path = ctx.workspace_root.join(path);
         std::fs::write(&path, text).map_err(|e| format!("riscos: {}: {e}", path.display()))?;
     }
     remove_found(&hostfs, corpora.left().iter().map(String::as_str))?;
     outln!(
-        "riscos: {} observations, {} lib/obey answers, {} typed BASIC programs, {} run ones, {} assembler lines and {} sessions recorded",
+        "riscos: {} observations, {} lib/obey answers, {} typed BASIC programs, {} run ones, {} assembler lines, {} sessions and {} screens recorded",
         observations.len(),
         answers
             .lines()
@@ -305,7 +319,8 @@ fn import(
         corpora.programs.len(),
         corpora.language.len(),
         corpora.assembler.len(),
-        corpora.sessions.len()
+        corpora.sessions.len(),
+        corpora.screens.len()
     )
 }
 

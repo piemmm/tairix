@@ -466,7 +466,12 @@ impl Os<'_> {
     /// The default of `vector`: the kernel's, or none, which claims the
     /// call and clears V.
     fn perform_default(&mut self, vector: Vector, regs: &mut Regs) -> Result<(), Unwind> {
-        let owned: Option<Default<'_>> = self.world.vectors.owner(vector).map(|code| code as _);
+        let owned: Option<Default<'_>> = self
+            .world
+            .vectors
+            .owner(vector)
+            .or_else(|| self.vdu_vector_default(vector))
+            .map(|code| code as _);
         let Some(default) = owned.or_else(|| default_of(vector)) else {
             regs.set_flag(psr::V, false);
             return Ok(());

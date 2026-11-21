@@ -14,7 +14,7 @@ use super::{
 };
 use crate::memory::layout::APPLICATION;
 use crate::memory::Bits;
-use crate::os::{len32, Fail, Host, Kernel, Os, Pulse, Regs};
+use crate::os::{len32, Ending, Fail, Host, Kernel, Os, Pulse, Regs};
 
 /// The application space a replay works in: room for every string and block
 /// a scenario passes.
@@ -45,7 +45,7 @@ impl Host for StillHost {
         false
     }
 
-    fn wait(&mut self, _: Option<u64>) -> Pulse {
+    fn wait(&mut self, _: Option<u64>, _: Ending) -> Pulse {
         Pulse::Stop
     }
 }

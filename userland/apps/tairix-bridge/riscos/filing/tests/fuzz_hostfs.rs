@@ -28,7 +28,7 @@ use tairix_riscos_filing::hostfs::protocol::{Refusal, Reply, Request};
 use tairix_riscos_filing::hostfs::server::{Given, Server};
 use tairix_riscos_kernel::corpus::StillHost;
 use tairix_riscos_kernel::input::InputEvent;
-use tairix_riscos_kernel::os::{Host, Os, Pulse, Regs};
+use tairix_riscos_kernel::os::{Ending, Host, Os, Pulse, Regs};
 use tairix_riscos_kernel::swi::os::{FILE, FIND, FS_CONTROL, GBPB};
 use tairix_riscos_kernel::swi::X;
 
@@ -294,8 +294,8 @@ impl Host for Damaging {
         self.still.pulse()
     }
 
-    fn wait(&mut self, until: Option<u64>) -> Pulse {
-        self.still.wait(until)
+    fn wait(&mut self, until: Option<u64>, ending: Ending) -> Pulse {
+        self.still.wait(until, ending)
     }
 
     fn input(&mut self) -> Option<InputEvent> {

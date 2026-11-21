@@ -67,6 +67,8 @@ pub(crate) enum Routine {
     Variable(u32),
     /// A key handler's exit: the mouse's buttons, then Break, a word apart.
     KeyExit(u32),
+    /// One of the VDU drivers' routines, by its place among them.
+    Vdu(u32),
     /// The entry of a built-in module's image this many after the first,
     /// which enters its Rust.
     Builtin(u32),
@@ -91,8 +93,9 @@ const VARIABLE_BASE: u32 = REDIRECT_OUTPUT + 1;
 const KEY_EXIT_BASE: u32 = VARIABLE_BASE + crate::vars::preset::ENTRIES;
 /// A key handler's exits: the mouse's buttons and Break.
 const KEY_EXITS: u32 = 2;
+const VDU_BASE: u32 = KEY_EXIT_BASE + KEY_EXITS;
 /// The first built-in module entry's routine: the kernel's own are below it.
-const BUILTIN_BASE: u32 = KEY_EXIT_BASE + KEY_EXITS;
+const BUILTIN_BASE: u32 = VDU_BASE + crate::output::VDU_ROUTINES;
 
 /// The FIQ vector's slot in [`EXCEPTIONS`].
 pub(crate) const FIQ: u32 = 7;
@@ -115,7 +118,8 @@ impl Routine {
             RESET_STACKS => Self::ResetStacks,
             REDIRECT_OUTPUT => Self::RedirectOutput,
             n if n < KEY_EXIT_BASE => Self::Variable(n - VARIABLE_BASE),
-            n if n < BUILTIN_BASE => Self::KeyExit(n - KEY_EXIT_BASE),
+            n if n < VDU_BASE => Self::KeyExit(n - KEY_EXIT_BASE),
+            n if n < BUILTIN_BASE => Self::Vdu(n - VDU_BASE),
             n => Self::Builtin(n - BUILTIN_BASE),
         }
     }
@@ -138,6 +142,7 @@ impl Routine {
             Self::RedirectOutput => REDIRECT_OUTPUT,
             Self::Variable(entry) => VARIABLE_BASE + entry,
             Self::KeyExit(exit) => KEY_EXIT_BASE + exit,
+            Self::Vdu(place) => VDU_BASE + place,
             Self::Builtin(entry) => BUILTIN_BASE + entry,
         }
     }
@@ -176,6 +181,7 @@ impl Os<'_> {
             Routine::Variable(entry) => self.preset_entered(entry),
             Routine::KeyExit(0) => self.mouse_exit(),
             Routine::KeyExit(_) => self.break_exit(),
+            Routine::Vdu(place) => self.vdu_routine_entered(place),
             Routine::Builtin(entry) => self.builtin_entered(entry),
         }
     }

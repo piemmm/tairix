@@ -75,6 +75,10 @@ impl Os<'_> {
             }
             14 => self.read_clock(block)?,
             15 => self.write_clock(block)?,
+            21 => {
+                let reason = self.read_byte(block)?;
+                self.mouse_word(reason, block)?
+            }
             _ => false,
         };
         if handled {

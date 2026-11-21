@@ -444,6 +444,9 @@ tairix-openbasic = { path = "../../lib/openbasic", version = "=0.0.0" }
 # BASIC's corpora: the language's programs and the assembler's lines, read
 # and probed by the definitions its replays hold it to them with.
 tairix-riscos-basic = { path = "../../userland/apps/tairix-bridge/riscos/basic", version = "=0.0.0" }
+# The VDU drivers' screen corpus, framed and read by the definitions its
+# replay holds the drivers to it with.
+tairix-riscos-vdu = { path = "../../userland/apps/tairix-bridge/riscos/vdu", version = "=0.0.0" }
 # The emulators' machine library: the Open Micro vertical aims at a card and
 # its menu, and declares the icon-bar menu, through the library's own layout
 # and rows.

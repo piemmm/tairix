@@ -123,16 +123,24 @@ pub mod os {
     pub const EVALUATE_EXPRESSION: u32 = 0x2D;
     /// `OS_SpriteOp`.
     pub const SPRITE_OP: u32 = 0x2E;
+    /// `OS_ReadPalette`.
+    pub const READ_PALETTE: u32 = 0x2F;
     /// `OS_ServiceCall`.
     pub const SERVICE_CALL: u32 = 0x30;
     /// `OS_ReadVduVariables`.
     pub const READ_VDU_VARIABLES: u32 = 0x31;
+    /// `OS_ReadPoint`.
+    pub const READ_POINT: u32 = 0x32;
     /// `OS_UpCall`.
     pub const UPCALL: u32 = 0x33;
     /// `OS_CallAVector`.
     pub const CALL_A_VECTOR: u32 = 0x34;
     /// `OS_ReadModeVariable`.
     pub const READ_MODE_VARIABLE: u32 = 0x35;
+    /// `OS_RemoveCursors`.
+    pub const REMOVE_CURSORS: u32 = 0x36;
+    /// `OS_RestoreCursors`.
+    pub const RESTORE_CURSORS: u32 = 0x37;
     /// `OS_ValidateAddress`.
     pub const VALIDATE_ADDRESS: u32 = 0x3A;
     /// `OS_CallAfter`.
@@ -143,14 +151,20 @@ pub mod os {
     pub const REMOVE_TICKER_EVENT: u32 = 0x3D;
     /// `OS_InstallKeyHandler`.
     pub const INSTALL_KEY_HANDLER: u32 = 0x3E;
+    /// `OS_CheckModeValid`.
+    pub const CHECK_MODE_VALID: u32 = 0x3F;
     /// `OS_ChangeEnvironment`.
     pub const CHANGE_ENVIRONMENT: u32 = 0x40;
+    /// `OS_ClaimScreenMemory`.
+    pub const CLAIM_SCREEN_MEMORY: u32 = 0x41;
     /// `OS_ReadMonotonicTime`.
     pub const READ_MONOTONIC_TIME: u32 = 0x42;
     /// `OS_SubstituteArgs`.
     pub const SUBSTITUTE_ARGS: u32 = 0x43;
     /// `OS_PrettyPrint`.
     pub const PRETTY_PRINT: u32 = 0x44;
+    /// `OS_Plot`.
+    pub const PLOT: u32 = 0x45;
     /// `OS_WriteN`.
     pub const WRITE_N: u32 = 0x46;
     /// `OS_AddToVector`.
@@ -165,10 +179,14 @@ pub mod os {
     pub const ADD_CALLBACK: u32 = 0x54;
     /// `OS_ReadDefaultHandler`.
     pub const READ_DEFAULT_HANDLER: u32 = 0x55;
+    /// `OS_SetECFOrigin`.
+    pub const SET_ECF_ORIGIN: u32 = 0x56;
     /// `OS_ReadSysInfo`.
     pub const READ_SYS_INFO: u32 = 0x58;
     /// `OS_Confirm`.
     pub const CONFIRM: u32 = 0x59;
+    /// `OS_ChangedBox`.
+    pub const CHANGED_BOX: u32 = 0x5A;
     /// `OS_CRC`.
     pub const CRC: u32 = 0x5B;
     /// `OS_ReadDynamicArea`.
@@ -177,8 +195,12 @@ pub mod os {
     pub const PRINT_CHAR: u32 = 0x5D;
     /// `OS_RemoveCallBack`.
     pub const REMOVE_CALLBACK: u32 = 0x5F;
+    /// `OS_SetColour`.
+    pub const SET_COLOUR: u32 = 0x61;
     /// `OS_Pointer`.
     pub const POINTER: u32 = 0x64;
+    /// `OS_ScreenMode`.
+    pub const SCREEN_MODE: u32 = 0x65;
     /// `OS_DynamicArea`.
     pub const DYNAMIC_AREA: u32 = 0x66;
     /// `OS_AbortTrap`.

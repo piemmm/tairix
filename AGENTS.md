@@ -756,6 +756,7 @@ tairix/
 │   ├── sync/            # Synchronisation primitives (locks, Once, bit claims).
 │   ├── syntax/          # Document formats: detection, lexers, settings validation.
 │   ├── sysconfig/       # Boot-time system-configuration store engine.
+│   ├── teletext/        # Teletext character generator: glyphs, mosaics, rounding, attributes.
 │   ├── termcap/         # Compiled-in TERM->capability database.
 │   ├── terrain/         # Grid terrain: drainage, erosion, least-cost routing.
 │   ├── theme/           # Shared desktop theme definition (dark/light).
@@ -823,7 +824,8 @@ tairix/
 │   │           ├── arm/    #   The ARM processor, its FPA, VFP and NEON, guest MMU.
 │   │           ├── kernel/ #   The RISC OS kernel: address space, slots, areas.
 │   │           ├── filing/ #   FileSwitch and the filing systems it calls.
-│   │           └── basic/  #   BBC BASIC V and VI: their numbers and interpreter.
+│   │           ├── basic/  #   BBC BASIC V and VI: their numbers and interpreter.
+│   │           └── vdu/    #   The VDU drivers: modes, the VDU stream, OS_Plot, palettes.
 │   └── games/           # Games. A leaf subtree: its crates compose each other
 │       │                #   and `lib/*`, and NOTHING outside it may depend on
 │       │                #   them, so game code never enters the OS libraries.

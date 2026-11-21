@@ -1,6 +1,6 @@
 //! RISC OS 5's numbered screen modes, 0 to 53: each one's mode variables, as
-//! `OS_ReadModeVariable` reads them for it. Mode 7 is Teletext as RISC OS 5
-//! keeps it on every machine it runs on now, in 256 colours at 640 by 500.
+//! `OS_ReadModeVariable` reads them for it on RISC OS 5.30. Mode 7 is
+//! Teletext in sixteen colours at 640 by 500.
 
 /// A mode's `ModeFlags`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -99,7 +99,7 @@ pub static MODES: [Mode; 54] = [
     /*  4 */ Mode { width: 320, height: 256, columns: 40, rows: 32, x_eig: 2, y_eig: 2, log2_bpp: 0, log2_bpc: 1, ncolour: 1, line_length: 80, screen_size: 20_480, y_shift: 4, flags: Flags::NONE },
     /*  5 */ Mode { width: 160, height: 256, columns: 20, rows: 32, x_eig: 3, y_eig: 2, log2_bpp: 1, log2_bpc: 2, ncolour: 3, line_length: 80, screen_size: 20_480, y_shift: 4, flags: Flags::NONE },
     /*  6 */ Mode { width: 320, height: 250, columns: 40, rows: 25, x_eig: 2, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 1, line_length: 80, screen_size: 20_480, y_shift: 4, flags: Flags::NON_GRAPHIC.union(Flags::GAP).union(Flags::BBC_GAP) },
-    /*  7 */ Mode { width: 640, height: 500, columns: 40, rows: 25, x_eig: 1, y_eig: 1, log2_bpp: 3, log2_bpc: 3, ncolour: 255, line_length: 640, screen_size: 655_360, y_shift: 5, flags: Flags::NON_GRAPHIC.union(Flags::TELETEXT).union(Flags::GAP).union(Flags::DOUBLE_VERTICAL).union(Flags::FULL_PALETTE) },
+    /*  7 */ Mode { width: 640, height: 500, columns: 40, rows: 25, x_eig: 1, y_eig: 1, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 320, screen_size: 327_680, y_shift: 5, flags: Flags::NON_GRAPHIC.union(Flags::TELETEXT).union(Flags::GAP).union(Flags::DOUBLE_VERTICAL) },
     /*  8 */ Mode { width: 640, height: 256, columns: 80, rows: 32, x_eig: 1, y_eig: 2, log2_bpp: 1, log2_bpc: 1, ncolour: 3, line_length: 160, screen_size: 40_960, y_shift: 5, flags: Flags::NONE },
     /*  9 */ Mode { width: 320, height: 256, columns: 40, rows: 32, x_eig: 2, y_eig: 2, log2_bpp: 2, log2_bpc: 2, ncolour: 15, line_length: 160, screen_size: 40_960, y_shift: 5, flags: Flags::NONE },
     /* 10 */ Mode { width: 160, height: 256, columns: 20, rows: 32, x_eig: 3, y_eig: 2, log2_bpp: 3, log2_bpc: 4, ncolour: 63, line_length: 320, screen_size: 81_920, y_shift: 6, flags: Flags::NONE },

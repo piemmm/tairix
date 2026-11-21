@@ -2,8 +2,8 @@
 
 The Acorn VDU vocabulary the BBC Micro's MOS and RISC OS share. OpenMicro's
 MOS builds its character set and control-code table from it, `lib/image` reads
-a sprite's numbered mode through it, and TAIRiX Bridge's VDU drivers
-(RO21) are to use all three parts (`plans/RISCOS-EMULATOR.md` RO8).
+a sprite's numbered mode through it, and TAIRiX Bridge's VDU drivers use all
+three parts (`plans/RISCOS-EMULATOR.md` RO8, RO21).
 
 ## Control codes
 
@@ -28,8 +28,8 @@ factors, `Log2BPP` and `Log2BPC`, `NColour`, `LineLength`, `ScreenSize`,
 
 Modes 3, 6 and 7 are text modes (`Flags::NON_GRAPHIC`). RISC OS refuses a
 sprite in one, so `Mode::graphic` says whether one may be in it. Mode 7 is
-Teletext as RISC OS 5 keeps it on every machine it now runs on: 256 colours at
-640 by 500. Mode 47's pixels are square, as RISC OS 5 defines them.
+Teletext as RISC OS 5.30 answers for it: sixteen colours at 640 by 500. Mode
+47's pixels are square, as RISC OS 5 defines them.
 
 ## The system character set
 

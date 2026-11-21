@@ -93,6 +93,17 @@ pub enum Pulse {
     Stop,
 }
 
+/// What can end a guest's wait, beside the host having something for it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Ending {
+    /// The clock, in time: the wait has a deadline, or the processor idles
+    /// until the next interrupt.
+    Clock,
+    /// Input alone: the clock reaching the host's deadline only runs the
+    /// timed work due then.
+    Input,
+}
+
 /// What the kernel asks of the session hosting it. The kernel is a pure
 /// function of the bytes it is given, its input and these readings, so a
 /// session replays exactly.
@@ -109,8 +120,9 @@ pub trait Host {
 
     /// The guest has nothing to do before the monotonic clock reaches
     /// `until`, or ever if none: the host waits until then or until it has
-    /// something for the guest. [`Pulse::Stop`] ends the run.
-    fn wait(&mut self, until: Option<u64>) -> Pulse;
+    /// something for the guest. `ending` says whether time alone can end
+    /// the guest's wait. [`Pulse::Stop`] ends the run.
+    fn wait(&mut self, until: Option<u64>, ending: Ending) -> Pulse;
 
     /// The next input event the host holds for the guest, if any.
     fn input(&mut self) -> Option<crate::input::InputEvent>;
@@ -365,6 +377,12 @@ pub enum BootError {
     Module(&'static str),
     /// The processor refused the state a reset leaves it in.
     Processor,
+    /// The VDU drivers hand out more routines than the host pages hold for
+    /// them.
+    VduRoutines,
+    /// The VDU drivers would not start: the error's number, or none for an
+    /// unwind.
+    Vdu(Option<u32>),
 }
 
 impl From<MemoryError> for BootError {
@@ -542,6 +560,7 @@ impl Kernel {
         os.write_byte(buffers.command, 0)
             .map_err(|_| BootError::NoMemory)?;
         os.reset_byte_vars();
+        os.reset_mouse();
         os.world.vars.buffer = claim(&mut os, crate::vars::preset::BUFFER)?;
         os.set_presets().map_err(|_| BootError::NoMemory)?;
         let messages = claim(&mut os, KERNEL_MESSAGES_ROOM)?;
@@ -568,6 +587,7 @@ impl Kernel {
             .load(bits, &state)
             .map_err(|_| BootError::Processor)?;
         os.create_ram_disc().map_err(|_| BootError::NoMemory)?;
+        os.start_vdu()?;
         os.start_roms()?;
         os.start_country().map_err(|_| BootError::NoMemory)?;
         os.keyboard_arrives().map_err(|_| BootError::NoMemory)?;

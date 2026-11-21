@@ -205,6 +205,11 @@ pub const TARGETS: &[Target] = &[
         description: "userland/apps/tairix-bridge/riscos/kernel SWIs: random SWIs with hostile registers (pointers into application space, at the top of memory, nowhere, misaligned) and random guest code salted with SWIs; every refusal a value, nothing endless past the host's word, the kernel still answering",
     },
     Target {
+        package: "tairix-riscos-vdu",
+        test: "fuzz_vdu",
+        description: "userland/apps/tairix-bridge/riscos/vdu: hostile VDU streams — every control code with any parameters, modes no monitor shows, windows off the screen or inside out, shapes reaching the ends of the coordinate range — and the drivers' SWIs, OS_Byte and OS_Word reasons with hostile registers and blocks; every refusal a value, every error block readable, the drivers still answering",
+    },
+    Target {
         package: "tairix-riscos-filing",
         test: "fuzz_hostfs",
         description: "userland/apps/tairix-bridge/riscos/filing HostFS relay: hostile requests from the session worker against the server, over a tree with roots and files beside them, each answered by a reply that answers it and nothing changed outside the writable root; every message that decodes re-encoding to its own bytes; a session whose relay fails or damages its replies still answering",

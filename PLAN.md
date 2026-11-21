@@ -364,8 +364,12 @@ token values, and which TAIRiX Bridge's BASIC and TextEdit are to use,
 parameter counts, VDU 23's operations, RISC OS 5's numbered modes with their
 mode variables, and the 8×8 system character set drawn for TAIRiX — from which
 OpenMicro's MOS builds its font and control table and `lib/image` reads a
-sprite's numbered mode, and which TAIRiX Bridge's VDU drivers are to
-use, `plans/RISCOS-EMULATOR.md` RO8),
+sprite's numbered mode, and which TAIRiX Bridge's VDU drivers use,
+`plans/RISCOS-EMULATOR.md` RO8),
+`lib/teletext` (the one Teletext character generator — the SAA5050's
+alphanumerics and mosaics, character rounding and a row's serial attributes —
+which OpenMicro's SAA5050 and TAIRiX Bridge's mode 7 draw from,
+`plans/RISCOS-EMULATOR.md` RO21),
 and `lib/util`.
 
 `lib/util` admits only an item with two or more independent callers, and its
@@ -1074,6 +1078,10 @@ lives in the charter.
   a name of TAIRiX's own, and its subtree moves beneath
   `userland/apps/tairix-bridge/`, where another system's layer can stand
   beside it.
+
+- **2026-11-20 — §3: `lib/teletext`.** OpenMicro's SAA5050 and TAIRiX
+  Bridge's mode 7 draw the same Teletext characters, so the generator is
+  defined once.
 
 - **2026-11-18 — §3: `lib/dfs`.** The volume probe, the archive driver and
   OpenMicro all read and write DFS discs, so the format is defined once.

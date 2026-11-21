@@ -21,7 +21,7 @@ use core::ops::Range;
 
 use tairix_collections::{OrderedMap, RangeMap};
 use tairix_inline::ArrayVec;
-use tairix_riscos_arm::mmu::{Access, Frame, Rights, PAGE_SIZE};
+use tairix_riscos_arm::mmu::{Access, Frame, Rights, GRANULE_SIZE, PAGE_SIZE};
 
 use super::layout::{COMPATIBILITY, HIGH_ZERO_PAGE, SCRATCH, ZERO_PAGE_SIZE};
 use super::{Bits, GuestError, Memory};
@@ -559,7 +559,70 @@ const fn name_key(title: &[u8], sequence: u64) -> ([u8; TITLE], u64) {
     (folded(title), u64::MAX - sequence)
 }
 
+/// The watcher that tells a display which of an area's bytes changed: the
+/// first of the MMU's, the translator's another.
+const DISPLAY: Option<tairix_riscos_arm::mmu::Watcher> = tairix_riscos_arm::mmu::Watcher::new(0);
+
 impl Memory {
+    /// Watches each page area `number` holds for the display, so a store
+    /// into any is reported. Pages the area gains are watched when this is
+    /// asked again.
+    ///
+    /// # Errors
+    ///
+    /// An area that is not one of pages of its own, or an MMU with no room
+    /// to record the watch.
+    pub fn watch_area_for_display(&mut self, number: u32) -> Result<(), AreaError> {
+        let watcher = DISPLAY.ok_or(AreaError::BadDynamicArea)?;
+        let area = self.areas.get(number)?;
+        let Shape::Pages(list) = &area.shape else {
+            return Err(AreaError::BadDynamicArea);
+        };
+        for &frame in list {
+            self.mmu
+                .watch(frame, u16::MAX, watcher)
+                .map_err(|_| AreaError::CantAllocateArea)?;
+        }
+        Ok(())
+    }
+
+    /// Hands `each` the offset into area `number` of every granule of it
+    /// stored into since this last asked, the lowest first, and watches them
+    /// again. Where there is no room to sort the stores by page, every
+    /// granule of the area is given.
+    pub fn take_display_damage(&mut self, number: u32, mut each: impl FnMut(u32)) {
+        let Some(watcher) = DISPLAY else {
+            return;
+        };
+        let mut written: Vec<(Frame, u16)> = Vec::new();
+        let mut whole = true;
+        self.mmu.take_written(watcher, |frame, granules| {
+            whole &= tairix_util::fallible::push(&mut written, (frame, granules));
+        });
+        let Ok(area) = self.areas.get(number) else {
+            return;
+        };
+        let Shape::Pages(list) = &area.shape else {
+            return;
+        };
+        written.sort_unstable_by_key(|(frame, _)| frame.number());
+        for (page, frame) in (0u32..).zip(list) {
+            let granules = if whole {
+                match written.binary_search_by_key(&frame.number(), |(f, _)| f.number()) {
+                    Ok(found) => written[found].1,
+                    Err(_) => continue,
+                }
+            } else {
+                u16::MAX
+            };
+            for granule in 0..PAGE_SIZE / GRANULE_SIZE {
+                if granules & (1 << granule) != 0 {
+                    each(page * PAGE_SIZE + granule * GRANULE_SIZE);
+                }
+            }
+        }
+    }
+
     /// `OS_DynamicArea` 2 and 24: an area's details.
     pub fn area_info(&self, number: u32) -> Result<Info<'_>, AreaError> {
         if number == FREE_POOL {

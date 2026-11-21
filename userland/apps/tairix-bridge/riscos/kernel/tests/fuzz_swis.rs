@@ -25,7 +25,7 @@ use boot::APPLICATION_SIZE;
 use tairix_fuzzseed::Prng;
 use tairix_riscos_kernel::input::InputEvent;
 use tairix_riscos_kernel::memory::layout::APPLICATION;
-use tairix_riscos_kernel::os::{Fail, Host, Kernel, Pulse, Regs};
+use tairix_riscos_kernel::os::{Ending, Fail, Host, Kernel, Pulse, Regs};
 use tairix_riscos_kernel::swi::X;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -81,7 +81,7 @@ impl Host for Hostile {
         false
     }
 
-    fn wait(&mut self, until: Option<u64>) -> Pulse {
+    fn wait(&mut self, until: Option<u64>, _: Ending) -> Pulse {
         if let Some(until) = until {
             self.clock.set(self.clock.get().max(until));
         }

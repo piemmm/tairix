@@ -8,22 +8,12 @@
     reason = "each test crate including this uses the helpers its own tests need"
 )]
 
-use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
-use std::rc::Rc;
-
-use tairix_fscopy::fixture::{Handle, Tree};
-use tairix_fscopy::tree::Roots;
-use tairix_riscos_filing::hostfs::server::{Given, Server};
-use tairix_riscos_kernel::input::InputEvent;
-use tairix_riscos_kernel::memory::layout::RISC_OS_5;
-use tairix_riscos_kernel::memory::policy::Ceiling;
-use tairix_riscos_kernel::memory::Bits;
+use tairix_fscopy::fixture::Tree;
+pub use tairix_riscos_filing::session::command;
+use tairix_riscos_filing::session::{end_redirection, Setup};
 use tairix_riscos_kernel::module::Builtin;
-use tairix_riscos_kernel::os::{Config, Fail, Host, Kernel, Os, Outcome, Pulse, Regs, Unwind};
+use tairix_riscos_kernel::os::{Fail, Kernel, Os, Outcome, Unwind};
 use tairix_riscos_kernel::output::VduDrivers;
-use tairix_riscos_kernel::swi::os::{CHANGE_ENVIRONMENT, CLI, FIND};
-use tairix_riscos_kernel::swi::X;
 
 /// The bytes the VDU drivers were given.
 pub struct Screen(pub Vec<u8>);
@@ -35,75 +25,31 @@ static MODULES: std::sync::LazyLock<Vec<&'static Builtin>> = std::sync::LazyLock
     modules
 });
 
-/// A host whose clock moves on as the guest waits, whose keyboard types the
-/// keys a test gives, which stops a wait with nothing left to type, and
-/// which serves HostFS where a test gives it a disc.
-struct ScriptHost {
-    clock: Rc<Cell<u64>>,
-    keys: Rc<RefCell<VecDeque<u8>>>,
-    disc: Option<Server<Handle>>,
-}
-
-/// 1 January 2000, in centiseconds since 1900.
-const MILLENNIUM: u64 = 3_155_673_600 * 100;
-
-impl Host for ScriptHost {
-    fn monotonic(&mut self) -> u64 {
-        self.clock.get()
-    }
-
-    fn real_time(&mut self) -> u64 {
-        MILLENNIUM + self.clock.get()
-    }
-
-    fn pulse(&mut self) -> Pulse {
-        Pulse::Continue
-    }
-
-    fn wait(&mut self, until: Option<u64>) -> Pulse {
-        if !self.keys.borrow().is_empty() {
-            return Pulse::Continue;
-        }
-        match until {
-            Some(at) => {
-                self.clock.set(self.clock.get().max(at));
-                Pulse::Continue
-            }
-            None => Pulse::Stop,
-        }
-    }
-
-    fn input(&mut self) -> Option<InputEvent> {
-        self.keys.borrow_mut().pop_front().map(InputEvent::Key)
-    }
-
-    fn relay(&mut self, request: &[u8], reply: &mut Vec<u8>) -> bool {
-        match &mut self.disc {
-            Some(server) => {
-                server.serve(request, reply);
-                true
-            }
-            None => false,
-        }
-    }
-}
-
 #[expect(clippy::unnecessary_wraps, reason = "the VDU drivers' signature")]
-fn capture(os: &mut Os<'_>, b: u8) -> Result<(), Fail> {
+fn capture(os: &mut Os<'_>, bytes: &[u8]) -> Result<(), Fail> {
     if let Some(screen) = os.extension::<Screen>() {
-        screen.0.push(b);
+        screen.0.extend_from_slice(bytes);
     }
     Ok(())
 }
 
-/// The VDU drivers a test's screen is: every byte kept.
+/// The VDU drivers a test's screen is: every byte kept, as a recording made
+/// with output redirected to a file keeps it, and nothing else answered.
 const VDU: VduDrivers = VduDrivers {
+    start: |_| Ok(()),
     write: capture,
     queued: |_| false,
-    printing: |_| false,
     swi: None,
     byte: None,
     word: None,
+    frames: |_| Ok(()),
+    deadline: |_| None,
+    edit: |_, _| Ok(None),
+    monitor: |os| os.configured_display().map_or(0, |display| display[1]),
+    set_monitor: |_, _| {},
+    origin: |_| (0, 0),
+    routines: &[],
+    vectors: &[],
 };
 
 /// A session, an application slot of `bytes`, with `keys` to type.
@@ -112,57 +58,25 @@ pub fn kernel(bytes: u32, keys: &[u8]) -> Kernel {
 }
 
 /// As [`kernel`], with no keys, its HostFS disc `$` served over `tree`'s
-/// [`DISC`] folder, which it may write.
+/// `DISC` folder, which it may write.
 pub fn hosted(bytes: u32, tree: &Tree) -> Kernel {
-    let given = Given {
-        dir: tree.open_dir(DISC, false).expect("the disc's folder"),
-        name: "Disc".to_string(),
-        writable: true,
-    };
-    session(bytes, &[], Some(Server::new(None, vec![given], [9; 16], 1)))
+    session(bytes, &[], Some(tree))
 }
 
-/// The folder of a test's tree that HostFS serves as `$`.
-pub const DISC: &str = "/disc";
-
-fn session(bytes: u32, keys: &[u8], disc: Option<Server<Handle>>) -> Kernel {
-    let clock = Rc::new(Cell::new(0));
-    let keys = Rc::new(RefCell::new(keys.iter().copied().collect()));
-    let config = Config {
-        layout: &RISC_OS_5,
-        ceiling: Ceiling::derive(256 * 1024 * 1024),
-        memo_pages: 16,
-        host: Box::new(ScriptHost { clock, keys, disc }),
+fn session(bytes: u32, keys: &[u8], disc: Option<&Tree>) -> Kernel {
+    let mut kernel = tairix_riscos_filing::session::session(&Setup {
         vdu: Some(VDU),
         modules: MODULES.as_slice(),
-        zone: tairix_tz::Zone::UTC,
-        pressure: &tairix_reclaim::pressure::Unpressured,
-        log: &tairix_log::DiscardSink,
-    };
-    let mut kernel = Kernel::new(config).expect("a kernel");
-    let memory = kernel.memory();
-    let slot = memory.create_slot(Bits::Bit32).expect("a slot");
-    memory.set_slot_size(slot, bytes).expect("its memory");
-    memory.switch_slot(slot).expect("made current");
-    let mut os = kernel.os();
-    os.hold_extension(Screen(Vec::new())).expect("room");
-    let mut regs = Regs::default();
-    regs.r[..2].copy_from_slice(&[0, 0x8000 + bytes]);
-    os.perform(X | CHANGE_ENVIRONMENT, &mut regs)
-        .expect("its limit");
+        bytes,
+        keys,
+        disc,
+    })
+    .kernel;
     kernel
-}
-
-/// `line` run as a command: the transfer to an application it started.
-pub fn command(os: &mut Os<'_>, line: &str) -> Result<(), Fail> {
-    let at = os
-        .rma_claim(u32::try_from(line.len() + 1).expect("short"))
+        .os()
+        .hold_extension(Screen(Vec::new()))
         .expect("room");
-    os.write_terminated(at, line.as_bytes(), 13, line.len() + 1)
-        .expect("written");
-    let mut regs = Regs::default();
-    regs.r[0] = at;
-    os.perform(X | CLI, &mut regs)
+    kernel
 }
 
 /// What a run of a program left.
@@ -224,34 +138,11 @@ pub fn run_hosted(tree: &Tree, line: &str) -> Outcome {
         "{line}: an application entered, not {entered:?}"
     );
     let outcome = kernel.run(1 << 32);
-    let mut os = kernel.os();
-    let mut ended = Regs::default();
-    os.perform(X | CHANGE_REDIRECTION, &mut ended)
-        .expect("redirection ended");
-    for handle in [ended.r[0], ended.r[1]] {
-        if handle != 0 {
-            let mut close = Regs::default();
-            close.r[1] = handle;
-            os.perform(X | FIND, &mut close).expect("its file closed");
-        }
-    }
+    end_redirection(&mut kernel.os());
     outcome
-}
-
-/// The bytes of the file `tree`'s disc holds as `name`, whatever type its
-/// host name's suffix gives it.
-pub fn disc_file(tree: &Tree, name: &str) -> Option<Vec<u8>> {
-    let host = tree
-        .names(DISC)
-        .into_iter()
-        .find(|host| host.split(',').next() == Some(name))?;
-    tree.bytes(&format!("{DISC}/{host}"))
 }
 
 /// A recording's quoted text: printable ASCII but for `\xHH`.
 pub fn unquote(token: &str) -> Vec<u8> {
     tairix_riscos_basic::corpus::unquoted(token).expect("one quoted text")
 }
-
-/// `OS_ChangeRedirection`.
-const CHANGE_REDIRECTION: u32 = 0x5E;

@@ -13,9 +13,10 @@ use tairix_riscos_arm::psr;
 use tairix_riscos_arm::reg::Reg;
 
 use crate::error::Error;
+use crate::input::Continuation;
 use crate::memory::layout::HIGH_ZERO_PAGE;
 use crate::memory::Bits;
-use crate::os::{Entry, Fail, Os, Regs, Target, Unwind};
+use crate::os::{Entry, Fail, Os, Regs, Target, Unwind, Wait};
 use crate::vectors;
 use crate::zeropage;
 
@@ -93,9 +94,36 @@ impl Clock {
 }
 
 impl Os<'_> {
-    /// The monotonic clock, in centiseconds.
-    pub(crate) fn now(&mut self) -> u64 {
+    /// The monotonic clock, in centiseconds since the session began.
+    pub fn now(&mut self) -> u64 {
         self.world.host.monotonic()
+    }
+
+    /// Waits for the clock to reach `deadline`. A program's own `SWI` leaves
+    /// its context waiting for the clock alone, to be performed again then,
+    /// toward the deadline its first performance set; deeper in the kernel
+    /// the host waits here, the clock's interrupts taken as it ticks.
+    ///
+    /// # Errors
+    ///
+    /// The unwind that leaves the context waiting, or what the interrupts'
+    /// work gives.
+    pub fn wait_until(&mut self, deadline: u64) -> Result<(), Fail> {
+        let deadline = match self.world.continuation {
+            Some(Continuation::Until { deadline }) => {
+                self.world.continuation = None;
+                deadline
+            }
+            _ => deadline,
+        };
+        while self.now() < deadline {
+            let wait = Wait::Clock { until: deadline };
+            if let Some(unwind) = self.suspended(wait, Some(Continuation::Until { deadline })) {
+                return Err(unwind);
+            }
+            self.host_wait(Some(deadline))?;
+        }
+        Ok(())
     }
 
     /// The monotonic time as the guest reads it, wrapping every 497 days.
@@ -123,7 +151,11 @@ impl Os<'_> {
         let interval = self.world.clock.interval_due;
         let key = self.world.keyboard.due();
         let zone = self.world.clock.zone_due;
-        [ticker, interval, key, zone].into_iter().flatten().min()
+        let frame = self.world.vdu.and_then(|vdu| (vdu.deadline)(self));
+        [ticker, interval, key, zone, frame]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// The IRQ vector's entry: the clock's work, then a return to the
@@ -177,6 +209,9 @@ impl Os<'_> {
         }
         for _ in 0..elapsed.min(TICKER_CATCH_UP) {
             self.call_vector(vectors::TICKER, &mut Regs::default(), Entry::Irq)?;
+        }
+        if let Some(vdu) = self.world.vdu {
+            (vdu.frames)(self)?;
         }
         self.run_tickers(now)?;
         let mut regs = Regs::default();

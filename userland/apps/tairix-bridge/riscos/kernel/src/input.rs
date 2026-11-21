@@ -16,7 +16,8 @@ use tairix_riscos_arm::reg::Reg;
 
 use crate::byte::var;
 use crate::memory::layout::HIGH_ZERO_PAGE;
-use crate::os::{len32, Entry, Fail, Os, Regs, Unwind, Wait};
+use crate::mouse::PACKET;
+use crate::os::{len32, Ending, Entry, Fail, Os, Regs, Unwind, Wait};
 use crate::vectors::{self, Carry};
 use crate::zeropage;
 
@@ -86,10 +87,6 @@ impl Ring {
 
 /// `InsV`'s and `RemV`'s R1 bit for a block of bytes rather than one.
 const BLOCK: u32 = 1 << 31;
-/// A mouse buffer packet: the position, the buttons and the time.
-const PACKET: usize = 9;
-/// The mouse event.
-const MOUSE_EVENT: u32 = 10;
 
 /// The buffers and what reading them holds over between calls.
 pub(crate) struct Input {
@@ -98,8 +95,8 @@ pub(crate) struct Input {
     soft: VecDeque<u8>,
     /// A key code owed after the NUL that announced it.
     owed: Option<u8>,
-    /// Where the pointer is and which buttons are held.
-    pub(crate) pointer: (i32, i32, u32),
+    /// Where the mouse is and which buttons are held.
+    pub(crate) mouse: crate::mouse::Mouse,
 }
 
 /// An input event the host delivers.
@@ -115,13 +112,24 @@ pub enum InputEvent {
         /// Down rather than up.
         down: bool,
     },
-    /// The pointer at a position, relative to the graphics origin, with
-    /// these buttons held.
+    /// The mouse at a place on the screen, in OS units from its bottom left,
+    /// with these buttons held.
     Pointer {
         /// Across.
         x: i32,
         /// Up.
         y: i32,
+        /// The buttons: Adjust, Menu, Select from bit 0.
+        buttons: u32,
+    },
+    /// The mouse moved by so much, in OS units before the multipliers
+    /// `OS_Word` 21,2 sets, with these buttons held: for a host that reports
+    /// movement rather than a place.
+    Motion {
+        /// Across.
+        dx: i32,
+        /// Up.
+        dy: i32,
         /// The buttons: Adjust, Menu, Select from bit 0.
         buttons: u32,
     },
@@ -145,7 +153,7 @@ impl Input {
             rings,
             soft: VecDeque::new(),
             owed: None,
-            pointer: (0, 0, 0),
+            mouse: crate::mouse::Mouse::new(),
         })
     }
 
@@ -156,6 +164,17 @@ impl Input {
     /// Ends a function key's expansion part way.
     pub(crate) fn end_soft_key(&mut self) {
         self.soft.clear();
+    }
+
+    /// Buffers a mouse packet where the whole of it fits.
+    pub(crate) fn buffer_mouse_packet(&mut self, packet: [u8; PACKET]) {
+        if let Some(ring) = self.ring(MOUSE) {
+            if ring.capacity() - ring.len >= PACKET {
+                for byte in packet {
+                    ring.push(byte);
+                }
+            }
+        }
     }
 
     /// The next buffered mouse packet: position, buttons and time.
@@ -182,6 +201,8 @@ impl Input {
 pub(crate) enum Continuation {
     /// `OS_Byte` 129's timed read: when it times out.
     Inkey { deadline: u64 },
+    /// A wait for the clock alone: when it ends.
+    Until { deadline: u64 },
     /// `OS_ReadLine`: its buffer and the characters stored in it.
     Line { buffer: u32, length: u32 },
     /// `OS_Confirm`.
@@ -440,48 +461,9 @@ impl Os<'_> {
                     self.call_vector(vectors::KEY, &mut regs, Entry::SupervisorNoIrq)?;
                 }
                 InputEvent::Pointer { x, y, buttons } => self.pointer_moved(x, y, buttons)?,
+                InputEvent::Motion { dx, dy, buttons } => self.mouse_moved_by(dx, dy, buttons)?,
             }
         }
-        Ok(())
-    }
-
-    /// The pointer at `x`, `y` with `buttons`: a change of buttons buffered
-    /// as a packet, with the mouse event.
-    pub(crate) fn pointer_moved(&mut self, x: i32, y: i32, buttons: u32) -> Result<(), Unwind> {
-        let changed = self.world.input.pointer.2 != buttons;
-        self.world.input.pointer = (x, y, buttons);
-        if !changed {
-            return Ok(());
-        }
-        let time = self.now32();
-        let mut packet = [0u8; PACKET];
-        packet[..2].copy_from_slice(&x.to_le_bytes()[..2]);
-        packet[2..4].copy_from_slice(&y.to_le_bytes()[..2]);
-        packet[4] = buttons.to_le_bytes()[0];
-        packet[5..].copy_from_slice(&time.to_le_bytes());
-        if let Some(ring) = self.world.input.ring(MOUSE) {
-            if ring.capacity() - ring.len >= PACKET {
-                for byte in packet {
-                    ring.push(byte);
-                }
-            }
-        }
-        let mut event = Regs::new([
-            MOUSE_EVENT,
-            x.cast_unsigned(),
-            y.cast_unsigned(),
-            buttons,
-            time,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ]);
-        self.raise_event(&mut event)?;
         Ok(())
     }
 
@@ -642,11 +624,17 @@ impl Os<'_> {
         }
         let nibble = code & 0xF;
         // Copy and the cursor keys are the copy cursor's while `OS_Byte` 4
-        // is 0, which the VDU drivers move, so they read as nothing; at 1
-        // they read 135 to 139, and at 2 as function keys 11 to 15.
+        // is 0: the VDU drivers move it, and only Copy reads, the character
+        // under it. At 1 they read 135 to 139, and at 2 as function keys 11
+        // to 15.
         if CURSOR_KEYS.contains(&code) {
             match self.byte_var(var::CURSOR_EDIT) {
-                0 => return Ok(None),
+                0 => {
+                    return match self.world.vdu {
+                        Some(vdu) => (vdu.edit)(self, code - CURSOR_KEYS.start()),
+                        None => Ok(None),
+                    }
+                }
                 1 => return Ok(Some(code - CURSOR_KEYS.start() + 135)),
                 _ => {}
             }
@@ -699,28 +687,64 @@ impl Os<'_> {
         if self.callbacks_while_idle()? {
             return Ok(());
         }
+        if let Some(wait) = self.suspended(Wait::Input { until: deadline }, continuation) {
+            return Err(wait);
+        }
+        self.host_wait(deadline)
+    }
+
+    /// The SWI being performed left to be performed again when `wait` is
+    /// over, carrying on from `continuation`, where it is a program's own
+    /// `SWI` that has run no guest code and is not one the kernel performs
+    /// for another: the unwind that leaves it.
+    pub(crate) fn suspended(
+        &mut self,
+        wait: Wait,
+        continuation: Option<Continuation>,
+    ) -> Option<Fail> {
         let resumable =
             self.world.depth == 0 && !self.world.guest_called && self.world.kernel_calls == 0;
-        if let Some(number) = self
+        let number = self
             .world
             .frame
             .and_then(|frame| frame.swi)
-            .filter(|_| resumable)
-        {
-            let swi = self.world.swi_at;
-            self.world.processor.cpu().set_reg(Reg::PC, swi);
-            self.world.continuation = continuation;
-            self.world.resume = Some((swi, number));
-            return Err(Fail::Unwind(Unwind::Wait(Wait::Input { until: deadline })));
-        }
+            .filter(|_| resumable)?;
+        let swi = self.world.swi_at;
+        self.world.processor.cpu().set_reg(Reg::PC, swi);
+        self.world.continuation = continuation;
+        self.world.resume = Some((swi, number));
+        Some(Fail::Unwind(Unwind::Wait(wait)))
+    }
+
+    /// Waits here for the host's next input or the next timed work, the
+    /// interrupt the clock asserted meanwhile taken: for a SWI that must not
+    /// be performed again, waiting on what the keys do.
+    ///
+    /// # Errors
+    ///
+    /// The unwind the host's stop or an interrupt's work starts.
+    pub fn await_input(&mut self) -> Result<(), Fail> {
+        self.host_wait(None)
+    }
+
+    /// The host waits for input, the next timed work or `deadline`, and the
+    /// interrupt its waking is — the clock's or the keyboard's — is taken, so
+    /// input that comes before the clock moves is delivered rather than
+    /// waited on again.
+    pub(crate) fn host_wait(&mut self, deadline: Option<u64>) -> Result<(), Fail> {
         let until = match (deadline, self.next_deadline()) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        if self.world.host.wait(until) == crate::os::Pulse::Stop {
+        let ending = if deadline.is_some() {
+            Ending::Clock
+        } else {
+            Ending::Input
+        };
+        if self.world.host.wait(until, ending) == crate::os::Pulse::Stop {
             return Err(Fail::Unwind(Unwind::Stopped));
         }
-        self.tick();
+        self.world.processor.set_irq(true);
         self.take_interrupt()?;
         Ok(())
     }

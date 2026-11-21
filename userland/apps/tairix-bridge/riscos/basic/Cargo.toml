@@ -26,11 +26,8 @@ tairix-openbasic = { path = "../../../../../lib/openbasic", version = "=0.0.0" }
 [dev-dependencies]
 # The fuzz harness's seeded generator and budget.
 tairix-fuzzseed = { path = "../../../../../tests/fuzzseed", version = "=0.0.0" }
-# The filing system a session's programs are loaded and saved through.
-tairix-riscos-filing = { path = "../filing", version = "=0.0.0" }
+# The filing system a session's programs are loaded and saved through, and
+# the session a test makes.
+tairix-riscos-filing = { path = "../filing", version = "=0.0.0", features = ["test-support"] }
 # The in-memory tree the replay's HostFS disc is served over.
 tairix-fscopy = { path = "../../../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }
-# What a session is made with.
-tairix-tz = { path = "../../../../../lib/tz", version = "=0.0.0" }
-tairix-reclaim = { path = "../../../../../lib/reclaim", version = "=0.0.0" }
-tairix-log = { path = "../../../../../lib/log", version = "=0.0.0" }

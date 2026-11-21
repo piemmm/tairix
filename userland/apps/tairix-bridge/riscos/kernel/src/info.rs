@@ -397,7 +397,7 @@ impl Os<'_> {
                 }
                 regs.r[0] = bytes.min(480 * 1024);
             }
-            1 => self.configured_display(regs)?,
+            1 => self.read_display(regs)?,
             2 => regs.r[..5].copy_from_slice(&[NO_CHIPS, 0, 0, 0, 0]),
             3..=5 => {
                 regs.r[0] = 0;
@@ -449,14 +449,33 @@ impl Os<'_> {
         Ok(())
     }
 
-    /// `OS_ReadSysInfo` 1: the configured mode, monitor type and sync, an
-    /// automatic one as the display's driver describes the display, else as
-    /// [`AUTO_DISPLAY`].
-    fn configured_display(&mut self, regs: &mut Regs) -> Result<(), Fail> {
-        regs.r[0] = self.read_spread(&cmos::MODE)?;
-        regs.r[1] = self.read_spread(&cmos::MONITOR_TYPE)?;
-        regs.r[2] = self.read_spread(&cmos::SYNC)?;
-        if regs.r[..3].contains(&u32::MAX) {
+    /// `OS_ReadSysInfo` 1: the configured mode and sync, and the current
+    /// monitor type, which the VDU drivers keep where they are.
+    fn read_display(&mut self, regs: &mut Regs) -> Result<(), Fail> {
+        let [mode, monitor, sync] = self.configured_display()?;
+        regs.r[0] = mode;
+        regs.r[1] = match self.world.vdu {
+            Some(vdu) => (vdu.monitor)(self),
+            None => monitor,
+        };
+        regs.r[2] = sync;
+        Ok(())
+    }
+
+    /// The configured mode, monitor type and sync, an automatic setting as
+    /// the display's driver describes the display, else as one comes to
+    /// that no driver describes.
+    ///
+    /// # Errors
+    ///
+    /// What reading CMOS or the service gives.
+    pub fn configured_display(&mut self) -> Result<[u32; 3], Fail> {
+        let mut display = [
+            self.read_spread(&cmos::MODE)?,
+            self.read_spread(&cmos::MONITOR_TYPE)?,
+            self.read_spread(&cmos::SYNC)?,
+        ];
+        if display.contains(&u32::MAX) {
             let mut lead = Regs::new([0, 0x76, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
             self.service(&mut lead)?;
             let described = if lead.r[1] == 0 {
@@ -464,13 +483,13 @@ impl Os<'_> {
             } else {
                 AUTO_DISPLAY
             };
-            for (slot, value) in regs.r[..3].iter_mut().zip(described) {
+            for (slot, value) in display.iter_mut().zip(described) {
                 if *slot == u32::MAX {
                     *slot = value;
                 }
             }
         }
-        Ok(())
+        Ok(display)
     }
 
     /// One `OS_ReadSysInfo` 6 value: an address the kernel has, a count, or
@@ -488,6 +507,10 @@ impl Os<'_> {
             24 | 86 => crate::vectors::COUNT,
             70 => zero + zeropage::DOMAIN_ID,
             71 => zero + crate::byte::VARIABLES - 0xA6,
+            72 => zero + crate::output::workspace::FOREGROUND,
+            73 => zero + crate::output::workspace::BACKGROUND,
+            83 => zero + crate::output::workspace::ECF_Y_OFFSET,
+            84 => zero + crate::output::workspace::ECF_SHIFT,
             74 => zero + zeropage::DEBUGGER_SPACE,
             75 => zeropage::DEBUGGER_SPACE_SIZE,
             76 => zero + zeropage::CANNOT_RESET,
@@ -1050,11 +1073,17 @@ impl Os<'_> {
     /// Where the caller's processor vectors and zero page are: at zero for
     /// 26-bit code, at &FFFF0000 for 32-bit, as RISC OS 5 relocates them on
     /// the processors that profile models.
-    pub(crate) fn vector_base(&mut self) -> u32 {
+    pub fn vector_base(&mut self) -> u32 {
         match self.caller_bits() {
             Bits::Bit26 => 0,
             Bits::Bit32 => HIGH_ZERO_PAGE,
         }
+    }
+
+    /// The layout the session was made with.
+    #[must_use]
+    pub const fn layout(&self) -> &'static crate::memory::layout::Layout {
+        self.memory.layout()
     }
 
     /// The top of the current task's application space.

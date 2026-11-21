@@ -7,9 +7,10 @@
 
 mod common;
 
-use common::{disc_file, run_hosted, DISC};
+use common::run_hosted;
 use tairix_fscopy::fixture::Tree;
 use tairix_riscos_basic::corpus::session;
+use tairix_riscos_filing::session::{disc_file, DISC};
 
 const SESSIONS: &str = include_str!("riscos5/sessions.txt");
 const TYPED: &str = include_str!("riscos5/typed.txt");

@@ -9,7 +9,7 @@ use tairix_fscopy::tree::Roots;
 use tairix_riscos_filing::hostfs::protocol::Request;
 use tairix_riscos_filing::hostfs::server::{Given, Server};
 use tairix_riscos_kernel::input::InputEvent;
-use tairix_riscos_kernel::os::{Host, Kernel, Pulse};
+use tairix_riscos_kernel::os::{Ending, Host, Kernel, Pulse};
 
 /// The host's real time: 2020, in centiseconds since 1900.
 pub const NOW: u64 = 0x58_0000_0000;
@@ -33,7 +33,7 @@ impl<F: FnMut(&[u8], &mut Vec<u8>) -> bool> Host for Relay<F> {
         Pulse::Continue
     }
 
-    fn wait(&mut self, _: Option<u64>) -> Pulse {
+    fn wait(&mut self, _: Option<u64>, _: Ending) -> Pulse {
         Pulse::Stop
     }
 

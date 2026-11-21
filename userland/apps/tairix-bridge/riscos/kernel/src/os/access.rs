@@ -66,6 +66,47 @@ impl Os<'_> {
         Ok(())
     }
 
+    /// The words of the page holding `address`, which a privileged mode may
+    /// write, and the index of the word holding `address` among them: a
+    /// writer of many words pays one lookup a page. Whatever watches the
+    /// page is told it is written.
+    ///
+    /// # Errors
+    ///
+    /// The abort an access there takes.
+    pub fn page_words_mut(
+        &mut self,
+        address: u32,
+    ) -> Result<(&mut [u32; FRAME_WORDS], usize), Fail> {
+        let Some((frame, offset)) = page_of(self, address, true)
+            .filter(|&(frame, _)| self.memory.frame_words(frame).is_some())
+        else {
+            return Err(self.aborted(address));
+        };
+        self.memory
+            .frame_words_mut(frame)
+            .map(|words| (words, offset / 4))
+            .ok_or(Fail::Unwind(super::Unwind::Ended(super::Ended::Fault)))
+    }
+
+    /// The words of the page holding `address`, which a privileged mode may
+    /// read, and the index of the word holding `address` among them.
+    ///
+    /// # Errors
+    ///
+    /// The abort an access there takes.
+    pub fn page_words(&mut self, address: u32) -> Result<(&[u32; FRAME_WORDS], usize), Fail> {
+        let Some((frame, offset)) = page_of(self, address, false)
+            .filter(|&(frame, _)| self.memory.frame_words(frame).is_some())
+        else {
+            return Err(self.aborted(address));
+        };
+        self.memory
+            .frame_words(frame)
+            .map(|words| (words, offset / 4))
+            .ok_or(Fail::Unwind(super::Unwind::Ended(super::Ended::Fault)))
+    }
+
     /// `at` moved on by `n` bytes of a page; an access that would wrap past
     /// the top of memory aborts there.
     fn advance(&mut self, at: u32, n: usize) -> Result<u32, Fail> {

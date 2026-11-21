@@ -450,7 +450,10 @@ impl Os<'_> {
             Special::Mode => self.configure_spread(&cmos::MODE, at).map(drop),
             Special::Sync => self.configure_spread(&cmos::SYNC, at).map(drop),
             Special::MonitorType => {
-                self.configure_spread(&cmos::MONITOR_TYPE, at)?;
+                let monitor = self.configure_spread(&cmos::MONITOR_TYPE, at)?;
+                if let Some(vdu) = self.world.vdu {
+                    (vdu.set_monitor)(self, monitor);
+                }
                 let mut changed = Regs::default();
                 changed.r[1] = MODE_FILE_CHANGED;
                 self.service(&mut changed)?;

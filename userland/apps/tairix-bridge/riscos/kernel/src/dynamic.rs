@@ -73,6 +73,42 @@ fn clamped(bytes: u64) -> u32 {
 }
 
 impl Os<'_> {
+    /// Makes one of the kernel's own areas, its number among those no
+    /// program may ask for, and grows it to its initial size, its handler
+    /// called as for any grow.
+    ///
+    /// # Errors
+    ///
+    /// The error `OS_DynamicArea` 0 gives for the same refusal.
+    pub fn create_kernel_area(
+        &mut self,
+        request: &crate::memory::Create<'_>,
+    ) -> Result<crate::memory::Created, Fail> {
+        match self.memory.create_kernel_area(request, self.world) {
+            Ok(created) => Ok(created),
+            Err(error) => Err(self.fail_area(error)),
+        }
+    }
+
+    /// Watches area `number`'s pages for the display: see
+    /// [`crate::memory::Memory::watch_area_for_display`].
+    ///
+    /// # Errors
+    ///
+    /// The error `OS_DynamicArea` gives for the refusal.
+    pub fn watch_area_for_display(&mut self, number: u32) -> Result<(), Fail> {
+        match self.memory.watch_area_for_display(number) {
+            Ok(()) => Ok(()),
+            Err(error) => Err(self.fail_area(error)),
+        }
+    }
+
+    /// Hands `each` the offset of every granule of area `number` stored
+    /// into since last asked.
+    pub fn take_display_damage(&mut self, number: u32, each: impl FnMut(u32)) {
+        self.memory.take_display_damage(number, each);
+    }
+
     /// The error `error` gives: the kernel's, or the handler's own block.
     pub(crate) fn fail_area(&mut self, error: AreaError) -> Fail {
         match (area_error(error), error) {

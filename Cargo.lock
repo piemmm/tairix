@@ -4228,6 +4228,7 @@ dependencies = [
  "tairix-raster",
  "tairix-rt",
  "tairix-sandbox",
+ "tairix-teletext",
  "tairix-theme",
  "tairix-util",
  "tairix-vdu",
@@ -4670,14 +4671,11 @@ version = "0.0.0"
 dependencies = [
  "tairix-fscopy",
  "tairix-fuzzseed",
- "tairix-log",
  "tairix-openbasic",
- "tairix-reclaim",
  "tairix-riscos-arm",
  "tairix-riscos-filing",
  "tairix-riscos-kernel",
  "tairix-softfloat",
- "tairix-tz",
 ]
 
 [[package]]
@@ -4717,6 +4715,22 @@ dependencies = [
  "tairix-tz",
  "tairix-tzcompile",
  "tairix-unicode",
+ "tairix-util",
+ "tairix-vdu",
+]
+
+[[package]]
+name = "tairix-riscos-vdu"
+version = "0.0.0"
+dependencies = [
+ "tairix-collections",
+ "tairix-fscopy",
+ "tairix-fuzzseed",
+ "tairix-riscos-arm",
+ "tairix-riscos-basic",
+ "tairix-riscos-filing",
+ "tairix-riscos-kernel",
+ "tairix-teletext",
  "tairix-util",
  "tairix-vdu",
 ]
@@ -5449,6 +5463,10 @@ dependencies = [
  "tairix-rt",
  "tairix-util",
 ]
+
+[[package]]
+name = "tairix-teletext"
+version = "0.0.0"
 
 [[package]]
 name = "tairix-telnet"
@@ -10156,6 +10174,7 @@ dependencies = [
  "tairix-riscos-arm",
  "tairix-riscos-basic",
  "tairix-riscos-kernel",
+ "tairix-riscos-vdu",
  "tairix-sandbox",
  "tairix-settings",
  "tairix-shaders",

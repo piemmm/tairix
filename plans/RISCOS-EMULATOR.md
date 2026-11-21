@@ -66,7 +66,8 @@ an application's own documents folder, the reference harness);
 | RO20.4 | The machine interface and the system: `CALL` and `USR` with the routine table on host pages, `SYS`, `OSCLI` and `*` lines; `PRINT`, `INPUT`, `GET` and `INKEY`, files, `TIME` and `TIME$`; the graphics, sound and `MOUSE` statements as the VDU stream and the SWIs they are | done |
 | RO20.5 | The assembler: `[` … `]`, `OPT`, labels, `ADR`, the `EQU` and `DC` directives, `ALIGN`, and every mnemonic RISC OS 5's BASIC assembler accepts, encoded through `arm`'s tables | done |
 | RO20.6 | The remaining commands: `AUTO`, `RENUMBER`, `DELETE`, `HELP`, and `EDIT`, which starts the separate ARM BASIC Editor module as RISC OS 5's BASIC does | done |
-| RO21 | The VDU drivers: modes, the VDU stream, `OS_Plot`, palettes, screen banks, screen memory | planned |
+| RO21.1 | The VDU drivers, each rule recorded first: modes, the VDU stream, `OS_Plot`, palettes, screen banks, screen memory, Teletext, the pointer, the ScreenModes module | done |
+| RO21.2 | Segments (`PLOT` &A8–&AF): the chord rule as recorded, with the known difference at some chord ends that §8 states | done |
 | RO22 | Sprites and JPEGs: `OS_SpriteOp`, SpriteExtend, output to sprites | planned |
 | RO23 | ColourTrans | planned |
 | RO24 | Draw and DrawFile | planned |
@@ -1063,10 +1064,10 @@ is fuzzed.
     number arguments, and `TO` with the flags.
   - `OSCLI` and `*` lines.
   - `POS` and `VPOS`, and the prompt's choice of opening a line, read the
-    text cursor through `OS_Byte` 134, which the VDU drivers answer (RO21).
-    Until they do, `POS` and `VPOS` meet the OS's error and the prompt takes
-    the cursor to be at a line's start, as genuine BASIC finds it under
-    output redirection.
+    text cursor through `OS_Byte` 134, which the VDU drivers answer. A
+    session without them has `POS` and `VPOS` meet the OS's error and the
+    prompt take the cursor to be at a line's start, as genuine BASIC finds
+    it under output redirection.
 - **The assembler.** `[` … `]` with `OPT`, labels, `ADR`, the `EQU` and `DC`
   directives and `ALIGN`, accepting the mnemonics RISC OS 5's BASIC assembler
   accepts. It encodes through `arm`'s tables (§2.2).
@@ -1136,9 +1137,32 @@ is fuzzed.
   observation:
   - moves and dotted lines with their end rules; points;
   - triangles, rectangles and parallelograms;
-  - circles, arcs, segments, sectors and ellipses;
+  - circles, their squared radius softened by its root; ellipses in RISC OS's
+    fixed point, the width's ratio to the height to eight fractional bits,
+    each row's root to eight, the shear stepped at sixteen and cut toward
+    nought, a row widened to meet the one above where the shear parts them;
+  - arcs ending where the ray toward the end point leaves the circle, moved
+    up its column to the outline; sectors whose rays run a pixel past a
+    corner of the circle where the sweep closes on them, in the end's first
+    and third quadrants and the start's second and fourth; segments whose
+    chord runs to the end direction's meeting with the circle, cut toward
+    nought, and on to the row nearest the true meeting in the first and
+    third quadrants — the one rule not held exactly, an accepted known
+    difference: about one recorded geometry in eight differs from RISC OS 5's
+    by a pixel or a few at the chord's end, mostly where the arc ends in the
+    second or fourth quadrant (RO21.2);
   - the two flood fills; block copy and move;
   - every GCOL action.
+  - Every shape is worked out within the window alone — lines and polygon
+    edges from their places along them, a round's rows as asked for, a ray's
+    exit by halving — so a guest's shape far larger than the screen costs
+    what the window holds. A point more than 2²⁸ pixels out is held there.
+  - Sprite plots, `PLOT` &E8–&EF, pass to `UKPlotV` with the codes the
+    drivers lack until RO22 draws them.
+- **The cursors** are drawn over the screen by the front end, never EORed
+  into its memory as genuine RISC OS does, so a program reading its screen
+  never meets them there: the one deliberate departure from RISC OS 5's
+  screen.
 - **Sprites** (RO22):
   - `OS_SpriteOp`, every reason, on system and user areas by name or pointer.
     Areas, headers, mode words, palettes and masks are read through `lib/image`'s
@@ -1604,7 +1628,8 @@ with tests that fail before and pass after (`AGENTS.md` §2.2, §2.18). A new
     performs, the rest passed to the unknown-VDU 23 vector, and characters
     defined from 32.
   - RISC OS 5's numbered modes 0–53 with every mode variable
-    `OS_ReadModeVariable` reads. Mode 7 is RISC OS 5's 256-colour Teletext.
+    `OS_ReadModeVariable` reads. Mode 7 is RISC OS 5's sixteen-colour
+    Teletext, 640 by 500.
     Modes 3, 6 and 7 are text modes, in which no sprite may be.
   - The 8×8 system character set in TAIRiX's own designs: OpenMicro's for
     32–126, and new ones in its style for the rest. RISC OS's arrangement runs

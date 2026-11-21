@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use tairix_fuzzseed::Prng;
 use tairix_riscos_kernel::input::InputEvent;
-use tairix_riscos_kernel::os::{Host, Kernel, Pulse};
+use tairix_riscos_kernel::os::{Ending, Host, Kernel, Pulse};
 
 struct Still {
     clock: Rc<Cell<u64>>,
@@ -33,7 +33,7 @@ impl Host for Still {
         false
     }
 
-    fn wait(&mut self, until: Option<u64>) -> Pulse {
+    fn wait(&mut self, until: Option<u64>, _: Ending) -> Pulse {
         if let Some(until) = until {
             self.clock.set(self.clock.get().max(until));
         }

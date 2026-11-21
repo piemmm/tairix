@@ -28,6 +28,8 @@ pub mod hostfs;
 pub mod obey;
 pub mod ramfs;
 pub(crate) mod script;
+#[cfg(feature = "test-support")]
+pub mod session;
 
 use tairix_riscos_kernel::module::Builtin;
 

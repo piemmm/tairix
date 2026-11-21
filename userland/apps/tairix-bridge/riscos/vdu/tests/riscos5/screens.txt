@@ -1,0 +1,543 @@
+# The VDU drivers' screens: each case run by genuine RISC OS 5's BASIC V on
+# the screen, and what it read and drew recorded, which the replay holds the
+# drivers to. A case opens `case NAME`; its lines follow, numbered 10 to
+# 8999. The frame (`tairix_riscos_vdu::corpus::program`) defines every
+# character from 32 to 255 as the first-party font draws it, gives the case
+# `PROCmode`, `PROCscreen`, `PROCr`, `FNm`, `FNv` and `FNs`, and saves the
+# screen at the end. A case that defines characters of its own defines the
+# font again before it ends, since the frame refuses a screen whose
+# characters no longer match the font. The cases run one after another in
+# one session, as the replay runs them, so what a case leaves that a mode
+# change does not reset is the next case's to find.
+
+case mode_variables_every_numbered_mode
+10 SYS "OS_ChangeDynamicArea",2,&200000
+20 FOR m%=0 TO 53:PROCmode(m%):PROCr("m"+STR$m%,FNm(0))
+30 FOR v%=1 TO 12:PROCr(" v"+STR$v%,FNm(v%)):NEXT
+40 FOR v%=162 TO 170:IF v%<>166 THEN PROCr(" w"+STR$v%,FNv(v%))
+50 NEXT:PROCr(" ecfy",FNz(84)):PROCr(" ecfx",FNz(83))
+60 NEXT:PROCmode(25)
+70 GOTO 9000
+80 DEFFNz(i%):LOCAL a%:SYS "OS_ReadSysInfo",6,0,i% TO ,,a%:=!a%
+
+case lines_every_octant
+10 PROCmode(25)
+20 RESTORE 50:FOR i%=1 TO 36:READ x%,y%
+30 MOVE 640,480:DRAW x%,y%:NEXT
+40 GOTO 9000
+50 DATA 1140,480,1132,552,1109,623,1073,690,1023,749,961,801
+60 DATA 890,843,811,874,726,893,640,900,553,893,468,874
+70 DATA 390,843,318,801,256,749,206,690,170,623,147,552
+80 DATA 140,480,147,407,170,336,206,270,256,210,318,158
+90 DATA 390,116,468,85,553,66,640,60,726,66,811,85
+100 DATA 890,116,961,158,1023,210,1073,270,1109,336,1132,407
+
+case lines_short_and_steep
+10 PROCmode(25)
+20 FOR i%=0 TO 15:MOVE 40+i%*76,40:DRAW 40+i%*76+i%*2,40+i%*24:NEXT
+30 FOR i%=0 TO 15:MOVE 40+i%*76,600:DRAW 40+i%*80-i%*2,600-i%*6:NEXT
+40 MOVE 100,900:DRAW 100,900:MOVE 200,900:DRAW 203,901
+
+case line_end_rules
+10 PROCmode(25)
+20 FOR t%=0 TO 7:y%=40+t%*114
+30 MOVE 60,y%:PLOT t%*8+5,300,y%+40:MOVE 400,y%:PLOT t%*8+5,410,y%+100
+40 MOVE 800,y%+90:PLOT t%*8+5,1000,y%:MOVE 1100,y%:PLOT t%*8+5,1100,y%+8:NEXT
+
+case dotted_lines_and_patterns
+10 PROCmode(25)
+20 FOR i%=0 TO 7:MOVE 40,40+i%*60:PLOT 21,1200,60+i%*60:NEXT
+30 VDU 23,6,&F0,&CC,&AA,&81,&FF,0,&F3,&18:SYS "OS_Byte",163,242,23
+40 FOR i%=0 TO 5:MOVE 40,600+i%*50:PLOT 61,600,620+i%*50:PLOT 61,1200,600+i%*50:NEXT
+50 SYS "OS_Byte",163,242,0:MOVE 40,920:PLOT 21,1200,920
+
+case points_and_relative_moves
+10 PROCmode(25)
+20 FOR i%=0 TO 40:PLOT 69,i%*30,i%*22:NEXT
+30 MOVE 100,900:FOR i%=0 TO 20:PLOT 65,8,-4:NEXT
+40 MOVE 600,600:PLOT 0,10,10:PLOT 1,40,0:PLOT 1,0,40:PLOT 1,-40,0
+50 PROCr("gcsx",FNv(138)):PROCr("gcsy",FNv(139)):PROCr("gcsix",FNv(144)):PROCr("gcsiy",FNv(145))
+60 PROCr("oldx",FNv(142)):PROCr("oldy",FNv(143)):PROCr("olderx",FNv(140)):PROCr("oldery",FNv(141))
+
+case plot_inverse_and_background
+10 PROCmode(27)
+20 GCOL 0,5:RECTANGLE FILL 100,100,1000,700
+30 GCOL 0,3:GCOL 0,128+9
+40 FOR i%=0 TO 9:MOVE 50+i%*120,50:PLOT 6,80+i%*120,900:PLOT 7,50+i%*120+40,900:NEXT
+50 MOVE 50,850:PLOT 71,1200,850:PLOT 70,1200,820
+
+case triangles
+10 PROCmode(25)
+20 MOVE 100,100:MOVE 500,150:PLOT 85,300,600
+30 MOVE 700,900:MOVE 1200,880:PLOT 85,1000,500
+40 MOVE 600,100:MOVE 620,105:PLOT 85,1250,110
+50 MOVE 50,700:MOVE 60,950:PLOT 85,55,720
+60 MOVE 300,700:MOVE 300,700:PLOT 85,300,700
+
+case rectangles_and_parallelograms
+10 PROCmode(25)
+20 MOVE 100,100:PLOT 101,300,200:MOVE 500,300:PLOT 101,400,150
+30 MOVE 100,500:MOVE 400,520:PLOT 117,450,800
+40 MOVE 900,100:MOVE 1200,300:PLOT 117,1100,600
+50 MOVE 700,700:PLOT 101,700,700:MOVE 800,900:PLOT 97,-50,-30
+
+case circles_and_discs
+10 PROCmode(25)
+20 FOR r%=4 TO 204 STEP 40:MOVE 300,300:PLOT 149,300+r%,300:NEXT
+30 FOR r%=10 TO 160 STEP 30:MOVE 700+r%*3,300:PLOT 157,700+r%*3,300+r%:NEXT
+40 CIRCLE 300,750,3:CIRCLE 400,750,1:CIRCLE FILL 500,750,7:CIRCLE 900,750,121
+
+case circles_in_tall_pixels
+10 PROCmode(12)
+20 FOR r%=8 TO 208 STEP 50:CIRCLE 300,500,r%:NEXT
+30 FOR r%=20 TO 200 STEP 60:CIRCLE FILL 800+r%*2,500,r%:NEXT
+
+case arcs
+10 PROCmode(25)
+20 MOVE 200,200:MOVE 350,200:PLOT 165,200,350
+30 MOVE 600,200:MOVE 700,300:PLOT 165,450,250
+40 MOVE 1000,200:MOVE 1100,200:PLOT 165,1100,190
+50 MOVE 200,600:MOVE 200,750:PLOT 165,330,520
+60 MOVE 600,600:MOVE 500,500:PLOT 165,700,700
+70 MOVE 1000,600:MOVE 1000,700:PLOT 165,1000,800
+
+case segments
+10 PROCmode(25)
+20 MOVE 200,200:MOVE 350,200:PLOT 173,200,350
+30 MOVE 600,200:MOVE 700,300:PLOT 173,450,250
+40 MOVE 1000,200:MOVE 900,300:PLOT 173,1100,100
+50 MOVE 200,600:MOVE 330,520:PLOT 173,200,750
+60 MOVE 600,650:MOVE 700,650:PLOT 173,500,640
+70 MOVE 1000,650:MOVE 1100,650:PLOT 173,1100,660
+
+case sectors
+10 PROCmode(25)
+20 MOVE 200,200:MOVE 300,200:PLOT 181,200,300
+30 MOVE 600,200:MOVE 500,250:PLOT 181,650,100
+40 MOVE 1000,200:MOVE 1100,250:PLOT 181,1050,300
+50 MOVE 200,650:MOVE 330,650:PLOT 181,320,600
+60 MOVE 600,650:MOVE 700,600:PLOT 181,700,700
+70 MOVE 1000,650:MOVE 1000,750:PLOT 181,1100,650
+
+case ellipses
+10 PROCmode(25)
+20 MOVE 300,300:MOVE 500,300:PLOT 197,350,450
+30 MOVE 900,300:MOVE 1100,300:PLOT 205,950,400
+40 MOVE 300,750:MOVE 350,750:PLOT 197,300,900
+50 MOVE 900,750:MOVE 1150,750:PLOT 205,800,800
+60 ELLIPSE 640,480,100,40:ELLIPSE FILL 640,120,60,20
+
+case arc_ends_where_the_ray_leaves
+10 PROCmode(25)
+20 RESTORE 100:FOR i%=0 TO 42:READ a%,b%,c%,d%:x%=80+160*(i% MOD 8):y%=80+160*(i% DIV 8)
+30 MOVE x%,y%:MOVE x%+2*a%,y%+2*b%:PLOT 165,x%+2*c%,y%+2*d%:NEXT
+100 DATA -3,6,3,2,-3,-10,8,8,-2,22,-24,-3,-15,5,4,16,-6,-2,5,3,3,23,20,-4,-6,-23,23,-9,-5,-23,24,-2,20,-4,-35,-19,-5,4,-2,-2
+110 DATA -3,-19,-15,-11,-15,1,-12,-7,12,-1,-4,12,-2,-23,-46,1,1,23,-16,-13,6,-5,-6,-6,-6,4,-13,-5,-1,-9,10,-1,-5,19,7,19,6,-11,13,2
+120 DATA -6,3,7,3,22,-2,17,15,4,-6,-14,-3,-4,8,9,3,-8,7,-8,6,23,12,-22,15,-12,-19,5,-23,-7,8,12,-2,15,-15,15,-11,3,-9,-7,-4
+130 DATA 0,-22,-19,10,-11,-10,13,-4,14,17,20,-2,-15,-10,6,-17,-13,1,26,3,0,-7,2,-6,-7,5,1,-9,9,-11,7,2,3,-20,-9,16,-9,17,19,3
+140 DATA 7,7,-5,-9,5,6,7,-3,-5,-14,-18,24
+
+case segment_chords
+10 PROCmode(25)
+20 RESTORE 100:FOR i%=0 TO 29:READ a%,b%,c%,d%:x%=80+160*(i% MOD 8):y%=80+160*(i% DIV 8)
+30 MOVE x%,y%:MOVE x%+2*a%,y%+2*b%:PLOT 173,x%+2*c%,y%+2*d%:NEXT
+100 DATA -6,4,-13,-5,15,5,-7,-16,-15,1,-12,-7,0,-22,-19,10,20,-4,-35,-19,-3,-10,8,8,-6,-2,5,3,22,-2,17,15,23,12,-22,15,-6,3,7,3
+110 DATA -2,-23,-46,1,6,-11,13,2,-2,22,-24,-3,-5,4,-2,-2,1,23,-16,-13,0,-17,-5,18,-7,8,12,-2,3,23,20,-4,12,-10,-13,-3,-15,20,19,12
+120 DATA -7,22,-9,18,10,-5,-1,11,7,10,-14,-20,-11,-10,13,-4,-10,4,1,10,14,17,20,-2,-5,-16,34,-2,1,-12,-11,-5,18,1,-6,-17,-7,5,1,-9
+
+case sector_rays_and_corners
+10 PROCmode(25)
+20 RESTORE 100:FOR i%=0 TO 47:READ a%,b%,c%,d%:x%=80+160*(i% MOD 8):y%=80+160*(i% DIV 8)
+30 MOVE x%,y%:MOVE x%+2*a%,y%+2*b%:PLOT 181,x%+2*c%,y%+2*d%:NEXT
+100 DATA -13,10,6,13,3,-9,-7,-4,-3,6,3,2,0,12,3,5,15,5,-7,-16,-10,4,1,10,18,1,-6,-17,-6,-5,-7,4,0,-22,-19,10,-5,19,7,19
+110 DATA -3,-10,8,8,-15,5,4,16,-5,4,-2,-2,4,-6,-14,-3,-13,1,26,3,-9,2,0,9,14,17,20,-2,6,-5,-6,-6,-10,-8,-12,4,6,7,9,-3
+120 DATA 14,-10,9,-15,-5,-14,-18,24,12,-10,-13,-3,-6,5,-1,4,-6,-2,5,3,-10,7,6,1,20,12,45,10,5,6,7,-3,7,7,-5,-9,-7,1,-5,5
+130 DATA -3,-19,-15,-11,-4,8,9,3,3,-20,-9,16,0,-17,-5,18,7,10,-14,-20,4,12,0,-13,6,-11,13,2,15,-15,15,-11,-7,12,-12,-2,5,18,-13,-14
+140 DATA -20,-3,-13,-12,-3,7,-5,7,-6,8,-3,4,-17,-17,-16,-18,22,8,23,12,-8,7,-8,6,13,17,-17,13,-10,1,4,-9
+
+case ellipses_tall_and_in_fixed_point
+10 PROCmode(25)
+20 MOVE 80,480:MOVE 130,480:PLOT 197,80,630
+30 MOVE 200,480:MOVE 250,480:PLOT 205,200,780
+40 MOVE 300,480:MOVE 320,480:PLOT 197,300,680
+50 MOVE 360,480:MOVE 370,480:PLOT 205,360,680
+60 MOVE 440,480:MOVE 466,480:PLOT 197,450,820
+70 MOVE 540,480:MOVE 540,480:PLOT 205,570,560
+80 MOVE 840,600:MOVE 1042,600:PLOT 197,840,802
+90 MOVE 1180,480:MOVE 1270,480:PLOT 205,1180,726
+100 MOVE 600,120:MOVE 606,120:PLOT 197,600,220
+110 MOVE 660,120:MOVE 662,120:PLOT 205,660,200
+
+case ellipses_sheared_and_degenerate
+10 PROCmode(25)
+20 MOVE 640,240:MOVE 864,240:PLOT 197,470,386
+30 MOVE 120,480:MOVE 136,480:PLOT 205,28,696
+40 MOVE 640,600:MOVE 720,600:PLOT 197,670,600
+50 MOVE 1000,660:MOVE 1080,660:PLOT 205,1020,600
+60 MOVE 640,800:MOVE 560,800:PLOT 197,660,860
+70 MOVE 640,910:MOVE 980,910:PLOT 205,650,936
+80 MOVE 1120,360:MOVE 1188,360:PLOT 197,976,562
+
+case arcs_in_tall_pixels
+10 PROCmode(12)
+20 MOVE 200,300:MOVE 300,300:PLOT 165,200,400
+30 MOVE 500,300:MOVE 560,380:PLOT 173,420,260
+40 MOVE 800,300:MOVE 900,260:PLOT 181,780,400
+50 MOVE 1100,300:MOVE 1000,340:PLOT 181,1150,240
+70 MOVE 600,750:MOVE 700,800:PLOT 165,560,600
+80 MOVE 1000,750:MOVE 1150,750:PLOT 197,1050,850
+
+case flood_fills
+10 PROCmode(27)
+20 GCOL 0,3:CIRCLE 300,300,200:MOVE 300,100:DRAW 300,500:MOVE 100,300:DRAW 500,300
+30 GCOL 0,2:PLOT 133,350,350
+40 GCOL 0,5:MOVE 800,200:DRAW 1200,200:DRAW 1000,600:DRAW 800,200
+50 GCOL 0,6:RECTANGLE FILL 900,250,60,60
+60 GCOL 0,5:PLOT 141,1000,400
+70 GCOL 0,9:PLOT 133,100,800:GCOL 0,4:PLOT 141,640,900
+
+case horizontal_line_fills
+10 PROCmode(27)
+20 GCOL 0,3:MOVE 640,0:DRAW 640,959:GCOL 0,5:MOVE 200,0:DRAW 200,959:MOVE 1000,0:DRAW 1000,959
+30 GCOL 0,2:PLOT 77,400,100:GCOL 0,4:PLOT 93,300,200:PLOT 93,640,240
+40 GCOL 0,7:PLOT 109,400,300:GCOL 0,3:PLOT 109,400,340
+50 GCOL 0,1:PLOT 125,400,400:GCOL 0,5:PLOT 125,700,440:PLOT 125,1000,480
+60 PROCr("gcsx",FNv(138)):PROCr("newx",FNv(146)):PROCr("oldx",FNv(142))
+
+case block_copy_and_move
+10 PROCmode(27)
+20 GCOL 0,1:RECTANGLE FILL 100,100,200,200:GCOL 0,2:RECTANGLE FILL 150,150,100,100
+30 MOVE 100,100:MOVE 300,300:PLOT 190,500,200
+40 MOVE 100,100:MOVE 300,300:PLOT 189,800,500
+50 GCOL 0,3:RECTANGLE FILL 400,600,200,200:MOVE 400,600:MOVE 600,800:PLOT 190,460,660
+60 MOVE 0,900:MOVE 40,950:PLOT 186,1200,0
+70 PROCr("gcsx",FNv(138)):PROCr("gcsy",FNv(139))
+
+case clipping_to_a_window
+10 PROCmode(25)
+20 GCOL 0,129:VDU 24,200;150;900;700;:CLG:GCOL 0,0
+30 MOVE 0,0:DRAW 1279,959:MOVE 0,959:DRAW 1279,0
+40 MOVE 500,400:PLOT 157,800,400:MOVE 100,100:PLOT 101,1200,250
+50 MOVE 150,500:MOVE 950,520:PLOT 85,500,800
+
+case origin_and_window
+10 PROCmode(25)
+20 VDU 29,640;480;:MOVE -200,-200:DRAW 200,200:CIRCLE 0,0,100
+30 GCOL 0,129:VDU 24,-300;-300;300;300;:CLG:GCOL 0,0:CIRCLE FILL 0,0,250
+40 FOR v%=128 TO 139:PROCr("v"+STR$v%,FNv(v%)):NEXT
+50 VDU 26:FOR v%=128 TO 139:PROCr("w"+STR$v%,FNv(v%)):NEXT
+
+case windows_refused
+10 PROCmode(1)
+20 VDU 28,30,10,10,5:VDU 28,0,40,39,0:VDU 28,5,3,10,8
+30 VDU 24,0;0;2000;2000;:VDU 24,800;100;100;200;
+40 FOR v%=128 TO 135:PROCr("v"+STR$v%,FNv(v%)):NEXT
+
+case gcol_actions_in_sixteen_colours
+10 PROCmode(27)
+20 FOR c%=0 TO 15:GCOL 0,c%:RECTANGLE FILL c%*80,0,79,959:NEXT
+30 FOR a%=0 TO 7:GCOL a%,6:RECTANGLE FILL 0,40+a%*110,1279,50:NEXT
+40 FOR a%=0 TO 7:GCOL a%,128+9:GCOL a%,9:RECTANGLE FILL 40+a%*150,900,100,40:NEXT
+
+case gcol_and_tints_in_256_colours
+10 PROCmode(28)
+20 FOR c%=0 TO 63:FOR t%=0 TO 3:GCOL 0,c% TINT t%*64
+30 RECTANGLE FILL (c% MOD 16)*80+t%*20,(c% DIV 16)*200,19,199:NEXT:NEXT
+40 FOR a%=1 TO 7:GCOL a%,21 TINT 128:RECTANGLE FILL a%*150,820,100,120:NEXT
+50 PROCr("gfcol",FNv(153)):PROCr("gftint",FNv(157)):PROCr("ora",FNz(0)):PROCr("eor",FNz(4))
+60 GOTO 9000
+70 DEFFNz(o%):LOCAL a%:SYS "OS_ReadSysInfo",6,0,72 TO ,,a%:=a%!o%
+
+case colour_blocks_in_each_depth
+10 FOR m%=0 TO 28:IF m%<>7 AND m%<>3 AND m%<>6 AND m%<>11 AND m%<>14 AND m%<>17 THEN PROCm(m%)
+20 NEXT:PROCmode(25):GOTO 9000
+30 DEFPROCm(m%):LOCAL a%,k%:PROCmode(m%):GCOL 0,1:GCOL 3,128+2
+40 SYS "OS_ReadSysInfo",6,0,72 TO ,,a%:FOR k%=0 TO 3:PROCr("m"+STR$m%+" fg"+STR$k%,a%!(k%*4)):NEXT
+50 SYS "OS_ReadSysInfo",6,0,73 TO ,,a%:FOR k%=0 TO 3:PROCr("m"+STR$m%+" bg"+STR$k%,a%!(k%*4)):NEXT
+60 ENDPROC
+
+case ecf_default_patterns
+10 PROCmode(27)
+20 FOR p%=1 TO 4:GCOL p%*16,0:RECTANGLE FILL (p%-1)*320,0,300,500:NEXT
+30 GCOL 80,0:RECTANGLE FILL 0,560,1279,100
+40 FOR p%=1 TO 4:GCOL p%*16+3,0:RECTANGLE FILL (p%-1)*320,700,300,200:NEXT
+
+case ecf_patterns_in_each_depth
+10 FOR m%=0 TO 2:PROCp(m%):NEXT:PROCp(9):PROCp(15):PROCp(1):PROCmode(28)
+20 GCOL 16,0:RECTANGLE FILL 0,0,600,400:VDU 23,4,1,2,3,4,5,6,7,8:GCOL 48,0:RECTANGLE FILL 640,0,600,400
+30 GOTO 9000
+40 DEFPROCp(m%):LOCAL b%,i%:DIM b% LOCAL 12:PROCmode(m%):FOR p%=2 TO 6:?b%=p%:SYS "OS_Word",10,b%
+50 FOR i%=1 TO 8:PROCr("m"+STR$m%+" p"+STR$p%+" "+STR$i%,b%?i%):NEXT:NEXT:ENDPROC
+
+case ecf_defined_bbc_and_native
+10 PROCmode(1)
+20 VDU 23,2,&1B,&E4,&0F,&F0,&33,&CC,&55,&AA:GCOL 16,0:RECTANGLE FILL 0,0,600,450
+30 VDU 23,17,4,1,0,0,0,0,0,0:VDU 23,2,&1B,&E4,&0F,&F0,&33,&CC,&55,&AA:GCOL 16,0:RECTANGLE FILL 640,0,600,450
+40 VDU 23,12,1,2,3,0,2,1,3,3:GCOL 16,0:RECTANGLE FILL 0,500,600,450
+50 VDU 23,11,0,0,0,0,0,0,0,0:GCOL 16,0:RECTANGLE FILL 640,500,600,450
+
+case ecf_origin
+10 PROCmode(1)
+20 VDU 23,2,&1B,&E4,&0F,&F0,&33,&CC,&55,&AA:VDU 23,17,6,12;20;0,0,0
+30 GCOL 16,0:RECTANGLE FILL 0,0,600,450:PROCr("shift",FNz(83)):PROCr("yoff",FNz(84))
+40 SYS "OS_SetECFOrigin",36,4:GCOL 16,0:RECTANGLE FILL 640,0,600,450
+50 PROCr("shift2",FNz(83)):PROCr("yoff2",FNz(84)):PROCr("ora",FNz(72))
+60 VDU 29,100;100;:SYS "OS_SetECFOrigin",0,0:PROCr("shift3",FNz(83)):PROCr("yoff3",FNz(84))
+70 GOTO 9000
+80 DEFFNz(i%):LOCAL a%:SYS "OS_ReadSysInfo",6,0,i% TO ,,a%:=!a%
+
+case ecf_transparent_background
+10 PROCmode(27)
+20 GCOL 0,3:RECTANGLE FILL 0,0,1279,959
+30 VDU 23,17,4,1,0,0,0,0,0,0:VDU 23,2,&21,&12,&22,&11,&20,&02,&21,&10
+40 GCOL 0,128+2:GCOL 24,0:RECTANGLE FILL 100,100,500,500
+50 GCOL 0,128+1:GCOL 25,0:RECTANGLE FILL 700,100,500,500
+
+case set_colour_numbers_and_patterns
+10 PROCmode(27)
+20 SYS "OS_SetColour",0,6:RECTANGLE FILL 0,0,300,300
+30 SYS "OS_SetColour",16+3,9:CLG
+40 DIM p% 32:FOR i%=0 TO 7:p%!(i%*4)=&11111111*i%:NEXT
+50 SYS "OS_SetColour",32,p%:RECTANGLE FILL 400,400,400,400
+60 SYS "OS_SetColour",128,p%:FOR i%=0 TO 7:PROCr("r"+STR$i%,p%!(i%*4)):NEXT
+70 SYS "OS_SetColour",128+64 TO ,c%:PROCr("text",c%)
+
+case text_printing_and_wrap
+10 PROCmode(1)
+20 PRINT "HELLO WORLD";:PRINT TAB(33);"WRAPPING ROUND":COLOUR 2:PRINT "RED"
+30 COLOUR 129:PRINT " ON RED":COLOUR 128:PRINT TAB(39);"X";:PROCr("pos",POS):PROCr("vpos",VPOS)
+40 PRINT "Y":PROCr("pos2",POS):PROCr("vpos2",VPOS)
+
+case text_window_scrolls_in_software
+10 PROCmode(1)
+20 VDU 28,5,20,30,8:COLOUR 130:CLS:COLOUR 1
+30 FOR i%=1 TO 20:PRINT "LINE ";i%:NEXT
+40 PROCr("pos",POS):PROCr("vpos",VPOS):SYS "OS_Byte",117 TO ,s%:PROCr("b117",s%)
+50 PROCr("start",FNs(148)):PROCr("display",FNs(149))
+
+case text_hardware_scroll
+10 PROCmode(1)
+20 FOR i%=1 TO 40:PRINT "L";i%;:IF i% MOD 3 THEN PRINT
+30 NEXT:PROCr("start",FNs(148)):PROCr("display",FNs(149))
+40 SYS "OS_Byte",117 TO ,s%:PROCr("b117",s%)
+
+case text_hardware_scroll_wraps_the_screen
+10 PROCmode(12)
+20 FOR i%=1 TO 100:PRINT STRING$(i% MOD 70,CHR$(64+i% MOD 26)):NEXT
+30 PROCr("start",FNs(148)):PROCr("display",FNs(149))
+
+case text_in_gap_modes
+10 PROCmode(3)
+20 FOR i%=1 TO 30:PRINT "LINE ";i%:NEXT:PROCr("vpos",VPOS):PROCr("ss",FNm(7))
+30 PROCr("start",FNs(148))
+
+case text_in_double_pixel_modes
+10 PROCmode(2):PRINT "MODE TWO":COLOUR 3:PRINT "COLOUR";:COLOUR 133:PRINT "BG"
+20 FOR c%=0 TO 15:GCOL 0,c%:MOVE c%*80,0:DRAW c%*80+70,700:NEXT
+
+case cursor_movement_flags
+10 PROCmode(1)
+20 VDU 23,16,2,0,0,0,0,0,0,0:PRINT TAB(39,0);"LEFTWARD";
+30 VDU 23,16,8,0,0,0,0,0,0,0:PRINT TAB(0,5);"DOWNWARDS";
+40 VDU 23,16,4,0,0,0,0,0,0,0:PRINT TAB(0,30);"UPWARD";
+50 VDU 23,16,32,0,0,0,0,0,0,0:PRINT TAB(10,10);"STAY";:PROCr("pos",POS):PROCr("vpos",VPOS)
+60 VDU 23,16,1,0,0,0,0,0,0,0:PRINT TAB(30,15);"PENDING NEWLINE";:PROCr("pos2",POS):PROCr("vpos2",VPOS)
+70 VDU 23,16,16,0,0,0,0,0,0,0:PRINT TAB(0,31);"WRAPS":VDU 23,16,0,0,0,0,0,0,0,0
+
+case backspace_delete_and_tab
+10 PROCmode(1)
+20 PRINT "ABCDEF";:VDU 8,8,127:PRINT "Z";:VDU 31,0,3,8:PROCr("pos",POS):PROCr("vpos",VPOS)
+30 VDU 31,0,0,11:PROCr("pos2",POS):PROCr("vpos2",VPOS)
+40 VDU 31,50,2:PROCr("pos3",POS):PROCr("vpos3",VPOS):VDU 30:PRINT "HOME"
+50 VDU 31,5,5,9,9,9,10,10,13,127:PROCr("pos4",POS):PROCr("vpos4",VPOS)
+
+case clears_and_home
+10 PROCmode(1)
+20 COLOUR 129:CLS:VDU 28,5,20,30,8:COLOUR 130:CLS:PRINT "IN";
+30 GCOL 0,131:VDU 24,100;100;400;400;:CLG:PROCr("pos",POS):PROCr("vpos",VPOS)
+
+case vdu_5_text
+10 PROCmode(25)
+20 VDU 5:MOVE 100,900:PRINT "VDU FIVE";:MOVE 1250,500:PRINT "EDGE";
+30 GCOL 3,1:MOVE 100,800:PRINT "XOR";:MOVE 104,804:PRINT "XOR";
+40 PROCr("gcsx",FNv(138)):PROCr("gcsy",FNv(139))
+50 VDU 23,17,7,6,16;24;0,0:MOVE 100,600:PRINT "BIG";:PROCr("gcx",FNv(162)):PROCr("gcy",FNv(163))
+60 PROCr("gsx",FNv(164)):PROCr("gsy",FNv(165)):VDU 4
+
+case vdu_5_window_edges
+10 PROCmode(25)
+20 VDU 24,200;200;600;500;:VDU 5:MOVE 520,480:PRINT "WRAPPING TEXT";
+30 VDU 8,8,8,10,11,13:PRINT "X";:PROCr("gcsx",FNv(138)):PROCr("gcsy",FNv(139))
+40 VDU 12:PROCr("homex",FNv(138)):PROCr("homey",FNv(139)):VDU 127,4
+
+case vdu_23_7_scrolls
+10 PROCmode(1)
+20 FOR i%=0 TO 30:PRINT TAB(i%,i%);"X";i%;:NEXT
+30 VDU 28,2,20,30,4:VDU 23,7,0,0,0,0,0,0,0,0:VDU 23,7,0,2,0,0,0,0,0,0
+40 VDU 23,7,0,1,1,0,0,0,0,0:VDU 23,7,1,3,0,0,0,0,0,0:VDU 23,7,1,6,1,0,0,0,0,0
+
+case vdu_23_8_clear_block
+10 PROCmode(1)
+20 COLOUR 129:FOR i%=0 TO 30:PRINT TAB(0,i%);STRING$(39,"#");:NEXT
+30 COLOUR 130:VDU 31,10,10:VDU 23,8,5,10,0,0,3,2,0,0
+40 COLOUR 131:VDU 23,8,0,6,1,1,0,2,0,0
+
+case text_colours_and_swaps
+10 PROCmode(12)
+20 FOR c%=0 TO 15:COLOUR c%:COLOUR 128+15-c%:PRINT "C";c%;:NEXT:PRINT
+30 VDU 23,17,5,0,0,0,0,0,0,0:PRINT "SWAPPED"
+40 VDU 20:PRINT "DEFAULT":PROCr("tf",FNv(155)):PROCr("tb",FNv(156))
+50 COLOUR 3 TINT 64:COLOUR 9:PROCr("tf2",FNv(155)):PROCr("tft",FNv(159))
+
+case text_colours_in_256
+10 PROCmode(28)
+20 FOR c%=0 TO 63 STEP 9:COLOUR c%:PRINT "C";c%;:NEXT
+30 COLOUR 5 TINT 192:COLOUR 128+40 TINT 64:PRINT "TINTED"
+40 PROCr("tf",FNv(155)):PROCr("tb",FNv(156)):PROCr("tft",FNv(159)):PROCr("tbt",FNv(160))
+
+case palette_reads
+10 PROCmode(12)
+20 VDU 19,1,4,0,0,0:VDU 19,2,16,&12,&34,&56:VDU 19,3,17,&FF,0,0:VDU 19,3,18,0,&FF,0
+30 VDU 19,0,24,&80,&40,&20:VDU 19,1,25,&FF,0,&FF:VDU 19,4,144,1,2,3
+40 FOR l%=0 TO 15:SYS "OS_ReadPalette",l%,16 TO ,,a%,b%:PROCr("p"+STR$l%,a%):PROCr("q"+STR$l%,b%):NEXT
+50 SYS "OS_ReadPalette",0,24 TO ,,a%:PROCr("border",a%):SYS "OS_ReadPalette",1,25 TO ,,a%:PROCr("ptr",a%)
+60 DIM w% 8:FOR l%=0 TO 4:IF l%<>3 THEN ?w%=l%:SYS "OS_Word",11,w%:PROCr("w"+STR$l%,w%!1)
+65 NEXT
+70 ?w%=5:w%?1=6:w%?2=1:w%?3=2:w%?4=3:SYS "OS_Word",12,w%:SYS "OS_ReadPalette",5,16 TO ,,a%:PROCr("w12",a%)
+80 VDU 20:SYS "OS_ReadPalette",2,16 TO ,,a%:PROCr("reset",a%)
+
+case palette_in_four_and_two_colours
+10 PROCmode(1):VDU 19,1,6,0,0,0:VDU 19,2,16,&F0,&0F,&88
+20 FOR l%=0 TO 3:SYS "OS_ReadPalette",l%,16 TO ,,a%,b%:PROCr("p"+STR$l%,a%):PROCr("q"+STR$l%,b%):NEXT
+30 PROCmode(0):VDU 19,1,2,0,0,0
+40 FOR l%=0 TO 1:SYS "OS_ReadPalette",l%,16 TO ,,a%,b%:PROCr("r"+STR$l%,a%):PROCr("s"+STR$l%,b%):NEXT
+
+case palette_in_256_colours
+10 PROCmode(28)
+20 VDU 19,1,16,&80,&90,&A0:VDU 19,17,16,&10,&20,&30:VDU 19,200,16,1,2,3
+30 FOR l%=0 TO 255 STEP 7:SYS "OS_ReadPalette",l%,16 TO ,,a%:PROCr("p"+STR$l%,a%):NEXT
+
+case read_point_and_point
+10 PROCmode(27)
+20 GCOL 0,5:RECTANGLE FILL 100,100,200,200:GCOL 0,9:PLOT 69,600,600
+30 SYS "OS_ReadPoint",150,150 TO ,,c%,t%,o%:PROCr("rp",c%):PROCr("rpt",t%):PROCr("rpo",o%)
+40 SYS "OS_ReadPoint",-10,150 TO ,,c%,t%,o%:PROCr("rpoff",c%):PROCr("rpoffo",o%)
+50 PROCr("point",POINT(600,600)):PROCr("pointoff",POINT(5000,5000))
+60 PROCmode(28):GCOL 0,37 TINT 128:PLOT 69,40,40
+70 SYS "OS_ReadPoint",40,40 TO ,,c%,t%:PROCr("rp256",c%):PROCr("rpt256",t%):PROCr("p256",POINT(40,40))
+
+case vdu_variables_after_windows
+10 PROCmode(12)
+20 VDU 24,100;200;900;700;:VDU 28,3,20,40,5:VDU 29,10;20;:MOVE 33,44:DRAW 55,66
+30 FOR v%=128 TO 147:PROCr("v"+STR$v%,FNv(v%)):NEXT
+40 FOR v%=151 TO 172:IF v%<>166 AND v%<>171 THEN PROCr("v"+STR$v%,FNv(v%))
+50 NEXT:PROCr("w256",FNv(256)):PROCr("w257",FNv(257)):PROCr("bad",FNv(400))
+60 FOR i%=0 TO 15:SYS "OS_Byte",160,i% TO ,x%,y%:PROCr("b160 "+STR$i%,x%):NEXT
+
+case text_cursor_bytes
+10 PROCmode(1)
+20 PRINT TAB(7,3);"Q";:SYS "OS_Byte",134 TO ,x%,y%:PROCr("b134x",x%):PROCr("b134y",y%)
+30 VDU 31,7,3:SYS "OS_Byte",135 TO ,c%,m%:PROCr("b135c",c%):PROCr("b135m",m%)
+40 VDU 31,8,3:SYS "OS_Byte",135 TO ,c%:PROCr("b135space",c%)
+50 COLOUR 2:COLOUR 129:PRINT TAB(2,2);"W";:VDU 8:SYS "OS_Byte",135 TO ,c%:PROCr("b135colour",c%)
+60 VDU 23,200,1,2,3,4,5,6,7,8:PRINT TAB(5,5);CHR$200;:VDU 8:SYS "OS_Byte",135 TO ,c%:PROCr("b135def",c%)
+70 SYS "OS_Byte",117 TO ,s%:PROCr("b117",s%):VDU 14:SYS "OS_Byte",117 TO ,s%:PROCr("b117p",s%):VDU 15
+80 PROCfont
+
+case char_definitions
+10 PROCmode(25)
+20 VDU 23,65,&FF,&81,&81,&81,&81,&81,&81,&FF:PRINT "AAA"
+30 DIM b% 12:?b%=65:SYS "OS_Word",10,b%:FOR i%=1 TO 8:PROCr("d"+STR$i%,b%?i%):NEXT
+40 SYS "OS_Byte",20:?b%=65:SYS "OS_Word",10,b%:PROCr("reset",b%!1=&818181FF)
+50 PROCfont:PRINT "BBB"
+
+case vsync_and_flash_bytes
+10 PROCmode(12)
+20 SYS "OS_Byte",9,10 TO ,o%:PROCr("b9",o%):SYS "OS_Byte",10,20 TO ,o%:PROCr("b10",o%)
+30 SYS "OS_Byte",195,0,255 TO ,f%:PROCr("first",f%):SYS "OS_Byte",194,0,255 TO ,s%:PROCr("second",s%)
+40 SYS "OS_Byte",9,25:SYS "OS_Byte",10,25:SYS "OS_Byte",19
+
+case screen_banks
+10 SYS "OS_ChangeDynamicArea",2,&80000
+20 PROCmode(1)
+30 SYS "OS_Byte",112,2 TO ,o%:PROCr("b112",o%):PROCfont:PRINT "BANK TWO"
+40 SYS "OS_Byte",250,0,255 TO ,v%,d%:PROCr("vb",v%):PROCr("db",d%)
+50 PROCr("start",FNs(148)):PROCr("display",FNs(149)):PROCr("total",FNv(150))
+60 SYS "XOS_Byte",112,99 TO ,o%;f%:PROCr("bad",o%):PROCr("badf",f% AND 2)
+70 SYS "OS_Byte",113,2 TO ,o%:PROCr("b113",o%):PROCr("display2",FNs(149))
+80 DIM b% 8:?b%=1:b%!1=&2000:SYS "OS_Word",22,b%:PROCr("w22",FNs(148)):PROCr("w22d",FNs(149))
+
+case shadow_modes
+10 SYS "OS_Byte",114,0 TO ,o%:PROCr("b114",o%):PROCmode(1)
+20 PRINT "SHADOW":PROCr("start",FNs(148)):SYS "OS_Byte",117 TO ,s%:PROCr("b117",s%)
+30 SYS "OS_Byte",135 TO ,c%,m%:PROCr("mode",m%):SYS "OS_Byte",114,1:PROCmode(129)
+40 PRINT "SHADOW TOO":PROCr("start2",FNs(148)):SYS "OS_Byte",135 TO ,c%,m%:PROCr("mode2",m%)
+
+case selector_256_colours
+10 DIM s% 64:s%!0=1:s%!4=640:s%!8=480:s%!12=3:s%!16=-1:s%!20=-1
+20 PROCscreen(s%):GCOL 0,21:RECTANGLE FILL 100,100,400,400:PRINT "SELECTED"
+30 SYS "OS_ScreenMode",1 TO ,c%:FOR k%=0 TO 5:PROCr("sel"+STR$k%,c%!(k%*4)):NEXT
+
+case selector_full_palette
+10 DIM s% 64:s%!0=1:s%!4=320:s%!8=256:s%!12=3:s%!16=-1:s%!20=0:s%!24=128:s%!28=3:s%!32=255:s%!36=-1
+20 PROCscreen(s%):FOR c%=0 TO 255:GCOL 0,c%:RECTANGLE FILL (c% MOD 16)*40,(c% DIV 16)*64,39,63:NEXT
+30 PROCr("nc",FNm(3)):PROCr("fl",FNm(0)):SYS "OS_ReadPalette",255,16 TO ,,a%:PROCr("p255",a%)
+
+case selector_sixteen_bits
+10 DIM s% 64:s%!0=1:s%!4=640:s%!8=480:s%!12=4:s%!16=-1:s%!20=-1
+20 PROCscreen(s%):FOR c%=0 TO 63:GCOL 0,c%:RECTANGLE FILL (c% MOD 8)*160,(c% DIV 8)*120,159,119:NEXT
+30 GCOL 0,128+21:GCOL 3,40:RECTANGLE FILL 500,500,300,300:PRINT "SIXTEEN"
+40 PROCr("gbcol",FNv(154)):PROCr("gfcol",FNv(153))
+
+case selector_thirty_two_bits
+10 DIM s% 64:s%!0=1:s%!4=640:s%!8=480:s%!12=5:s%!16=-1:s%!20=-1
+20 PROCscreen(s%):FOR c%=0 TO 63:GCOL 0,c%:RECTANGLE FILL (c% MOD 8)*160,(c% DIV 8)*20,159,19:NEXT
+30 PRINT TAB(0,20);"THIRTY TWO":SYS "OS_ReadPoint",10,10 TO ,,c%:PROCr("rp",c%)
+
+case mode_strings
+10 DIM s% 128,t% 256
+20 RESTORE 60:FOR i%=0 TO 7:READ m$:$t%=m$:FOR k%=0 TO 31:s%!(k%*4)=0:NEXT
+30 SYS "XOS_ScreenMode",13,t%,s%,128 TO e%;f%:IF f% AND 1 THEN PROCr("err"+STR$i%,!e%) ELSE PROCs(i%)
+40 NEXT:PROCmode(25):GOTO 9000
+50 DEFPROCs(i%):LOCAL k%:FOR k%=0 TO 9:PROCr("s"+STR$i%+" "+STR$k%,s%!(k%*4)):NEXT:ENDPROC
+60 DATA X640 Y480 C256,"X640,Y480,C16 EX0 EY0",28 C16M,X640 Y480 C32K F60,X640 Y480 G256,X640 Y480,X320 Y240 C64,bad
+
+case check_mode_valid
+10 FOR m%=0 TO 60 STEP 3:SYS "XOS_CheckModeValid",m% TO r0%,r1%;f%:PROCr("m"+STR$m%,r0%):PROCr(" c",f% AND 2)
+20 IF (f% AND 2)<>0 AND r1%<256 THEN PROCr(" alt",r1%)
+25 IF (f% AND 2)<>0 AND r1%>255 THEN PROCs(r1%)
+30 NEXT:DIM s% 64:s%!0=1:s%!4=800:s%!8=600:s%!12=3:s%!16=-1:s%!20=-1
+40 SYS "XOS_CheckModeValid",s% TO r0%,r1%;f%:PROCr("sel",r0%):PROCr("selc",f% AND 2):PROCr("selalt",r1%)
+50 GOTO 9000
+60 DEFPROCs(a%):LOCAL k%:FOR k%=0 TO 9:PROCr(" alt"+STR$k%,a%!(k%*4)):NEXT:ENDPROC
+
+case changed_box
+10 PROCmode(25)
+20 SYS "OS_ChangedBox",1 TO ,b%:SYS "OS_ChangedBox",2
+30 PLOT 69,100,100:PROCb("point")
+40 SYS "OS_ChangedBox",2:MOVE 200,200:DRAW 600,300:CIRCLE FILL 300,600,40:PROCb("shapes")
+50 SYS "OS_ChangedBox",2:PRINT TAB(5,5);"A";:PROCb("char")
+60 SYS "OS_ChangedBox",2:VDU 24,100;100;500;400;:CLG:PROCb("clg")
+70 SYS "OS_ChangedBox",-1 TO e%:PROCr("state",e% AND 1):SYS "OS_ChangedBox",0 TO e%:PROCr("was",e% AND 1)
+80 GOTO 9000
+90 DEFPROCb(n$):LOCAL i%:FOR i%=0 TO 4:PROCr(n$+STR$i%,b%!(i%*4)):NEXT:ENDPROC
+
+case teletext_readings
+10 PROCmode(7)
+20 PRINT CHR$(129);"RED";CHR$(157);"BG":PRINT "ABC"
+30 VDU 31,1,0:SYS "OS_Byte",135 TO ,c%,m%:PROCr("c",c%):PROCr("m",m%)
+40 PROCr("pos",POS):PROCr("vpos",VPOS)
+50 FOR v%=0 TO 12:PROCr("m"+STR$v%,FNm(v%)):NEXT
+60 FOR v%=162 TO 170:IF v%<>166 THEN PROCr("v"+STR$v%,FNv(v%))
+70 NEXT:SYS "OS_ReadPalette",9,16 TO ,,a%:PROCr("p9",a%):PROCmode(25)
+
+case vdu_21_and_6
+10 PROCmode(1)
+20 PRINT "SHOWN":VDU 21:PRINT "HIDDEN":VDU 19,1,4,0,0,0:PLOT 69,0,0:VDU 6:PRINT "BACK"
+30 SYS "OS_ReadPalette",1,16 TO ,,a%:PROCr("p1",a%):PROCr("vpos",VPOS)
+
+case vdu_queue_and_unknown_codes
+10 PROCmode(1)
+20 VDU 25,4:SYS "OS_Byte",218,0,255 TO ,q%:PROCr("q",q%):VDU 100,0,100,0:PROCr("x",FNv(138))
+30 VDU 17:SYS "OS_Byte",218,0,0:PRINT "ABANDONED":PROCr("pos",POS)
+40 VDU 23,30,1,2,3,4,5,6,7,8:VDU 0,27:PRINT "AFTER"

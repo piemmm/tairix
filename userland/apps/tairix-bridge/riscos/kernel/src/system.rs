@@ -69,24 +69,6 @@ impl Os<'_> {
         self.vectored(vectors::MOUSE, regs, Entry::SupervisorNoIrq, Carry::All)
     }
 
-    /// `MouseV`'s default: the next buffered button change, or where the
-    /// pointer is now: R0 and R1 its position, R2 the buttons, R3 the time.
-    #[expect(clippy::unnecessary_wraps, reason = "a vector default's signature")]
-    pub(crate) fn default_mouse(&mut self, regs: &mut Regs) -> Result<(), Fail> {
-        let packet = self.world.input.take_mouse_packet();
-        let (x, y, buttons, time) = if let Some(packet) = packet {
-            packet
-        } else {
-            let pointer = self.world.input.pointer;
-            (pointer.0, pointer.1, pointer.2, self.now32())
-        };
-        regs.r[0] = x.cast_unsigned();
-        regs.r[1] = y.cast_unsigned();
-        regs.r[2] = buttons;
-        regs.r[3] = time;
-        Ok(())
-    }
-
     /// `OS_ChangeRedirection`: the input and output redirection handles,
     /// each changed unless 256 or more; the old ones returned. Output
     /// redirected takes `WrchV`; output ended gives it up.

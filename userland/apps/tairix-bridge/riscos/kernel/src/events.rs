@@ -48,10 +48,21 @@ impl Events {
 }
 
 impl Os<'_> {
+    /// Whether `event` is delivered: what a source of an event costly to
+    /// time asks before arranging it.
+    #[must_use]
+    pub fn event_enabled(&self, event: u32) -> bool {
+        self.world.events.enabled(event)
+    }
+
     /// Raises the event `regs` names in R0, its parameters in R1 onward:
     /// through `EventV` with interrupts disabled if it is enabled. Whether it
     /// was.
-    pub(crate) fn raise_event(&mut self, regs: &mut Regs) -> Result<bool, Unwind> {
+    ///
+    /// # Errors
+    ///
+    /// The unwind a claimant starts.
+    pub fn raise_event(&mut self, regs: &mut Regs) -> Result<bool, Unwind> {
         if !self.world.events.enabled(regs.r[0]) {
             return Ok(false);
         }

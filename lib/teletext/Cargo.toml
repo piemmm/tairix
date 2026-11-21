@@ -1,0 +1,12 @@
+[package]
+name = "tairix-teletext"
+description = "The Teletext character generator: the SAA5050's alphanumerics and mosaics, character rounding, and a row's serial attributes. no_std, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

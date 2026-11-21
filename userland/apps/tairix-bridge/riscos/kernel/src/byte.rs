@@ -15,7 +15,26 @@ use crate::os::{Entry, Fail, Os, Regs, Unwind};
 use crate::vectors::{self, Carry};
 
 /// The `OS_Byte` variables used by name.
-pub(crate) mod var {
+pub mod var {
+    /// The flash counter: the frames left before the flashing colours
+    /// change over.
+    pub const FLASH_COUNTER: u8 = 0xC1;
+    /// The frames the flashing colours' second state lasts.
+    pub const SECOND_DURATION: u8 = 0xC2;
+    /// The frames their first lasts.
+    pub const FIRST_DURATION: u8 = 0xC3;
+    /// The bell's sound channel.
+    pub const BELL_CHANNEL: u8 = 0xD3;
+    /// Its volume.
+    pub const BELL_VOLUME: u8 = 0xD4;
+    /// Its pitch.
+    pub const BELL_PITCH: u8 = 0xD5;
+    /// Its duration.
+    pub const BELL_DURATION: u8 = 0xD6;
+    /// The bank the VDU drivers write to.
+    pub const VDU_BANK: u8 = 0xFA;
+    /// The bank displayed.
+    pub const DISPLAY_BANK: u8 = 0xFB;
     /// The first: what `OS_Byte` 166 reports the table from.
     pub(crate) const FIRST: u8 = 0xA6;
     /// The input stream: 0 the keyboard, 1 the serial port.
@@ -40,9 +59,9 @@ pub(crate) mod var {
     /// What is left of a function key's expansion.
     pub(crate) const SOFT_KEY_LEN: u8 = 0xD8;
     /// The page-mode line count.
-    pub(crate) const PAGE_LINES: u8 = 0xD9;
+    pub const PAGE_LINES: u8 = 0xD9;
     /// The VDU queue's count.
-    pub(crate) const VDU_QUEUE: u8 = 0xDA;
+    pub const VDU_QUEUE: u8 = 0xDA;
     /// The code Tab gives.
     pub(crate) const TAB_CHAR: u8 = 0xDB;
     /// The escape character.
@@ -60,7 +79,7 @@ pub(crate) mod var {
     /// `OS_Byte` 3's output streams.
     pub(crate) const WRCH_DEST: u8 = 0xEC;
     /// `OS_Byte` 4's cursor key mode.
-    pub(crate) const CURSOR_EDIT: u8 = 0xED;
+    pub const CURSOR_EDIT: u8 = 0xED;
     /// What the keypad's codes are counted from, in place of `0`.
     pub(crate) const KEYPAD_BASE: u8 = 0xEE;
     /// The configured country.
@@ -119,12 +138,12 @@ impl Os<'_> {
     }
 
     /// `OS_Byte` variable `number`.
-    pub(crate) fn byte_var(&mut self, number: u8) -> u8 {
+    pub fn byte_var(&mut self, number: u8) -> u8 {
         self.peek_byte(Self::byte_address(number)).unwrap_or(0)
     }
 
     /// Sets `OS_Byte` variable `number`.
-    pub(crate) fn set_byte_var(&mut self, number: u8, value: u8) {
+    pub fn set_byte_var(&mut self, number: u8, value: u8) {
         let _ = self.poke_byte(Self::byte_address(number), value);
     }
 
@@ -166,7 +185,7 @@ impl Os<'_> {
         };
         let num_lock = if start & 0x80 != 0 { 0x04 } else { 0 };
         self.set_byte_var(var::KEYBOARD_STATUS, locks | num_lock);
-        self.set_byte_var(0xD4, if dbtb & 2 != 0 { 0x90 } else { 0xD0 });
+        self.set_byte_var(var::BELL_VOLUME, if dbtb & 2 != 0 { 0x90 } else { 0xD0 });
         self.set_byte_var(var::COUNTRY, country);
         self.set_byte_var(var::PRINTER_TYPE, printer);
         self.set_byte_var(var::PRINTER_IGNORE, pig);

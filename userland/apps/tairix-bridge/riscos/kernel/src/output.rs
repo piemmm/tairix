@@ -7,8 +7,11 @@ use tairix_riscos_arm::psr;
 use tairix_riscos_arm::reg::Reg;
 
 use crate::byte::var;
-use crate::os::{Entry, Fail, Os, Regs, Unwind};
+use crate::os::{len32, BootError, Entry, Fail, Os, Regs, Unwind};
 use crate::vectors::{self, Carry};
+
+/// The bytes `OS_WriteN` hands the VDU drivers at a time.
+const WRITE_N_CHUNK: usize = 256;
 
 /// `OS_Byte` 3's bits: what each turns off or on.
 mod destination {
@@ -39,25 +42,120 @@ pub type VduReason = for<'a, 'b, 'c> fn(&'a mut Os<'b>, &'c mut Regs) -> Option<
 /// that has them gives these when the session is made.
 #[derive(Clone, Copy, Debug)]
 pub struct VduDrivers {
-    /// Takes a byte of the VDU stream.
-    pub write: for<'a, 'b> fn(&'a mut Os<'b>, u8) -> Result<(), Fail>,
+    /// Readies them at reset, before any module starts: their state, the
+    /// screen's memory and the configured mode.
+    pub start: for<'a, 'b> fn(&'a mut Os<'b>) -> Result<(), Fail>,
+    /// Takes bytes of the VDU stream.
+    pub write: for<'a, 'b, 'c> fn(&'a mut Os<'b>, &'c [u8]) -> Result<(), Fail>,
     /// Whether the stream is part way through a control sequence's
     /// parameters, where `OS_ReadLine` prints a key rather than storing it.
     pub queued: for<'a, 'b> fn(&'a mut Os<'b>) -> bool,
-    /// Whether VDU 2 has turned the printer on.
-    pub printing: for<'a, 'b> fn(&'a mut Os<'b>) -> bool,
     /// The OS SWIs the VDU drivers perform, by number.
     pub swi: Option<VduSwi>,
     /// Their reasons of `OS_Byte`.
     pub byte: Option<VduReason>,
     /// Their reasons of `OS_Word`.
     pub word: Option<VduReason>,
+    /// The work of the vertical syncs since the last, taken on the clock's
+    /// interrupt.
+    pub frames: for<'a, 'b> fn(&'a mut Os<'b>) -> Result<(), Unwind>,
+    /// When their next timed work falls due on the monotonic clock: a frame
+    /// someone waits for, a flash to show.
+    pub deadline: for<'a, 'b> fn(&'a mut Os<'b>) -> Option<u64>,
+    /// A key read while `OS_Byte` 4 gives it to the copy cursor — Copy 0,
+    /// then left, right, down and up — the character Copy copies, if any.
+    pub edit: for<'a, 'b> fn(&'a mut Os<'b>, u8) -> Result<Option<u8>, Fail>,
+    /// The current monitor type.
+    pub monitor: for<'a, 'b> fn(&'a mut Os<'b>) -> u32,
+    /// Makes a newly configured monitor type the current one.
+    pub set_monitor: for<'a, 'b> fn(&'a mut Os<'b>, u32),
+    /// The graphics origin, in OS units from the screen's bottom left: what
+    /// the mouse is read relative to.
+    pub origin: for<'a, 'b> fn(&'a mut Os<'b>) -> (i32, i32),
+    /// The code they hand out by address, each entered as a subroutine:
+    /// [`VDU_ROUTINES`] at most.
+    pub routines: &'static [crate::module::Code],
+    /// The vectors whose default they are.
+    pub vectors: &'static [crate::module::VectorDefault],
+}
+
+/// The most routines [`VduDrivers::routines`] may hold.
+pub const VDU_ROUTINES: u32 = 4;
+
+/// Where the VDU drivers keep in zero page what software reads there, as
+/// RISC OS 5 keeps it: offsets from zero page's start, which
+/// `OS_ReadSysInfo` 6 and the VDU variables give.
+pub mod workspace {
+    /// The ECF pattern's shift across, in bits.
+    pub const ECF_SHIFT: u32 = 0x11F8;
+    /// The ECF pattern's row offset.
+    pub const ECF_Y_OFFSET: u32 = 0x11FC;
+    /// The foreground colour block: an OR and an exclusive-OR word for each
+    /// of the pattern's eight rows.
+    pub const FOREGROUND: u32 = 0x1480;
+    /// The background colour block.
+    pub const BACKGROUND: u32 = 0x14C0;
+    /// The background colour's block with the store action.
+    pub const BACKGROUND_STORE: u32 = 0x1500;
+    /// A colour block's bytes.
+    pub const BLOCK: u32 = 64;
+    /// The changed box `OS_ChangedBox` hands out: its flag and four
+    /// coordinates.
+    pub const CHANGED_BOX: u32 = 0x165C;
 }
 
 /// The name the serial stream opens.
 const SERIAL_STREAM: &[u8] = b"Serial#Buffer2:\0";
 
 impl Os<'_> {
+    /// The VDU drivers started at reset, where there are any, their routines
+    /// within the room the kernel gives them.
+    pub(crate) fn start_vdu(&mut self) -> Result<(), BootError> {
+        let Some(vdu) = self.world.vdu else {
+            return Ok(());
+        };
+        if len32(vdu.routines.len()) > VDU_ROUTINES {
+            return Err(BootError::VduRoutines);
+        }
+        (vdu.start)(self).map_err(|fail| match fail {
+            Fail::Error(block) => BootError::Vdu(self.peek_word(block)),
+            Fail::Unwind(_) => BootError::Vdu(None),
+        })
+    }
+
+    /// The address the VDU drivers' routine at `place` is entered at, if they
+    /// have one there.
+    #[must_use]
+    pub fn vdu_routine(&self, place: u32) -> Option<u32> {
+        let vdu = self.world.vdu?;
+        (place < len32(vdu.routines.len()))
+            .then(|| self.world.routine_address(crate::host::Routine::Vdu(place)))
+    }
+
+    /// One of the VDU drivers' routines, entered as a subroutine.
+    pub(crate) fn vdu_routine_entered(&mut self, place: u32) -> Result<(), Unwind> {
+        let code = self
+            .world
+            .vdu
+            .and_then(|vdu| vdu.routines.get(place as usize).copied());
+        let Some(code) = code else {
+            self.undefined_here();
+            return Ok(());
+        };
+        self.as_subroutine(code)
+    }
+
+    /// The VDU drivers' default of `vector`, if they are its default.
+    pub(crate) fn vdu_vector_default(
+        &self,
+        vector: vectors::Vector,
+    ) -> Option<crate::module::Code> {
+        let vdu = self.world.vdu?;
+        vdu.vectors
+            .iter()
+            .find(|default| default.vector == vector)
+            .map(|default| default.code)
+    }
     /// `OS_WriteC`: R0's character through `WrchV`.
     pub(crate) fn write_c_swi(&mut self, regs: &mut Regs) -> Result<(), Fail> {
         self.vectored(vectors::WRCH, regs, Entry::SupervisorIrq, Carry::Caller)
@@ -137,26 +235,91 @@ impl Os<'_> {
         self.write_text(b"\n\r")
     }
 
-    /// `OS_Plot`: `VDU 25` with R0's code at R1 and R2, through `WrchV` as
-    /// RISC OS 5's goes, so redirection and spooling take it; a code past a
-    /// byte plots nothing.
+    /// `OS_Plot`: `VDU 25` with R0's code at R1 and R2: straight to the VDU
+    /// drivers where nothing else would see it, else through `WrchV`, so
+    /// redirection and spooling take it; a code past a byte plots nothing.
     pub(crate) fn plot(&mut self, regs: &mut Regs) -> Result<(), Fail> {
         let Ok(code) = u8::try_from(regs.r[0]) else {
             return Ok(());
         };
         let [x0, x1, ..] = regs.r[1].to_le_bytes();
         let [y0, y1, ..] = regs.r[2].to_le_bytes();
-        self.write_text(&[25, code, x0, x1, y0, y1])
+        let bytes = [25, code, x0, x1, y0, y1];
+        match self.vdu_alone() {
+            Some(vdu) => (vdu.write)(self, &bytes),
+            None => self.write_text(&bytes),
+        }
     }
 
-    /// `OS_WriteN`: R1 bytes from R0.
+    /// `OS_WriteN`: R1 bytes from R0, straight to the VDU drivers where
+    /// nothing else would see them, else through `WrchV` a byte at a time.
     pub(crate) fn write_n(&mut self, regs: &mut Regs) -> Result<(), Fail> {
-        for i in 0..regs.r[1] {
-            let c = self.read_byte(regs.r[0].wrapping_add(i))?;
-            self.write_c(c)?;
+        let (start, length) = (regs.r[0], regs.r[1]);
+        let Some(vdu) = self.vdu_alone() else {
+            for i in 0..length {
+                let c = self.read_byte(start.wrapping_add(i))?;
+                self.write_c(c)?;
+                self.yield_point()?;
+            }
+            return Ok(());
+        };
+        let mut chunk = [0; WRITE_N_CHUNK];
+        let mut done = 0;
+        while done < length {
+            let at = start.wrapping_add(done);
+            let before_wrap = 0u32.wrapping_sub(at);
+            let mut n = (length - done).min(len32(WRITE_N_CHUNK));
+            if before_wrap != 0 {
+                n = n.min(before_wrap);
+            }
+            let bytes = &mut chunk[..n as usize];
+            self.read_bytes(at, bytes)?;
+            (vdu.write)(self, bytes)?;
+            done += n;
             self.yield_point()?;
         }
         Ok(())
+    }
+
+    /// The VDU drivers, where they alone would take what is written: no
+    /// `WrchV` claimant, no spool file, `OS_Byte` 3 naming no other stream and
+    /// not printing everything.
+    fn vdu_alone(&mut self) -> Option<VduDrivers> {
+        let vdu = self.world.vdu?;
+        let selected = self.byte_var(var::WRCH_DEST);
+        let elsewhere = destination::SERIAL | destination::NO_VDU | destination::VDUX;
+        let spooling =
+            self.byte_var(var::SPOOL_HANDLE) != 0 && selected & destination::NO_SPOOL == 0;
+        let printing_all = self.printer_selected() && selected & destination::PRINT_ALL != 0;
+        let alone = selected & elsewhere == 0
+            && !spooling
+            && !printing_all
+            && !self.vector_claimed(vectors::WRCH);
+        alone.then_some(vdu)
+    }
+
+    /// A character the VDU drivers print: one VDU 2 lets through, or VDU 1's
+    /// own, which `OS_Byte` 3 lets reach the printer unless it keeps the
+    /// printer out altogether, and which the ignore character does not hold
+    /// back. Nothing where every character is printed anyway.
+    ///
+    /// # Errors
+    ///
+    /// What the printer stream gives.
+    pub fn vdu_print(&mut self, c: u8, vdu_1: bool) -> Result<(), Fail> {
+        let selected = self.byte_var(var::WRCH_DEST);
+        if self.printer_selected() && selected & destination::PRINT_ALL != 0 {
+            return Ok(());
+        }
+        let blocked = if vdu_1 {
+            destination::NO_PRINTER
+        } else {
+            destination::NO_PRINTER | destination::NO_PRINTER_BUT_VDU_1
+        };
+        if selected & blocked != 0 {
+            return Ok(());
+        }
+        self.printer_out(c, vdu_1)
     }
 
     /// `WrchV`'s default: the character to each stream `OS_Byte` 3 selects.
@@ -189,12 +352,14 @@ impl Os<'_> {
             if selected & destination::VDUX != 0 {
                 let mut vdux = Regs::new([u32::from(c), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
                 self.call_vector(vectors::VDUX, &mut vdux, Entry::Supervisor)?;
+                if vdux.flag(psr::C) {
+                    self.vdu_print(c, false)?;
+                }
             } else if let Some(vdu) = self.world.vdu {
-                (vdu.write)(self, c)?;
+                (vdu.write)(self, &[c])?;
             }
         }
-        let printing = self.world.vdu.is_some_and(|vdu| (vdu.printing)(self));
-        if self.printer_selected() && (printing || selected & destination::PRINT_ALL != 0) {
+        if self.printer_selected() && selected & destination::PRINT_ALL != 0 {
             self.printer_out(c, false)?;
         }
         Ok(())
