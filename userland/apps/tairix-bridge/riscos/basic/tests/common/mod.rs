@@ -10,7 +10,7 @@
 
 use tairix_fscopy::fixture::Tree;
 pub use tairix_riscos_filing::session::command;
-use tairix_riscos_filing::session::{end_redirection, Setup};
+use tairix_riscos_filing::session::{end_redirection, Setup, SLOT_BYTES};
 use tairix_riscos_kernel::module::Builtin;
 use tairix_riscos_kernel::os::{Fail, Kernel, Os, Outcome, Unwind};
 use tairix_riscos_kernel::output::VduDrivers;
@@ -99,7 +99,7 @@ pub fn run_program(basic: &str, program: &str, keys: &[u8]) -> Run {
 
 /// As [`run_program`], the run spending at most `budget` instructions.
 pub fn run_within(basic: &str, program: &str, keys: &[u8], budget: u64) -> Run {
-    let mut kernel = kernel(0x10_0000, keys);
+    let mut kernel = kernel(SLOT_BYTES, keys);
     let mut os = kernel.os();
     let length = u32::try_from(program.len()).expect("short");
     let at = os.rma_claim(length.max(4)).expect("room");
@@ -129,7 +129,7 @@ pub fn basic(program: &str) -> String {
 /// HostFS disc is `tree`'s, to its end; its redirection then ended and its
 /// files closed, as the command line that ran it ends them.
 pub fn run_hosted(tree: &Tree, line: &str) -> Outcome {
-    let mut kernel = hosted(0x10_0000, tree);
+    let mut kernel = hosted(SLOT_BYTES, tree);
     let entered = command(&mut kernel.os(), line);
     assert!(
         matches!(entered, Err(Fail::Unwind(Unwind::Transfer))),

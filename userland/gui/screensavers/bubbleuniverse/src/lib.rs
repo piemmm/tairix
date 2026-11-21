@@ -5,18 +5,19 @@
 //! Every point is drawn as a soft dot whose light adds to its neighbours', so
 //! where the curves crowd the light gathers and whitens, and a halo and a wide
 //! haze glow about it; the sum is toned, dithered and laid opaque. A frame is
-//! exposed over half its own time at four moments, so the curves flow at
-//! thirty frames a second rather than jumping. A slow drift of the map's other
-//! phase keeps the picture from repeating, the whole turns once in seven
-//! minutes, and the bubble wanders a little about the screen so no pixel holds
-//! one light for long. Under reduced motion each picture is still, and another
-//! takes its place, elsewhere, each minute.
+//! exposed over half its own time at four moments, so the curves flow at the
+//! scene clock's pace, up to thirty frames a second, rather than jumping. A
+//! slow drift of the map's other phase keeps the picture from repeating, the
+//! whole turns once in seven minutes, and the bubble wanders a little about
+//! the screen so no pixel holds one light for long. Under reduced motion each
+//! picture is still, and another takes its place, elsewhere, each minute.
 //!
-//! The points are traced a gang of eight curves to the lanes of a vector at a
-//! time, across every core the saver is granted; they are sorted by the
-//! strips of rows they light, and each band of rows draws and tones its own
-//! strips, so the work follows the bubble rather than the screen and a frame
-//! repaints only the square about it.
+//! The points are traced eight curves at a time, one to a lane of an array the
+//! compiler steps in vector registers where the target has them, across every
+//! core the saver is granted; they are sorted by the strips of rows they
+//! light, and each band of rows draws and tones its own whole strips, so the
+//! work follows the bubble rather than the screen and a frame repaints only
+//! the square about it.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -45,10 +46,10 @@ use tairix_theme::motion::{seconds, SceneClock};
 use tairix_util::{fallible, mathf};
 
 use glow::{Glow, GLOW_CELLS};
-use light::{Bins, Dot, Light, Placed, Spot, SUB};
+use light::{Bins, Dot, Light, Placed, Shed, Spot, SUB};
 use orbit::{Curves, Gang, Lanes, Moment, CURVES, GANGS, GANG_POINTS, LANES, REACH, STEPS};
 use palette::Palette;
-use tone::{Tone, LIGHT_ONE};
+use tone::Tone;
 
 /// The bubble's radius, as a share of the screen's shorter side.
 const BUBBLE: f64 = 0.44;
@@ -64,9 +65,8 @@ const POINT_LIGHT: f64 = 2.0;
 /// How strongly the tone curve shows light: `1 − e^(−EXPOSURE · light)`.
 const EXPOSURE: f64 = 1.0;
 
-/// The moments a frame is exposed at, and the share of its time they span.
+/// The moments a frame is exposed at, spread over the scene clock's shutter.
 const EXPOSURES: usize = 4;
-const SHUTTER: f64 = 0.5;
 
 /// The spots one moment traces.
 const MOMENT_SPOTS: usize = CURVES * STEPS;
@@ -158,15 +158,12 @@ impl Universe {
         let pace = f64::from(setup.pace("speed")?) / 100.0;
         let glowing = setup.switch("glow")?;
         let start = setup.start;
-        let screen = Rect::new(0, 0, start.region.width(), start.region.height());
-        let radius = BUBBLE * f64::from(screen.width.min(screen.height));
-        let scale = radius / REFERENCE_RADIUS;
-        let dot = Dot::new(u32::try_from(mathf::round_i32(scale).max(1)).unwrap_or(1));
-        let cell =
-            u32::try_from(mathf::round_i32(radius / GLOW_CELLS_PER_RADIUS).max(2)).unwrap_or(2);
+        let screen = setup.screen();
+        let sizing = Sizing::of(screen);
+        let (dot, shed) = (sizing.dot, sizing.shed());
         let course = Course::new(
-            (screen, radius),
-            (dot, glowing.then_some(cell)),
+            (screen, sizing.radius),
+            (dot, glowing.then_some(sizing.cell)),
             pace,
             setup.seed,
         );
@@ -175,22 +172,23 @@ impl Universe {
         // moment's.
         let glow = if glowing {
             let energy = dot.energy() * u64::try_from(EXPOSURES).unwrap_or(1);
-            Some(Glow::new((side, side), cell, energy, runner).ok_or(Errno::OutOfMemory)?)
+            let glow = Glow::new((side, side), sizing.cell, (energy, shed), runner);
+            Some(glow.ok_or(Errno::OutOfMemory)?)
         } else {
             None
         };
         let tone = Tone::new(EXPOSURE).ok_or(Errno::OutOfMemory)?;
-        let bins = Bins::new(EXPOSURES * GANGS, GANG_POINTS, screen.height, dot)
+        let bins = Bins::new(EXPOSURES * GANGS, GANG_POINTS, screen.height.min(side), dot)
             .ok_or(Errno::OutOfMemory)?;
-        let light =
-            Light::new((side, side), bins, (tone, glow), runner).ok_or(Errno::OutOfMemory)?;
-        // A dot sheds the light its screen's size is worth, however its
-        // radius was rounded, shared across the frame's moments.
-        let rho = f64::from(dot.radius());
-        let peak = POINT_LIGHT * scale * scale / (rho * rho * rho * rho * mathf::real(EXPOSURES));
+        // What the saver may hold beyond its picture.
+        let heap = start
+            .memory
+            .saturating_sub(u64::try_from(start.region.len()).unwrap_or(u64::MAX));
+        let light = Light::new((side, side), (bins, shed), (tone, glow), (runner, heap))
+            .ok_or(Errno::OutOfMemory)?;
         Ok(Self {
             curves: Curves::new(),
-            colours: colours(palette, peak).ok_or(Errno::OutOfMemory)?,
+            colours: colours(palette, shed).ok_or(Errno::OutOfMemory)?,
             spots: fallible::filled(EXPOSURES * MOMENT_SPOTS, Spot::default())
                 .ok_or(Errno::OutOfMemory)?,
             light,
@@ -332,21 +330,59 @@ fn fixed(at: f32) -> i32 {
     (at + 0.5) as i32
 }
 
-/// Every point's light in the palette, its peak `peak` of a light, gang by
+/// Every point's light in the palette, held as `shed` holds a spot's, gang by
 /// gang in the order a gang traces them; `None` when the heap will not hold
 /// the table.
-fn colours(palette: Palette, peak: f64) -> Option<Vec<[u16; 3]>> {
+fn colours(palette: Palette, shed: Shed) -> Option<Vec<[u16; 3]>> {
     let mut table = fallible::filled(CURVES * STEPS, [0u16; 3])?;
     palette.each(|curve, step, light| {
-        let index = (curve / LANES) * GANG_POINTS + step * LANES + curve % LANES;
-        if let Some(entry) = table.get_mut(index) {
-            *entry = light.map(|channel| {
-                let lit = mathf::round_i32(channel * peak * f64::from(LIGHT_ONE));
-                u16::try_from(lit.clamp(0, i32::from(u16::MAX))).unwrap_or(u16::MAX)
-            });
+        if let Some(entry) = table.get_mut(traced_at(curve, step)) {
+            *entry = light.map(|channel| shed.carried(channel));
         }
     });
     Some(table)
+}
+
+/// Where point `step` of curve `curve` lies among a frame's points, which a
+/// gang traces a step of all its lanes at a time.
+const fn traced_at(curve: usize, step: usize) -> usize {
+    (curve / LANES) * GANG_POINTS + step * LANES + curve % LANES
+}
+
+/// The sizes a screen draws the universe at.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct Sizing {
+    /// The bubble's radius in pixels, and its share of the reference's.
+    radius: f64,
+    scale: f64,
+    dot: Dot,
+    /// The side of a glow cell, in pixels.
+    cell: u32,
+}
+
+impl Sizing {
+    /// The sizes a bubble on `screen` is drawn at.
+    fn of(screen: Rect) -> Self {
+        let radius = BUBBLE * f64::from(screen.width.min(screen.height));
+        let scale = radius / REFERENCE_RADIUS;
+        let whole = |pixels: f64, least: u32| {
+            u32::try_from(mathf::round_i32(pixels)).map_or(least, |whole| whole.max(least))
+        };
+        Self {
+            radius,
+            scale,
+            dot: Dot::new(whole(scale, 1)),
+            cell: whole(radius / GLOW_CELLS_PER_RADIUS, 2),
+        }
+    }
+
+    /// How a spot holds its light: a dot sheds the light its screen's size is
+    /// worth, however its radius was rounded, shared across a frame's moments.
+    fn shed(self) -> Shed {
+        let rho = f64::from(self.dot.radius());
+        let peak = POINT_LIGHT * self.scale * self.scale / (rho * rho * rho * rho);
+        Shed::new(peak / mathf::real(EXPOSURES))
+    }
 }
 
 /// When the picture moves on: every frame, or a still each minute.
@@ -398,7 +434,7 @@ impl Pace {
             Self::Moving(clock) => clock.frame_ns(),
             Self::Still { .. } => SceneClock::frame_on(refresh),
         };
-        SHUTTER * seconds(frame)
+        SceneClock::SHUTTER * seconds(frame)
     }
 }
 
@@ -446,8 +482,8 @@ impl Course {
                 WANDER * radius,
             )
         };
-        let reach =
-            f64::from(dot.radius() + 1) + cell.map_or(0.0, |cell| f64::from(GLOW_CELLS * cell));
+        let reach = f64::from(dot.radius() + 1)
+            + cell.map_or(0.0, |cell| mathf::real(GLOW_CELLS) * f64::from(cell));
         let mut rng = NonCryptoRng::seed_from_u64(seed);
         Self {
             pace,

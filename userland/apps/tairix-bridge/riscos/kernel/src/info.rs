@@ -835,7 +835,7 @@ impl Os<'_> {
         // known reasons read or ignore flags and which refuse them is what
         // genuine RISC OS 5.30 is observed to do.
         let known = matches!(reason, 0 | 6..=9 | 12..=24 | 64 | 65);
-        let takes_flags = matches!(reason, 0 | 6..=9 | 12..=16 | 19 | 21..=23 | 64);
+        let takes_flags = matches!(reason, 0 | 6..=9 | 12..=16 | DMA | 21..=23 | 64);
         if known && flags != 0 && !takes_flags {
             return Err(self.error(BAD_PARAMETERS));
         }
@@ -889,7 +889,7 @@ impl Os<'_> {
                     None => Err(self.error(NO_ACCESS_PRIVILEGE)),
                 }
             }
-            19 => self.memory_dma(regs),
+            DMA => self.memory_dma(regs),
             20 => self.memory_compatibility(regs),
             23 => match self
                 .memory
@@ -1125,6 +1125,9 @@ impl Os<'_> {
 
 /// `GraphicsV`'s `SetBlank` reason.
 const GRAPHICS_SET_BLANK: u32 = 4;
+
+/// `OS_Memory` 19: a DMA transfer's buffer translated for its driver.
+const DMA: u32 = 19;
 
 mod dma;
 

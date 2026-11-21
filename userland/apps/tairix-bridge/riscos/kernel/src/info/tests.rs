@@ -4,6 +4,8 @@
 
 use tairix_riscos_arm::psr;
 
+use super::dma::{COMPLETE, DMA_WRITES};
+use super::DMA;
 use crate::memory::layout::{APPLICATION, RISC_OS_5, SHARED};
 use crate::memory::Bits;
 use crate::os::Regs;
@@ -12,11 +14,6 @@ use crate::swi::os::{
 };
 use crate::swi::X;
 use crate::testkit::{with_application, Session, DATA};
-
-/// `OS_Memory` 19, and its flags: the transfer writes to RAM; it is over.
-const DMA: u32 = 0x13;
-const DMA_WRITES: u32 = 1 << 9;
-const DMA_COMPLETE: u32 = 1 << 10;
 
 fn session() -> Session {
     with_application(&RISC_OS_5, Bits::Bit32)
@@ -346,7 +343,7 @@ fn os_memory_19_outputs_the_regions_joined_and_marks_a_dma_write_s_partial_lines
         [0, 16, 1],
         "too short for a whole cache line: bounced"
     );
-    let finished = DMA | DMA_WRITES | DMA_COMPLETE;
+    let finished = DMA | DMA_WRITES | COMPLETE;
     let regs = call(&mut s, MEMORY, &[finished, buffer, regions, input, out, 0]);
     assert_eq!(
         (regs.r[2] - regions, regs.r[4]),

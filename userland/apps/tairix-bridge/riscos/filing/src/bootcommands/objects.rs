@@ -5,9 +5,12 @@
 
 use alloc::vec::Vec;
 
+use tairix_riscos_kernel::filing::fs::stamp;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::{self as swi, file, gbpb};
 use tairix_riscos_kernel::swi::X;
+
+pub(crate) use tairix_riscos_kernel::filing::fs::kind::{DIRECTORY, FILE, IMAGE};
 
 /// The room one read of a listing is given: a record's catalogue words and
 /// a leaf of the longest a filing system gives.
@@ -15,11 +18,6 @@ const ROOM: u32 = 20 + 256;
 /// The most objects a listing holds: a containment bound on what one
 /// directory's walk costs.
 const MOST: usize = 1 << 16;
-
-/// An object's kinds, as `OS_File` and `OS_GBPB` give them.
-pub(crate) const FILE: u32 = 1;
-pub(crate) const DIRECTORY: u32 = 2;
-pub(crate) const IMAGE: u32 = 3;
 
 /// An object in a directory.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -36,10 +34,10 @@ pub(crate) struct Object {
 impl Object {
     /// Its file type: none for a directory or an untyped file.
     pub(crate) const fn file_type(&self) -> Option<u32> {
-        if self.kind == DIRECTORY || self.load & 0xFFF0_0000 != 0xFFF0_0000 {
+        if self.kind == DIRECTORY {
             None
         } else {
-            Some((self.load >> 8) & 0xFFF)
+            stamp::type_of(self.load)
         }
     }
 }

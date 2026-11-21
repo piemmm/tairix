@@ -23,9 +23,12 @@ pub const AREA: u32 = 5;
 /// Its title.
 const TITLE: &[u8] = b"RAM disc";
 
+/// Its pages' access privilege: privileged code's alone.
+pub const ACCESS: u32 = 2;
+
 /// Its flags, as RISC OS 5 gives them: a pool of pages it names, which only
 /// privileged code may reach.
-const FLAGS: u32 = AreaFlags::PMP | AreaFlags::NEEDS_SPECIFIC_PAGES | 2;
+const FLAGS: u32 = AreaFlags::PMP | AreaFlags::NEEDS_SPECIFIC_PAGES | ACCESS;
 
 /// The most address space its window takes, however much RAM the session
 /// has: half of what a 32-bit address reaches.

@@ -250,7 +250,9 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   a sine along a row by turning its phase one rotation a step, so a row of
   samples pays one four-multiply rotation a sample rather than a series; the ribbon of
   light (`lib/ribbon`) and the retro games screensaver's floor both sweep
-  through it.
+  through it. Its rotation is `Turn`, an angle held as its sine and cosine and
+  composed by angle addition, which the Bubble Universe screensaver turns its
+  curves' phases by.
 * `mode` — the one reading of a file mode a command line spells, shared by
   `chmod`, `mkdir -m` and the shell's `umask`. `Mode::parse` takes an octal
   value of any length up to `7777`, or GNU's symbolic grammar

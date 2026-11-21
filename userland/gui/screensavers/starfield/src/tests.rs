@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use tairix_abi::saver_ipc::Start;
 use tairix_geometry::{Point, Rect, Region};
 use tairix_raster::{Color, Surface};
-use tairix_saver::testing::{self, Screen, FRAME_NS};
+use tairix_saver::testing::{self, Screen, FRAME_NS, SEC};
 use tairix_saver::{NextFrame, SaverValue};
 use tairix_theme::motion::{seconds, SceneClock};
 use tairix_util::mathf;
@@ -19,8 +19,6 @@ use super::{
 };
 
 const SCREEN: (u32, u32) = (1920, 1080);
-
-const SEC: u64 = 1_000_000_000;
 
 /// The start the host would send for a `size` screen with these options.
 fn start(size: (u32, u32), stars: &str, warp: bool) -> Start {

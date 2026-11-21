@@ -12,17 +12,21 @@
 
 use alloc::vec::Vec;
 
+use tairix_riscos_kernel::filing::filetype::DATA;
 use tairix_riscos_kernel::filing::fs;
 use tairix_riscos_kernel::os::{len32, Fail, Os};
 
 use super::call::{self, Info, Opened};
-use super::file::{typed_stamp, DATA};
+use super::file::typed_stamp;
 use super::name::Resolved;
 use super::system::{Calls, Point};
 use super::{error, with};
 
 /// The handles there are: RISC OS's bound on open files.
 pub const HANDLES: u32 = 255;
+
+/// The largest buffer a filing system may ask FileSwitch to keep for a file.
+pub(crate) const BUFFER_MOST: u32 = 1024;
 
 pub use tairix_riscos_kernel::filing::fs::file_info;
 
@@ -207,7 +211,7 @@ pub(crate) fn record(
     } = resolved;
     let buffer = match opened.buffer {
         0 => None,
-        size if size.is_power_of_two() && (64..=1024).contains(&size) => {
+        size if size.is_power_of_two() && (64..=BUFFER_MOST).contains(&size) => {
             let at = match os.rma_claim(size) {
                 Ok(at) => at,
                 Err(fail) => {

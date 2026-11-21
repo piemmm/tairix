@@ -82,7 +82,7 @@ impl Slideshow {
             due_ns: start.now_ns,
             wanted: None,
             arrived: false,
-            screen: Rect::new(0, 0, start.region.width(), start.region.height()),
+            screen: setup.screen(),
         };
         if show.shuffled {
             show.shuffle(None);

@@ -11,8 +11,6 @@ use crate::swi::os::{CALL_A_SWI, SWI_NUMBER_FROM_STRING, SWI_NUMBER_TO_STRING};
 use crate::swi::X;
 use crate::testkit::{asm, with_application, Session, CODE, DATA, SWI_AT};
 
-const UKSWIV: u32 = 0x18;
-
 fn session() -> Session {
     with_application(&RISC_OS_5, Bits::Bit32)
 }
@@ -74,7 +72,7 @@ fn a_swi_no_module_provides_goes_through_ukswiv_and_a_claimant_answers_it() {
     assert_eq!(s.error_text(regs.r[0]), b"SWI &45678 not known");
     // A claimant answering the SWI in R11 with R0 = 99.
     s.poke(CODE, &[asm::mov(0, 99), asm::claim()]);
-    let (regs, _) = s.user_swi(X | CLAIM, registers(&[UKSWIV, CODE, 0]));
+    let (regs, _) = s.user_swi(X | CLAIM, registers(&[crate::vectors::UKSWI.0, CODE, 0]));
     assert!(!regs.flag(psr::V));
     let (regs, _) = s.user_swi(X | 0x4_5678, [0; 13]);
     assert!(!regs.flag(psr::V));

@@ -168,6 +168,7 @@ tairix_sync::global! {
 // Loom's own visibility arms take a visibility as plain tokens, so each form
 // `global!` accepts is built here, where the model checker expands it.
 tairix_sync::global! {
+    /// The `pub` form: its doc reaches the type loom's expansion declares.
     pub static PUBLIC: SpinLock<u32> = SpinLock::new(1);
 }
 

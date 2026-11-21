@@ -9,7 +9,7 @@ use tairix_abi::saver_ipc::Start;
 use tairix_abi::switchboard_ipc::{MachineInterface, MachineInterfaceName, MachineNetwork};
 use tairix_geometry::Rect;
 use tairix_raster::{Color, Surface};
-use tairix_saver::testing::{self, Screen};
+use tairix_saver::testing::{self, Screen, SEC};
 use tairix_saver::{NextFrame, Scene, WallReading};
 use tairix_theme::Theme;
 
@@ -19,8 +19,6 @@ use super::verdict::Verdict;
 use super::{SystemMonitor, FIRST_READING_NS, STALE_PERIODS};
 
 const SCREEN: (u32, u32) = (1920, 1080);
-
-const SEC: u64 = 1_000_000_000;
 
 const MARK: Color = Color::rgb(1, 2, 3);
 

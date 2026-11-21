@@ -5488,6 +5488,9 @@ dependencies = [
 [[package]]
 name = "tairix-teletext"
 version = "0.0.0"
+dependencies = [
+ "tairix-font",
+]
 
 [[package]]
 name = "tairix-telnet"
@@ -9752,6 +9755,9 @@ dependencies = [
 [[package]]
 name = "tairix-vdu"
 version = "0.0.0"
+dependencies = [
+ "tairix-font",
+]
 
 [[package]]
 name = "tairix-video"

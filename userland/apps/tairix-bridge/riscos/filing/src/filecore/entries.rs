@@ -9,8 +9,9 @@ use tairix_filecore::dir::Object;
 use tairix_filecore::volume::{Directory, Recorded, Volume, EMPTY_OBJECT};
 use tairix_filecore::{Error, Fault};
 use tairix_fsmeta::preset::acorn;
+use tairix_riscos_kernel::filing::filetype::DATA;
 use tairix_riscos_kernel::filing::fs::{
-    args, attribute, file, file_info, func, kind, open as reasons,
+    args, attribute, file, file_info, func, kind, open as reasons, opt,
 };
 use tairix_riscos_kernel::filing::UNSUPPORTED;
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
@@ -29,8 +30,6 @@ const ROOT_ATTRIBUTES: u32 = attribute::LOCKED;
 /// reports them.
 const FLOPPY_DISC: u32 = 0xFCE;
 const HARD_DISC: u32 = 0xFCD;
-/// The type a new directory is stamped with.
-const DATA: u32 = 0xFFD;
 /// The directory an open root is held under: none holds the root's entry,
 /// and none lies at address zero.
 const ROOT_PARENT: u32 = 0;
@@ -835,7 +834,7 @@ pub(super) fn func(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         | func::SHUT_DOWN
         | func::NEW_IMAGE
         | func::CLOSING_IMAGE
-        | STAMP_IMAGE => Ok(()),
+        | func::STAMP_IMAGE => Ok(()),
         func::OPT => opt(os, workspace, regs),
         func::RENAME => rename(os, workspace, &client, regs),
         func::READ_DISC => read_disc(os, workspace, &client, regs),
@@ -848,39 +847,26 @@ pub(super) fn func(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
             regs.r[2] = with_volume(os, workspace, drive, |volume, _| boot_option(volume))?;
             Ok(())
         }
-        DEFECT_LIST => defect_list(os, workspace, &client, regs, false),
-        DEFECT_LIST_64 => defect_list(os, workspace, &client, regs, true),
-        ADD_DEFECT => add_defect(os, workspace, &client, regs, u64::from(regs.r[2])),
-        ADD_DEFECT_64 => {
+        func::DEFECT_LIST => defect_list(os, workspace, &client, regs, false),
+        func::DEFECT_LIST_64 => defect_list(os, workspace, &client, regs, true),
+        func::ADD_DEFECT => add_defect(os, workspace, &client, regs, u64::from(regs.r[2])),
+        func::ADD_DEFECT_64 => {
             let address = u64::from(regs.r[2]) | u64::from(regs.r[3]) << 32;
             add_defect(os, workspace, &client, regs, address)
         }
-        WRITE_BOOT_OPTION => {
+        func::WRITE_BOOT_OPTION => {
             let (_, drive) = resolve(os, workspace, &client, regs.r[1])?;
             let option = regs.r[2].to_le_bytes()[0];
             with_volume(os, workspace, drive, |volume, _| {
                 volume.set_boot_option(option)
             })
         }
-        FREE_SPACE | FREE_SPACE_64 => free_space(os, workspace, &client, regs),
-        NAME_DISC => name_disc(os, workspace, &client, regs),
-        OBJECT_AT_OFFSET => object_at_offset(os, workspace, &client, regs),
+        func::FREE_SPACE | func::FREE_SPACE_64 => free_space(os, workspace, &client, regs),
+        func::NAME_DISC => name_disc(os, workspace, &client, regs),
+        func::OBJECT_AT_OFFSET => object_at_offset(os, workspace, &client, regs),
         _ => Err(os.error(UNSUPPORTED)),
     }
 }
-
-/// `FSEntry_Func`'s disc reasons, which FileSwitch passes on from
-/// `OS_FSControl` 46 to 58.
-const DEFECT_LIST: u32 = 25;
-const ADD_DEFECT: u32 = 26;
-const WRITE_BOOT_OPTION: u32 = 28;
-const FREE_SPACE: u32 = 30;
-const NAME_DISC: u32 = 31;
-const STAMP_IMAGE: u32 = 32;
-const OBJECT_AT_OFFSET: u32 = 33;
-const FREE_SPACE_64: u32 = 35;
-const DEFECT_LIST_64: u32 = 36;
-const ADD_DEFECT_64: u32 = 37;
 
 /// `FSEntry_Func` 25 and 36: the defects the disc R1 names records, written
 /// to the R5 bytes at R2 as RISC OS 5 writes them. For 25, a word each — the
@@ -977,7 +963,7 @@ fn boot_option(volume: &mut Volume<ClientDisc<'_, '_>>) -> Result<u32, Error<Fai
 /// `FSEntry_Func` 7: `*Opt 4`'s boot option set on the current drive's
 /// disc; any other option is FileSwitch's.
 fn opt(os: &mut Os<'_>, workspace: u32, regs: &Regs) -> Result<(), Fail> {
-    if regs.r[1] != 4 {
+    if regs.r[1] != opt::BOOT {
         return Ok(());
     }
     let drive = names::drive_of(os, workspace, None)?;
@@ -1255,7 +1241,7 @@ fn free_space(
 ) -> Result<(), Fail> {
     let (_, drive) = resolve(os, workspace, client, regs.r[1])?;
     let (free, size) = with_volume(os, workspace, drive, |volume, _| space_of(volume))?;
-    if regs.r[0] == FREE_SPACE {
+    if regs.r[0] == func::FREE_SPACE {
         regs.r[0] = capped(free);
         regs.r[1] = capped(free);
         regs.r[2] = capped(size);

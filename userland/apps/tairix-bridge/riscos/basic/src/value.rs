@@ -57,7 +57,7 @@ impl Real {
 }
 
 /// The longest string BASIC holds.
-pub(crate) const STRING_MOST: usize = 255;
+pub const STRING_MOST: usize = 255;
 
 /// A string's bytes.
 #[derive(Clone, Copy)]

@@ -3,6 +3,7 @@
 //! pseudo-variables a statement sets.
 
 use tairix_riscos_kernel::os::Regs;
+use tairix_riscos_kernel::swi::os::set_colour::{ACTION, BACKGROUND, TEXT};
 use tairix_riscos_kernel::swi::{os as swi, sound, X};
 
 use super::super::functions::{string_of, Guest};
@@ -643,8 +644,7 @@ impl Machine<'_, '_> {
             Gathered::ColourOf | Gathered::ColourOn => {
                 let background = kind == Gathered::ColourOn;
                 match n {
-                    1 => self
-                        .set_colour(TEXT_COLOUR | if background { BACKGROUND } else { 0 }, a[0])?,
+                    1 => self.set_colour(TEXT | if background { BACKGROUND } else { 0 }, a[0])?,
                     3 => self.text_colour_rgb(background, a)?,
                     _ => return Err(Error::Syntax.into()),
                 }
@@ -856,7 +856,7 @@ impl Machine<'_, '_> {
     fn set_colour(&mut self, flags: u32, colour: i32) -> Step {
         let mut regs = Regs::default();
         regs.r[..2].copy_from_slice(&[flags, colour.cast_unsigned()]);
-        self.os.perform(X | SET_COLOUR, &mut regs)?;
+        self.os.perform(X | swi::SET_COLOUR, &mut regs)?;
         Ok(())
     }
 
@@ -1024,7 +1024,7 @@ impl Machine<'_, '_> {
             }
             token::CLOSE => {
                 let mut regs = Regs::default();
-                regs.r[..2].copy_from_slice(&[0, handle]);
+                regs.r[..2].copy_from_slice(&[swi::find::CLOSE, handle]);
                 self.os.perform(X | swi::FIND, &mut regs)?;
                 Ok(Next::Done)
             }
@@ -1079,9 +1079,9 @@ impl Machine<'_, '_> {
             token::PTR_LHS | token::EXT => {
                 let n = self.int_value(value)?.cast_unsigned();
                 let reason = if payload.byte(1) == token::PTR_LHS {
-                    1
+                    swi::args::WRITE_POINTER
                 } else {
-                    3
+                    swi::args::WRITE_EXTENT
                 };
                 let mut regs = Regs::default();
                 regs.r[..3].copy_from_slice(&[reason, handle, n]);
@@ -1207,7 +1207,7 @@ impl Machine<'_, '_> {
         self.os.perform(swi::BGET | X, &mut regs)?;
         if regs.flag(tairix_riscos_arm::psr::C) {
             let mut eof = Regs::default();
-            eof.r[..2].copy_from_slice(&[ARGS_EOF_ERROR, handle]);
+            eof.r[..2].copy_from_slice(&[swi::args::AT_END, handle]);
             self.os.perform(X | swi::ARGS, &mut eof)?;
             return Err(Error::OutOfData.into());
         }
@@ -1464,19 +1464,11 @@ mod plot {
     pub(super) const ELLIPSE_FILL: i32 = code(vdu::ELLIPSE_FILL | vdu::ABSOLUTE | vdu::FOREGROUND);
 }
 
-/// `OS_Args` reason that reads whether a file is at its end.
-const ARGS_EOF_ERROR: u32 = 5;
 /// `ColourTrans_SetGCOL` and `ColourTrans_SetTextColour`, and their flag
 /// for the background.
 const COLOUR_TRANS_SET_GCOL: u32 = 0x4_0743;
 const COLOUR_TRANS_SET_TEXT_COLOUR: u32 = 0x4_0761;
 const COLOUR_TRANS_BACKGROUND: u32 = 1 << 7;
-/// `OS_SetColour`, and its flags: the action's bits, the background, and the
-/// text colour rather than the graphics.
-const SET_COLOUR: u32 = 0x61;
-const ACTION: u32 = 0xF;
-const BACKGROUND: u32 = 1 << 4;
-const TEXT_COLOUR: u32 = 1 << 6;
 /// `PRINT#`'s markers: an integer, BASIC V's real, BASIC VI's real and a
 /// string.
 const FILE_INT: u8 = 0x40;

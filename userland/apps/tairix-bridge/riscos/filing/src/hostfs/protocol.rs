@@ -22,7 +22,7 @@ pub const ROOTS_MOST: usize = 64;
 
 /// The longest path beneath a root a request names, in bytes: as long as the
 /// longest name FileSwitch resolves.
-pub const PATH_MOST: usize = 1024;
+pub const PATH_MOST: usize = crate::fileswitch::name::NAME_MOST;
 
 /// The longest leaf, or disc name, in bytes.
 pub const NAME_MOST: usize = acorn::LEAF_MAX;

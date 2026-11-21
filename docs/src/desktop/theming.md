@@ -327,6 +327,8 @@ bundles, under a stable `ThemeId`:
   stands at, each step held to
   `MOST_FRAMES` so a late wake carries it a few frames on rather than all the
   way to the clock. A scene made still under reduced motion asks for no frame.
+  A scene that draws its motion blurred exposes each frame over `SHUTTER`, the
+  one share of a frame's time every scene's exposure spans.
 - `MotionTheme` — one duration per `MotionInteraction`, in milliseconds, so no
   control carries a private animation timing. It is a table indexed by the
   interaction rather than a field per interaction: the durations are all the

@@ -34,7 +34,8 @@ use tairix_riscos_kernel::service::FS_REDECLARE;
 use tairix_riscos_kernel::swi::os::{fs_control, FS_CONTROL};
 use tairix_riscos_kernel::swi::X;
 
-pub(crate) use disc::Mounted;
+pub(crate) use disc::{op, Mounted};
+pub use swis::number as swi;
 
 /// FileCore's SWI chunk.
 const CHUNK: u32 = 0x40540;
@@ -99,12 +100,39 @@ const OWN_WORKSPACE: u32 = REQUEST_AT + REQUEST;
 const INFO_AT: u32 = 0;
 const EMPTY_AT: u32 = INFO_AT + 4 * len32(block::WORDS);
 const DESCRIBED_AT: u32 = EMPTY_AT + 4;
-const RECORDS_AT: u32 = DESCRIBED_AT + 20;
+const RECORDS_AT: u32 = DESCRIBED_AT + 4 * len32(DESCRIPTOR_WORDS);
+/// A descriptor block's words: its flags and filing system number, then its
+/// title's, boot text's, `DiscOp`'s and `MiscOp`'s.
+pub(crate) const DESCRIPTOR_WORDS: usize = 5;
+
+/// A descriptor block written at `at`: `flags` beneath the filing system's
+/// `number`, then `entries`, the title's, boot text's, `DiscOp`'s and
+/// `MiscOp`'s.
+pub(crate) fn write_descriptor(
+    os: &mut Os<'_>,
+    at: u32,
+    flags: u32,
+    number: u8,
+    entries: [u32; DESCRIPTOR_WORDS - 1],
+) -> Result<(), Fail> {
+    let [title, boot_text, disc_op, misc_op] = entries;
+    let words = [
+        (flags & 0x00FF_FFFF) | u32::from(number) << 24,
+        title,
+        boot_text,
+        disc_op,
+        misc_op,
+    ];
+    for (n, word) in (0..).zip(words) {
+        os.write_word(at + 4 * n, word)?;
+    }
+    Ok(())
+}
 /// A disc record's room, as `FileCore_DescribeDisc` fills it.
 pub(crate) const RECORD_ROOM: u32 = 64;
 const BOOT_BLOCKS_AT: u32 = RECORDS_AT + RECORD_ROOM * DRIVES as u32;
 /// A hard disc's boot block.
-pub(crate) const BOOT_BLOCK_ROOM: u32 = 512;
+pub(crate) const BOOT_BLOCK_ROOM: u32 = len32(tairix_filecore::record::BOOT_BLOCK_SIZE);
 const BOUNCE_AT: u32 = BOOT_BLOCKS_AT + BOOT_BLOCK_ROOM * (DRIVES - FIRST_HARD_DISC) as u32;
 /// The buffer a transfer passes through: whole sectors of every size.
 pub(crate) const BOUNCE: u32 = 4096;
@@ -160,7 +188,7 @@ pub static FILE_CORE: Builtin = Builtin {
     vectors: &[],
     resources: &[Resource {
         name: "Resources.FileCore.Messages",
-        file_type: 0xFFF,
+        file_type: tairix_riscos_kernel::filing::filetype::TEXT,
         data: MESSAGES,
     }],
     code: None,
@@ -298,7 +326,7 @@ pub(crate) fn with_instance<T>(
 }
 
 /// FileCore's errors, by the number each has in its filing system's range.
-pub(crate) mod code {
+pub mod code {
     pub(crate) const DEFECT: u8 = 0x94;
     pub(crate) const TOO_MANY_DEFECTS: u8 = 0x95;
     pub(crate) const COMPACT_REQ: u8 = 0x98;
@@ -306,7 +334,8 @@ pub(crate) mod code {
     pub(crate) const BAD_DISC: u8 = 0x9A;
     pub(crate) const AMBIG_DISC: u8 = 0x9E;
     pub(crate) const IN_USE: u8 = 0xA0;
-    pub(crate) const BAD_PARMS: u8 = 0xA1;
+    /// A parameter out of range.
+    pub const BAD_PARMS: u8 = 0xA1;
     pub(crate) const BUFFER: u8 = 0xA5;
     pub(crate) const BROKEN_DIR: u8 = 0xA8;
     pub(crate) const BAD_FS_MAP: u8 = 0xA9;
@@ -316,7 +345,8 @@ pub(crate) mod code {
     pub(crate) const DIR_FULL: u8 = 0xB3;
     pub(crate) const DIR_NOT_EMPTY: u8 = 0xB4;
     pub(crate) const ACCESS: u8 = 0xBD;
-    pub(crate) const OPEN: u8 = 0xC2;
+    /// The object is open.
+    pub const OPEN: u8 = 0xC2;
     pub(crate) const LOCKED: u8 = 0xC3;
     pub(crate) const EXISTS: u8 = 0xC4;
     pub(crate) const DISC_FULL: u8 = 0xC6;
@@ -324,7 +354,8 @@ pub(crate) mod code {
     pub(crate) const WRITE_PROTECTED: u8 = 0xC9;
     pub(crate) const BAD_NAME: u8 = 0xCC;
     pub(crate) const DISC_NOT_FOUND: u8 = 0xD4;
-    pub(crate) const NOT_FOUND: u8 = 0xD6;
+    /// No object of the name.
+    pub const NOT_FOUND: u8 = 0xD6;
     pub(crate) const DISC_NOT_FILE_CORE: u8 = 0xD7;
     pub(crate) const CHANNEL: u8 = 0xDE;
 }
@@ -365,7 +396,8 @@ fn token(code: u8) -> &'static str {
 /// Error `code` of filing system `system`, numbered beside it: as a client
 /// of FileCore's may ask FileCore to number its errors, and as RISC OS's
 /// HostFS numbers its own.
-pub(crate) const fn numbered(system: u32, code: u8) -> u32 {
+#[must_use]
+pub const fn numbered(system: u32, code: u8) -> u32 {
     0x1_0000 | system << 8 | code as u32
 }
 
@@ -421,7 +453,7 @@ pub(crate) fn refused(
 }
 
 /// The number FileCore's own errors are numbered beside: its module's.
-const MODULE_NUMBER: u32 = 0x08;
+pub const MODULE_NUMBER: u32 = 0x08;
 
 /// Its initialisation, for each incarnation: the first is FileCore's own,
 /// which keeps its messages; a later one is the instance `FileCore_Create`
@@ -463,16 +495,18 @@ fn create_instance(os: &mut Os<'_>, private_word: u32, client: Client) -> Result
     let workspace = os.rma_claim(INSTANCE_WORKSPACE)?;
     os.write_word(private_word, workspace)?;
     os.write_word(workspace + EMPTY_AT, 0)?;
-    let described = [
-        (client.flags & 0x00FF_FFFF) | u32::from(client.number) << 24,
-        client.title,
-        client.boot_text,
-        client.disc_op.address,
-        client.misc_op.address,
-    ];
-    for (n, word) in (0..).zip(described) {
-        os.write_word(workspace + DESCRIBED_AT + 4 * n, word)?;
-    }
+    write_descriptor(
+        os,
+        workspace + DESCRIBED_AT,
+        client.flags,
+        client.number,
+        [
+            client.title,
+            client.boot_text,
+            client.disc_op.address,
+            client.misc_op.address,
+        ],
+    )?;
     let drive = if client.has(client.default_drive) {
         client.default_drive
     } else {

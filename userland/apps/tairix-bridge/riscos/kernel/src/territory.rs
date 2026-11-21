@@ -55,6 +55,8 @@ pub(crate) const READ_CALENDAR_INFORMATION: u32 = CHUNK + 0x1F;
 pub(crate) const NAME_TO_NUMBER: u32 = CHUNK + 0x20;
 /// `Territory_ConvertTextToString`, which does nothing.
 const CONVERT_TEXT_TO_STRING: u32 = CHUNK + 0x35;
+/// `Territory_DaylightRules`' offset in the chunk.
+const DAYLIGHT_RULES: u32 = 0x23;
 /// `Territory_Select`'s, `Territory_DaylightSaving`'s and
 /// `Territory_ConvertTimeFormats`' offsets in the chunk.
 const SELECT: u32 = 0x36;
@@ -77,7 +79,7 @@ mod entry {
     pub(super) const ALPHABET: usize = of(super::ALPHABET);
     pub(super) const SELECT_KEYBOARD_HANDLER: usize = of(CHUNK + 0x14);
     pub(super) const COLLATE: usize = of(CHUNK + 0x1D);
-    pub(super) const DAYLIGHT_RULES: usize = of(CHUNK + 0x23);
+    pub(super) const DAYLIGHT_RULES: usize = of(CHUNK + super::DAYLIGHT_RULES);
 }
 
 /// The CMOS it keeps: the configured territory, the time zone and daylight
@@ -285,7 +287,7 @@ pub(crate) static TERRITORY_MANAGER: Builtin = Builtin {
     vectors: &[],
     resources: &[Resource {
         name: "Resources.TerrMgr.Messages",
-        file_type: 0xFFF,
+        file_type: crate::filing::filetype::TEXT,
         data: MESSAGES,
     }],
     code: None,
@@ -669,10 +671,10 @@ fn swi(os: &mut Os<'_>, offset: u32, regs: &mut Regs) -> Result<(), Fail> {
         7 => {
             let block = os.world.territory.workspace.map_or(0, |w| w + SCRATCH_AT);
             let time = os.read_five(regs.r[0])?;
-            os.write_byte(block, 5)?;
+            os.write_byte(block, crate::word::set::UTC)?;
             os.write_five(block + 1, time)?;
             let mut word = Regs::default();
-            word.r[..2].copy_from_slice(&[15, block]);
+            word.r[..2].copy_from_slice(&[crate::word::SET_CLOCK, block]);
             os.perform(X | os::WORD, &mut word)?;
             // A clock set across a changeover changes what the rules say.
             os.dst_changeover()

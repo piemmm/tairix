@@ -5,10 +5,11 @@ use alloc::vec::Vec;
 
 use tairix_riscos_arm::psr;
 
-use crate::cli::tests::{cli, filing_system, refused, session, written, SEEN, X};
+use crate::cli::tests::{cli, filing_system, refused, session, written, SEEN};
 use crate::memory::layout::APPLICATION;
 use crate::os::{Ended, Outcome};
 use crate::swi::os::{BYTE, READ_DYNAMIC_AREA, READ_VAR_VAL, SET_VAR_VAL};
+use crate::swi::X;
 use crate::testkit::{asm, Session, DATA};
 
 /// `name`'s value as `OS_ReadVarVal` reads it unexpanded, if it is set.

@@ -19,7 +19,7 @@ pub(crate) mod scan;
 use alloc::vec::Vec;
 
 use crate::error::Error;
-use crate::filing::{IS_A_DIRECTORY, NOT_FOUND as FILE_NOT_FOUND};
+use crate::filing::{filetype, IS_A_DIRECTORY, NOT_FOUND as FILE_NOT_FOUND};
 use crate::module::{Builtin, Resource, Services, Swis};
 use crate::os::{len32, Fail, Os, Regs, Unwind, World};
 use crate::resourcefs::{Object, FS_NUMBER};
@@ -173,7 +173,7 @@ pub(crate) static MESSAGE_TRANS: Builtin = Builtin {
     vectors: &[],
     resources: &[Resource {
         name: "Resources.MsgTrans.Messages",
-        file_type: 0xFFF,
+        file_type: filetype::TEXT,
         data: MESSAGES,
     }],
     code: None,
@@ -460,7 +460,7 @@ impl Os<'_> {
             return found;
         }
         let mut open = Regs::default();
-        open.r[0] = os::find::INPUT | os::find::MUST_OPEN | NO_PATH;
+        open.r[0] = os::find::INPUT | os::find::MUST_OPEN | os::find::NO_PATH;
         open.r[1] = name;
         self.perform(X | os::FIND, &mut open)?;
         let handle = open.r[0];
@@ -529,7 +529,7 @@ impl Os<'_> {
     /// ResourceFS.
     fn handle_located(&mut self, handle: u32) -> Result<Located, Fail> {
         let mut info = Regs::default();
-        info.r[0] = READ_FS_HANDLE;
+        info.r[0] = os::fs_control::HANDLE;
         info.r[1] = handle;
         self.perform(X | os::FS_CONTROL, &mut info)?;
         let mut extent = Regs::default();
@@ -550,7 +550,7 @@ impl Os<'_> {
         let block = data.wrapping_sub(4);
         if length >= SQUASH_HEADER && self.read_word(data)? == SQSH {
             let load = self.read_word(data.wrapping_add(8))?;
-            if load & 0xFFFF_FF00 == 0xFFFF_FF00 {
+            if crate::filing::fs::stamp::type_of(load) == Some(filetype::TEXT) {
                 let size = self.read_word(data.wrapping_add(4))?;
                 return Ok(Located::Squashed { block, size });
             }
@@ -1102,9 +1102,7 @@ impl Os<'_> {
     }
 }
 
-/// `OS_Find`'s flag for no path, `OS_FSControl` 21 and `Squash_Decompress`.
-const NO_PATH: u32 = 3;
-const READ_FS_HANDLE: u32 = 21;
+/// `Squash_Decompress`, and its flag asking the workspace it needs.
 const SQUASH_DECOMPRESS: u32 = 0x4_2701;
 const SQUASH_WORKSPACE: u32 = 8;
 /// A squashed file's header: its magic and the words after it.

@@ -122,7 +122,7 @@ pub(crate) static RESOURCE_FS: Builtin = Builtin {
     vectors: &[],
     resources: &[Resource {
         name: "Resources.ResourceFS.Messages",
-        file_type: 0xFFF,
+        file_type: crate::filing::filetype::TEXT,
         data: MESSAGES,
     }],
     code: None,

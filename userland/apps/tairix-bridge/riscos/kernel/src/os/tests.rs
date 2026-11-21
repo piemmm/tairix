@@ -8,6 +8,7 @@ use crate::input::InputEvent;
 use crate::memory::layout::RISC_OS_5;
 use crate::memory::Bits;
 use crate::os::{Ended, Fail, Outcome, Regs, Wait};
+use crate::swi::os::exit::ABEX;
 use crate::swi::os::{ADD_CALLBACK, SET_CALLBACK};
 use crate::swi::os::{
     BYTE, CALL_AFTER, CALL_EVERY, CHANGE_ENVIRONMENT, CLAIM, EXIT, GENERATE_EVENT, INT_OFF, INT_ON,
@@ -15,12 +16,7 @@ use crate::swi::os::{
 };
 use crate::swi::X;
 use crate::testkit::{asm, with_application, Session, CODE, DATA, SWI_AT};
-
-const UP_CALL_V: u32 = 0x1D;
-const TICKER_V: u32 = 0x1C;
-const ABEX: u32 = 0x5845_4241;
-const EVENT_V: u32 = 0x10;
-const BYTE_V: u32 = 6;
+use crate::vectors;
 
 fn session() -> Session {
     with_application(&RISC_OS_5, Bits::Bit32)
@@ -103,7 +99,7 @@ fn timed_calls_fire_from_the_interrupt_once_or_every_period_until_removed() {
 fn an_event_reaches_eventv_only_while_enabled_and_numbers_from_32_always() {
     let mut s = session();
     counter(&mut s, CODE);
-    s.user_swi(X | CLAIM, registers(&[EVENT_V, CODE, DATA]));
+    s.user_swi(X | CLAIM, registers(&[vectors::EVENT.0, CODE, DATA]));
     s.user_swi(X | GENERATE_EVENT, registers(&[9]));
     assert_eq!(s.peek(DATA), 0, "disabled");
     let (regs, _) = s.user_swi(X | BYTE, registers(&[14, 9]));
@@ -239,7 +235,7 @@ fn interrupts_are_taken_while_a_claimant_s_swi_waits_for_input() {
             asm::claim(),
         ],
     );
-    s.user_swi(X | CLAIM, registers(&[BYTE_V, reader, 0]));
+    s.user_swi(X | CLAIM, registers(&[vectors::BYTE.0, reader, 0]));
     s.arrive(50, InputEvent::Key(b'k'));
     let (regs, _) = s.user_swi(X | BYTE, registers(&[0x80]));
     assert_eq!(regs.r[0], u32::from(b'k'));
@@ -273,7 +269,7 @@ fn guest_code_looping_on_a_swi_inside_a_call_still_stops_when_the_host_says() {
     let mut s = session();
     // A ByteV claimant that never returns, a SWI every other instruction.
     s.poke(CODE, &[asm::swi(X | 0x42), asm::b(CODE + 4, CODE)]);
-    s.user_swi(X | CLAIM, registers(&[BYTE_V, CODE, 0]));
+    s.user_swi(X | CLAIM, registers(&[vectors::BYTE.0, CODE, 0]));
     s.stop_after.set(Some(2));
     assert_eq!(s.start_swi(X | BYTE, registers(&[0x80])), Outcome::Stopped);
 }
@@ -419,7 +415,7 @@ fn an_upcall_keeps_its_callers_interrupt_state_and_flags() {
             asm::mov_pc_lr(),
         ],
     );
-    s.user_swi(X | CLAIM, registers(&[UP_CALL_V, CODE, DATA]));
+    s.user_swi(X | CLAIM, registers(&[vectors::UPCALL.0, CODE, DATA]));
     let at = CODE + 0x40;
     s.poke(
         at,
@@ -492,7 +488,7 @@ fn the_unused_swi_handler_is_given_the_number_with_bit_17_clear() {
 fn tickerv_is_called_once_a_centisecond_and_a_late_interrupt_makes_up_a_second_at_most() {
     let mut s = session();
     counter(&mut s, CODE);
-    s.user_swi(X | CLAIM, registers(&[TICKER_V, CODE, DATA]));
+    s.user_swi(X | CLAIM, registers(&[vectors::TICKER.0, CODE, DATA]));
     spin(&mut s);
     s.clock.set(5);
     s.run(100);

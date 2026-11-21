@@ -183,7 +183,7 @@ impl Machine<'_, '_> {
             self.os.write_bytes(at, name.as_bytes())?;
             self.os.write_byte(at + u32::from(name.len()), b'\r')?;
             let mut regs = Regs::default();
-            regs.r[..2].copy_from_slice(&[0x83, at]);
+            regs.r[..2].copy_from_slice(&[swi::find::OUTPUT | swi::find::NO_PATH, at]);
             self.os.perform(X | swi::FIND, &mut regs)?;
             self.close_trace_file()?;
             self.os.write_word(ws::TRACEF.at(), regs.r[0])?;
@@ -213,7 +213,7 @@ impl Machine<'_, '_> {
         let handle = self.os.read_word(ws::TRACEF.at())?;
         if handle != 0 {
             let mut regs = Regs::default();
-            regs.r[..2].copy_from_slice(&[0, handle]);
+            regs.r[..2].copy_from_slice(&[swi::find::CLOSE, handle]);
             self.os.write_word(ws::TRACEF.at(), 0)?;
             self.os.perform(X | swi::FIND, &mut regs)?;
         }

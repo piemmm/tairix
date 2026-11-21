@@ -1,15 +1,13 @@
 //! The kernel's SWIs, by number: those it performs in Rust, those that are
 //! their vectors, and those the VDU drivers perform.
 
+use crate::convert::CONVERT_VARIFORM;
 use crate::env::{BREAKPOINT, CALLBACK};
 use crate::os::{Entry, Fail, Os, Regs};
 use crate::swi::names::{CONVERT_DATE_AND_TIME, CONVERT_HEX1, CONVERT_STANDARD_DATE_AND_TIME};
 use crate::swi::os as number;
 use crate::swi::Handler;
 use crate::vectors::{self, Carry};
-
-/// The number conversions past `OS_ConvertHex1`.
-const CONVERSIONS: u32 = 30;
 
 macro_rules! through {
     ($($name:ident: $vector:expr, $carry:expr;)*) => {
@@ -66,7 +64,7 @@ impl Os<'_> {
 /// number no SWI has.
 #[expect(clippy::too_many_lines, reason = "one arm a SWI")]
 pub(crate) fn os<'o>(number: u32) -> Option<Handler<'o>> {
-    if (CONVERT_HEX1..CONVERT_HEX1 + CONVERSIONS).contains(&number) {
+    if (CONVERT_HEX1..=CONVERT_VARIFORM).contains(&number) {
         return Some(Os::conversion);
     }
     let handler: Handler<'o> = match number {

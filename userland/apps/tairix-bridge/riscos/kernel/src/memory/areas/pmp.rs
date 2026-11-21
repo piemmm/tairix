@@ -9,6 +9,7 @@ use tairix_collections::OrderedMap;
 use tairix_riscos_arm::mmu::{Access, Frame, FrameKind, Table, PAGE_SIZE};
 
 use super::super::guest::{Guest, Service};
+use super::super::map::UNAVAILABLE;
 use super::super::{Holder, Memory, Record, RESERVED};
 use super::change::named;
 use super::{access_privilege, AreaError, AreaFlags, Id, Shape};
@@ -16,8 +17,6 @@ use super::{access_privilege, AreaError, AreaFlags, Id, Shape};
 /// The page flags a logical op may set: the access privilege, the cache
 /// bits and policy, and unavailability.
 const LOGICAL_FLAGS: u32 = 0xF03F;
-/// A page claimed for its owner alone.
-const UNAVAILABLE: u32 = 1 << 15;
 
 /// A pool's pages: its page list and where in its window each is mapped.
 pub(super) struct Pool {

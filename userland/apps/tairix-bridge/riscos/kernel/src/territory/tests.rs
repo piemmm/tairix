@@ -10,13 +10,15 @@ use std::sync::OnceLock;
 use tairix_riscos_arm::psr;
 use tairix_tz::{Zone, ZoneInfo};
 
-use super::{calendar, CHUNK};
+use super::formats::{ADJUSTMENT, AS_SUMMER, BY_THE_RULES, STANDARD_UNRULED};
+use super::{calendar, CHUNK, CONVERT_TIME_FORMATS, DAYLIGHT_RULES, DAYLIGHT_SAVING, HOUR, SELECT};
 use crate::memory::layout::RISC_OS_5;
 use crate::memory::Bits;
-use crate::msgtrans::tests::{swi, X};
+use crate::msgtrans::tests::swi;
 use crate::os::MILLENNIUM;
-use crate::service::TIME_ZONE_CHANGED;
+use crate::service::{POST_INIT, TERRITORY_STARTED, TIME_ZONE_CHANGED};
 use crate::swi::os::{BYTE, SERVICE_CALL};
+use crate::swi::X;
 use crate::testkit::{asm, boot_in, Session, CODE, DATA};
 
 const BUFFER: u32 = DATA + 0x100;
@@ -299,11 +301,6 @@ fn a_registration_stands_when_its_territory_cannot_be_set_up() {
     assert!(exists.flag(psr::Z));
 }
 
-const DAYLIGHT_SAVING: u32 = 0x37;
-const DAYLIGHT_RULES: u32 = 0x23;
-const SELECT: u32 = 0x36;
-const POST_INIT: u32 = 0x73;
-const STARTED: u32 = 0x75;
 /// Where watchers count `Service_TimeZoneChanged` and
 /// `Service_TerritoryStarted`.
 const ANNOUNCED: u32 = DATA + 0xA00;
@@ -633,7 +630,7 @@ fn every_change_of_daylight_saving_is_announced_with_the_state_and_offset() {
 fn selecting_a_territory_records_it_and_says_so_and_does_nothing_more() {
     let mut s = session_in("Europe/London", (2026, 7, 1, 12, 0));
     crate::module::tests::watch_service(&mut s, TIME_ZONE_CHANGED, ANNOUNCED);
-    crate::module::tests::watch_service(&mut s, STARTED, STARTED_SEEN);
+    crate::module::tests::watch_service(&mut s, TERRITORY_STARTED, STARTED_SEEN);
     for unloaded in [99, 0, u32::MAX] {
         let refused = territory(
             &mut s,
@@ -682,7 +679,7 @@ fn the_territory_command_names_or_selects_the_current_territory() {
     use crate::cli::tests::{cli, written};
     let mut s = session_in("Europe/London", (2026, 7, 1, 12, 0));
     assert_eq!(written(&mut s, "Territory"), b"UK\n\r");
-    crate::module::tests::watch_service(&mut s, STARTED, STARTED_SEEN);
+    crate::module::tests::watch_service(&mut s, TERRITORY_STARTED, STARTED_SEEN);
     cli(&mut s, "Territory UK").expect("by name");
     cli(&mut s, "Territory 1").expect("by number");
     assert_eq!(s.peek(STARTED_SEEN), 2, "selected twice");
@@ -758,8 +755,6 @@ fn starting_up_brings_daylight_saving_up_to_date_where_the_rules_keep_it() {
     );
 }
 
-const CONVERT_TIME_FORMATS: u32 = 0x38;
-
 /// `Territory_ConvertTimeFormats` of `TIME` into `BUFFER`.
 fn convert(s: &mut Session, number: u32, flags: u32, zone: u32) -> Result<crate::os::Regs, u32> {
     let registers = [number, TIME, BUFFER, flags, zone, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -791,11 +786,7 @@ fn utc_five(
     s.kernel.os().read_five(BUFFER).expect("five bytes")
 }
 
-const AS_SUMMER: u32 = 1 << 16;
-const STANDARD_UNRULED: u32 = 1 << 17;
-const BY_THE_RULES: u32 = 1 << 18;
-const ADJUSTMENT: u32 = 1 << 19;
-const HOUR_CS: u64 = 360_000;
+const HOUR_CS: u64 = HOUR.unsigned_abs();
 
 #[test]
 fn time_formats_convert_local_time_and_utc_as_risc_os_5_s_do() {

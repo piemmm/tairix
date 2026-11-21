@@ -15,6 +15,7 @@ use crate::env::RC_EXCEEDED;
 use crate::host::Routine;
 use crate::os::{len32, Fail, Os, Regs, Unwind};
 use crate::swi::{os, X};
+use crate::word::{read, set, READ_CLOCK, SET_CLOCK};
 
 /// The code variables the kernel makes, in the order it makes them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -58,14 +59,6 @@ const YEAR_MOST: u32 = 4;
 /// year.
 const YEAR_OF_DATE: &[u8] = b" %ce%yr\0";
 const DATE_OF_YEAR: &[u8] = b"%w3,%dy %m3 \0";
-
-/// `OS_Word` 14 reason 3: the time; `OS_Word` 15's reasons: set the time,
-/// set the date — each the length of the text it takes.
-const READ_CLOCK: u32 = 14;
-const UTC: u8 = 3;
-const SET_CLOCK: u32 = 15;
-const SET_TIME: u8 = 8;
-const SET_DATE: u8 = 15;
 
 impl Preset {
     const fn name(self) -> &'static [u8] {
@@ -159,19 +152,19 @@ impl Os<'_> {
         match preset {
             Preset::Time => {
                 self.write_bytes(text, &given)?;
-                self.set_clock(SET_TIME, text.wrapping_add(length))
+                self.set_clock(set::TIME, text.wrapping_add(length))
             }
             Preset::Date => {
                 self.write_bytes(text, &given)?;
                 let end = text.wrapping_add(length);
                 let year = self.clock_text(YEAR_OF_DATE, end)?;
-                self.set_clock(SET_DATE, end.wrapping_add(year))
+                self.set_clock(set::DATE, end.wrapping_add(year))
             }
             Preset::Year => {
                 let date = self.clock_text(DATE_OF_YEAR, text)?;
                 let at = text.wrapping_add(date);
                 self.write_bytes(at, &given)?;
-                self.set_clock(SET_DATE, at.wrapping_add(length))
+                self.set_clock(set::DATE, at.wrapping_add(length))
             }
             Preset::ReturnCode => {
                 let code = self.preset_number(&given, text)?;
@@ -198,7 +191,7 @@ impl Os<'_> {
         let format_at = block.wrapping_add(VALUE_ROOM);
         let time = format_at.wrapping_add(FORMAT_ROOM);
         self.write_bytes(format_at, format)?;
-        self.write_byte(time, UTC)?;
+        self.write_byte(time, read::UTC)?;
         let mut word = Regs::default();
         word.r[..2].copy_from_slice(&[READ_CLOCK, time]);
         self.perform(X | os::WORD, &mut word)?;

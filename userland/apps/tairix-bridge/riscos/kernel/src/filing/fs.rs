@@ -126,16 +126,18 @@ pub mod stamp {
 /// An object's attributes: the owner's read and write, locked, and the
 /// public's read and write.
 pub mod attribute {
+    use tairix_fsmeta::preset::acorn::fileswitch;
+
     /// The owner may read it.
-    pub const OWNER_READ: u32 = 1 << 0;
+    pub const OWNER_READ: u32 = fileswitch::OWNER_READ as u32;
     /// The owner may write it.
-    pub const OWNER_WRITE: u32 = 1 << 1;
+    pub const OWNER_WRITE: u32 = fileswitch::OWNER_WRITE as u32;
     /// It may not be deleted, written over or renamed.
-    pub const LOCKED: u32 = 1 << 3;
+    pub const LOCKED: u32 = fileswitch::LOCKED as u32;
     /// Others may read it.
-    pub const PUBLIC_READ: u32 = 1 << 4;
+    pub const PUBLIC_READ: u32 = fileswitch::PUBLIC_READ as u32;
     /// Others may write it.
-    pub const PUBLIC_WRITE: u32 = 1 << 5;
+    pub const PUBLIC_WRITE: u32 = fileswitch::PUBLIC_WRITE as u32;
 }
 
 /// `FSEntry_Open`'s reasons.
@@ -200,7 +202,8 @@ pub mod args {
     pub const IOCTL: u32 = 11;
 }
 
-/// `FSEntry_Func`'s reasons.
+/// `FSEntry_Func`'s reasons; 25 to 37 are a disc's, which FileSwitch passes
+/// on from `OS_FSControl` 46 to 58.
 pub mod func {
     /// Set the current directory.
     pub const SET_DIRECTORY: u32 = 0;
@@ -228,8 +231,40 @@ pub mod func {
     pub const CLOSING_IMAGE: u32 = 22;
     /// Make a special field and disc canonical.
     pub const CANONICAL: u32 = 23;
+    /// A disc's defect list, a word each.
+    pub const DEFECT_LIST: u32 = 25;
+    /// A defect added to a disc's list.
+    pub const ADD_DEFECT: u32 = 26;
     /// Read a disc's boot option.
     pub const READ_BOOT_OPTION: u32 = 27;
+    /// Write a disc's boot option.
+    pub const WRITE_BOOT_OPTION: u32 = 28;
+    /// A disc's map of its used space.
+    pub const USED_SPACE_MAP: u32 = 29;
+    /// A disc's free space.
+    pub const FREE_SPACE: u32 = 30;
+    /// Name a disc.
+    pub const NAME_DISC: u32 = 31;
+    /// An image's disc stamped as changed.
+    pub const STAMP_IMAGE: u32 = 32;
+    /// The object at an offset into a disc.
+    pub const OBJECT_AT_OFFSET: u32 = 33;
+    /// A disc's free space, in 64 bits.
+    pub const FREE_SPACE_64: u32 = 35;
+    /// A disc's defect list, two words each.
+    pub const DEFECT_LIST_64: u32 = 36;
+    /// A defect at a 64-bit address added to a disc's list.
+    pub const ADD_DEFECT_64: u32 = 37;
+}
+
+/// `*Opt`'s options: `FSEntry_Func` 7's R1.
+pub mod opt {
+    /// Every option reset.
+    pub const RESET: u32 = 0;
+    /// FileSwitch's messages.
+    pub const MESSAGES: u32 = 1;
+    /// A disc's boot option.
+    pub const BOOT: u32 = 4;
 }
 
 /// `UpCall_ModifyingFile`, which comes before each change a call makes, and

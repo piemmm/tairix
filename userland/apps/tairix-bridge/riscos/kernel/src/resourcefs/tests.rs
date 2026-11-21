@@ -4,7 +4,13 @@
 use tairix_riscos_arm::psr;
 
 use super::{Object, DEREGISTER_FILES, REGISTER_FILES};
-use crate::msgtrans::tests::{block, register, session, swi, BLOCK, X};
+use crate::filing::filetype;
+use crate::filing::fs::{attribute, kind, stamp};
+
+/// The attributes every ResourceFS object has: its owner may read and write it.
+const OWNER_READ_WRITE: u32 = attribute::OWNER_READ | attribute::OWNER_WRITE;
+use crate::msgtrans::tests::{block, register, session, swi, BLOCK};
+use crate::swi::X;
 use crate::testkit::{asm, Session, CODE, DATA};
 
 /// What `name` finds.
@@ -263,7 +269,10 @@ fn a_file_is_read_by_its_catalogue_and_its_bytes_through_a_buffer() {
     )
     .expect("read");
     assert_eq!(info.r[0], 1, "a file");
-    assert_eq!(info.r[2..6], [0xFFFF_FF00, 0, 3, 3]);
+    assert_eq!(
+        info.r[2..6],
+        [stamp::typed(filetype::TEXT, 0), 0, 3, OWNER_READ_WRITE]
+    );
     let opened = call_fs(
         &mut s,
         super::fs::open,
@@ -407,7 +416,13 @@ fn children_are_listed_in_name_order_each_named_by_its_first_registered_file() {
         .collect();
     assert_eq!(
         words,
-        [0xFFFF_FF00, 0, 1, 3, 2],
+        [
+            stamp::typed(filetype::TEXT, 0),
+            0,
+            1,
+            OWNER_READ_WRITE,
+            kind::DIRECTORY
+        ],
         "the directory as its first registered file says"
     );
     assert_eq!(s.read(ROOM + 20, 6), b"inner\0");

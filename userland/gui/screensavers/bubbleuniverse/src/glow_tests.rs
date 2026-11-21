@@ -1,18 +1,21 @@
-//! Host tests of the glow: what a spot leaves, how it spreads and falls off,
-//! and how a pixel reads it back.
+//! Host tests of the glow: what a spot leaves, how it softens, spreads and
+//! falls off, how the haze gathers it, and how a pixel reads it back.
 
 extern crate std;
 
 use alloc::vec::Vec;
 
 use tairix_parallel::{JobRunner, Reversed, Threaded, SERIAL};
+use tairix_raster::Pixel16;
+use tairix_rng::{NonCryptoRng, RandU64};
 
-use super::{clamped, lerp, Between, Glow, DARK};
+use super::{clamped, gather_haze, lerp, soften, Between, Glow, GLOW_CELLS, HAZE_CELLS, SOFTEN};
+use crate::light::Shed;
 
 /// A square frame of `side` pixels with cells of `cell`, for dots of one
-/// pixel's energy.
-fn glow(side: u32, cell: u32) -> Glow {
-    Glow::new((side, side), cell, 1, &SERIAL).expect("a glow")
+/// pixel's energy whose spots hold their light as the reference screen's do.
+fn glow(side: u32, cell: u32, runner: &dyn JobRunner) -> Glow {
+    Glow::new((side, side), cell, (1, Shed::new(0.5)), runner).expect("a glow")
 }
 
 /// What `glow` gathered, summed over every cell and channel.
@@ -47,12 +50,14 @@ fn row(glow: &Glow, row: u32, side: u32) -> Vec<[u32; 3]> {
 /// deposit between them.
 #[test]
 fn a_spot_leaves_its_whole_deposit_wherever_it_falls() {
-    let mut glow = glow(240, 6);
-    let light = [4000, 1000, 250];
+    let mut glow = glow(240, 6, &SERIAL);
+    let light = [60_000, 15_000, 3_750];
+    let point = 16 + glow.shift;
     let whole: u64 = light
         .iter()
-        .map(|&l| (u64::from(l) * glow.deposit) >> 16)
+        .map(|&l| (u64::from(l) * glow.deposit) >> point)
         .sum();
+    assert!(whole > 300, "{whole}");
     for (x, y) in [
         (120 * 256, 120 * 256),
         (100 * 256 + 37, 133 * 256 + 211),
@@ -70,10 +75,10 @@ fn a_spot_leaves_its_whole_deposit_wherever_it_falls() {
 
 #[test]
 fn nothing_gathered_glows_nowhere() {
-    let mut glow = glow(240, 6);
+    let mut glow = glow(240, 6, &SERIAL);
     glow.clear();
     glow.spread(&SERIAL);
-    assert!(glow.halo.iter().all(|cell| *cell == DARK));
+    assert!(glow.halo.iter().all(|cell| *cell == Pixel16::BLACK));
     for pixel_row in [0, 100, 239] {
         assert!(row(&glow, pixel_row, 240)
             .iter()
@@ -81,13 +86,33 @@ fn nothing_gathered_glows_nowhere() {
     }
 }
 
+/// A cell's light glows as itself while faint and ever less than itself as it
+/// brightens, so a crowd glows more than a lone point but never past the
+/// softening's ceiling, however many points it holds.
+#[test]
+fn a_crowd_glows_more_than_a_point_but_never_as_all_of_its_points() {
+    let mut last = 0;
+    for light in (0..=Pixel16::FULL).step_by(7) {
+        let glows = soften(light);
+        assert!(glows >= last && glows <= light, "{light}: {glows}");
+        assert!(u32::from(glows) < SOFTEN, "{light}: {glows}");
+        last = glows;
+    }
+    assert!(
+        soften(10).abs_diff(10) <= 1,
+        "a faint light glows as itself"
+    );
+    assert!(soften(Pixel16::FULL) > soften(1_500), "a crowd glows more");
+}
+
 /// One bright spot at a cell's centre haloes that cell's neighbours alike on
-/// every side, its glow falls away from where it fell, and it is gone well
-/// inside the reach the frame allows the glow.
+/// every side, and its glow falls away from where it fell: to under a
+/// hundredth of its peak at the reach the frame allows the glow, and to
+/// nothing past it.
 #[test]
 fn a_spot_s_glow_falls_away_from_where_it_fell() {
     let (side, cell) = (480, 6);
-    let mut glow = glow(side, cell);
+    let mut glow = glow(side, cell, &SERIAL);
     glow.clear();
     // Cell 40's centre, 243 pixels in.
     let (spot_cell, spot) = (40usize, 243 * 256);
@@ -122,11 +147,17 @@ fn a_spot_s_glow_falls_away_from_where_it_fell() {
     }
     let below = row(&glow, 243 + 60, side);
     assert!(below[243][0] < at(243), "and below it");
-    let far = row(&glow, 4, side);
+    let reach = u32::try_from(GLOW_CELLS).expect("small") * cell;
+    let edge = row(&glow, 243 - reach, side);
     assert!(
-        far.iter().all(|light| *light == [0; 3]),
-        "far off it is gone"
+        100 * edge[243][0] <= at(243) && 100 * at(243 - reach) <= at(243),
+        "at the reach: {} and {} against {}",
+        edge[243][0],
+        at(243 - reach),
+        at(243)
     );
+    let far = row(&glow, 4, side);
+    assert!(far.iter().all(|light| *light == [0; 3]), "past it, nothing");
 }
 
 /// The halo spread a band of rows at a time across cores, whichever band runs
@@ -134,21 +165,20 @@ fn a_spot_s_glow_falls_away_from_where_it_fell() {
 #[test]
 fn a_halo_spread_in_bands_is_the_halo_spread_whole() {
     let spread = |runner: &dyn JobRunner| {
-        let mut glow = Glow::new((600, 600), 5, 1, runner).expect("a glow");
+        let mut glow = glow(600, 5, runner);
         glow.clear();
-        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut rng = NonCryptoRng::seed_from_u64(0x9E37_79B9_7F4A_7C15);
+        let mut at = || u32::try_from(rng.next_below(600 * 256)).expect("small");
         for _ in 0..3_000 {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            let at = |shift: u32| u32::try_from((seed >> shift) % (600 * 256)).expect("small");
-            glow.gather((at(0), at(24)), [900, 300, 1200]);
+            let (x, y) = (at(), at());
+            glow.gather((x, y), [9_000, 3_000, 12_000]);
         }
         glow.spread(runner);
         (glow.halo, glow.haze, glow.blocks.len())
     };
     let (whole, haze, bands) = spread(&SERIAL);
     assert_eq!(bands, 1);
+    assert!(whole.iter().any(|cell| cell.r > 0), "something to spread");
     let reversed = Reversed::new(4);
     let threaded = Threaded::new(4);
     let runners: [&dyn JobRunner; 2] = [&reversed, &threaded];
@@ -158,6 +188,24 @@ fn a_halo_spread_in_bands_is_the_halo_spread_whole() {
         assert!(banded == whole, "the bands spread the halo");
         assert!(banded_haze == haze, "and the haze gathered from it");
     }
+}
+
+/// A haze cell is the mean of the halo cells it gathers, a block the halo's
+/// edge cuts short as much as a whole one.
+#[test]
+fn a_haze_cell_is_the_mean_of_the_cells_it_gathers() {
+    let (across, down) = (6, 7);
+    let level = Pixel16 {
+        r: 900,
+        g: 300,
+        b: 1_200,
+        a: Pixel16::FULL,
+    };
+    let halo = alloc::vec![level; across * down];
+    let haze_across = across.div_ceil(HAZE_CELLS);
+    let mut haze = alloc::vec![Pixel16::BLACK; haze_across * down.div_ceil(HAZE_CELLS)];
+    gather_haze(&halo, across, &mut haze, haze_across);
+    assert!(haze.iter().all(|cell| *cell == level), "{haze:?}");
 }
 
 /// A position before the first cell's centre or past the last is held at it,

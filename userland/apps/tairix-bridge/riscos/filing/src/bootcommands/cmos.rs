@@ -10,13 +10,12 @@
 //! whether or not there was one; the emulator's session, whose CMOS starts
 //! afresh each time, keeps its own the same way.
 
+use tairix_riscos_kernel::cmos::SIZE;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
 use tairix_riscos_kernel::release::RELEASE;
 use tairix_riscos_kernel::swi::os::{self as swi, file, find, gbpb};
 use tairix_riscos_kernel::swi::X;
 
-/// The bytes of CMOS RAM a file holds.
-const SIZE: u32 = 256;
 /// A saved file's type: Configuration.
 const CONFIGURATION: u32 = 0xFF2;
 /// `OS_NVMemory`'s reason that reads bytes by logical location.

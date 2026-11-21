@@ -30,12 +30,12 @@ pub(crate) static UTILITY: Builtin = Builtin {
     resources: &[
         Resource {
             name: "Resources.Kernel.Messages",
-            file_type: 0xFFF,
+            file_type: crate::filing::filetype::TEXT,
             data: crate::error::MESSAGES,
         },
         Resource {
             name: "Resources.Kernel.Dictionary",
-            file_type: 0xFFD,
+            file_type: crate::filing::filetype::DATA,
             data: DICTIONARY,
         },
     ],

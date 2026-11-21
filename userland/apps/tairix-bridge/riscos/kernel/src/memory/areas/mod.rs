@@ -41,7 +41,7 @@ pub const RMA: u32 = 1;
 pub const FREE_POOL_FLAGS: u32 =
     AreaFlags::PMP | AreaFlags::NOT_CACHEABLE | AreaFlags::NOT_BUFFERABLE | 2;
 /// Area numbers up to this are the system's own.
-const SYSTEM: u32 = 7;
+pub const SYSTEM: u32 = 7;
 /// The numbers handed out first, most recently freed first.
 const QUICK: Range<u32> = 0x100..0x200;
 /// The longest title kept; a longer one is cut.

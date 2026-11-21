@@ -2,7 +2,7 @@
 
 use tairix_riscos_arm::psr;
 use tairix_riscos_kernel::os::{Entry, Fail, Os, Regs};
-use tairix_riscos_kernel::swi::os as number;
+use tairix_riscos_kernel::swi::os::{self as number, set_colour};
 
 use crate::palette::PALETTE_V;
 use crate::state::with;
@@ -116,27 +116,20 @@ fn claim_screen_memory(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 /// than set it.
 fn set_colour(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let flags = regs.r[0];
-    let background = flags & 0x10 != 0;
-    let text = flags & 0x40 != 0;
-    let read = flags & 0x80 != 0;
-    if read {
-        let words = with(os, |vdu, os| {
+    let background = flags & set_colour::BACKGROUND != 0;
+    let text = flags & set_colour::TEXT != 0;
+    if flags & set_colour::READ != 0 {
+        let words = with(os, |vdu, _| {
             let format = vdu.screen.format;
             if text {
                 let (fore, back) = vdu.colours.text_words(&format);
                 return Ok(Err(if background { back } else { fore }));
             }
-            let offset = if background {
-                tairix_riscos_kernel::output::workspace::BACKGROUND
-            } else {
-                tairix_riscos_kernel::output::workspace::FOREGROUND
-            };
             let gcol = if background {
                 vdu.colours.back
             } else {
                 vdu.colours.fore
             };
-            let _ = (os, offset);
             Ok(Ok(gcol.pattern.unwrap_or_else(|| {
                 [crate::colour::replicate(
                     &format,
@@ -154,7 +147,7 @@ fn set_colour(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         }
         return Ok(());
     }
-    let pattern = if flags & 0x20 != 0 {
+    let pattern = if flags & set_colour::PATTERN != 0 {
         let mut words = [0; 8];
         for (i, word) in (0u32..).zip(words.iter_mut()) {
             *word = os.read_word(regs.r[1].wrapping_add(4 * i))?;
@@ -180,7 +173,7 @@ fn set_colour(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         } else {
             &mut vdu.colours.fore
         };
-        target.action = flags & 0xF;
+        target.action = flags & set_colour::ACTION;
         target.literal = true;
         target.pattern = pattern;
         if pattern.is_none() {

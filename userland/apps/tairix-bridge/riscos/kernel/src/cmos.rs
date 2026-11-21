@@ -7,7 +7,7 @@ use crate::error::Error;
 use crate::os::{Fail, Os, Regs};
 
 /// The CMOS RAM's size.
-const SIZE: u32 = 256;
+pub const SIZE: u32 = 256;
 /// Where the checksum is, by logical address.
 const CHECKSUM: u8 = 0xEF;
 /// The Econet station number's location, which nothing here changes.
@@ -18,8 +18,9 @@ const SEED: u8 = 1;
 pub const FILE_LANG: u8 = 0x05;
 /// FileSwitch's options: names truncated rather than refused in bit 0.
 pub const FILESWITCH_OPTIONS: u8 = 0x1C;
-/// HostFS's filing system number.
-pub(crate) const HOSTFS: u8 = 153;
+/// HostFS's filing system number: RPCEmu's HostFS's (recorded under RISC OS
+/// 5), which a program that looks for HostFS asks after.
+pub const HOSTFS: u8 = 153;
 /// The configured country.
 pub(crate) const COUNTRY: u8 = 0xBA;
 /// The configured territory, its low bit inverted as it is kept.

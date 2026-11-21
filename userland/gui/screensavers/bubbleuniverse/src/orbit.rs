@@ -16,13 +16,14 @@
 //! By angle addition a step needs the sine and cosine of `u` and `v` alone,
 //! turned by a curve's two phases, which are taken once a moment. Both lie
 //! within [`REACH`] of nought, so a short series gives them with no range
-//! reduction, and [`LANES`] curves are stepped side by side, one to a lane, so
-//! a vector unit takes a gang whole.
+//! reduction, and [`LANES`] curves are stepped side by side, one to a lane of
+//! an array the compiler steps in vector registers where the target has
+//! them.
 
 use core::array::from_fn;
 use core::f64::consts::TAU;
 
-use tairix_util::mathf::{self, single};
+use tairix_util::mathf::{self, single, Turn};
 
 /// The curves the picture is drawn from.
 pub(crate) const CURVES: usize = 200;
@@ -56,31 +57,6 @@ const SINE: [f32; 7] = taylor(1.0);
 
 /// Cosine by powers of `x²`, through `x¹⁴`.
 const COSINE: [f32; 8] = taylor(0.0);
-
-/// The sine and cosine of a phase.
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) struct Turn {
-    sin: f64,
-    cos: f64,
-}
-
-impl Turn {
-    /// The turn through `angle` radians.
-    pub(crate) fn of(angle: f64) -> Self {
-        Self {
-            sin: mathf::sin(angle),
-            cos: mathf::cos(angle),
-        }
-    }
-
-    /// This turn and `by` together.
-    fn then(self, by: Self) -> Self {
-        Self {
-            sin: self.sin * by.cos + self.cos * by.sin,
-            cos: self.cos * by.cos - self.sin * by.sin,
-        }
-    }
-}
 
 /// A moment of the picture: its time `t` and its drift `φ`.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -158,7 +134,10 @@ impl Curves {
 /// `phases` each turned on by `by`, as their sines and cosines a lane each.
 fn lanes(phases: &[Turn; LANES], by: Turn) -> (Lanes, Lanes) {
     let turned = phases.map(|phase| phase.then(by));
-    (turned.map(|t| single(t.sin)), turned.map(|t| single(t.cos)))
+    (
+        turned.map(|t| single(t.sin())),
+        turned.map(|t| single(t.cos())),
+    )
 }
 
 /// The sine and cosine of each lane, for values no farther than a little past

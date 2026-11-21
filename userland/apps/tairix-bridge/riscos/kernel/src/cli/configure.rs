@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 
 use crate::convert::Decimal;
 use tairix_obey::gstrans::{gstrans, Flags};
+use tairix_riscos_arm::mmu::PAGE_SIZE;
 
 use super::commands::TOO_MANY;
 use super::table::{Item, Wanted, CONFIGURE, FILING};
@@ -26,11 +27,8 @@ use crate::swi::X;
 
 /// `OS_Pointer` 1: the pointing device's type set.
 const SET_POINTER_TYPE: u32 = 1;
-/// The page a size counts in, but for the font cache's 4 KiB.
-const PAGE: u32 = 4096;
+/// The unit the font cache's size counts in, whatever the page size.
 const FONT_UNIT: u32 = 4096;
-/// The column a listing's values start at, past a name that reaches it.
-const VALUE_COLUMN: usize = 11;
 /// What a configuration's code returns in R0 for the kernel's errors.
 const OWN_ERRORS: u32 = 3;
 
@@ -183,31 +181,31 @@ pub(crate) const KEYWORDS: [Keyword; 34] = [
     keyword("Print", Kind::Number(Field::new(cmos::PRINT_SERIAL, 5, 3))),
     keyword(
         "PrinterBufferSize",
-        Kind::Size(Field::new(cmos::PRINTER_BUFFER, 0, 7), PAGE),
+        Kind::Size(Field::new(cmos::PRINTER_BUFFER, 0, 7), PAGE_SIZE),
     ),
     keyword(
         "RamFSSize",
-        Kind::Size(Field::new(cmos::RAM_DISC, 0, 7), PAGE),
+        Kind::Size(Field::new(cmos::RAM_DISC, 0, 7), PAGE_SIZE),
     ),
     keyword("Repeat", Kind::Number(Field::new(cmos::KEY_REPEAT, 0, 8))),
     keyword(
         "RMASize",
-        Kind::Size(Field::new(cmos::RMA_SIZE, 0, 7), PAGE),
+        Kind::Size(Field::new(cmos::RMA_SIZE, 0, 7), PAGE_SIZE),
     ),
     keyword(
         "ScreenSize",
-        Kind::Size(Field::new(cmos::SCREEN_SIZE, 0, 7), PAGE),
+        Kind::Size(Field::new(cmos::SCREEN_SIZE, 0, 7), PAGE_SIZE),
     ),
     keyword("Scroll", Kind::NoParm(SCROLL, 0)),
     keyword("NoScroll", Kind::NoParm(SCROLL, 1)),
     keyword(
         "SpriteSize",
-        Kind::Size(Field::new(cmos::SPRITE_SIZE, 0, 7), PAGE),
+        Kind::Size(Field::new(cmos::SPRITE_SIZE, 0, 7), PAGE_SIZE),
     ),
     keyword("Sync", Kind::Special(Special::Sync)),
     keyword(
         "SystemSize",
-        Kind::Size(Field::new(cmos::SYSTEM_HEAP, 0, 6), PAGE),
+        Kind::Size(Field::new(cmos::SYSTEM_HEAP, 0, 6), PAGE_SIZE),
     ),
     keyword("TV", Kind::Special(Special::Tv)),
     keyword("WimpMode", Kind::Special(Special::Mode)),
@@ -273,10 +271,7 @@ fn set_instead(keyword: &Keyword, value: u32) -> Option<&'static Keyword> {
 /// `name` and the spaces that bring a listing to its value's column.
 fn padded(name: &[u8], out: &mut Vec<u8>) {
     out.extend_from_slice(name);
-    out.resize(
-        out.len() + VALUE_COLUMN.saturating_sub(name.len()).max(1),
-        b' ',
-    );
+    out.resize(out.len() + crate::module::value_padding(name.len()), b' ');
 }
 
 /// What a listing is for.

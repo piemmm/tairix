@@ -4,28 +4,24 @@
 mod common;
 
 use common::{block, call, read, text};
-use tairix_riscos_filing::ramfs::State;
-use tairix_riscos_kernel::os::{Kernel, Os};
-use tairix_riscos_kernel::swi::os::{
-    fs_control, CHANGE_DYNAMIC_AREA, FS_CONTROL, READ_DYNAMIC_AREA,
+use tairix_riscos_filing::filecore::swi::{
+    DESCRIBE_DISC, DISC_FORMAT, DISC_OP, DISC_OP_64, DRIVES, FEATURES, FLOPPY_STRUCTURE,
+    FREE_SPACE, FREE_SPACE_64, LAYOUT_STRUCTURE, MISC_OP, SECTOR_DISC_OP,
 };
+use tairix_riscos_filing::filecore::{code, numbered, MODULE_NUMBER};
+use tairix_riscos_filing::ramfs::{self, State};
+use tairix_riscos_kernel::os::{Kernel, Os};
+use tairix_riscos_kernel::swi::os::{fs_control, FS_CONTROL, READ_DYNAMIC_AREA};
+use tairix_riscos_kernel::swi::X;
 
-/// FileCore's SWIs, by their offset in its chunk.
-const DISC_OP: u32 = 0x4_0540;
-const DRIVES: u32 = 0x4_0542;
-const FREE_SPACE: u32 = 0x4_0543;
-const DESCRIBE_DISC: u32 = 0x4_0545;
-const MISC_OP: u32 = 0x4_0549;
-const SECTOR_DISC_OP: u32 = 0x4_054A;
-const FREE_SPACE_64: u32 = 0x4_054B;
-const DISC_OP_64: u32 = 0x4_054C;
-const FEATURES: u32 = 0x4_054D;
+/// FileCore's own "bad parameters".
+const BAD_PARMS: u32 = numbered(MODULE_NUMBER, code::BAD_PARMS);
 
 /// A session with a RAM disc of 256K, and FileCore's instance for it.
 fn session() -> (Kernel, u32) {
     let mut kernel = common::kernel();
     let mut os = kernel.os();
-    call(&mut os, CHANGE_DYNAMIC_AREA, &[5, 0x4_0000]).expect("a RAM disc");
+    common::ram_disc(&mut os);
     let instance = os
         .extension::<State>()
         .map(|state| state.instance())
@@ -66,7 +62,7 @@ fn features_and_drives_are_as_risc_os_5_gives_them() {
     assert_eq!(drives[..3], [0, 1, 0], "drive 0, one floppy, no hard disc");
     assert_eq!(
         with_instance(&mut os, DRIVES, instance + 4, &[]).map(drop),
-        Err(0x108A1),
+        Err(BAD_PARMS),
         "no instance's private word there: FileCore's own BadParms"
     );
 }
@@ -160,14 +156,12 @@ fn misc_op_6_describes_the_client() {
     let mut os = kernel.os();
     let described = with_instance(&mut os, MISC_OP, instance, &[6]).expect("described");
     let words = read(&mut os, described[0], 20);
-    assert_eq!(words[3], 0x17, "RamFS's filing system number");
+    assert_eq!(words[3], ramfs::NUMBER, "RamFS's filing system number");
 }
 
-/// `FileCore_DiscFormat`.
-const DISC_FORMAT: u32 = 0x4_0547;
-/// `OS_ValidateAddress`, the vetting SWI a caller with no controller of its
+/// `XOS_ValidateAddress`, the vetting SWI a caller with no controller of its
 /// own hands `FileCore_DiscFormat`.
-const VALIDATE_ADDRESS: u32 = 0x2003A;
+const VALIDATE_ADDRESS: u32 = X | tairix_riscos_kernel::swi::os::VALIDATE_ADDRESS;
 
 #[test]
 fn disc_format_describes_each_format_as_risc_os_5_describes_it() {
@@ -221,12 +215,8 @@ fn disc_format_describes_each_format_as_risc_os_5_describes_it() {
         assert_eq!(got[24], 160, "{format:#X}");
     }
     let refused = call(&mut os, DISC_FORMAT, &[at, VALIDATE_ADDRESS, at + 64, 0x85]);
-    assert_eq!(refused.map_err(|(number, _)| number).err(), Some(0x108A1));
+    assert_eq!(refused.map_err(|(number, _)| number).err(), Some(BAD_PARMS));
 }
-
-/// `FileCore_FloppyStructure` and `FileCore_LayoutStructure`.
-const FLOPPY_STRUCTURE: u32 = 0x4_0544;
-const LAYOUT_STRUCTURE: u32 = 0x4_0548;
 
 /// An 800K E floppy's record, but for its size.
 fn e_record(os: &mut Os<'_>, size: u64) -> u32 {
@@ -257,7 +247,7 @@ fn a_structure_is_refused_for_a_disc_its_record_cannot_lay_out() {
         )
         .map(drop)
         .map_err(|(number, _)| number),
-        Err(0x108A1),
+        Err(BAD_PARMS),
         "more disc than one zone describes"
     );
     let past_an_image = e_record(&mut os, 5 << 30);
@@ -270,7 +260,7 @@ fn a_structure_is_refused_for_a_disc_its_record_cannot_lay_out() {
         )
         .map(drop)
         .map_err(|(number, _)| number),
-        Err(0x108A1),
+        Err(BAD_PARMS),
         "more disc than an image file's offsets reach"
     );
 }

@@ -1,8 +1,9 @@
 //! The Supervisor's tests: a command line run as the application.
 
-use crate::cli::tests::{session, X};
+use crate::cli::tests::session;
 use crate::input::InputEvent;
 use crate::os::Outcome;
+use crate::swi::X;
 use crate::testkit::{Session, DATA};
 
 /// `*GOS` entered with `typed` arriving at it, run until nothing more comes:

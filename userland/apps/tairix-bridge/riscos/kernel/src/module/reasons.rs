@@ -8,20 +8,18 @@
 
 use alloc::vec::Vec;
 
-use super::header::{Field, Header};
+use super::header::{Field, Header, TITLE_MOST};
 use super::lifecycle::rma_request;
 use super::name::{self, Given};
 use super::{Missing, ModuleKey, Place, Shape};
 use crate::error::Error;
+use crate::filing::filetype;
+use crate::filing::fs::{kind, stamp};
 use crate::kheap::KernelHeap;
 use crate::os::{len32, Fail, Os, Regs};
 use crate::swi::os::file::{LOAD, MAKE_ERROR, READ_INFO};
 use crate::swi::X;
 
-/// `OS_File` 5's object type for a file.
-const FILE: u32 = 1;
-/// A module's file type, as the top of its load address carries it.
-const MODULE_TYPE: u32 = 0x00FF_FFFA;
 /// The start offset's bits that make it a branch rather than an offset.
 const BRANCH: u32 = 0xFF00_0003;
 
@@ -59,9 +57,6 @@ const ALIGNMENT: Error = error(0x117, "InvalidAlignment");
 /// "Module … refuses to be replaced": a bridge refuses to die for a
 /// replacement, as a module refusing finalisation does.
 const CANT_REPLACE: Error = error(super::lifecycle::CANT_KILL.number, "ModuleNotReplaceable");
-
-/// The longest name the kernel reads.
-const NAME_MOST: usize = 256;
 
 impl Os<'_> {
     /// `OS_Module`.
@@ -146,7 +141,7 @@ impl Os<'_> {
         let mut info = Regs::default();
         info.r[..2].copy_from_slice(&[READ_INFO, name]);
         self.perform(crate::swi::os::FILE, &mut info)?;
-        if info.r[0] != FILE {
+        if info.r[0] != kind::FILE {
             let mut make = Regs::default();
             make.r[..3].copy_from_slice(&[MAKE_ERROR, name, info.r[0]]);
             // FileSwitch's error for the object, or what it left in R0 if it
@@ -156,7 +151,7 @@ impl Os<'_> {
                 Err(fail) => fail,
             });
         }
-        if info.r[2] >> 8 != MODULE_TYPE {
+        if stamp::type_of(info.r[2]) != Some(filetype::MODULE) {
             return Err(self.error(NOT_MOD));
         }
         let block = self.rma_claim(info.r[4])?;
@@ -239,7 +234,7 @@ impl Os<'_> {
                 self.reinitialise(key, index, env)
             }
             Err(Missing::Module) => {
-                let (text, _) = self.read_until(address, NAME_MOST, |b| b <= b' ')?;
+                let (text, _) = self.read_until(address, TITLE_MOST, |b| b <= b' ')?;
                 match self.restart_rom(Given::parse(&text).title, true)? {
                     Some(_) => Ok(()),
                     None => Err(self.missing(Missing::Module, address)),
@@ -460,7 +455,7 @@ impl Os<'_> {
     /// preferred one; a ROM module not active is started, its base
     /// incarnation given the postfix.
     fn module_new_incarnation(&mut self, address: u32) -> Result<(), Fail> {
-        let (text, _) = self.read_until(address, NAME_MOST, |b| b <= b' ')?;
+        let (text, _) = self.read_until(address, TITLE_MOST, |b| b <= b' ')?;
         let given = Given::parse(&text);
         let Some(postfix) = given.postfix.filter(|postfix| !postfix.is_empty()) else {
             return Err(self.error(POSTFIX_NEEDED));
@@ -483,7 +478,7 @@ impl Os<'_> {
     /// `OS_Module` 15: the incarnation R1 names given R2's postfix.
     fn module_rename(&mut self, address: u32, postfix: u32) -> Result<(), Fail> {
         let (key, index) = self.named(address)?;
-        let (postfix, _) = self.read_until(postfix, NAME_MOST, |b| b <= b' ')?;
+        let (postfix, _) = self.read_until(postfix, TITLE_MOST, |b| b <= b' ')?;
         if postfix.is_empty() {
             return Err(self.error(POSTFIX_NEEDED));
         }

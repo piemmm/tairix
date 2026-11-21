@@ -18,7 +18,7 @@ use tairix_unicode::{normalize, Form};
 
 use crate::byte::var;
 use crate::international::{ALPHABET_BYTE, READ_KEYBOARD, SET_KEYBOARD, UTF8};
-use crate::keyboard::{status, KEY_HANDLER, NO_KEYBOARD};
+use crate::keyboard::{status, FIRST, KEY_HANDLER, NO_KEYBOARD, SHIFT_DOWN, SHIFT_UP};
 use crate::memory::Bits;
 use crate::module::{Builtin, Services};
 use crate::os::{len32, Entry, Fail, Os, Regs, Unwind};
@@ -33,11 +33,6 @@ const KEYBOARDS: [u8; 4] = [1, 2, 3, NO_KEYBOARD];
 const KEYS: u32 = 0x70;
 /// A key with no code of its own in the translation table.
 const SPECIAL: u8 = 0xFF;
-/// What its special code is asked: a shifting key up or down, a key's first
-/// code.
-const UP: u32 = 0;
-const DOWN: u32 = 1;
-const FIRST: u32 = 2;
 
 /// Where its workspace keeps the handler: the header, the list a call
 /// gives, the translation table, the internal keys' table, the shifting and
@@ -960,7 +955,7 @@ fn special_key(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     match Class::of(layout, key) {
         Class::Shift => {
             let keys = &mut os.world.intkey;
-            if keys.left_alt && keys.shift == 0 && action == DOWN {
+            if keys.left_alt && keys.shift == 0 && action == SHIFT_DOWN {
                 state ^= status::NO_KANA_LOCK;
             }
             keys.shift = held(keys.shift, action);
@@ -972,15 +967,15 @@ fn special_key(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
             state = flag(state, status::CTRL, keys.ctrl > 0);
         }
         Class::LayerAlt => {
-            os.world.intkey.left_alt = action == DOWN;
-            if action == DOWN && state & status::SHIFT != 0 {
+            os.world.intkey.left_alt = action == SHIFT_DOWN;
+            if action == SHIFT_DOWN && state & status::SHIFT != 0 {
                 state ^= status::NO_KANA_LOCK;
             }
         }
         Class::Alt => alt_key(os, action, &mut state, &mut out)?,
         Class::Button(bit) => {
             let keys = &mut os.world.intkey;
-            keys.buttons = flag(keys.buttons, bit, action == DOWN);
+            keys.buttons = flag(keys.buttons, bit, action == SHIFT_DOWN);
             let mut exit = *regs;
             exit.r[0] = u32::from(keys.buttons);
             return take_exit(os, regs, exit, 0);
@@ -1136,7 +1131,7 @@ fn shifted(code: u8, state: u8) -> u8 {
 
 /// A held key's count after `action`.
 fn held(count: u8, action: u32) -> u8 {
-    if action == UP {
+    if action == SHIFT_UP {
         count.saturating_sub(1)
     } else {
         count.saturating_add(1)

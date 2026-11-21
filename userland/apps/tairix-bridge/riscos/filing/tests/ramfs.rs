@@ -6,12 +6,10 @@ mod common;
 
 use common::{block, call, info, read, save, text};
 use tairix_riscos_kernel::os::{Kernel, Os};
+use tairix_riscos_kernel::ramdisc::AREA;
 use tairix_riscos_kernel::swi::os::{
     fs_control, ARGS, CHANGE_DYNAMIC_AREA, FILE, FIND, FS_CONTROL, GBPB,
 };
-
-/// The RAM disc's area.
-const AREA: u32 = 5;
 
 /// `bytes` added to the RAM disc's area, or taken from it where negative:
 /// the bytes moved, or the refusal's number.

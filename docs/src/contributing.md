@@ -249,7 +249,7 @@ concurrently as the one `static gates` stage:
 | `proptest --once` | Runs one iteration of each stateful capability model, fresh logged seed |
 | `crypto-constant-time` | Re-runs `lib/crypto`'s tests under release optimisation, where the optimiser can break constant time |
 | `fuzz --once` | Runs each fuzz harness once, fresh+logged seed ([§19.6][fz]) |
-| `loom` | Model-checks every protocol `commands/loom.rs`'s `TARGETS` enrols over every thread interleaving |
+| `loom` | Model-checks every protocol `commands/loom.rs`'s `TARGETS` enrols over every thread interleaving, building the code only it compiles with warnings denied |
 | `docs-check`  | `cargo doc` (deny warnings) + `mdbook build` (link checked) |
 | `image`       | Builds every delivered image profile end-to-end (`debug` and `installer` for each image platform), so an image-breaking change cannot land green |
 | `clippy`      | `-D warnings` for the host **and once per Tier-1 target** (see below) |

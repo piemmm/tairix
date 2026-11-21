@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use tairix_filecore::format::{lay_out, new_map_record, BootRecord, Variant};
 use tairix_filecore::record::DISC_RECORD_SIZE;
 use tairix_filecore::Disc;
+use tairix_riscos_arm::mmu::PAGE_SIZE;
 use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::module::{Builtin, Command, CommandKind, Help, Resource};
 use tairix_riscos_kernel::msgtrans::{Own, OWN_DESCRIPTOR, REQUEST};
@@ -25,7 +26,7 @@ use tairix_riscos_kernel::swi::X;
 use crate::filecore::{self, flag};
 
 /// RamFS's filing system number, as RISC OS 5 numbers it.
-const NUMBER: u8 = 0x17;
+pub const NUMBER: u8 = 0x17;
 /// Its filing system's name, which its module's command selects.
 const NAME: &[u8] = b"RAM";
 /// The incarnation of FileCore that is its filing system.
@@ -50,7 +51,7 @@ const OWN_AT: u32 = 0;
 const MESSAGES_NAME_AT: u32 = OWN_DESCRIPTOR;
 const REQUEST_AT: u32 = (MESSAGES_NAME_AT + len32(MESSAGES_NAME.len())).next_multiple_of(4);
 const DESCRIPTOR_AT: u32 = REQUEST_AT + REQUEST;
-const NAME_AT: u32 = DESCRIPTOR_AT + 20;
+const NAME_AT: u32 = DESCRIPTOR_AT + 4 * len32(filecore::DESCRIPTOR_WORDS);
 const MEDIA_AT: u32 = NAME_AT + 4;
 const WORKSPACE: u32 = MEDIA_AT + 8;
 /// `MiscOp` 4's media name.
@@ -67,9 +68,6 @@ const BAD_OP: Error = Error {
     number: 0xA6,
     token: "BadOp",
 };
-
-/// `FileCore_Create`.
-const FILE_CORE_CREATE: u32 = 0x4_0541;
 
 /// RamFS.
 pub static RAM_FS: Builtin = Builtin {
@@ -95,7 +93,7 @@ pub static RAM_FS: Builtin = Builtin {
     vectors: &[],
     resources: &[Resource {
         name: "Resources.RamFS.Messages",
-        file_type: 0xFFF,
+        file_type: tairix_riscos_kernel::filing::filetype::TEXT,
         data: MESSAGES,
     }],
     code: None,
@@ -149,7 +147,7 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     area.r[0] = AREA;
     os.perform(X | READ_DYNAMIC_AREA, &mut area)?;
     let (base, size) = (area.r[0], area.r[1]);
-    let words = size.div_ceil(PAGE).div_ceil(64) as usize;
+    let words = size.div_ceil(PAGE_SIZE).div_ceil(64) as usize;
     let mut mapped = Vec::new();
     if mapped.try_reserve_exact(words).is_err() {
         return Err(os.no_memory());
@@ -198,19 +196,17 @@ fn start(os: &mut Os<'_>, private_word: u32, workspace: u32, size: u32) -> Resul
     os.write_terminated(workspace + NAME_AT, NAME, 0, NAME.len() + 1)?;
     os.write_bytes(workspace + MEDIA_AT, MEDIA)?;
     let routine = |os: &Os<'_>, index: usize| os.routine_of(&RAM_FS, index).unwrap_or(module);
-    let descriptor = [
-        FLAGS | u32::from(NUMBER) << 24,
-        (workspace + NAME_AT).wrapping_sub(module),
-        (workspace + NAME_AT).wrapping_sub(module),
+    let name = (workspace + NAME_AT).wrapping_sub(module);
+    let entries = [
+        name,
+        name,
         routine(os, 0).wrapping_sub(module),
         routine(os, 1).wrapping_sub(module),
     ];
-    for (n, word) in (0..).zip(descriptor) {
-        os.write_word(workspace + DESCRIPTOR_AT + 4 * n, word)?;
-    }
+    filecore::write_descriptor(os, workspace + DESCRIPTOR_AT, FLAGS, NUMBER, entries)?;
     let mut create = Regs::default();
     create.r[..4].copy_from_slice(&[workspace + DESCRIPTOR_AT, module, private_word, 1]);
-    os.perform(X | FILE_CORE_CREATE, &mut create)?;
+    os.perform(X | filecore::swi::CREATE, &mut create)?;
     let instance = create.r[0];
     with(os, |state| state.instance = instance)?;
     os.hold_extension(Occupant { occupied })
@@ -274,12 +270,6 @@ fn select(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     os.perform(X | FS_CONTROL, &mut regs)
 }
 
-/// A page of the area.
-const PAGE: u32 = 4096;
-/// The access a mapped page of the area is given: the area's own, privileged
-/// code's alone.
-const PAGE_ACCESS: u32 = 2;
-
 /// The area's pages from `first` for `count` mapped into its window where
 /// they are not yet.
 fn map(os: &mut Os<'_>, first: u32, count: u32) -> Result<(), Fail> {
@@ -309,7 +299,7 @@ fn map(os: &mut Os<'_>, first: u32, count: u32) -> Result<(), Fail> {
             let at = list + 12 * n;
             os.write_word(at, page)?;
             os.write_word(at + 4, page)?;
-            os.write_word(at + 8, PAGE_ACCESS)?;
+            os.write_word(at + 8, tairix_riscos_kernel::ramdisc::ACCESS)?;
         }
         let mut regs = Regs::default();
         regs.r[..4].copy_from_slice(&[22, AREA, list, len32(unmapped.len())]);
@@ -337,8 +327,8 @@ fn reach(os: &mut Os<'_>, at: u64, length: u32) -> Result<Option<u32>, Fail> {
     if length == 0 {
         return Ok(Some(base));
     }
-    let first = u32::try_from(at / u64::from(PAGE)).unwrap_or(u32::MAX);
-    let last = u32::try_from((end - 1) / u64::from(PAGE)).unwrap_or(u32::MAX);
+    let first = u32::try_from(at / u64::from(PAGE_SIZE)).unwrap_or(u32::MAX);
+    let last = u32::try_from((end - 1) / u64::from(PAGE_SIZE)).unwrap_or(u32::MAX);
     map(os, first, last - first + 1)?;
     Ok(Some(
         base.wrapping_add(u32::try_from(at).unwrap_or(u32::MAX)),
@@ -391,9 +381,8 @@ impl Disc for AreaDisc<'_, '_> {
 
 /// `DiscOp`'s reasons RamFS answers, and its flag for a scatter list at R3.
 mod reason {
+    pub(super) use crate::filecore::op::{READ, WRITE};
     pub(super) const VERIFY: u32 = 0;
-    pub(super) const READ: u32 = 1;
-    pub(super) const WRITE: u32 = 2;
     pub(super) const SEEK: u32 = 5;
     pub(super) const RESTORE: u32 = 6;
     pub(super) const SCATTER: u32 = 1 << 5;

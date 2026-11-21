@@ -74,11 +74,6 @@ const SUN_LIFT: f64 = 0.66;
 /// Grid cells the flight crosses a second at its own pace.
 const FLIGHT_SPEED: f64 = 0.8;
 
-/// The share of a frame's interval its exposure lasts: a moving line is
-/// drawn across the ground it covered in that time, so the flight reads as
-/// continuous at the pace frames are drawn.
-const SHUTTER: f64 = 0.5;
-
 /// How far the flight sways either side of the grid's centre line, in cells,
 /// and how long one sway takes, in seconds.
 const SWAY: f64 = 0.3;
@@ -372,7 +367,7 @@ impl Moment {
         Self {
             time,
             flown: speed * time,
-            travel: speed * seconds(frame_ns) * SHUTTER,
+            travel: speed * seconds(frame_ns) * SceneClock::SHUTTER,
             sway: SWAY * mathf::sin(TAU * time / SWAY_PERIOD),
         }
     }
@@ -591,7 +586,7 @@ fn paint_rows(
     surface.paint_bands(
         rows,
         runner,
-        (usize::MAX, BAND_GRAIN),
+        (usize::MAX, BAND_GRAIN, 1),
         |band| band,
         &|band: &mut RowBand<'_>| {
             for y in band.rows() {

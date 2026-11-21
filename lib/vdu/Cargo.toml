@@ -10,3 +10,8 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# The one reading of glyph art the character set is drawn in. Without its
+# default features it is the atlas alone: nothing that draws comes with it.
+tairix-font = { path = "../font", version = "=0.0.0", default-features = false }

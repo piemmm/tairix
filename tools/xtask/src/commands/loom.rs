@@ -15,6 +15,9 @@
 //! the word it runs on is modelled through a feature instead: its harness
 //! supplies loom-backed words and the graph builds as usual.
 //!
+//! Code behind the loom cfg or feature builds in this stage alone, which no
+//! lint pass sees, so the stage builds it refusing warnings.
+//!
 //! The stage exists at all because the harness it drives had stopped
 //! compiling and nothing noticed — the models are only worth writing if
 //! something runs them.
@@ -160,6 +163,9 @@ pub const TARGETS: &[Target] = &[
 /// dependents into a scratch profile of their own.
 const LOOM_CFG: [&str; 2] = ["--cfg", "loom"];
 
+/// Refuses the warnings of the code only this stage builds.
+const DENY_WARNINGS: [&str; 2] = ["-D", "warnings"];
+
 /// Parsed `loom` arguments.
 pub struct Options {
     /// Restrict the run to one package.
@@ -253,9 +259,12 @@ fn command_for(ctx: &Context, target: &Target) -> Command {
         "--locked",
     ]);
     match target.build {
-        Build::SwappedAtomics => crate::rustflags::add(&mut cmd, &LOOM_CFG),
+        Build::SwappedAtomics => {
+            crate::rustflags::add(&mut cmd, &[LOOM_CFG, DENY_WARNINGS].concat());
+        }
         Build::Feature(feature) => {
             cmd.args(["--features", feature]);
+            crate::rustflags::add(&mut cmd, &DENY_WARNINGS);
         }
     }
     cmd
@@ -276,26 +285,29 @@ mod tests {
         items.iter().map(OsString::from).collect()
     }
 
-    /// A harness whose atomics are swapped is built with `--cfg loom` after
-    /// the caller's flags, as cargo reads them: without it the harness builds
-    /// empty and the stage models nothing.
+    /// Every harness is built with the stage's flags after the caller's, as
+    /// cargo reads them, refusing warnings: a swapped one carries `--cfg loom`
+    /// too, without which it builds empty and the stage models nothing.
     #[test]
-    fn a_swapped_harness_carries_the_loom_cfg_after_the_caller_s_flags() {
+    fn every_harness_carries_the_stage_s_flags_after_the_caller_s() {
         let ctx = Context {
             workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
             cargo: OsString::from("true"),
             children: Arc::new(Children::new(None)),
         };
-        let swapped = TARGETS
-            .iter()
-            .find(|target| matches!(target.build, Build::SwappedAtomics))
-            .expect("a swapped-atomics target");
-        let (encoded, removes_plain) = flags_of(&command_for(&ctx, swapped));
-        assert!(
-            encoded.is_some_and(|flags| flags.ends_with("--cfg\u{1f}loom")),
-            "the cfg closes the encoded flags"
-        );
-        assert!(removes_plain);
+        let swapped_close = "--cfg\u{1f}loom\u{1f}-D\u{1f}warnings";
+        for target in TARGETS {
+            let (encoded, removes_plain) = flags_of(&command_for(&ctx, target));
+            let encoded = encoded.unwrap_or_default();
+            let stage_flags_close = match target.build {
+                Build::SwappedAtomics => encoded.ends_with(swapped_close),
+                Build::Feature(_) => {
+                    encoded.ends_with("-D\u{1f}warnings") && !encoded.ends_with(swapped_close)
+                }
+            };
+            assert!(stage_flags_close, "{}: {encoded:?}", target.package);
+            assert!(removes_plain, "{}", target.package);
+        }
     }
 
     /// Every model of every target runs, none ignored or filtered.

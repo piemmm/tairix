@@ -12,11 +12,11 @@ use crate::memory::Bits;
 use crate::os::Outcome;
 use crate::swi::os::CLAIM;
 use crate::swi::os::CLI;
+use crate::swi::X;
 use crate::testkit::asm::{self, Condition};
 use crate::testkit::{with_application, OneFile, Session, CODE, DATA};
+use crate::vectors;
 
-pub(crate) const X: u32 = 1 << 17;
-const FSCV: u32 = 0x0F;
 /// Where a test's claimants record what they were given.
 pub(crate) const SEEN: u32 = DATA + 0x800;
 
@@ -97,7 +97,10 @@ pub(crate) fn filing_system(s: &mut Session, refuses_runs: bool) {
     ];
     code.extend(run);
     s.poke(at, &code);
-    let (claimed, _) = s.user_swi(X | CLAIM, [FSCV, at, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let (claimed, _) = s.user_swi(
+        X | CLAIM,
+        [vectors::FSC.0, at, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
     assert!(!claimed.flag(psr::V), "FSCV claimed");
 }
 

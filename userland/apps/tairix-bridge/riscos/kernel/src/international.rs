@@ -200,7 +200,7 @@ pub(crate) static INTERNATIONAL: Builtin = Builtin {
     vectors: &[],
     resources: &[Resource {
         name: "Resources.Internatio.Messages",
-        file_type: 0xFFF,
+        file_type: crate::filing::filetype::TEXT,
         data: MESSAGES,
     }],
     code: None,

@@ -207,17 +207,29 @@ pub struct Pixel16 {
     pub g: u16,
     /// Blue, premultiplied by the alpha.
     pub b: u16,
-    /// Alpha, at most `255 × 255`.
+    /// Alpha, at most [`Self::FULL`].
     pub a: u16,
 }
 
 impl Pixel16 {
+    /// A channel at its fullest: an opaque pixel's alpha, which no colour
+    /// channel exceeds.
+    pub const FULL: u16 = 255 * 255;
+
     /// Fully transparent.
     pub const TRANSPARENT: Self = Self {
         r: 0,
         g: 0,
         b: 0,
         a: 0,
+    };
+
+    /// Opaque black.
+    pub const BLACK: Self = Self {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: Self::FULL,
     };
 
     /// The straight colour this pixel holds, each channel rounded to the

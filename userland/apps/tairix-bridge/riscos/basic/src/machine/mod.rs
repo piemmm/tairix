@@ -569,7 +569,7 @@ impl<'o, 'a> Machine<'o, 'a> {
         }
         self.os.write_word(ws::ESCWORD.at(), word & !ws::ESCAPE)?;
         let mut regs = tairix_riscos_kernel::os::Regs::default();
-        regs.r[0] = ACKNOWLEDGE_ESCAPE;
+        regs.r[0] = tairix_riscos_kernel::input::ACKNOWLEDGE_ESCAPE;
         self.os.perform(
             tairix_riscos_kernel::swi::X | tairix_riscos_kernel::swi::os::BYTE,
             &mut regs,
@@ -577,9 +577,6 @@ impl<'o, 'a> Machine<'o, 'a> {
         Err(Error::Escape.into())
     }
 }
-
-/// `OS_Byte` 126: an escape condition acknowledged.
-pub(crate) const ACKNOWLEDGE_ESCAPE: u32 = 126;
 
 /// The longest name a program's text holds: a line's.
 pub(crate) const NAME_MOST: usize = STRING_MOST;

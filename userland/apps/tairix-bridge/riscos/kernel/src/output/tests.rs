@@ -4,11 +4,9 @@
 use crate::memory::layout::RISC_OS_5;
 use crate::memory::Bits;
 use crate::os::Outcome;
-use crate::swi::os::{BYTE, CLAIM, NEW_LINE, PRINT_CHAR, WRITE_0, WRITE_C, WRITE_N, WRITE_S};
-use crate::swi::X;
+use crate::swi::os::{BYTE, CLAIM, NEW_LINE, PLOT, PRINT_CHAR, WRITE_0, WRITE_C, WRITE_N, WRITE_S};
+use crate::swi::{WRITE_I, X};
 use crate::testkit::{asm, with_application, Session, DATA, SWI_AT};
-
-const WRITE_I: u32 = 0x100;
 
 fn session() -> Session {
     let mut s = with_application(&RISC_OS_5, Bits::Bit32);
@@ -34,7 +32,6 @@ fn each_output_swi_writes_its_characters_through_wrchv() {
 
 #[test]
 fn plot_is_its_vdu_25_through_wrchv_and_a_code_past_a_byte_plots_nothing() {
-    const PLOT: u32 = 0x45;
     let mut s = session();
     s.user_swi(
         X | PLOT,
@@ -77,8 +74,6 @@ fn write_s_writes_the_string_after_it_and_returns_past_it_word_aligned() {
 
 #[test]
 fn the_printer_hears_only_what_os_byte_3_lets_through() {
-    const BPUT_V: u32 = 0x0B;
-    const FIND_V: u32 = 0x0D;
     let mut s = with_application(&RISC_OS_5, Bits::Bit32);
     let call = |s: &mut Session, swi: u32, r0: u32, r1: u32, r2: u32| {
         s.user_swi(X | swi, [r0, r1, r2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -95,8 +90,8 @@ fn the_printer_hears_only_what_os_byte_3_lets_through() {
         ],
     );
     s.poke(printed, &[printed + 4]);
-    call(&mut s, CLAIM, FIND_V, find, 0);
-    call(&mut s, CLAIM, BPUT_V, bput, printed);
+    call(&mut s, CLAIM, crate::vectors::FIND.0, find, 0);
+    call(&mut s, CLAIM, crate::vectors::BPUT.0, bput, printed);
     crate::cli::tests::cli(&mut s, "Set PrinterType$1 lp").expect("set");
     call(&mut s, BYTE, 5, 1, 0);
     call(&mut s, BYTE, 3, 8, 0);

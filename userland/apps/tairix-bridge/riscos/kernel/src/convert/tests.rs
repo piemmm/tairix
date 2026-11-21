@@ -33,6 +33,7 @@ fn ipv6_writes_its_groups_and_shortens_the_longest_zero_run() {
 mod swis {
     use tairix_riscos_arm::psr;
 
+    use crate::convert::{CONVERT_FILE_SIZE, CONVERT_FIXED_FILE_SIZE, CONVERT_VARIFORM};
     use crate::memory::layout::RISC_OS_5;
     use crate::memory::Bits;
     use crate::os::Regs;
@@ -46,9 +47,6 @@ mod swis {
     const CONVERT_INTEGER4: u32 = 0xDC;
     const CONVERT_BINARY1: u32 = 0xDD;
     const CONVERT_SPACED_CARDINAL4: u32 = 0xE4;
-    const CONVERT_FIXED_FILE_SIZE: u32 = 0xEB;
-    const CONVERT_FILE_SIZE: u32 = 0xEC;
-    const CONVERT_VARIFORM: u32 = 0xED;
     const OUT: u32 = DATA + 0x100;
 
     fn session() -> Session {

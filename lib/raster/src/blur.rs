@@ -94,8 +94,8 @@ pub fn box_blur16(
     blur_block(region, width, height, radius, aux);
 }
 
-/// How many box passes [`soften_coverage`] runs: three are within a few
-/// percent of a Gaussian, where one draws a visibly square halo.
+/// How many box passes [`soften_coverage`] and [`soften16`] run: three are
+/// within a few percent of a Gaussian, where one draws a visibly square halo.
 pub const SOFTEN_PASSES: u32 = 3;
 
 /// Soften `coverage` in place into a near-Gaussian falloff: [`SOFTEN_PASSES`]
@@ -113,6 +113,22 @@ pub fn soften_coverage(
 ) {
     for _ in 0..SOFTEN_PASSES {
         box_blur_coverage(coverage, width, height, radius, aux);
+    }
+}
+
+/// Soften `region`, a dense row-major `width`×`height` block of sixteen-bit
+/// pixels, in place as [`soften_coverage`] softens coverage: [`SOFTEN_PASSES`]
+/// passes of [`box_blur16`] at `radius`, each rounding at sixteen bits. The
+/// refusals are [`box_blur`]'s.
+pub fn soften16(
+    region: &mut [Pixel16],
+    width: usize,
+    height: usize,
+    radius: usize,
+    aux: &mut [Pixel16],
+) {
+    for _ in 0..SOFTEN_PASSES {
+        box_blur16(region, width, height, radius, aux);
     }
 }
 

@@ -111,7 +111,7 @@ pub struct Resource {
     /// Its name below `Resources:$`, its parts separated by full stops.
     pub name: &'static str,
     /// Its file type.
-    pub file_type: u16,
+    pub file_type: u32,
     /// Its contents.
     pub data: &'static [u8],
 }
@@ -147,6 +147,21 @@ pub enum CommandKind {
     Filing,
     /// A `*Configure` and `*Status` keyword.
     Configure,
+}
+
+/// The column a `*Configure` or `*Status` listing's values start at.
+pub const VALUE_COLUMN: usize = 11;
+
+/// The spaces after a listing's keyword `keyword` bytes long: to
+/// [`VALUE_COLUMN`], and one after a keyword that reaches it.
+#[must_use]
+pub const fn value_padding(keyword: usize) -> usize {
+    let gap = VALUE_COLUMN.saturating_sub(keyword);
+    if gap == 0 {
+        1
+    } else {
+        gap
+    }
 }
 
 /// A built-in module's `*` command, or a keyword it has help on.

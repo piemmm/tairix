@@ -62,7 +62,7 @@ mod text;
 mod traps;
 mod vars;
 pub mod vectors;
-mod word;
+pub mod word;
 mod zeropage;
 
 #[cfg(test)]

@@ -219,7 +219,7 @@ mod tests {
         Object {
             leaf: leaf.to_vec(),
             kind,
-            load: 0xFFF0_0000 | (file_type << 8),
+            load: tairix_riscos_kernel::filing::fs::stamp::typed(file_type, 0),
             exec: 0,
         }
     }

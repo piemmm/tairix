@@ -6,7 +6,8 @@
 //! saves go through `FSEntry_Open` and the buffer where the filing system's
 //! information word asks.
 
-use tairix_riscos_kernel::filing::fs;
+use tairix_riscos_kernel::filing::filetype::DATA;
+use tairix_riscos_kernel::filing::fs::{self, stamp};
 use tairix_riscos_kernel::filing::{BAD_FILE, IS_A_DIRECTORY, NOT_FOUND};
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
 
@@ -16,9 +17,6 @@ use super::open::status;
 use super::system::info;
 use super::{error, open};
 
-/// The Data file type, which a file no one typed is stamped as.
-pub(crate) const DATA: u32 = 0xFFD;
-use tairix_riscos_kernel::filing::fs::stamp;
 /// `OS_File` 20 to 23's types for what is not a typed file: a directory, an
 /// application, and an untyped file or nothing, which RISC OS 5 answers as
 /// all ones.

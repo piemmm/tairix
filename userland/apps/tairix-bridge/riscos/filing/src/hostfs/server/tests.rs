@@ -110,8 +110,8 @@ fn names(server: &mut Server<Handle>, path: &[u8]) -> Vec<Vec<u8>> {
 
 /// The type a typed load word gives.
 pub(super) fn filetype(object: &Object) -> u32 {
-    assert_eq!(object.load >> 20, 0xFFF, "typed: {object:?}");
-    (object.load >> 8) & 0xFFF
+    tairix_riscos_kernel::filing::fs::stamp::type_of(object.load)
+        .unwrap_or_else(|| panic!("typed: {object:?}"))
 }
 
 #[test]

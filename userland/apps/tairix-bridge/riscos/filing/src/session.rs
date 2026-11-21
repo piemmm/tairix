@@ -32,6 +32,9 @@ use crate::hostfs::server::{Given, Server};
 /// The folder of a test's tree that HostFS serves as `$`.
 pub const DISC: &str = "/disc";
 
+/// The application slot of a test's session that needs no particular size.
+pub const SLOT_BYTES: u32 = 0x10_0000;
+
 /// A host whose clock moves on as the guest waits, whose keyboard types the
 /// keys a test gives, which stops a wait with nothing left to type, and
 /// which serves HostFS where a test gives it a disc.

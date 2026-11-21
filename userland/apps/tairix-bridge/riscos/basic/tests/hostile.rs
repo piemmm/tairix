@@ -11,6 +11,7 @@
 mod common;
 
 use common::{command, kernel, run_within, Screen};
+use tairix_riscos_filing::session::SLOT_BYTES;
 use tairix_riscos_kernel::os::{Fail, Outcome, Unwind};
 
 /// Instructions a run may spend.
@@ -23,7 +24,7 @@ fn run(program: &str) -> String {
 
 /// What BASIC V printed at its prompt as `keys` were typed.
 fn typed(keys: &str) -> String {
-    let mut kernel = kernel(0x10_0000, keys.as_bytes());
+    let mut kernel = kernel(SLOT_BYTES, keys.as_bytes());
     let entered = command(&mut kernel.os(), "BASIC");
     assert!(
         matches!(entered, Err(Fail::Unwind(Unwind::Transfer))),

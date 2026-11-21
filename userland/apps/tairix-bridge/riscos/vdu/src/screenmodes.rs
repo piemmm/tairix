@@ -90,7 +90,7 @@ pub static SCREEN_MODES: Builtin = Builtin {
     vectors: &[],
     resources: &[Resource {
         name: "Resources.ScreenMode.Messages",
-        file_type: 0xFFF,
+        file_type: tairix_riscos_kernel::filing::filetype::TEXT,
         data: MESSAGES,
     }],
     code: None,

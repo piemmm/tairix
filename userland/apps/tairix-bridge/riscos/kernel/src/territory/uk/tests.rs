@@ -6,7 +6,9 @@ use alloc::vec::Vec;
 
 use tairix_riscos_arm::psr;
 
-use crate::msgtrans::tests::{session, swi, X};
+use crate::msgtrans::tests::{session, swi};
+use crate::swi::os::READ_VAR_VAL;
+use crate::swi::X;
 use crate::territory::CHUNK;
 use crate::testkit::{Session, DATA};
 
@@ -81,7 +83,7 @@ fn the_territory_is_the_uk_and_says_so() {
     let ime = territory(&mut s, 0x22, [1, 5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).expect("IME");
     assert_eq!(&ime.r[..3], &[0, 5, 6], "no input method");
     assert_eq!(
-        territory(&mut s, 0x23, [1; 13]).expect_err("time zone 1"),
+        territory(&mut s, crate::territory::DAYLIGHT_RULES, [1; 13]).expect_err("time zone 1"),
         (
             0xAC2,
             b"The UK keeps no daylight saving rule for that time zone and year".to_vec()
@@ -407,7 +409,13 @@ fn the_clock_s_variables_read_and_set_it() {
         let mut bytes = name.to_vec();
         bytes.push(0);
         s.write(TEXT, &bytes);
-        let regs = swi(s, 0x23, [TEXT, BUFFER, 64, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0]).expect("read");
+        let expanded = u32::from(crate::vars::EXPANDED);
+        let regs = swi(
+            s,
+            READ_VAR_VAL,
+            [TEXT, BUFFER, 64, 0, expanded, 0, 0, 0, 0, 0, 0, 0, 0],
+        )
+        .expect("read");
         s.read(BUFFER, regs.r[2] as usize)
     };
     assert_eq!(read(&mut s, b"Sys$Time"), b"00:00:00");

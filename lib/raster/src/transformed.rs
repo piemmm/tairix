@@ -597,19 +597,21 @@ fn sample<P: Picture + ?Sized>(src: &P, (left, wx): (i64, u32), (top, wy): (i64,
     weigh(src.quad(left, top), wx, wy)
 }
 
-/// The four pixels about a sample, each weighted by how near it lies, their
-/// weights summing to `1 << 16`, rounded to nearest. Two channels share a
-/// word: a channel's sum stays below `1 << 24`, so neither carries into the
-/// other.
+/// What each of the four places about a sample weighs, the sample `wx` and
+/// `wy` 256ths of the way past the first along each axis, both at most 256:
+/// above left, above right, below left and below right, summing to `1 << 16`.
+#[must_use]
+pub const fn bilinear_weights(wx: u32, wy: u32) -> [u32; 4] {
+    let (left, top) = (256u32.saturating_sub(wx), 256u32.saturating_sub(wy));
+    [left * top, wx * top, left * wy, wx * wy]
+}
+
+/// The four pixels about a sample, each weighted by how near it lies, rounded
+/// to nearest. Two channels share a word: a channel's sum stays below
+/// `1 << 24`, so neither carries into the other.
 fn weigh(quad: [Pixel; 4], wx: u32, wy: u32) -> Pixel {
-    let weights = [
-        (256 - wx) * (256 - wy),
-        wx * (256 - wy),
-        (256 - wx) * wy,
-        wx * wy,
-    ];
     let (mut red_blue, mut green_alpha) = (0_u64, 0_u64);
-    for (pixel, weight) in quad.into_iter().zip(weights) {
+    for (pixel, weight) in quad.into_iter().zip(bilinear_weights(wx, wy)) {
         let weight = u64::from(weight);
         red_blue += (u64::from(pixel.r) | u64::from(pixel.b) << 32) * weight;
         green_alpha += (u64::from(pixel.g) | u64::from(pixel.a) << 32) * weight;

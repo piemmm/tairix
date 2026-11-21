@@ -246,6 +246,14 @@ fn a_pool_is_held_to_the_granted_threads() {
 }
 
 #[test]
+fn the_screen_is_the_region_at_the_origin() {
+    assert_eq!(
+        setup(&start(640, 360, 0)).screen(),
+        Rect::new(0, 0, 640, 360)
+    );
+}
+
+#[test]
 fn the_first_message_must_be_a_start() {
     let (channel, _) = script(&[frame(1)]);
     let ended = serve(

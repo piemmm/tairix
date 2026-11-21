@@ -3,7 +3,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{Mosaic, Picture};
+use super::{bilinear_weights, Mosaic, Picture};
 use crate::color::{Color, Pixel};
 use crate::surface::Surface;
 use tairix_bezier::Affine;
@@ -386,4 +386,24 @@ fn a_mirrored_mosaic_with_a_tile_missing_is_drawn_seamlessly() {
         from_whole.blit_transformed(&whole, transform, 255);
         assert_eq!(from_tiles.pixels(), from_whole.pixels(), "{transform:?}");
     }
+}
+
+/// A sample's four weights share the whole between them wherever it falls,
+/// and one lying on a place takes all of that place's.
+#[test]
+fn a_sample_s_weights_share_the_whole_wherever_it_falls() {
+    for wy in 0..=256 {
+        for wx in 0..=256 {
+            assert_eq!(
+                bilinear_weights(wx, wy).iter().sum::<u32>(),
+                1 << 16,
+                "({wx}, {wy})"
+            );
+        }
+    }
+    assert_eq!(bilinear_weights(0, 0), [1 << 16, 0, 0, 0]);
+    assert_eq!(bilinear_weights(256, 0), [0, 1 << 16, 0, 0]);
+    assert_eq!(bilinear_weights(0, 256), [0, 0, 1 << 16, 0]);
+    assert_eq!(bilinear_weights(256, 256), [0, 0, 0, 1 << 16]);
+    assert_eq!(bilinear_weights(128, 128), [1 << 14; 4]);
 }

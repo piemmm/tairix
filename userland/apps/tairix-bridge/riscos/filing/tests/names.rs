@@ -7,23 +7,22 @@
 mod common;
 
 use common::{block, call, info, read, save, text, FILECORE_NOT_FOUND};
+use tairix_riscos_filing::fileswitch::error;
 use tairix_riscos_kernel::filing::NOT_FOUND;
 use tairix_riscos_kernel::os::{Kernel, Os, Regs};
-use tairix_riscos_kernel::swi::os::{
-    fs_control, ARGS, CHANGE_DYNAMIC_AREA, CLI, FILE, FIND, FS_CONTROL, GBPB,
-};
+use tairix_riscos_kernel::swi::os::{fs_control, ARGS, CLI, FILE, FIND, FS_CONTROL, GBPB};
 
 /// FileSwitch's refusals of a wildcard where none may be, and of a wipe whose
 /// directory lists nothing.
-const WILDCARDS: u32 = 0xFD;
-const NOTHING_MATCHED: u32 = 0x416;
+const WILDCARDS: u32 = error::WILDCARDS.number;
+const NOTHING_MATCHED: u32 = error::NOTHING_MATCHED.number;
 
 /// A session with a RAM disc of 256K holding the empty directory `D` and the
 /// untyped file `F`.
 fn disc() -> Kernel {
     let mut kernel = common::kernel();
     let mut os = kernel.os();
-    call(&mut os, CHANGE_DYNAMIC_AREA, &[5, 0x4_0000]).expect("a RAM disc");
+    common::ram_disc(&mut os);
     line(&mut os, b"CDir RAM:$.D").expect("made");
     save(&mut os, b"RAM:$.F", 0xFFF, b"f").expect("saved");
     kernel

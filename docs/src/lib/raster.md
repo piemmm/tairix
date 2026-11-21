@@ -72,13 +72,15 @@ The box blur averages eight-bit premultiplied `Pixel`s, one byte of coverage,
 or `Pixel16`s — premultiplied at sixteen bits a channel, which an eight-bit
 colour goes into and comes back out of exactly — so a Gaussian of three box
 passes, as Paint's is, rounds each pass at sixteen bits rather than losing a
-translucent pixel's colour to eight. Each pass's mean is an exact fixed-point
+translucent pixel's colour to eight; `soften16` is the three-pass recipe over
+them, as `soften_coverage` is over coverage. Each pass's mean is an exact fixed-point
 reciprocal of its window, at either width.
 
 The fills draw into a `Surface` or one `RowBand` of it, and the mesh path into
 a `DepthBuffer` or one `DepthBand` of it, handing each fragment to the caller's
 shader, so a pass cut into bands on several cores draws the picture the whole
-surface would. `Surface::paint_bands` cuts the bands for a runner, and
+surface would. `Surface::paint_bands` cuts the bands for a runner, each a whole
+number of the pass's unit of rows, and
 `BandScratch` gives each band a scan converter of its own. A pass whose work runs down its columns, as the ribbon of light
 sums its, is cut into `ColumnBand`s instead, so no band repeats another's
 column.

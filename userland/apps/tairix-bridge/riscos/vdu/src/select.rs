@@ -799,9 +799,9 @@ fn enumerate(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
             .iter()
             .enumerate()
         {
-            os.write_word(block + 4 * len32(i), *word)?;
+            os.write_word(block.wrapping_add(4 * len32(i)), *word)?;
         }
-        block += 28;
+        block = block.wrapping_add(28);
         room -= 28;
         regs.r[2] = regs.r[2].wrapping_sub(1);
     }

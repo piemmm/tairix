@@ -37,7 +37,7 @@ fn read_point(os: &mut Os<'_>, block: u32) -> Result<(), Fail> {
     let (x, y) = os.read_coordinates(block)?;
     let colour = with(os, |vdu, os| vdu.colour_at(os, x, y))?;
     let value = colour.map_or(0xFF, |(c, _)| c.to_le_bytes()[0]);
-    os.write_byte(block + 4, value)
+    os.write_byte(block.wrapping_add(4), value)
 }
 
 /// `OS_Word` 10: the block's first byte names a character, whose eight
@@ -52,7 +52,7 @@ fn definition(os: &mut Os<'_>, block: u32) -> Result<(), Fail> {
             _ => vdu.font.glyph(code).copied().unwrap_or([0; 8]),
         })
     })?;
-    os.write_bytes(block + 1, &rows)
+    os.write_bytes(block.wrapping_add(1), &rows)
 }
 
 /// `OS_Word` 11: the logical colour at +0 through `PaletteV`, in the flash
@@ -70,7 +70,7 @@ fn read_palette(os: &mut Os<'_>, block: u32) -> Result<(), Fail> {
     os.call_vector(PALETTE_V, &mut regs, Entry::Supervisor)?;
     let second = with(os, |vdu, _| Ok(vdu.palette.second))?;
     let shown = if second { regs.r[3] } else { regs.r[2] };
-    os.write_bytes(block + 1, &shown.to_le_bytes())
+    os.write_bytes(block.wrapping_add(1), &shown.to_le_bytes())
 }
 
 /// `OS_Word` 12: `VDU 19` from the block's five bytes.
@@ -100,7 +100,7 @@ fn cursors(os: &mut Os<'_>, block: u32) -> Result<(), Fail> {
 fn bases(os: &mut Os<'_>, block: u32) -> Result<(), Fail> {
     let kind = os.read_byte(block)?;
     let mut offset = [0; 4];
-    os.read_bytes(block + 1, &mut offset)?;
+    os.read_bytes(block.wrapping_add(1), &mut offset)?;
     let offset = u32::from_le_bytes(offset);
     with(os, |vdu, _| {
         vdu.screen.set_base(kind & 1 != 0, kind & 2 != 0, offset);

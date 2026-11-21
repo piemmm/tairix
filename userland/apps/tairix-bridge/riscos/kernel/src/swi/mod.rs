@@ -21,8 +21,6 @@ pub const X: u32 = 1 << 17;
 pub const WRITE_I: u32 = 0x100;
 /// The SWIs in a module's chunk.
 pub const CHUNK: u32 = 64;
-/// `OS_GenerateError`.
-const GENERATE_ERROR: u32 = 0x2B;
 /// How far a chain of `OS_CallASWI`s is followed.
 const CALL_A_SWI_HOPS: u32 = 16;
 /// A number no SWI has, for a chain followed too far.
@@ -322,7 +320,26 @@ pub mod os {
 
     /// `OS_ChangeEnvironment`'s handlers.
     pub mod environment {
-        pub use crate::env::EXIT;
+        pub use crate::env::{ERROR, ESCAPE, EXIT, UPCALL};
+    }
+
+    /// `OS_Exit`'s word beside a return code.
+    pub mod exit {
+        pub use crate::env::ABEX;
+    }
+
+    /// `OS_SetColour`'s flags.
+    pub mod set_colour {
+        /// The GCOL action.
+        pub const ACTION: u32 = 0xF;
+        /// The background colour rather than the foreground.
+        pub const BACKGROUND: u32 = 1 << 4;
+        /// R1 points at an ECF pattern's eight words.
+        pub const PATTERN: u32 = 1 << 5;
+        /// The text colour rather than the graphics.
+        pub const TEXT: u32 = 1 << 6;
+        /// The colour read rather than set.
+        pub const READ: u32 = 1 << 7;
     }
 
     /// `OS_ReadUnsigned`'s flags, beside its base.
@@ -342,6 +359,9 @@ pub mod os {
     /// `OS_Find`'s reason: its kind, the flags that refuse a directory and
     /// a missing object, and the path it searches.
     pub mod find {
+        /// Close the file R1 names; with R1 0, the current filing system's
+        /// every file.
+        pub const CLOSE: u32 = 0;
         /// Open an existing file to read.
         pub const INPUT: u32 = 0x40;
         /// Create a file to write.
@@ -680,7 +700,7 @@ impl Os<'_> {
     /// `XOS_GenerateError`'s, which is its caller's own to give.
     fn perform_resolved(&mut self, number: u32, regs: &mut Regs) -> Result<(), Fail> {
         match self.run_handler(number, regs) {
-            Err(Fail::Error(block)) if number != X | GENERATE_ERROR => {
+            Err(Fail::Error(block)) if number != X | os::GENERATE_ERROR => {
                 Err(self.checked_error(number, block))
             }
             result => result,
@@ -801,7 +821,7 @@ impl Os<'_> {
 
 /// "No SWI has that name".
 const NO_SUCH_SWI_NAME: crate::error::Error = crate::error::Error {
-    number: 0x1E6,
+    number: crate::env::NO_SUCH_SWI.number,
     token: "UnknownSwiName",
 };
 

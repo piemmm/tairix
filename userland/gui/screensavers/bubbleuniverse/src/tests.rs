@@ -1,6 +1,7 @@
 //! Host tests of the screensaver: its options, its pace, a frame that paints
-//! only the square about the bubble, the bubble's wander, reduced motion,
-//! and the same frame drawn across cores.
+//! only the square about the bubble and holds every dot whole, the bubble's
+//! wander, reduced motion, the light every screen sheds and the colours it
+//! keeps, and the same frame drawn across cores.
 
 extern crate std;
 
@@ -8,18 +9,20 @@ use alloc::vec::Vec;
 
 use tairix_abi::saver_ipc::Start;
 use tairix_abi::Errno;
+use tairix_colour::srgb_to_linear;
 use tairix_geometry::{Point, Rect, Region};
 use tairix_parallel::{JobRunner, Reversed, Threaded, SERIAL};
 use tairix_raster::{Color, Surface};
-use tairix_saver::testing::{self, Screen, FRAME_NS};
+use tairix_saver::testing::{self, Screen, FRAME_NS, SEC};
 use tairix_saver::{Frame, Host, NextFrame, SaverValue, Scene};
 use tairix_theme::motion::{seconds, SceneClock};
 use tairix_util::mathf;
 
 use super::{
-    BubbleUniverse, Dot, Pace, Universe, CURVES, EXPOSURES, REFERENCE_RADIUS, STEPS, STILL_NS,
+    colours, traced_at, BubbleUniverse, Pace, Sizing, Universe, CURVES, EXPOSURES, STEPS, STILL_NS,
     TIME_RATE,
 };
+use crate::palette::Palette;
 
 /// A universe drawn across `runner`, as the saver draws one across its pool.
 struct Across<'r> {
@@ -42,7 +45,9 @@ impl Scene for Across<'_> {
 
 const SCREEN: (u32, u32) = (1280, 720);
 
-const SEC: u64 = 1_000_000_000;
+/// What a screen holds where no frame has reached: no frame writes a clear
+/// pixel.
+const MARK: Color = Color::TRANSPARENT;
 
 /// The start the host would send for a `size` screen with these options.
 fn start(size: (u32, u32), colours: &str, speed: &str, glow: bool) -> Start {
@@ -82,6 +87,14 @@ fn lit(surface: &Surface) -> usize {
         .iter()
         .filter(|pixel| pixel.r != 0 || pixel.g != 0 || pixel.b != 0)
         .count()
+}
+
+/// The point at surface column `x` and row `y`.
+fn point(x: u32, y: u32) -> Point {
+    Point::new(
+        i32::try_from(x).expect("small"),
+        i32::try_from(y).expect("small"),
+    )
 }
 
 #[test]
@@ -124,11 +137,11 @@ fn each_frame_asks_for_the_next_a_scene_frame_on() {
     );
 }
 
-/// A frame repaints the square about the bubble and nothing else: every
-/// pixel outside it keeps whatever it held, and the damage names the square.
+/// A frame repaints every pixel of the square about the bubble and nothing
+/// else: every pixel outside it keeps whatever it held, and the damage names
+/// the square.
 #[test]
 fn a_frame_paints_only_the_square_about_the_bubble() {
-    const MARK: Color = Color::rgb(1, 2, 3);
     let mut screen = Screen::new(usual());
     let mut universe = made(&usual(), 2);
     draw(&mut screen, &mut universe, FRAME_NS);
@@ -141,22 +154,14 @@ fn a_frame_paints_only_the_square_about_the_bubble() {
         painted,
         "a wander this short uncovers nothing"
     );
-    let mut outside = 0;
+    let (mark, mut outside) = (MARK.premultiply(), 0);
     for y in 0..SCREEN.1 {
         for x in 0..SCREEN.0 {
-            let at = Point::new(
-                i32::try_from(x).expect("small"),
-                i32::try_from(y).expect("small"),
-            );
             let pixel = screen.surface.get(x, y).expect("inside");
-            if painted.contains(at) {
-                assert_eq!(pixel.a, u8::MAX, "({x}, {y}) opaque");
+            if painted.contains(point(x, y)) {
+                assert_eq!(pixel.a, u8::MAX, "({x}, {y}) painted");
             } else {
-                assert_eq!(
-                    (pixel.r, pixel.g, pixel.b),
-                    (1, 2, 3),
-                    "({x}, {y}) untouched"
-                );
+                assert_eq!(pixel, mark, "({x}, {y}) untouched");
                 outside += 1;
             }
         }
@@ -165,14 +170,12 @@ fn a_frame_paints_only_the_square_about_the_bubble() {
     assert!(lit(&screen.surface) > 50_000, "the bubble is drawn");
 }
 
-/// However long it wanders, the bubble's square stays about the screen's
-/// centre and its disc on the screen.
+/// However long it wanders, the bubble's disc stays on the screen.
 #[test]
 fn the_bubble_wanders_but_never_leaves_the_screen() {
     let start = usual();
     let universe = made(&start, 3);
     let course = &universe.universe.course;
-    let screen = Rect::new(0, 0, SCREEN.0, SCREEN.1);
     let mut moved = 0.0f64;
     let first = course.at(0.0).centre;
     for second in 0..2_000 {
@@ -186,11 +189,42 @@ fn the_bubble_wanders_but_never_leaves_the_screen() {
             y - course.radius >= 0.0 && y + course.radius <= f64::from(SCREEN.1),
             "{y}"
         );
-        let placed = course.placed(instant.centre);
-        assert_eq!(placed.painted, placed.frame.intersection(&screen));
         moved = moved.max((x - first.0).abs()).max((y - first.1).abs());
     }
     assert!(moved > 4.0, "it does wander: {moved}");
+}
+
+/// Every point's dot lies whole inside the square a frame paints, wherever
+/// the bubble has wandered and whatever the screen's shape, so no light is
+/// cut off at the square's edge.
+#[test]
+fn every_dot_lies_whole_inside_the_square_a_frame_paints() {
+    for (size, glow) in [
+        (SCREEN, true),
+        (SCREEN, false),
+        ((1080, 1920), true),
+        ((3840, 2160), false),
+    ] {
+        let mut universe = made(&start(size, "original", "normal", glow), 11);
+        let universe = &mut universe.universe;
+        let dot = Sizing::of(Rect::new(0, 0, size.0, size.1)).dot;
+        let shutter = universe.pace.shutter_s(universe.refresh) * universe.course.pace;
+        for seconds in [0.0, 21.5, 43.0, 86.5, 130.0, 173.0] {
+            let instant = universe.course.at(seconds);
+            let painted = universe.course.placed(instant.centre).painted;
+            universe.trace(&instant, shutter, painted, &SERIAL);
+            for spot in &universe.spots {
+                let (across, down) = (dot.covers(spot.x), dot.covers(spot.y));
+                assert!(
+                    across.start >= painted.left()
+                        && across.end <= painted.right()
+                        && down.start >= painted.top()
+                        && down.end <= painted.bottom(),
+                    "{size:?} at {seconds}: {across:?} by {down:?} outside {painted:?}"
+                );
+            }
+        }
+    }
 }
 
 /// Where the bubble wandered from, the frame clears to the ground what the
@@ -204,6 +238,7 @@ fn a_frame_clears_where_the_bubble_no_longer_reaches() {
     let (before, after) = loop {
         let before = universe.universe.painted;
         now += SceneClock::MOST_FRAMES * FRAME_NS;
+        screen.surface.fill(MARK);
         draw(&mut screen, &mut universe, now);
         let after = universe.universe.painted;
         if after != before {
@@ -322,7 +357,7 @@ fn the_speed_scales_the_picture_s_motion() {
 }
 
 /// With its glow on the light hazes the square about the bubble; with it off
-/// the dark between the curves, and beyond the disc, is black.
+/// the dark between the curves, and all beyond the disc, is black.
 #[test]
 fn the_glow_lights_the_dark_about_the_curves() {
     let mut counts = Vec::new();
@@ -332,22 +367,39 @@ fn the_glow_lights_the_dark_about_the_curves() {
         let mut screen = Screen::new(given);
         draw(&mut screen, &mut universe, FRAME_NS);
         counts.push(lit(&screen.surface));
+        if !glow {
+            let universe = &universe.universe;
+            let Pace::Moving(clock) = &universe.pace else {
+                unreachable!("moving")
+            };
+            let (cx, cy) = universe.course.at(clock.moved()).centre;
+            let dot = Sizing::of(Rect::new(0, 0, SCREEN.0, SCREEN.1)).dot;
+            let beyond = universe.course.radius + f64::from(dot.radius() + 1);
+            for y in 0..SCREEN.1 {
+                for x in 0..SCREEN.0 {
+                    let (dx, dy) = (f64::from(x) + 0.5 - cx, f64::from(y) + 0.5 - cy);
+                    if mathf::hypot(dx, dy) > beyond {
+                        let pixel = screen.surface.get(x, y).expect("inside");
+                        assert_eq!((pixel.r, pixel.g, pixel.b), (0, 0, 0), "({x}, {y})");
+                    }
+                }
+            }
+        }
     }
     assert!(counts[0] > counts[1] * 3 / 2, "{counts:?}");
 }
 
 /// Every screen sheds as much light, area for area, as every other: a dot as
 /// large as its screen asks for carries the light its size is worth, however
-/// its radius rounds. What is shown of that light follows the tone curve, so a
-/// small screen's denser, dimmer dots show a little brighter, as a picture
-/// shrunk in light rather than in its encoding does.
+/// its radius rounds and however wide it is held to drawing. What is shown of
+/// that light follows the tone curve, so a small screen's denser, dimmer dots
+/// show a little brighter, as a picture shrunk in light rather than in its
+/// encoding does.
 #[test]
 fn every_screen_sheds_the_same_light_area_for_area() {
     let shed = |size: (u32, u32)| {
         let universe = made(&start(size, "original", "normal", false), 9);
-        let radius = universe.universe.course.radius;
-        let rounded = mathf::round_i32(radius / REFERENCE_RADIUS).max(1);
-        let dot = Dot::new(u32::try_from(rounded).expect("a radius"));
+        let sizing = Sizing::of(Rect::new(0, 0, size.0, size.1));
         let light: u64 = universe
             .universe
             .colours
@@ -355,14 +407,52 @@ fn every_screen_sheds_the_same_light_area_for_area() {
             .flatten()
             .map(|&c| u64::from(c))
             .sum();
-        let light = f64::from(u32::try_from(light).expect("a frame's light"));
-        let energy = f64::from(u32::try_from(dot.energy()).expect("small"));
-        light * energy * mathf::real(EXPOSURES) / (radius * radius)
+        let held = mathf::real(usize::try_from(light).expect("a frame's light"))
+            / mathf::real(1 << sizing.shed().shift());
+        let energy = f64::from(u32::try_from(sizing.dot.energy()).expect("small"));
+        held * energy * mathf::real(EXPOSURES) / (sizing.radius * sizing.radius)
     };
     let reference = shed((1920, 1080));
-    for size in [(1280, 720), (2560, 1440), (3840, 2160), (7680, 4320)] {
+    for size in [
+        (1280, 720),
+        (2560, 1440),
+        (3840, 2160),
+        (7680, 4320),
+        (15360, 8640),
+    ] {
         let ratio = shed(size) / reference;
         assert!((ratio - 1.0).abs() < 0.01, "{size:?}: {ratio}");
+    }
+}
+
+/// However large the screen, and so however little light each of its dots
+/// sheds, a point keeps every channel its palette lights, a full one held in
+/// all of sixteen bits.
+#[test]
+fn every_channel_a_palette_lights_is_kept_at_every_size() {
+    let dimmest = srgb_to_linear(1.0 / 255.0);
+    for size in [
+        (1280, 720),
+        (1920, 1080),
+        (3840, 2160),
+        (7680, 4320),
+        (15360, 8640),
+    ] {
+        let shed = Sizing::of(Rect::new(0, 0, size.0, size.1)).shed();
+        for palette in [Palette::Original, Palette::Ember, Palette::Ice] {
+            let table = colours(palette, shed).expect("a table");
+            let brightest = table.iter().flatten().copied().max().unwrap_or(0);
+            assert!(brightest >= 1 << 14, "{size:?} {palette:?}: {brightest}");
+            palette.each(|curve, step, light| {
+                let held = table[traced_at(curve, step)];
+                for (channel, held) in light.iter().zip(held) {
+                    assert!(
+                        *channel < dimmest || held > 0,
+                        "{size:?} {palette:?}: curve {curve} step {step} lost {channel}"
+                    );
+                }
+            });
+        }
     }
 }
 
@@ -386,5 +476,5 @@ fn a_frame_drawn_across_cores_is_the_frame_drawn_on_one() {
         assert!(banded.surface == whole.surface, "the cores drew the frame");
         assert_eq!(banded.damage, whole.damage);
     }
-    assert!(reversed.widest() > 1, "the frame was split");
+    assert!(reversed.widest() > 1, "the frame's work was spread");
 }

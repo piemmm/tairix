@@ -13,7 +13,7 @@ use super::{
     acos, acosh, asin, asinh, atan, atan2, atanh, bilinear, byte, ceil, clamp, cos, cosh,
     double_to_half, exp, exp2, fabs, float_bits, float_of, floor, fmax, fmin, from_half, hypot, ln,
     log2, power, quantized_to_half, real, reduce, round, round_even, round_i32, share, sin, single,
-    sinh, smoothstep, smoothstepf, sqrt, tan, tanh, to_half, trunc, Phasor, EXP_MAX_ARG,
+    sinh, smoothstep, smoothstepf, sqrt, tan, tanh, to_half, trunc, Phasor, Turn, EXP_MAX_ARG,
     EXP_MIN_ARG, REDUCIBLE,
 };
 use super::{expm1, log1p};
@@ -368,6 +368,18 @@ fn a_phasor_sweeps_the_sine_it_was_turned_from() {
     for n in 0..1_000u32 {
         close(phasor.value(), amplitude * sin(angle + f64::from(n) * step));
         phasor.advance();
+    }
+}
+
+/// Two turns composed are the turn through both angles, and a turn through
+/// nought leaves another exactly as it was.
+#[test]
+fn turns_compose_by_angle_addition() {
+    for (a, b) in [(0.3, 1.1), (-2.0, 0.25), (3.0, 3.0), (100.0, -41.5)] {
+        let both = Turn::of(a).then(Turn::of(b));
+        close(both.sin(), sin(a + b));
+        close(both.cos(), cos(a + b));
+        assert_eq!(Turn::of(a).then(Turn::of(0.0)), Turn::of(a));
     }
 }
 

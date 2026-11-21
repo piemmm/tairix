@@ -7,16 +7,19 @@
 
 pub mod served;
 
+use tairix_riscos_filing::filecore::{code, numbered};
+use tairix_riscos_filing::ramfs;
 use tairix_riscos_kernel::corpus::StillHost;
 use tairix_riscos_kernel::memory::layout::RISC_OS_5;
 use tairix_riscos_kernel::memory::policy::Ceiling;
 use tairix_riscos_kernel::os::{Config, Fail, Host, Kernel, Os, Outcome, Regs};
+use tairix_riscos_kernel::ramdisc::AREA;
 use tairix_riscos_kernel::swi::os::{CHANGE_DYNAMIC_AREA, CLI, FILE, GET_ENV};
 use tairix_riscos_kernel::swi::X;
 
 /// FileCore's "not found" as RamFS reports it: FileCore's errors beside
 /// RamFS's number.
-pub const FILECORE_NOT_FOUND: u32 = 0x1_17D6;
+pub const FILECORE_NOT_FOUND: u32 = numbered(ramfs::NUMBER as u32, code::NOT_FOUND);
 
 /// A session booted afresh with this crate's modules.
 pub fn kernel() -> Kernel {
@@ -118,12 +121,17 @@ pub fn load(os: &mut Os<'_>, name: &[u8], length: usize) -> Result<Vec<u8>, (u32
     Ok(read(os, at, length))
 }
 
+/// The session given a RAM disc of 256K.
+pub fn ram_disc(os: &mut Os<'_>) {
+    call(os, CHANGE_DYNAMIC_AREA, &[AREA, 0x4_0000]).expect("a RAM disc");
+}
+
 /// A session with a RAM disc and an application slot of `bytes`, as the
 /// front end gives a program one: its memory limit.
 pub fn session(kernel: &mut Kernel, bytes: u32) -> u32 {
     tairix_riscos_filing::session::application_slot(kernel, bytes);
     let mut os = kernel.os();
-    call(&mut os, CHANGE_DYNAMIC_AREA, &[5, 0x4_0000]).expect("a RAM disc");
+    ram_disc(&mut os);
     call(&mut os, GET_ENV, &[]).expect("the environment").r[1]
 }
 

@@ -23,10 +23,10 @@ const UTC_FIVE: u32 = 3;
 /// The flags: daylight saving taken as in force; standard time where the
 /// territory keeps no rules; daylight saving as its rules say; R4 an
 /// adjustment in centiseconds rather than a time zone.
-const AS_SUMMER: u32 = 1 << 16;
-const STANDARD_UNRULED: u32 = 1 << 17;
-const BY_THE_RULES: u32 = 1 << 18;
-const ADJUSTMENT: u32 = 1 << 19;
+pub(super) const AS_SUMMER: u32 = 1 << 16;
+pub(super) const STANDARD_UNRULED: u32 = 1 << 17;
+pub(super) const BY_THE_RULES: u32 = 1 << 18;
+pub(super) const ADJUSTMENT: u32 = 1 << 19;
 /// The flags past those.
 const RESERVED: u32 = !(ADJUSTMENT | (ADJUSTMENT - 1));
 

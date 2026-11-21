@@ -7,20 +7,20 @@
     reason = "each test crate including this uses the helpers its own tests need"
 )]
 
-use tairix_riscos_filing::session::{session, Session, Setup};
+use tairix_riscos_filing::session::{session, Session, Setup, SLOT_BYTES};
 use tairix_riscos_kernel::os::{Fail, Regs};
 use tairix_riscos_kernel::swi::os::{READ_MODE_VARIABLE, WRITE_C};
 use tairix_riscos_kernel::swi::X;
 
-/// The application space a session has.
-pub const BYTES: u32 = 0x10_0000;
+/// Where a test writes a mode selector, in the application slot.
+pub const SELECTOR_AT: u32 = 0x9000;
 
 /// A session with the drivers and their module, `keys` to type.
 pub fn drivers(keys: &[u8]) -> Session {
     session(&Setup {
         vdu: Some(tairix_riscos_vdu::DRIVERS),
         modules: &tairix_riscos_vdu::MODULES,
-        bytes: BYTES,
+        bytes: SLOT_BYTES,
         keys,
         disc: None,
     })

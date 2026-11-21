@@ -7,15 +7,14 @@ use alloc::vec::Vec;
 
 use tairix_riscos_arm::psr;
 
-use super::{key, CODES_AT, INKEY_AT, KEYS, SHIFTING, SHIFTING_AT, SPECIAL_AT, TRANSLATION_AT};
+use super::{
+    key, CODES_AT, DECIMAL, INKEY_AT, KEYS, SHIFTING, SHIFTING_AT, SPECIAL_AT, TRANSLATION_AT,
+};
 use crate::cli::tests::{cli, session};
 use crate::keyboard::status;
 use crate::msgtrans::tests::swi;
 use crate::swi::os::{BYTE, CALL_A_VECTOR, INSTALL_KEY_HANDLER};
 use crate::testkit::Session;
-
-/// `KeyV`.
-const KEY_VECTOR: u32 = 0x13;
 
 /// Keys the tests press.
 const A: u32 = 0x3C;
@@ -38,7 +37,6 @@ const KEYPAD_5: u32 = 0x49;
 const KEYPAD_7: u32 = 0x37;
 const KEYPAD_9: u32 = 0x39;
 const KEYPAD_PLUS: u32 = 0x4B;
-const KEYPAD_DECIMAL: u32 = 0x66;
 
 /// A low-level key as its tables hold it.
 fn low(key: u32) -> u8 {
@@ -51,7 +49,21 @@ fn press(s: &mut Session, low: u32, down: bool) {
     swi(
         s,
         CALL_A_VECTOR,
-        [reason, low, 0, 0, 0, 0, 0, 0, 0, KEY_VECTOR, 0, 0, 0],
+        [
+            reason,
+            low,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            crate::vectors::KEY.0,
+            0,
+            0,
+            0,
+        ],
     )
     .expect("called");
 }
@@ -292,15 +304,15 @@ fn alt_and_the_keypad_type_a_character_by_its_number() {
 fn the_keypad_follows_num_lock_and_the_layout_s_decimal() {
     let mut s = keyboard_in("UK", "Latin1");
     tap(&mut s, &[], KEYPAD_7);
-    tap(&mut s, &[], KEYPAD_DECIMAL);
+    tap(&mut s, &[], DECIMAL);
     assert_eq!(typed(&mut s), b"7.");
     tap(&mut s, &[], key::NUM_LOCK);
     tap(&mut s, &[], KEYPAD_7);
     tap(&mut s, &[], KEYPAD_5);
-    tap(&mut s, &[], KEYPAD_DECIMAL);
+    tap(&mut s, &[], DECIMAL);
     assert_eq!(typed(&mut s), [0x1E, 0x7F], "Home, nothing, Delete");
     let mut s = keyboard_in("Germany", "Latin1");
-    tap(&mut s, &[], KEYPAD_DECIMAL);
+    tap(&mut s, &[], DECIMAL);
     assert_eq!(typed(&mut s), b",", "a German keypad's decimal comma");
 }
 
@@ -460,7 +472,21 @@ fn break_is_the_escape_key_or_a_reset_as_os_byte_247_says() {
     press(&mut s, key::BREAK, true);
     let up = s.start_swi(
         0x2_0000 | CALL_A_VECTOR,
-        [1, key::BREAK, 0, 0, 0, 0, 0, 0, 0, KEY_VECTOR, 0, 0, 0],
+        [
+            1,
+            key::BREAK,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            crate::vectors::KEY.0,
+            0,
+            0,
+            0,
+        ],
     );
     assert_eq!(
         up,

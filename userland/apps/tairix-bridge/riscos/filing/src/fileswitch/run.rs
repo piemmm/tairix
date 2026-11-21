@@ -8,7 +8,10 @@ use alloc::vec::Vec;
 
 use tairix_obey::command::MOST_LINE;
 use tairix_riscos_kernel::error::Error;
+use tairix_riscos_kernel::filing::filetype::{ABSOLUTE, UTILITY};
+use tairix_riscos_kernel::filing::fs::stamp;
 use tairix_riscos_kernel::filing::NOT_FOUND;
+use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::os::{len32, Entry, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::{self as swi, fs_control as reason};
 use tairix_riscos_kernel::swi::X;
@@ -19,13 +22,8 @@ use super::{args, error};
 
 /// The path a name to run is looked for along.
 const RUN_PATH: &[u8] = b"Run$Path";
-/// Where an Absolute file is loaded and entered: application space's start.
-const APPLICATION: u32 = 0x8000;
 /// The workspace a Utility is given after its code, its stack's.
 const UTILITY_WORKSPACE: u32 = 1024;
-/// The types FileSwitch runs itself rather than through an alias.
-const ABSOLUTE: u32 = 0xFF8;
-const UTILITY: u32 = 0xFFC;
 
 /// "No run action is set for files of type &%0".
 const NO_RUN_TYPE: Error = Error {
@@ -68,7 +66,7 @@ fn run_file(
     start: u32,
     tail: u32,
 ) -> Result<(), Fail> {
-    if found.load & 0xFFF0_0000 != 0xFFF0_0000 {
+    let Some(kind) = stamp::type_of(found.load) else {
         return application(
             os,
             canonical,
@@ -76,8 +74,8 @@ fn run_file(
             tail,
             (found.load, found.exec, found.length),
         );
-    }
-    match (found.load >> 8) & 0xFFF {
+    };
+    match kind {
         ABSOLUTE => application(
             os,
             canonical,

@@ -21,7 +21,7 @@ use super::{
 
 /// The buffer FileSwitch keeps for a HostFS file: the largest it allows,
 /// so a file crosses the relay in the fewest requests.
-const BUFFER: u32 = 1024;
+const BUFFER: u32 = crate::fileswitch::open::BUFFER_MOST;
 
 /// What a path names: its disc's place and the path beneath its root.
 struct Named {

@@ -2,12 +2,13 @@
 //! glow, and shown through the tone curve a band of rows at a time.
 //!
 //! A frame's spots are sorted into the strips of [`STRIP_ROWS`] rows their
-//! dots reach. Each band of a paint then draws a strip's dots into light of
+//! dots reach. Each band of a paint then draws its strips' dots into light of
 //! its own and tones those rows straight away, while the strip is still in
 //! cache, so the frame's light is never held whole and no two bands share a
-//! byte. A strip's light is held a dot's width wider than its rows and
-//! columns on every side, so a dot is drawn whole, its taps unrolled, and
-//! what falls past the strip is never shown.
+//! byte. A band holds whole strips, so no strip is drawn twice. A strip's
+//! light is held a dot's width wider than its rows and columns on every side,
+//! so a dot is drawn whole, its taps unrolled, and what falls past the strip
+//! is never shown.
 
 use alloc::vec::Vec;
 use core::array::from_fn;
@@ -15,11 +16,11 @@ use core::ops::Range;
 
 use tairix_geometry::Rect;
 use tairix_parallel::JobRunner;
-use tairix_raster::{DitherRow, Pixel, RowBand, Surface};
-use tairix_util::fallible;
+use tairix_raster::{DitherRow, Pixel, RowBand, Surface, BAND_GRAIN};
+use tairix_util::{fallible, mathf};
 
-use crate::glow::Glow;
-use crate::tone::Tone;
+use crate::glow::{lerp, Glow};
+use crate::tone::{Tone, LIGHT_ONE};
 
 /// The fraction bits a spot's position is held in.
 pub(crate) const SUB_SHIFT: u32 = 8;
@@ -30,9 +31,18 @@ pub(crate) const SUB: i32 = 1 << SUB_SHIFT;
 /// A pixel's centre, from its top left corner.
 const HALF: i32 = SUB / 2;
 
+/// The centre of pixel `pixel`, in a position's fraction from the first's
+/// edge.
+pub(crate) const fn pixel_centre(pixel: u32) -> u32 {
+    pixel
+        .saturating_mul(SUB.unsigned_abs())
+        .saturating_add(HALF.unsigned_abs())
+}
+
 /// The widest a dot is drawn, in whole pixels either way of its centre: the
 /// size an 8K screen asks for. A larger screen's dots are drawn no wider,
-/// each still shedding the light its size is worth.
+/// each still shedding the light its size is worth, so its light gathers into
+/// fewer pixels and shows a little whiter.
 pub(crate) const MAX_RADIUS: u32 = 4;
 
 /// The most pixels a dot covers along an axis.
@@ -47,16 +57,64 @@ const _: () = assert!(
     "a dot reaches at most two strips"
 );
 
-/// The fewest pixels worth handing another core to draw.
-const PAINT_GRAIN: usize = 16_384;
+/// The most of the heap the paint's scratch may hold, as a divisor. Every band
+/// a paint may split into needs its own, so a machine of many cores driving a
+/// large screen would otherwise spend the saver's whole ceiling on them;
+/// holding fewer costs bands, never the picture.
+const SCRATCH_SHARE: u64 = 2;
 
 /// One point of light as a frame draws it: where its dot is centred, in
-/// 256ths of a pixel on the screen, and the light the dot spreads about it.
+/// 256ths of a pixel on the screen, and the light the dot spreads about it,
+/// held as the frame's [`Shed`] holds light.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Spot {
     pub(crate) x: i32,
     pub(crate) y: i32,
     pub(crate) light: [u16; 3],
+}
+
+/// How a frame's spots hold their light: a light of one, the most a lone
+/// point lights its pixel, is `LIGHT_ONE << shift` of a spot's. The shift is
+/// as large as a channel of full strength leaves room for in sixteen bits, so
+/// a dim colour keeps its hue however little light a large screen's dots each
+/// shed.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct Shed {
+    /// A channel of full strength, as a spot holds it.
+    full: f64,
+    shift: u32,
+}
+
+impl Shed {
+    /// The most bits a spot's light is held to past light's own, so the
+    /// shifts that bring it back stay inside a word.
+    const MOST_SHIFT: u32 = 24;
+
+    /// Spots whose full channel sheds `peak` lights, held as finely as
+    /// sixteen bits allow.
+    pub(crate) fn new(peak: f64) -> Self {
+        let mut held = Self {
+            full: peak * f64::from(LIGHT_ONE),
+            shift: 0,
+        };
+        while held.shift < Self::MOST_SHIFT && held.full * 2.0 <= f64::from(u16::MAX) {
+            held.full *= 2.0;
+            held.shift += 1;
+        }
+        held
+    }
+
+    /// The light a channel at `channel` of full strength sheds, as a spot
+    /// holds it.
+    pub(crate) fn carried(self, channel: f64) -> u16 {
+        let held = mathf::round_i32(channel * self.full).clamp(0, i32::from(u16::MAX));
+        u16::try_from(held).unwrap_or(u16::MAX)
+    }
+
+    /// The bits a spot's light is held to past light's own.
+    pub(crate) const fn shift(self) -> u32 {
+        self.shift
+    }
 }
 
 /// The dot each point is drawn as: a tent `radius` whole pixels each way.
@@ -97,6 +155,13 @@ impl Dot {
     #[inline]
     fn first(self, at: i32) -> i32 {
         ((at - HALF - self.radius.cast_signed() * SUB) >> SUB_SHIFT) + 1
+    }
+
+    /// The pixels along an axis it lights, centred `at`.
+    #[inline]
+    pub(crate) fn covers(self, at: i32) -> Range<i32> {
+        let first = self.first(at);
+        first..first + self.taps()
     }
 }
 
@@ -162,8 +227,7 @@ impl Layout {
     /// The strips `spot`'s dot reaches.
     #[inline]
     fn of(self, spot: &Spot) -> Range<usize> {
-        let first = self.dot.first(spot.y);
-        self.reached(first..first + self.dot.taps())
+        self.reached(self.dot.covers(spot.y))
     }
 
     /// The painted rows strip `strip` holds.
@@ -322,10 +386,11 @@ impl GlowRows {
     }
 }
 
-/// A frame's light: the bins its spots are sorted into, its glow and its
-/// tone, and where its dots are drawn.
+/// A frame's light: the bins its spots are sorted into and how they hold
+/// their light, its glow and its tone, and where its dots are drawn.
 pub(crate) struct Light {
     bins: Bins,
+    shed: Shed,
     tone: Tone,
     glow: Option<Glow>,
     /// One scratch for each band a paint may split into, and at least one.
@@ -333,23 +398,31 @@ pub(crate) struct Light {
 }
 
 impl Light {
-    /// The light of frames `size` pixels whose spots `bins` sorts, shown
-    /// through `tone` with `glow` if it shines, in no more bands than
-    /// `runner` takes; `None` when the heap will not hold it.
+    /// The light of frames `size` pixels whose spots `bins` sorts and hold
+    /// their light as `shed` says, shown through `tone` with `glow` if it
+    /// shines, in no more bands than `runner` takes or than half of `heap`
+    /// bytes holds scratch for; `None` when the heap will not hold it.
     pub(crate) fn new(
         size: (u32, u32),
-        bins: Bins,
+        (bins, shed): (Bins, Shed),
         (tone, glow): (Tone, Option<Glow>),
-        runner: &dyn JobRunner,
+        (runner, heap): (&dyn JobRunner, u64),
     ) -> Option<Self> {
         let width = usize::try_from(size.0).ok()?;
         let strips = usize::try_from(size.1.div_ceil(STRIP_ROWS.unsigned_abs())).ok()?;
         let (cells, glow_width) = glow.as_ref().map_or((0, 0), |glow| (glow.across(), width));
-        let bands = tairix_parallel::bands(runner, strips, 1).max(1);
         // A strip is held its dots' width wider on every side.
         let pad = 2 * usize::try_from(bins.layout.dot.taps()).ok()?;
         let strip_rows = usize::try_from(STRIP_ROWS).ok()? + pad;
         let strip_light = (width + pad).checked_mul(strip_rows)?;
+        let held = strip_light
+            .checked_add(cells)?
+            .checked_add(glow_width.checked_mul(2)?)?
+            .checked_mul(size_of::<[u16; 3]>())?;
+        let affordable = heap / SCRATCH_SHARE / u64::try_from(held).ok()?.max(1);
+        let bands = tairix_parallel::bands(runner, strips, 1)
+            .min(usize::try_from(affordable).unwrap_or(usize::MAX))
+            .max(1);
         let mut scratch = Vec::new();
         if !fallible::reserve(&mut scratch, bands) {
             return None;
@@ -369,6 +442,7 @@ impl Light {
         }
         Some(Self {
             bins,
+            shed,
             tone,
             glow,
             scratch,
@@ -379,6 +453,12 @@ impl Light {
     /// its share of the bins to sort what it traces into.
     pub(crate) fn shares(&mut self, painted: Rect) -> impl Iterator<Item = Share<'_>> {
         self.bins.shares(painted)
+    }
+
+    /// How a paint cuts its rows into bands: no more of them than it holds
+    /// scratch for, each worth a band's grain and each whole strips.
+    fn split(&self) -> (usize, usize, u32) {
+        (self.scratch.len(), BAND_GRAIN, STRIP_ROWS.unsigned_abs())
     }
 
     /// Draw the spots the jobs sorted where `placed` puts the frame, over
@@ -392,8 +472,10 @@ impl Light {
         surface: &mut Surface,
         runner: &dyn JobRunner,
     ) {
+        let split = self.split();
         let Self {
             bins,
+            shed,
             tone,
             glow,
             scratch,
@@ -417,15 +499,15 @@ impl Light {
             tone,
             glow: glow.as_ref(),
             bins: &*bins,
+            shift: shed.shift(),
             frame,
             painted,
         };
-        let most = scratch.len();
         let mut free = scratch.iter_mut();
         surface.paint_bands(
             top..top.saturating_add(painted.height),
             runner,
-            (most, PAINT_GRAIN),
+            split,
             |band| (band, free.next()),
             &|(band, scratch): &mut (RowBand<'_>, Option<&mut Scratch>)| {
                 if let Some(scratch) = scratch {
@@ -441,6 +523,8 @@ struct Drawn<'a> {
     tone: &'a Tone,
     glow: Option<&'a Glow>,
     bins: &'a Bins,
+    /// The bits a spot's light is held to past light's own.
+    shift: u32,
     frame: Rect,
     painted: Rect,
 }
@@ -484,7 +568,7 @@ impl Drawn<'_> {
             let corner = (self.painted.left() - pad, rows.start - pad);
             for spots in self.bins.spots(strip) {
                 for spot in spots {
-                    splat::<TAPS>(spot, corner, stride, light);
+                    splat::<TAPS>(spot, corner, (stride, self.shift), light);
                 }
             }
             let shown = light.chunks_exact_mut(stride).skip(TAPS);
@@ -517,7 +601,7 @@ impl Drawn<'_> {
 fn brighten(light: &mut [[u16; 3]], (upper, lower): (&[[u16; 3]], &[[u16; 3]]), weight: u32) {
     let (upper, lower) = (upper.as_flattened(), lower.as_flattened());
     for ((light, &upper), &lower) in light.as_flattened_mut().iter_mut().zip(upper).zip(lower) {
-        let glow = (u32::from(upper) * (256 - weight) + u32::from(lower) * weight + 128) >> 8;
+        let glow = lerp(u32::from(upper), u32::from(lower), weight);
         *light = light.saturating_add(u16::try_from(glow).unwrap_or(u16::MAX));
     }
 }
@@ -529,13 +613,14 @@ fn frame_offset(at: u32, origin: i32) -> u32 {
 }
 
 /// Draw `spot`'s tent, `TAPS` pixels each way, into `light`, `stride` pixels
-/// a row from surface pixel `corner`; a dot that would reach past its rows'
-/// ends is not drawn.
+/// a row from surface pixel `corner`, its light held `shift` bits past
+/// light's own; a dot that would pass the light it is drawn into is not drawn
+/// at all.
 #[inline]
 fn splat<const TAPS: usize>(
     spot: &Spot,
     corner: (i32, i32),
-    stride: usize,
+    (stride, shift): (usize, u32),
     light: &mut [[u16; 3]],
 ) {
     let (left, across) = tent::<TAPS>(spot.x);
@@ -546,19 +631,24 @@ fn splat<const TAPS: usize>(
     ) else {
         return;
     };
-    if column + TAPS > stride {
+    if column + TAPS > stride || (row + TAPS) * stride > light.len() {
         return;
     }
     let shed = spot.light.map(u64::from);
+    // The taps weigh in 256ths squared and the light is held `shift` bits
+    // finer still: a row's taps are scaled once to weigh in 2³²nds, so each
+    // cell's light comes back by a fixed shift.
+    let (up, down_by) = (16u32.saturating_sub(shift), shift.saturating_sub(16));
+    let across = across.map(|height| (u64::from(height) << up) >> down_by);
     for (row, down) in (row..).zip(down) {
         let start = row * stride + column;
         let Some(cells) = light.get_mut(start..start + TAPS) else {
             return;
         };
         for (cell, across) in cells.iter_mut().zip(across) {
-            let weight = u64::from(across * down);
+            let weight = across * u64::from(down);
             for (channel, shed) in cell.iter_mut().zip(shed) {
-                let lit = (shed * weight + (1 << 15)) >> 16;
+                let lit = (shed * weight + (1 << 31)) >> 32;
                 *channel = channel.saturating_add(u16::try_from(lit).unwrap_or(u16::MAX));
             }
         }

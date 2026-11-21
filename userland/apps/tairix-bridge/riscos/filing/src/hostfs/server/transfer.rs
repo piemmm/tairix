@@ -11,8 +11,11 @@ use tairix_abi::time::Time64;
 use tairix_fscopy::tree::{Node, WriteAt};
 use tairix_fscopy::{Source, Target};
 use tairix_fsmeta::preset::acorn;
+use tairix_fsmeta::preset::acorn::fileswitch::{
+    LOCKED, OWNER_READ, OWNER_WRITE, PUBLIC_READ, PUBLIC_WRITE,
+};
 
-use super::{keep_first, object, push_decimal, refusal, typed_stamp, version_of, DATA, LOCKED};
+use super::{keep_first, object, push_decimal, refusal, typed_stamp, version_of};
 use crate::hostfs::protocol::{Kind, Object, Refusal, Reply, Version, ENTRIES_MOST, NAME_MOST};
 
 /// The name its disc is given, made unique among the session's.
@@ -26,10 +29,10 @@ const DIGITS_MOST: usize = 20;
 
 /// A directory on it: read for all, and locked, since nothing on it may be
 /// deleted.
-const DIRECTORY_ATTRIBUTES: u8 = 0x19;
+const DIRECTORY_ATTRIBUTES: u8 = OWNER_READ | PUBLIC_READ | LOCKED;
 
 /// The attribute bits that let a file be written.
-const WRITE_ATTRIBUTES: u8 = 0x22;
+const WRITE_ATTRIBUTES: u8 = OWNER_WRITE | PUBLIC_WRITE;
 
 /// One delivered file: its leaf as RISC OS spells it, its own name, which
 /// its type is read from, the file, and whether it may be written.
@@ -303,7 +306,10 @@ const fn nothing_beneath(below: Option<&[u8]>) -> Result<Option<Spot>, Refusal> 
 
 /// A directory of the disc, stamped `stamp`, or the epoch for none.
 fn directory(stamp: Option<Time64>) -> Result<Object, Refusal> {
-    let (load, exec) = typed_stamp(DATA, stamp.unwrap_or(Time64::UNIX_EPOCH))?;
+    let (load, exec) = typed_stamp(
+        acorn::Filetype::DATA.get(),
+        stamp.unwrap_or(Time64::UNIX_EPOCH),
+    )?;
     Ok(Object {
         kind: Kind::Directory,
         load,

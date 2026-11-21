@@ -153,6 +153,9 @@ pub const TEST_REFRESH: RefreshRate = RefreshRate::ASSUMED;
 /// One scene frame on [`TEST_REFRESH`].
 pub const FRAME_NS: u64 = SceneClock::frame_on(TEST_REFRESH);
 
+/// One second, in the nanoseconds a frame is timed in.
+pub const SEC: u64 = tairix_abi::time::NANOS_PER_SEC as u64;
+
 /// A start for a `width` × `height` screen at 100% with no feed, one thread,
 /// no option values and 256 MiB.
 ///

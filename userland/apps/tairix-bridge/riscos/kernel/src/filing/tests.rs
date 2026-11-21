@@ -9,10 +9,11 @@ use tairix_riscos_arm::psr;
 use crate::memory::layout::RISC_OS_5;
 use crate::memory::Bits;
 use crate::os::Regs;
+use crate::swi::os::{fs_control, BGET, BPUT, CLAIM, FS_CONTROL, GBPB};
 use crate::swi::os::{ARGS, CHANGE_ENVIRONMENT, FILE, FIND, GET_ENV};
-use crate::swi::os::{BGET, BPUT, FS_CONTROL, GBPB};
 use crate::swi::X;
 use crate::testkit::{asm, with_application, Session, CODE, DATA};
+use crate::vectors;
 
 const NAME: u32 = DATA;
 
@@ -141,11 +142,16 @@ fn the_filing_queries_answer_none_and_the_rest_find_nothing() {
     assert_eq!((prefix.r[1], prefix.r[2], prefix.r[3]), (NAME, u32::MAX, 0));
     let present = call(&mut s, FS_CONTROL, [13, NAME, 1, 0]).unwrap();
     assert_eq!(present.r[2], 0, "no filing system present");
-    for reason in [20, 30] {
+    for reason in [fs_control::TEMPORARY_MODULE, fs_control::SECONDARY_MODULE] {
         let base = call(&mut s, FS_CONTROL, [reason, 7, 7, 0]).unwrap();
         assert_eq!((base.r[1], base.r[2]), (0, 0), "{reason}");
     }
-    for reason in [2, 15, 19, 22] {
+    for reason in [
+        fs_control::START_APPLICATION,
+        fs_control::BOOT,
+        fs_control::RESTORE,
+        fs_control::CLOSE_ALL,
+    ] {
         assert!(
             call(&mut s, FS_CONTROL, [reason, 0, 0, 0]).is_ok(),
             "{reason}"
@@ -196,8 +202,7 @@ fn an_unknown_command_is_a_file_not_found() {
 
 #[test]
 fn a_new_application_is_told_set_up_and_left_no_handler_of_the_old() {
-    const ESCAPE: u32 = 9;
-    const ACTIVE_OBJECT: u32 = 15;
+    use crate::env::{CURRENT_ACTIVE_OBJECT, ESCAPE};
     let mut s = session();
     s.poke(CODE, &[asm::mov_pc_lr()]);
     call(&mut s, CHANGE_ENVIRONMENT, [ESCAPE, CODE, 0, 0]).unwrap();
@@ -205,18 +210,27 @@ fn a_new_application_is_told_set_up_and_left_no_handler_of_the_old() {
     let name = DATA + 0x80;
     s.write(tail, b"its tail\r");
     s.write(name, b"Program\0");
-    call(&mut s, FS_CONTROL, [2, tail, 0xABC0, name]).unwrap();
+    call(
+        &mut s,
+        FS_CONTROL,
+        [fs_control::START_APPLICATION, tail, 0xABC0, name],
+    )
+    .unwrap();
     let env = call(&mut s, GET_ENV, [0, 0, 0, 0]).unwrap();
     assert_eq!(s.read(env.r[0], 17), b"Program its tail\0");
-    let object = call(&mut s, CHANGE_ENVIRONMENT, [ACTIVE_OBJECT, 0, 0, 0]).unwrap();
+    let object = call(&mut s, CHANGE_ENVIRONMENT, [CURRENT_ACTIVE_OBJECT, 0, 0, 0]).unwrap();
     assert_eq!(object.r[1], 0xABC0);
     let escape = call(&mut s, CHANGE_ENVIRONMENT, [ESCAPE, 0, 0, 0]).unwrap();
     assert_ne!(escape.r[1], CODE, "the old program's handler is gone");
 
     s.poke(CODE + 0x10, &[asm::mov(0, 0), asm::claim()]);
-    call(&mut s, 0x1F, [0x1D, CODE + 0x10, 0, 0]).unwrap();
+    call(&mut s, CLAIM, [vectors::UPCALL.0, CODE + 0x10, 0, 0]).unwrap();
     assert_eq!(
-        number(call(&mut s, FS_CONTROL, [2, tail, 0, name])),
+        number(call(
+            &mut s,
+            FS_CONTROL,
+            [fs_control::START_APPLICATION, tail, 0, name]
+        )),
         Err(0x600),
         "UpCallV refused it"
     );

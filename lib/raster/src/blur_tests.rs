@@ -23,8 +23,9 @@ use alloc::vec::Vec;
 use tairix_fuzzseed::Prng;
 
 use super::{
-    box_blur, box_blur16, box_blur_coverage, cast_shadow, soften_coverage, BlurScratch, Blurring,
-    Reciprocal, ShadowCast, DEEP_MAX_COUNT, RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT, SOFTEN_PASSES,
+    box_blur, box_blur16, box_blur_coverage, cast_shadow, soften16, soften_coverage, BlurScratch,
+    Blurring, Reciprocal, ShadowCast, DEEP_MAX_COUNT, RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT,
+    SOFTEN_PASSES,
 };
 use crate::color::{div255_biased, Color, Pixel, Pixel16, ROUND_NEAREST};
 use crate::dither::DitherRow;
@@ -2008,6 +2009,45 @@ fn a_colour_premultiplies_into_sixteen_bits_and_back_exactly() {
                 colour.premultiply16().unpremultiply(),
                 expected,
                 "level {level} at alpha {alpha}"
+            );
+        }
+    }
+}
+
+/// An opaque colour's alpha, and a full channel of it, premultiply to the
+/// sixteen-bit pixel's fullest.
+#[test]
+fn an_opaque_full_channel_premultiplies_to_the_fullest() {
+    assert_eq!(Color::BLACK.premultiply16(), Pixel16::BLACK);
+    let white = Color::rgb(255, 255, 255).premultiply16();
+    assert_eq!([white.r, white.g, white.b, white.a], [Pixel16::FULL; 4]);
+}
+
+/// A lone light softened at sixteen bits reaches its radius times the passes,
+/// alike either way along each axis, and no further.
+#[test]
+fn a_light_softened_at_sixteen_bits_reaches_its_passes_times_its_radius() {
+    let (side, radius) = (21, 2);
+    let centre = side / 2;
+    let mut field = vec![Pixel16::BLACK; side * side];
+    field[centre * side + centre].r = Pixel16::FULL;
+    let mut aux = vec![Pixel16::TRANSPARENT; side * side];
+    soften16(&mut field, side, side, radius, &mut aux);
+    let reach = radius * usize::try_from(SOFTEN_PASSES).expect("small");
+    let light = |x: usize, y: usize| field[y * side + x].r;
+    for y in 0..side {
+        for x in 0..side {
+            let within = x.abs_diff(centre) <= reach && y.abs_diff(centre) <= reach;
+            assert_eq!(light(x, y) > 0, within, "({x}, {y})");
+            assert_eq!(
+                light(x, y),
+                light(side - 1 - x, y),
+                "({x}, {y}) mirrored across"
+            );
+            assert_eq!(
+                light(x, y),
+                light(x, side - 1 - y),
+                "({x}, {y}) mirrored down"
             );
         }
     }

@@ -26,7 +26,6 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::ptr;
 
 use tairix_abi::driver::display::{DisplayFormat, SeatGate};
 use tairix_abi::input::{KeyEdge, KeyInput, KeyValue, Modifiers, PhysicalKey};

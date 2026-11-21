@@ -22,20 +22,18 @@
 
 use tairix_fuzzseed::Prng;
 use tairix_riscos_arm::bus::{Bus, Width};
+use tairix_riscos_arm::mmu::PAGE_SIZE;
 use tairix_riscos_kernel::memory::layout::{RISC_OS_5, SHARED};
 use tairix_riscos_kernel::memory::policy::Ceiling;
 use tairix_riscos_kernel::memory::{
     Allowed, AreaFlags, Bits, Create, Guest, GuestError, Handler, Info, LogicalOp, Memory,
-    PageEntry, PageQuery, PhysicalOp, Service, Slot, FREE_POOL,
+    PageEntry, PageQuery, PhysicalOp, Service, Slot, FREE_POOL, SYSTEM,
 };
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_RUNS: u64 = 150;
 /// Calls in one run.
 const CALLS: usize = 160;
-const PAGE: u32 = 0x1000;
-/// The highest system area number; every other area's is past it.
-const SYSTEM: u32 = 7;
 /// Titles a request is drawn with: none, empty, ordinary, and past the
 /// longest RISC OS keeps.
 const TITLES: [Option<&[u8]>; 4] = [
@@ -279,7 +277,7 @@ fn drawn_size(rng: &mut Prng, pages: usize) -> u32 {
     match rng.below(10) {
         0 => *rng.pick(&[u32::MAX, 0xFFFF_F001, 0x8000_0000]),
         1 => rng.next_u32(),
-        _ => u32::try_from(rng.below(pages)).unwrap_or(0) * PAGE,
+        _ => u32::try_from(rng.below(pages)).unwrap_or(0) * PAGE_SIZE,
     }
 }
 
@@ -363,7 +361,7 @@ fn span(info: &Info<'_>) -> core::ops::Range<u64> {
 fn check(memory: &mut Memory, fixed: u32, slots: &[Slot], step: usize) {
     let mut accounted = fixed;
     for &slot in slots {
-        accounted += memory.slot_size(slot).unwrap_or(0) / PAGE;
+        accounted += memory.slot_size(slot).unwrap_or(0) / PAGE_SIZE;
     }
     let mut mapped = Vec::new();
     let mut spans = Vec::new();
@@ -379,16 +377,16 @@ fn check(memory: &mut Memory, fixed: u32, slots: &[Slot], step: usize) {
         );
         match info.pool {
             Some((pages, _)) => accounted += pages,
-            None => accounted += info.size / PAGE,
+            None => accounted += info.size / PAGE_SIZE,
         }
         if info.max != 0 {
             spans.push(span(&info));
         }
         if info.pool.is_none() && info.flags & AreaFlags::SPARSE == 0 {
-            for page in 0..info.size / PAGE {
-                mapped.push(info.base + page * PAGE);
+            for page in 0..info.size / PAGE_SIZE {
+                mapped.push(info.base + page * PAGE_SIZE);
                 if info.flags & AreaFlags::DOUBLY_MAPPED != 0 {
-                    mapped.push(info.base - info.size + page * PAGE);
+                    mapped.push(info.base - info.size + page * PAGE_SIZE);
                 }
             }
         }
@@ -397,7 +395,7 @@ fn check(memory: &mut Memory, fixed: u32, slots: &[Slot], step: usize) {
     assert_eq!(used, accounted, "step {step}: pages in use");
     assert_eq!(
         memory.free_pages(),
-        u32::try_from(memory.ram() / u64::from(PAGE))
+        u32::try_from(memory.ram() / u64::from(PAGE_SIZE))
             .unwrap_or(0)
             .saturating_sub(used),
         "step {step}: the free pool"

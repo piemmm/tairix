@@ -456,7 +456,7 @@ impl Machine<'_, '_> {
         let source = regs.r[1];
         let mut text = alloc::vec::Vec::new();
         for i in 0..super::machine::NAME_MOST * 2 {
-            let b = self.os.read_byte(source + machine::len32(i))?;
+            let b = self.os.read_byte(source.wrapping_add(machine::len32(i)))?;
             if b == b'\r' || b == b'\n' {
                 break;
             }
@@ -475,9 +475,9 @@ impl Machine<'_, '_> {
         let destination = regs.r[2];
         self.os.write_bytes(destination, &out)?;
         self.os
-            .write_byte(destination + machine::len32(out.len()), b'\r')?;
-        regs.r[1] = source + machine::len32(text.len()) + 1;
-        regs.r[2] = destination + machine::len32(out.len()) + 1;
+            .write_byte(destination.wrapping_add(machine::len32(out.len())), b'\r')?;
+        regs.r[1] = source.wrapping_add(machine::len32(text.len()) + 1);
+        regs.r[2] = destination.wrapping_add(machine::len32(out.len()) + 1);
         let warnings = tokenised.warnings;
         regs.r[5] = u32::from(warnings.quote)
             | u32::from(warnings.line_number) << 8

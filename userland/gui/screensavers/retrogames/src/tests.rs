@@ -10,7 +10,7 @@ use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_parallel::{Reversed, Threaded, SERIAL};
 use tairix_raster::{Color, Surface};
 use tairix_rng::NonCryptoRng;
-use tairix_saver::testing::{self, Screen, FRAME_NS as TEST_SCENE_FRAME_NS};
+use tairix_saver::testing::{self, Screen, FRAME_NS as TEST_SCENE_FRAME_NS, SEC};
 use tairix_saver::NextFrame;
 use tairix_theme::motion::{seconds, SceneClock};
 
@@ -22,8 +22,6 @@ use super::{
 
 /// A screen small enough to paint quickly and large enough for every part.
 const SCREEN: (u32, u32) = (480, 270);
-
-const SEC: u64 = 1_000_000_000;
 
 fn start_on(size: (u32, u32), speed: &str, calm: bool, now_ns: u64) -> Start {
     let mut given = testing::start(size.0, size.1);

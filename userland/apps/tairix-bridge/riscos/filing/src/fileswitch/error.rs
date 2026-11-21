@@ -23,7 +23,7 @@ pub(crate) const END_OF_FILE: Error = Error {
     token: "EndOfFile",
 };
 /// "File not open for update".
-pub(crate) const NOT_FOR_UPDATE: Error = Error {
+pub const NOT_FOR_UPDATE: Error = Error {
     number: 0xC1,
     token: "NotOpenForUpdate",
 };
@@ -39,18 +39,18 @@ pub(crate) const OUTSIDE: Error = Error {
 };
 /// "'%0' exists, and is not what was asked for": a save or an empty file
 /// made over a directory, a directory made over a file.
-pub(crate) const WRONG_KIND: Error = Error {
+pub const WRONG_KIND: Error = Error {
     number: 0xAF,
     token: "WrongKindExists",
 };
 /// "Nothing matches %0": a wipe of a wildcard whose directory lists nothing.
-pub(crate) const NOTHING_MATCHED: Error = Error {
+pub const NOTHING_MATCHED: Error = Error {
     number: 0x416,
     token: "NothingMatched",
 };
 /// A wildcarded leaf naming what `OS_File` is to make or delete, refused
 /// before any filing system is asked.
-pub(crate) const WILDCARDS: Error = Error {
+pub const WILDCARDS: Error = Error {
     number: 0xFD,
     token: "Wildcards",
 };

@@ -584,8 +584,11 @@ flags are one table, `swi::os`, which the SWI dispatch table is keyed by; the
 built-in modules' SWI chunks are another, `swi::chunk`, and the sound modules'
 SWIs a third, `swi::sound`. The service calls' numbers and reasons are one
 table, `service`, and a dynamic area handler's reasons another,
-`memory::handler_reason`. The kernel, its modules, FileSwitch, BASIC, the VDU
-drivers and their tests all read them.
+`memory::handler_reason`. File types are `filing::filetype`, an object's kind
+and attributes `filing::fs`, the real-time clock's `OS_Word` numbers `word`,
+a `*Configure` or `*Status` listing's value column `module::VALUE_COLUMN`, and
+the page the processor's, `tairix_riscos_arm::mmu::PAGE_SIZE`. The kernel, its
+modules, FileSwitch, BASIC, the VDU drivers and their tests all read them.
 
 An error's number is the one genuine RISC OS 5 was recorded giving. A
 condition it was never seen to report — it faults, or does not check — takes
@@ -1255,9 +1258,11 @@ shares with the vectors' defaults are the kernel's.
 - **Its texts.** Messages FileSwitch alone gives are in its own words; the
   numbers are RISC OS 5's.
 
-The SWI and service numbers FileSwitch shares with the kernel are the
-kernel's tables, `tairix_riscos_kernel::swi::os` and
-`tairix_riscos_kernel::service`.
+The SWI and service numbers, file types, object kinds and attributes, and
+listing layout FileSwitch shares with the kernel are the kernel's tables:
+`tairix_riscos_kernel::swi::os`, `tairix_riscos_kernel::service`,
+`tairix_riscos_kernel::filing::{filetype, fs}` and
+`tairix_riscos_kernel::module::VALUE_COLUMN`.
 
 ### HostFS
 

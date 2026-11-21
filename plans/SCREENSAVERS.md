@@ -30,8 +30,8 @@ store), `docs/src/security/sandbox.md`.
 
 - **A screensaver is a bundle, and only a bundle.** Clock, Ribbon, Starfield,
   Bubble Universe, Life, the ray tracer, Retro Games, System Monitor and
-  Slideshow each ship as `<Name>.app` of kind `screensaver`. Blank and Dim stay the session's own
-  display states: they draw nothing a bundle could.
+  Slideshow each ship as `<Name>.app` of kind `screensaver`. Blank and Dim
+  stay the session's own display states: they draw nothing a bundle could.
 - **Every saver is sandboxed, system ones too.** A saver runs capability-empty
   in the drawing sandbox (SV3): its two pipes, its one shared region, its own
   threads and memory, and the monotonic clock to pace its own work, nothing
@@ -293,14 +293,18 @@ loaded from the account's store, shown, and dismissed.
 no capability and no feed, `threads = "cores"`. The decisions it holds:
 
 - **Each curve sets off from the origin.** The map's curves are independent,
-  so a gang of eight is stepped to a vector's lanes and the gangs of every
-  moment are spread across the saver's threads; a curve's sine and cosine of
-  `i + φ + v` and `r·i + t + u` come by angle addition from per-moment phases
-  and a short series over `|u|, |v| <= 2`, never a range-reduced sine a step.
-- **The picture is the same at every size.** The bubble is a share of the
-  screen's shorter side; a dot is a tent a whole number of pixels wide, the
-  light it sheds held to its size's worth whatever its radius rounds to, so
-  every screen sheds the same light area for area.
+  so a gang of eight is stepped side by side, one to a lane, and the gangs of
+  every moment are spread across the saver's threads; a curve's sine and
+  cosine of `i + φ + v` and `r·i + t + u` come by angle addition from
+  per-moment phases and a short series over `|u|, |v| <= 2`, never a
+  range-reduced sine a step.
+- **The picture is the same at every size up to 8K.** The bubble is a share
+  of the screen's shorter side; a dot is a tent a whole number of pixels wide,
+  at most four each way, the light it sheds held to its size's worth whatever
+  its radius rounds to, so every screen sheds the same light area for area,
+  and a spot holds its light in as many bits as its full strength leaves room
+  for, so a dim colour keeps its hue however little light each dot sheds.
+  Past 8K a dot is drawn no wider, so its light gathers and shows whiter.
 - **Light adds and is toned.** Dots accumulate in 4.12 fixed point; the tone
   curve `1 − e^(−light)` is one table load a channel and the ordered dither
   rounds it. The glow is gathered from one moment's points on a coarse grid,
@@ -308,9 +312,12 @@ no capability and no feed, `threads = "cores"`. The decisions it holds:
   as two hundred, and spread into a halo, banded across the threads with an
   apron that keeps it exact, and a wider haze.
 - **Work follows the bubble.** Each tracing job counting-sorts its own points
-  into strips of sixteen rows; each band of the paint draws a strip's dots
-  into a padded scratch of its own and tones it at once, and only the square
-  about the bubble, and what it uncovered as it wandered, is repainted.
+  into strips of sixteen rows; each band of the paint holds whole strips,
+  draws each strip's dots into a padded scratch of its own and tones it at
+  once, and only the square about the bubble, and what it uncovered as it
+  wandered, is repainted. The scratches are held to half the heap the saver
+  may map, so a many-core machine driving a large screen paints in fewer bands
+  rather than not at all; the glow's cells are softened in its bands too.
 - **Motion is calm and never repeats.** A frame is exposed at four moments
   over half its time; the drift `φ` runs a seventh as fast as `t`; the whole
   turns once in seven minutes and wanders up to eight hundredths of its radius

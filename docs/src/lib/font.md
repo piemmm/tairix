@@ -5,11 +5,16 @@ rendering is one of the curated OS shared-library classes (`AGENTS.md` §16.4),
 so it lives in `lib/*` and the taskbar, window manager, and default apps draw
 text through it without depending on one another.
 
-The crate holds **no font outline and no TrueType parser**. It holds two
+The crate holds **no font outline and no TrueType parser**. It holds three
 things:
 
 - a small compiled-in **console atlas** (`atlas`) with the Unicode glyph
-  lookup over it (`glyph`), and
+  lookup over it (`glyph`);
+- the one reading of **glyph art** (`art`): a bitmap character set drawn as
+  text, a row of `#` for a dot and `.` for none, read as the program
+  compiles, so a malformed row is a build error. `lib/vdu`'s system font,
+  `lib/teletext`'s character generator and the PC emulator's code page 437
+  sets are all drawn this way; and
 - behind the default-on `render` feature, a thin, cached **client** of the OS
   font service `fontd` (`client`) plus the blitter that draws onto a
   `lib/raster` `Surface` (`font`).

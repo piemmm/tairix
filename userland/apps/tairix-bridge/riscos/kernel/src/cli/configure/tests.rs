@@ -2,8 +2,9 @@
 //! kind writes to CMOS, and what each shows.
 
 use super::find;
-use crate::cli::tests::{cli, refused, session, written, X};
+use crate::cli::tests::{cli, refused, session, written};
 use crate::swi::os::BYTE;
+use crate::swi::X;
 use crate::testkit::Session;
 
 /// CMOS location `logical`.

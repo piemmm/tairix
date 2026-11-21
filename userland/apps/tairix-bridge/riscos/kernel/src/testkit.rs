@@ -11,11 +11,14 @@ use core::cell::{Cell, RefCell};
 use tairix_riscos_arm::cpu::State;
 use tairix_riscos_arm::psr::{self, Mode};
 
+use crate::filing::filetype;
+use crate::filing::fs::{kind, stamp};
 use crate::input::InputEvent;
 use crate::memory::layout::{Layout, APPLICATION};
 use crate::memory::policy::Ceiling;
 use crate::memory::Bits;
 use crate::os::{len32, Config, Ending, Host, Kernel, Outcome, Pulse, Regs, MILLENNIUM};
+use crate::vectors;
 
 /// Input events and the times they arrive.
 type Arrivals = Rc<RefCell<VecDeque<(u64, InputEvent)>>>;
@@ -320,14 +323,19 @@ impl Session {
         };
         self.poke(ONE_FILE_STATE, &[ONE_FILE_DATA, len32(bytes.len()), 0, 0]);
         self.write(ONE_FILE_DATA, bytes);
-        file.describe(self, 1, (0xFFFF_FD00, 0), 0xFFD);
+        file.describe(
+            self,
+            kind::FILE,
+            (stamp::typed(filetype::DATA, 0), 0),
+            filetype::DATA,
+        );
         let mut at = ONE_FILE_CODE;
         let builders: [(u32, Claimant); 5] = [
-            (0x0D, one_file::find),
-            (0x0A, one_file::bget),
-            (0x0B, one_file::bput),
-            (0x09, one_file::args),
-            (0x08, one_file::file),
+            (vectors::FIND.0, one_file::find),
+            (vectors::BGET.0, one_file::bget),
+            (vectors::BPUT.0, one_file::bput),
+            (vectors::ARGS.0, one_file::args),
+            (vectors::FILE.0, one_file::file),
         ];
         for (vector, build) in builders {
             let code = build(at);

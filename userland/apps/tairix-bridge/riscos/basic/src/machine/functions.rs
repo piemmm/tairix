@@ -182,26 +182,13 @@ impl Bracketed {
 }
 
 /// `OS_Word` 1: the system clock read.
-const READ_CLOCK: u32 = 1;
-/// `OS_Word` 14 reason 0: the real-time clock as a string.
-const READ_TIME_STRING: u32 = 14;
+const READ_SYSTEM_CLOCK: u32 = 1;
 /// `OS_Byte` 134: the text cursor's position.
 const CURSOR_POSITION: u32 = 134;
 /// `OS_Byte` 128: an ADC channel or buffer's state.
 const ADVAL: u32 = 128;
 /// `OS_Byte` 129: a key read in a time, or a key scanned.
 const INKEY: u32 = 129;
-/// `OS_Args` 0, 1 and 2: a file's pointer read, written, and its extent.
-const ARGS_POINTER: u32 = 0;
-const ARGS_EXTENT: u32 = 2;
-/// `OS_Args` 5: whether a file is at its end.
-const ARGS_EOF: u32 = 5;
-/// `OS_Find`'s reasons BASIC opens files with, as recorded: for input,
-/// output and update, through `File$Path`, a missing file answering nought
-/// and a directory left to the filing system.
-const OPEN_IN: u32 = 0x40;
-const OPEN_OUT: u32 = 0x80;
-const OPEN_UP: u32 = 0xC0;
 
 impl Machine<'_, '_> {
     /// An operand that begins with a keyword.
@@ -455,10 +442,12 @@ impl Machine<'_, '_> {
                 Value::Int(adval_result(n, regs.r[1], regs.r[2]))
             }
             Unary::OpenIn | Unary::OpenOut | Unary::OpenUp => {
+                // No flags, as recorded: through `File$Path`, a missing file
+                // answering nought and a directory left to the filing system.
                 let reason = match op {
-                    Unary::OpenIn => OPEN_IN,
-                    Unary::OpenOut => OPEN_OUT,
-                    _ => OPEN_UP,
+                    Unary::OpenIn => swi::find::INPUT,
+                    Unary::OpenOut => swi::find::OUTPUT,
+                    _ => swi::find::UPDATE,
                 };
                 Value::Int(self.open(reason, string_of(value)?)?.cast_signed())
             }
@@ -476,9 +465,9 @@ impl Machine<'_, '_> {
             Unary::Eof | Unary::Ext | Unary::Ptr => {
                 let handle = self.int_value(value)?.cast_unsigned();
                 let reason = match op {
-                    Unary::Eof => ARGS_EOF,
-                    Unary::Ext => ARGS_EXTENT,
-                    _ => ARGS_POINTER,
+                    Unary::Eof => swi::args::AT_END,
+                    Unary::Ext => swi::args::READ_EXTENT,
+                    _ => swi::args::READ_POINTER,
                 };
                 let mut regs = Regs::default();
                 regs.r[..2].copy_from_slice(&[reason, handle]);
@@ -709,7 +698,7 @@ impl Machine<'_, '_> {
     pub(crate) fn clock(&mut self) -> Step<i32> {
         let block = ws::STRACC.at();
         let mut regs = Regs::default();
-        regs.r[..2].copy_from_slice(&[READ_CLOCK, block]);
+        regs.r[..2].copy_from_slice(&[READ_SYSTEM_CLOCK, block]);
         self.os.perform(X | swi::WORD, &mut regs)?;
         Ok(self.os.read_word(block)?.cast_signed())
     }
@@ -717,9 +706,10 @@ impl Machine<'_, '_> {
     /// `TIME$`: the real-time clock as RISC OS writes it.
     fn time_string(&mut self) -> Step<Text> {
         let block = ws::STRACC.at();
-        self.os.write_byte(block, 0)?;
+        self.os
+            .write_byte(block, tairix_riscos_kernel::word::read::STRING)?;
         let mut regs = Regs::default();
-        regs.r[..2].copy_from_slice(&[READ_TIME_STRING, block]);
+        regs.r[..2].copy_from_slice(&[tairix_riscos_kernel::word::READ_CLOCK, block]);
         self.os.perform(X | swi::WORD, &mut regs)?;
         let mut text = self.read_dollar(block)?;
         if text.as_bytes().last() == Some(&b'\0') {

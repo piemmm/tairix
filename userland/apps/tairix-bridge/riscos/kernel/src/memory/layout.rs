@@ -119,8 +119,7 @@ pub static RISC_OS_5: Layout = Layout {
 mod tests {
     use super::*;
     use alloc::vec;
-
-    const PAGE: u32 = 0x1000;
+    use tairix_riscos_arm::mmu::PAGE_SIZE;
 
     fn disjoint(parts: &[Range<u32>]) -> bool {
         parts.iter().enumerate().all(|(i, a)| {
@@ -139,10 +138,10 @@ mod tests {
                 layout.rma.clone(),
                 layout.system_heap.clone(),
                 // A stack's guard page below it.
-                s.start - PAGE..s.end,
-                i.start - PAGE..i.end,
-                a.start - PAGE..a.end,
-                u.start - PAGE..u.end,
+                s.start - PAGE_SIZE..s.end,
+                i.start - PAGE_SIZE..i.end,
+                a.start - PAGE_SIZE..a.end,
+                u.start - PAGE_SIZE..u.end,
                 layout.host.clone(),
                 HIGH_ZERO_PAGE..HIGH_ZERO_PAGE + ZERO_PAGE_SIZE,
             ];
@@ -155,7 +154,10 @@ mod tests {
                 parts[0] = APPLICATION..window.start;
             }
             for part in &parts {
-                assert!(part.start % PAGE == 0 && part.end % PAGE == 0, "{part:X?}");
+                assert!(
+                    part.start % PAGE_SIZE == 0 && part.end % PAGE_SIZE == 0,
+                    "{part:X?}"
+                );
                 assert!(part.start < part.end, "{part:X?}");
             }
             assert!(disjoint(&parts), "{layout:X?}");

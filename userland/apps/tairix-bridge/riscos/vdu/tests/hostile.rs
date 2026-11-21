@@ -5,14 +5,13 @@
 
 mod common;
 
-use common::{answers, drivers, vdu};
+use common::{answers, drivers, vdu, SELECTOR_AT};
 use tairix_riscos_filing::session::Session;
 use tairix_riscos_kernel::os::{Fail, Regs};
 use tairix_riscos_kernel::swi::os::{BYTE, MODULE, PLOT, READ_C, SCREEN_MODE};
 use tairix_riscos_kernel::swi::X;
 use tairix_riscos_vdu::display;
 
-const SELECTOR_AT: u32 = 0x9000;
 /// `OS_Module`'s reasons to claim a block and insert a module there.
 const CLAIM: u32 = 6;
 const INSERT: u32 = 10;

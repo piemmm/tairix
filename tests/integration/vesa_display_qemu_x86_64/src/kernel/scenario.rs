@@ -11,7 +11,6 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use core::ptr;
 
 use tairix_abi::{CapabilityId, DriverHost, DriverKind, Errno, MmioMapper};
 use tairix_arch_x86_64::qemu_exit;

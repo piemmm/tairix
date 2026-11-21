@@ -64,6 +64,17 @@ const BAD_NETWORK: Error = Error {
     token: "BadNetworkNumber",
 };
 
+/// `OS_ConvertFixedNetStation`.
+const CONVERT_FIXED_NET_STATION: u32 = CONVERT_HEX1 + 25;
+/// `OS_ConvertNetStation`.
+const CONVERT_NET_STATION: u32 = CONVERT_HEX1 + 26;
+/// `OS_ConvertFixedFileSize`.
+const CONVERT_FIXED_FILE_SIZE: u32 = CONVERT_HEX1 + 27;
+/// `OS_ConvertFileSize`.
+const CONVERT_FILE_SIZE: u32 = CONVERT_HEX1 + 28;
+/// `OS_ConvertVariform`, the last of the number conversions.
+pub(crate) const CONVERT_VARIFORM: u32 = CONVERT_HEX1 + 29;
+
 /// What a fixed conversion writes, by SWI from `OS_ConvertHex1`.
 #[derive(Clone, Copy)]
 enum Fixed {
@@ -218,10 +229,12 @@ impl Os<'_> {
                 .collect(),
             Some(Fixed::SpacedCardinal(bytes)) => decimal(sized(value, bytes, false), Some(b" ")),
             Some(Fixed::SpacedInteger(bytes)) => decimal(sized(value, bytes, true), Some(b" ")),
-            None => match offset {
-                25 | 26 => self.net_station(regs.r[0], offset == 25)?,
-                27 => file_size(value, true),
-                28 => file_size(value, false),
+            None => match number {
+                CONVERT_FIXED_NET_STATION | CONVERT_NET_STATION => {
+                    self.net_station(regs.r[0], number == CONVERT_FIXED_NET_STATION)?
+                }
+                CONVERT_FIXED_FILE_SIZE => file_size(value, true),
+                CONVERT_FILE_SIZE => file_size(value, false),
                 _ => return self.variform(regs),
             },
         };

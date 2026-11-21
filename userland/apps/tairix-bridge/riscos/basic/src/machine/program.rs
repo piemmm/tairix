@@ -8,6 +8,8 @@ use tairix_openbasic::list::{number_field, pieces, unpadded, Lister, Options, Pi
 use tairix_openbasic::program::{self as image, HEADER};
 use tairix_openbasic::tokenise::{tokenise, Start};
 use tairix_openbasic::{lineref, Dialect, Error as BasicError};
+use tairix_riscos_kernel::filing::filetype;
+use tairix_riscos_kernel::filing::fs::kind;
 use tairix_riscos_kernel::os::Regs;
 use tairix_riscos_kernel::swi::{os as swi, X};
 
@@ -19,17 +21,6 @@ use crate::token::{self, command};
 use crate::value::{Text, Value};
 use crate::workspace::{self as ws, reg};
 
-/// `OS_File`'s reasons: an object's information, a file saved with its
-/// type, the error for what an object is not, a file loaded.
-const READ_INFO: u32 = 5;
-const SAVE_TYPED: u32 = 10;
-const MAKE_ERROR: u32 = 19;
-const LOAD: u32 = 255;
-/// A BASIC program's file type, and a text file's.
-const BASIC_TYPE: u32 = 0xFFB;
-const TEXT_TYPE: u32 = 0xFFF;
-/// An object `OS_File` 5 says is a file.
-const IS_FILE: u32 = 1;
 /// A program's end.
 const END: u8 = image::END;
 
@@ -179,7 +170,7 @@ impl Machine<'_, '_> {
         let (length, file_type) = self.file_length(name)?;
         let staging = self.staging(length)?;
         self.load_file_at(name, staging)?;
-        if file_type == TEXT_TYPE {
+        if file_type == filetype::TEXT {
             self.tokenise_text(staging, length)?;
             return self.clear();
         }
@@ -281,11 +272,11 @@ impl Machine<'_, '_> {
     pub(crate) fn file_length(&mut self, name: &Text) -> Step<(u32, u32)> {
         let at = self.name_block(name)?;
         let mut regs = Regs::default();
-        regs.r[..2].copy_from_slice(&[READ_INFO, at]);
+        regs.r[..2].copy_from_slice(&[swi::file::READ_INFO, at]);
         self.os.perform(X | swi::FILE, &mut regs)?;
-        if regs.r[0] & IS_FILE == 0 {
+        if regs.r[0] & kind::FILE == 0 {
             let mut raise = Regs::default();
-            raise.r[..3].copy_from_slice(&[MAKE_ERROR, at, regs.r[0]]);
+            raise.r[..3].copy_from_slice(&[swi::file::MAKE_ERROR, at, regs.r[0]]);
             self.os.perform(X | swi::FILE, &mut raise)?;
             return Err(Error::BadProgram.into());
         }
@@ -301,7 +292,7 @@ impl Machine<'_, '_> {
     pub(crate) fn load_file_at(&mut self, name: &Text, at: u32) -> Step {
         let block = self.name_block(name)?;
         let mut regs = Regs::default();
-        regs.r[..4].copy_from_slice(&[LOAD, block, at, 0]);
+        regs.r[..4].copy_from_slice(&[swi::file::LOAD, block, at, 0]);
         self.os.perform(X | swi::FILE, &mut regs)?;
         Ok(())
     }
@@ -318,7 +309,14 @@ impl Machine<'_, '_> {
     pub(crate) fn save_program(&mut self, name: &Text) -> Step {
         let at = self.name_block(name)?;
         let mut regs = Regs::default();
-        regs.r[..6].copy_from_slice(&[SAVE_TYPED, at, BASIC_TYPE, 0, self.page, self.top]);
+        regs.r[..6].copy_from_slice(&[
+            swi::file::SAVE_TYPED,
+            at,
+            filetype::BASIC,
+            0,
+            self.page,
+            self.top,
+        ]);
         self.os.perform(X | swi::FILE, &mut regs)?;
         Ok(())
     }
@@ -334,7 +332,14 @@ impl Machine<'_, '_> {
         }
         self.os.write_bytes(block, &text)?;
         let mut regs = Regs::default();
-        regs.r[..6].copy_from_slice(&[SAVE_TYPED, at, TEXT_TYPE, 0, block, block + room]);
+        regs.r[..6].copy_from_slice(&[
+            swi::file::SAVE_TYPED,
+            at,
+            filetype::TEXT,
+            0,
+            block,
+            block + room,
+        ]);
         self.os.perform(X | swi::FILE, &mut regs)?;
         Ok(())
     }

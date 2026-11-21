@@ -112,10 +112,11 @@ relaying each call.
   a softened halo and haze before it is toned and dithered. Each frame is
   exposed at four moments so the rings and spirals flow; a slow drift of `φ`
   keeps the picture from repeating, and the bubble turns and wanders a little
-  against burn-in. The curves are stepped eight to a vector's lanes across the
-  saver's threads, and each band of rows draws and tones its own strips, so
-  only the square about the bubble is repainted. Its options set the colours,
-  the speed and the glow; under reduced motion each picture holds a minute.
+  against burn-in. The curves are stepped eight side by side, one to a lane,
+  across the saver's threads, and each band of rows draws and tones its own
+  whole strips, so only the square about the bubble is repainted. Its options
+  set the colours, the speed and the glow; under reduced motion each picture
+  holds a minute.
 - **Game of Life** (`Life.app`): Conway's B3/S23 on a torus, bit-packed and
   stepped a word at a time, a newborn taking the colour of the colony most of
   its parents belong to and cells shading as they age; a world that settles
@@ -155,8 +156,9 @@ relaying each call.
   the board steps round a small orbit against burn-in.
 
 Each animated saver draws on whole frames of the display's rate, at most
-thirty a second (`tairix_theme::motion::SceneClock`), presents only what
-changed, and asks for its next frame no sooner than it needs one; the
+thirty a second (`tairix_theme::motion::SceneClock`), blurs whatever motion
+it blurs over the clock's one `SHUTTER`, presents only what changed, and asks
+for its next frame no sooner than it needs one; the
 desktop asks for none faster than the display shows them, and asks for the
 next as soon as the last is laid, so a saver draws one frame while the
 desktop composites the one before.

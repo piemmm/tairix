@@ -11,12 +11,14 @@ use super::{
     flag, CLOSE_FILE, COPY_ERROR, DICTIONARY, ENUMERATE_TOKENS, ERROR_LOOKUP, FAST, FILE_INFO,
     GS_LOOKUP, LOOKUP, MAKE_MENUS, OPEN_FILE,
 };
+use crate::filing::filetype;
+use crate::filing::fs::{attribute, stamp};
 use crate::memory::layout::RISC_OS_5;
 use crate::memory::Bits;
 use crate::resourcefs::{DEREGISTER_FILES, REGISTER_FILES};
+use crate::swi::X;
 use crate::testkit::{with_application, Session, DATA};
 
-pub(crate) const X: u32 = 1 << 17;
 /// Where a test's file block, descriptor, buffers and names go.
 pub(crate) const BLOCK: u32 = DATA + 0x1000;
 const DESCRIPTOR: u32 = DATA + 0x600;
@@ -53,7 +55,9 @@ pub(crate) fn block(files: &[(&str, &[u8])]) -> Vec<u8> {
         let data_room = data.len().next_multiple_of(4);
         let entry = 20 + name_room + 4 + data_room;
         let length = crate::os::len32(data.len());
-        for word in [crate::os::len32(entry), 0xFFFF_FF00, 0, length, 3] {
+        let load = stamp::typed(filetype::TEXT, 0);
+        let attributes = attribute::OWNER_READ | attribute::OWNER_WRITE;
+        for word in [crate::os::len32(entry), load, 0, length, attributes] {
             bytes.extend_from_slice(&word.to_le_bytes());
         }
         bytes.extend_from_slice(name.as_bytes());

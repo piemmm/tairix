@@ -7,20 +7,21 @@
 mod common;
 
 use common::{block, call, read, save, text, FILECORE_NOT_FOUND};
+use tairix_riscos_filing::filecore::{code, numbered};
+use tairix_riscos_filing::fileswitch::error;
+use tairix_riscos_filing::ramfs;
 use tairix_riscos_kernel::os::{Kernel, Os};
-use tairix_riscos_kernel::swi::os::{
-    fs_control, ARGS, CHANGE_DYNAMIC_AREA, FILE, FIND, FS_CONTROL, GBPB,
+use tairix_riscos_kernel::swi::os::find::{
+    INPUT as OPEN_IN, MUST_OPEN, OUTPUT as OPEN_OUT, UPDATE as OPEN_UP,
 };
+use tairix_riscos_kernel::swi::os::{fs_control, ARGS, FILE, FIND, FS_CONTROL, GBPB};
 
-const OPEN_IN: u32 = 0x40;
-const OPEN_OUT: u32 = 0x80;
-const OPEN_UP: u32 = 0xC0;
 /// FileCore's "file open" beside RamFS's number, and FileSwitch's own "not
 /// open for update" and "exists, and is not what was asked for".
-const FILE_OPEN: u32 = 0x1_17C2;
+const FILE_OPEN: u32 = numbered(ramfs::NUMBER as u32, code::OPEN);
 const NOT_FOUND: u32 = tairix_riscos_kernel::filing::NOT_FOUND.number;
-const NOT_FOR_UPDATE: u32 = 0xC1;
-const WRONG_KIND: u32 = 0xAF;
+const NOT_FOR_UPDATE: u32 = error::NOT_FOR_UPDATE.number;
+const WRONG_KIND: u32 = error::WRONG_KIND.number;
 
 /// A session with a RAM disc of 256K, current.
 fn with_disc() -> Kernel {
@@ -30,7 +31,7 @@ fn with_disc() -> Kernel {
 /// `kernel` given a RAM disc of 256K, current.
 fn disc_in(mut kernel: Kernel) -> Kernel {
     let mut os = kernel.os();
-    call(&mut os, CHANGE_DYNAMIC_AREA, &[5, 0x4_0000]).expect("a RAM disc");
+    common::ram_disc(&mut os);
     let ram = text(&mut os, b"RAM");
     call(&mut os, tairix_riscos_kernel::swi::os::CLI, &[ram]).expect("current");
     kernel
@@ -180,7 +181,7 @@ fn a_path_through_a_missing_directory_or_a_file_reads_as_nothing_there() {
             assert_eq!(regs.r[0], 0, "OS_File {reason}");
         }
         assert_eq!(open(&mut os, OPEN_IN, name), Ok(0));
-        assert_eq!(open(&mut os, OPEN_IN | 0x0C, name), Err(NOT_FOUND));
+        assert_eq!(open(&mut os, OPEN_IN | MUST_OPEN, name), Err(NOT_FOUND));
         assert_eq!(open(&mut os, OPEN_UP, name), Ok(0));
         assert_eq!(
             open(&mut os, OPEN_OUT, name),

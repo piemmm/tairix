@@ -45,7 +45,7 @@ const NO_LOAD_TYPE: Error = Error {
 };
 /// The file type `*Create` gives a file it is given no addresses for: data,
 /// in the low twelve bits.
-const DATA: u32 = 0xFFFF_FFFD;
+const DATA: u32 = 0xFFFF_F000 | crate::filing::filetype::DATA;
 /// The most bytes a `*Dump` line shows, which only a window over a thousand
 /// columns wide would outgrow.
 const LINE_MOST: u32 = 256;

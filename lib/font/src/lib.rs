@@ -1,11 +1,13 @@
 //! Shared text rasterisation primitives (`lib/font`).
 //!
-//! This crate is the system's text-rendering front end. It holds two things
-//! and no font outline: the compiled-in **console atlas** ([`atlas`], emitted
+//! This crate is the system's text-rendering front end. It holds no font
+//! outline: it holds the compiled-in **console atlas** ([`atlas`], emitted
 //! by `cargo xtask font-atlas --write` from the committed SIL OFL 1.1 primary
 //! Inconsolata EX face in `assets/`) with the Unicode glyph lookup over it
-//! ([`glyph`]), and — behind the default-on `render` feature — the
-//! service-backed blitter ([`font`]) that draws onto a `lib/raster` `Surface`.
+//! ([`glyph`]); the one reading of glyph art ([`art`]), the text bitmap
+//! character sets are drawn in; and — behind the default-on `render` feature —
+//! the service-backed blitter ([`font`]) that draws onto a `lib/raster`
+//! `Surface`.
 //! Font rendering is one of the curated shared-library classes; like
 //! `lib/geometry`, `lib/theme`, and `lib/raster`, it lives in `lib/*` so the
 //! taskbar and the default apps can draw text without depending on the window
@@ -91,6 +93,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod art;
 pub mod atlas;
 #[cfg(feature = "render")]
 pub mod client;

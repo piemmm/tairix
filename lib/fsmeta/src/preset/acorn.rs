@@ -683,18 +683,32 @@ const FILECORE_BITS: [(u8, u16); 6] = [
     (1 << 5, ATTR_PUBLIC_WRITE),
 ];
 
-/// A `FileSwitch` attribute byte (`OS_File`, RISC OS PRM vol. 2 ch. 27)
-/// beside the canonical bit each holds: owner read, owner write, owner
-/// execute-only, locked, public read, public write. Bits 6 and 7 are
-/// reserved; `FileSwitch` has no directory bit, a directory being an
-/// object's kind.
+/// `FileSwitch`'s attribute byte (`OS_File`, RISC OS PRM vol. 2 ch. 27).
+/// Bits 6 and 7 are reserved, and there is no directory bit: a directory is
+/// an object's kind.
+pub mod fileswitch {
+    /// The owner may read it.
+    pub const OWNER_READ: u8 = 1 << 0;
+    /// The owner may write it.
+    pub const OWNER_WRITE: u8 = 1 << 1;
+    /// The owner may only run it.
+    pub const EXECUTE_ONLY: u8 = 1 << 2;
+    /// It may not be deleted, written over or renamed.
+    pub const LOCKED: u8 = 1 << 3;
+    /// Others may read it.
+    pub const PUBLIC_READ: u8 = 1 << 4;
+    /// Others may write it.
+    pub const PUBLIC_WRITE: u8 = 1 << 5;
+}
+
+/// Each [`fileswitch`] bit beside the canonical bit it holds.
 const FILESWITCH_BITS: [(u8, u16); 6] = [
-    (1 << 0, ATTR_OWNER_READ),
-    (1 << 1, ATTR_OWNER_WRITE),
-    (1 << 2, ATTR_EXECUTE_ONLY),
-    (1 << 3, ATTR_LOCKED),
-    (1 << 4, ATTR_PUBLIC_READ),
-    (1 << 5, ATTR_PUBLIC_WRITE),
+    (fileswitch::OWNER_READ, ATTR_OWNER_READ),
+    (fileswitch::OWNER_WRITE, ATTR_OWNER_WRITE),
+    (fileswitch::EXECUTE_ONLY, ATTR_EXECUTE_ONLY),
+    (fileswitch::LOCKED, ATTR_LOCKED),
+    (fileswitch::PUBLIC_READ, ATTR_PUBLIC_READ),
+    (fileswitch::PUBLIC_WRITE, ATTR_PUBLIC_WRITE),
 ];
 
 /// The canonical bits `FileCore`'s on-disc attribute `byte` records; its

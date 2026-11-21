@@ -6,7 +6,7 @@
 //! once for its last — and carry each point from the one to the other as it
 //! ages, mixed in CIE L\*a\*b\* so every ramp is even to the eye.
 
-use tairix_colour::{srgb_to_linear, Lab, Rgb};
+use tairix_colour::{linear_of, Lab, Rgb};
 use tairix_util::mathf;
 
 use crate::orbit::{CURVES, STEPS};
@@ -29,7 +29,7 @@ pub(crate) enum Palette {
 }
 
 /// The original's constant blue, in encoded levels.
-const ORIGINAL_BLUE: usize = 99;
+const ORIGINAL_BLUE: u8 = 99;
 
 /// A designed palette: its ramp across the curves for young points, and for
 /// old ones.
@@ -98,22 +98,27 @@ const ICE: Ramps = Ramps {
     ],
 };
 
+/// The reds the spectrum's young and old ramps start and end on, so its
+/// curves run the whole way round the hues.
+const SPECTRUM_YOUNG_RED: Rgb = Rgb::new(0xB0, 0x10, 0x30);
+const SPECTRUM_OLD_RED: Rgb = Rgb::new(0xFF, 0x8A, 0x9A);
+
 const SPECTRUM: Ramps = Ramps {
     young: &[
-        Rgb::new(0xB0, 0x10, 0x30),
+        SPECTRUM_YOUNG_RED,
         Rgb::new(0xB8, 0x6E, 0x00),
         Rgb::new(0x2E, 0x9A, 0x22),
         Rgb::new(0x00, 0x7C, 0xB8),
         Rgb::new(0x5A, 0x2C, 0xC8),
-        Rgb::new(0xB0, 0x10, 0x30),
+        SPECTRUM_YOUNG_RED,
     ],
     old: &[
-        Rgb::new(0xFF, 0x8A, 0x9A),
+        SPECTRUM_OLD_RED,
         Rgb::new(0xFF, 0xD3, 0x7A),
         Rgb::new(0x9C, 0xF5, 0x8C),
         Rgb::new(0x7A, 0xD8, 0xFF),
         Rgb::new(0xC6, 0xA6, 0xFF),
-        Rgb::new(0xFF, 0x8A, 0x9A),
+        SPECTRUM_OLD_RED,
     ],
 };
 
@@ -170,7 +175,8 @@ impl Palette {
 /// The original's light at `step` along curve `curve`: the encoded levels
 /// `(curve, step, 99)`.
 fn original(curve: usize, step: usize) -> [f64; 3] {
-    [curve, step, ORIGINAL_BLUE].map(|level| srgb_to_linear(mathf::real(level) / 255.0))
+    let level = |of: usize| u8::try_from(of).unwrap_or(u8::MAX);
+    linear_of(Rgb::new(level(curve), level(step), ORIGINAL_BLUE))
 }
 
 /// Where `index` lies among `count`, from nought at the first to one at the

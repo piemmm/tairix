@@ -80,7 +80,7 @@ pub(crate) fn word_21(os: &mut Os<'_>, reason: u8, block: u32) -> Result<(), Fai
     match reason {
         0 => {
             let mut head = [0; 9];
-            os.read_bytes(block + 1, &mut head)?;
+            os.read_bytes(block.wrapping_add(1), &mut head)?;
             let [number, width, height, ax, ay, d0, d1, d2, d3] = head;
             if !(1..=4).contains(&number) || width > MOST_WIDTH || height > MOST_HEIGHT {
                 return Ok(());
@@ -120,3 +120,6 @@ pub(crate) fn word_21(os: &mut Os<'_>, reason: u8, block: u32) -> Result<(), Fai
         _ => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests;

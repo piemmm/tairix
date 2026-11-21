@@ -11,6 +11,10 @@
 
 use alloc::vec::Vec;
 
+use tairix_riscos_kernel::filing::filetype::OBEY;
+use tairix_riscos_kernel::filing::fs::attribute::{OWNER_READ, OWNER_WRITE};
+use tairix_riscos_kernel::filing::fs::kind;
+use tairix_riscos_kernel::filing::fs::stamp;
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::{self as swi, file, fs_control};
 use tairix_riscos_kernel::swi::resource_fs;
@@ -22,9 +26,8 @@ use crate::fileswitch::name::matches;
 
 /// The directory added objects go in, below `Resources:$`.
 const APPS: &[u8] = b"Apps.";
-/// What an added file is: Obey, its owner able to read and write it.
-const OBEY: u32 = 0xFEB;
-const ATTRIBUTES: u32 = 0b11;
+/// An added file's attributes: its owner able to read and write it.
+const ATTRIBUTES: u32 = OWNER_READ | OWNER_WRITE;
 /// The room a canonical name is read into.
 const NAME_ROOM: u32 = 1024;
 /// `OS_Word` 14's reason that reads the five-byte time.
@@ -73,7 +76,7 @@ fn add(os: &mut Os<'_>, leaf: &[u8], whole: &[u8]) -> Result<(), Fail> {
     };
     let inside = |os: &mut Os<'_>, part: &[u8]| -> Result<bool, Fail> {
         let name = joined(os, &[&canonical, b".", part])?;
-        Ok(object_kind(os, &name)? != 0)
+        Ok(object_kind(os, &name)? != kind::NOT_FOUND)
     };
     if inside(os, b"!Boot")? {
         files.push((b"!Boot", joined(os, &[b"/", &canonical, b".!Boot %*0\n"])?));
@@ -137,7 +140,7 @@ fn stamped(os: &mut Os<'_>) -> Result<(u32, u32), Fail> {
         os.perform(X | swi::WORD, &mut regs)?;
         let exec = os.read_word(block)?;
         let high = u32::from(os.read_byte(block.wrapping_add(4))?);
-        Ok((0xFFF0_0000 | (OBEY << 8) | high, exec))
+        Ok((stamp::typed(OBEY, high), exec))
     })
 }
 

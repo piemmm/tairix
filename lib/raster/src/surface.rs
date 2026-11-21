@@ -1858,25 +1858,34 @@ impl Surface {
     }
 
     /// Paint rows `rows` across `runner` in bands of whole rows, at most `most`
-    /// of them and each worth `grain` pixels or more: `ready` makes each band
-    /// what `paint` is handed. Rows too few to split are one band, painted on
-    /// the calling thread.
+    /// of them, each worth `grain` pixels or more and each but the last a whole
+    /// number of `unit` rows, counted from the first row the surface admits:
+    /// `ready` makes each band what `paint` is handed. Rows too few to split
+    /// are one band, painted on the calling thread.
+    ///
+    /// A pass whose work comes in groups of rows — a strip of them gathered
+    /// once and drawn whole — names the group as its unit, so no band repeats
+    /// another's gathering.
     pub fn paint_bands<'s, T: Send>(
         &'s mut self,
         rows: Range<u32>,
         runner: &dyn JobRunner,
-        (most, grain): (usize, usize),
+        (most, grain, unit): (usize, usize, u32),
         ready: impl FnMut(RowBand<'s>) -> T,
         paint: &(dyn Fn(&mut T) + Sync),
     ) {
-        let count = usize::try_from(rows.end.saturating_sub(rows.start)).unwrap_or(0);
-        let wide = usize::try_from(self.width).unwrap_or(1).max(1);
-        let pieces = tairix_parallel::bands(runner, count, grain.div_ceil(wide))
+        let unit = unit.max(1);
+        let units =
+            usize::try_from(rows.end.saturating_sub(rows.start).div_ceil(unit)).unwrap_or(0);
+        let unit_pixels = usize::try_from(u64::from(unit) * u64::from(self.width))
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let pieces = tairix_parallel::bands(runner, units, grain.div_ceil(unit_pixels))
             .min(most)
             .max(1);
         tairix_parallel::for_each_drawn(
             runner,
-            self.row_bands_mut(rows, band_rows(count, pieces))
+            self.row_bands_mut(rows, band_rows(units, pieces).saturating_mul(unit))
                 .map(ready),
             &|mut piece| paint(&mut piece),
         );
@@ -2474,7 +2483,7 @@ impl BandScratch {
         surface.paint_bands(
             rows,
             runner,
-            (most, BAND_GRAIN),
+            (most, BAND_GRAIN, 1),
             |band| (band, scratch.next()),
             &|(band, scratch): &mut (RowBand<'_>, Option<&mut ScanScratch>)| {
                 if let Some(scratch) = scratch {

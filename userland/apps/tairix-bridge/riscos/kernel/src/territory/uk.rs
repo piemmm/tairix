@@ -191,7 +191,7 @@ pub(crate) static UK: Builtin = Builtin {
     vectors: &[],
     resources: &[Resource {
         name: "Resources.UK.Messages",
-        file_type: 0xFFF,
+        file_type: crate::filing::filetype::TEXT,
         data: MESSAGES,
     }],
     code: None,

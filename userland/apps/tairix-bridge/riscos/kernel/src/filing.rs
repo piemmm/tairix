@@ -21,7 +21,7 @@ pub const NOT_FOUND: Error = Error {
 };
 /// "Directory '%0' not found".
 pub const NO_DIRECTORY: Error = Error {
-    number: 0xD6,
+    number: NOT_FOUND.number,
     token: "DirectoryNotFound",
 };
 /// "'%0' is a file".
@@ -119,9 +119,9 @@ impl Os<'_> {
     /// That error.
     pub fn object_error(&mut self, name: u32, kind: u32) -> Result<(), Fail> {
         match kind {
-            0 => Err(self.name_error(NOT_FOUND, name)),
-            1 => Err(self.name_error(IS_A_FILE, name)),
-            2 | 3 => Err(self.name_error(IS_A_DIRECTORY, name)),
+            fs::kind::NOT_FOUND => Err(self.name_error(NOT_FOUND, name)),
+            fs::kind::FILE => Err(self.name_error(IS_A_FILE, name)),
+            fs::kind::DIRECTORY | fs::kind::IMAGE => Err(self.name_error(IS_A_DIRECTORY, name)),
             0x100 => Err(self.name_error(NO_DIRECTORY, name)),
             _ => Ok(()),
         }
@@ -281,6 +281,7 @@ impl Os<'_> {
     }
 }
 
+pub mod filetype;
 pub mod fs;
 
 #[cfg(test)]

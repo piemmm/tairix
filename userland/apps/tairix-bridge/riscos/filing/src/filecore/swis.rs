@@ -37,6 +37,41 @@ mod offset {
     pub(super) const FEATURES: u32 = 13;
 }
 
+/// Its SWIs' numbers, each its offset in FileCore's chunk.
+pub mod number {
+    use super::offset;
+    use crate::filecore::CHUNK;
+
+    /// `FileCore_DiscOp`.
+    pub const DISC_OP: u32 = CHUNK + offset::DISC_OP;
+    /// `FileCore_Create`.
+    pub const CREATE: u32 = CHUNK + offset::CREATE;
+    /// `FileCore_Drives`.
+    pub const DRIVES: u32 = CHUNK + offset::DRIVES;
+    /// `FileCore_FreeSpace`.
+    pub const FREE_SPACE: u32 = CHUNK + offset::FREE_SPACE;
+    /// `FileCore_FloppyStructure`.
+    pub const FLOPPY_STRUCTURE: u32 = CHUNK + offset::FLOPPY_STRUCTURE;
+    /// `FileCore_DescribeDisc`.
+    pub const DESCRIBE_DISC: u32 = CHUNK + offset::DESCRIBE_DISC;
+    /// `FileCore_DiscardReadSectorsCache`.
+    pub const DISCARD_READ_SECTORS_CACHE: u32 = CHUNK + offset::DISCARD_READ_SECTORS_CACHE;
+    /// `FileCore_DiscFormat`.
+    pub const DISC_FORMAT: u32 = CHUNK + offset::DISC_FORMAT;
+    /// `FileCore_LayoutStructure`.
+    pub const LAYOUT_STRUCTURE: u32 = CHUNK + offset::LAYOUT_STRUCTURE;
+    /// `FileCore_MiscOp`.
+    pub const MISC_OP: u32 = CHUNK + offset::MISC_OP;
+    /// `FileCore_SectorDiscOp`.
+    pub const SECTOR_DISC_OP: u32 = CHUNK + offset::SECTOR_DISC_OP;
+    /// `FileCore_FreeSpace64`.
+    pub const FREE_SPACE_64: u32 = CHUNK + offset::FREE_SPACE_64;
+    /// `FileCore_DiscOp64`.
+    pub const DISC_OP_64: u32 = CHUNK + offset::DISC_OP_64;
+    /// `FileCore_Features`.
+    pub const FEATURES: u32 = CHUNK + offset::FEATURES;
+}
+
 /// What `FileCore_Features` answers, as RISC OS 5 answers it.
 const FEATURES: u32 = 3;
 
@@ -98,19 +133,19 @@ fn create(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let (descriptor, base) = (regs.r[0], regs.r[1]);
     let bits = os.caller_bits();
     let flags = os.read_word(descriptor)? & 0x00FF_FFFF;
-    let number = os.read_byte(descriptor + 3)?;
+    let number = os.read_byte(descriptor.wrapping_add(3))?;
     let at = |offset: u32| base.wrapping_add(offset);
     let client = Client {
         flags,
         number,
-        title: at(os.read_word(descriptor + 4)?),
-        boot_text: at(os.read_word(descriptor + 8)?),
+        title: at(os.read_word(descriptor.wrapping_add(4))?),
+        boot_text: at(os.read_word(descriptor.wrapping_add(8))?),
         disc_op: Target {
-            address: at(os.read_word(descriptor + 12)?),
+            address: at(os.read_word(descriptor.wrapping_add(12))?),
             bits,
         },
         misc_op: Target {
-            address: at(os.read_word(descriptor + 16)?),
+            address: at(os.read_word(descriptor.wrapping_add(16))?),
             bits,
         },
         private_word: regs.r[2],
@@ -242,8 +277,8 @@ fn disc_op_64(
 ) -> Result<(), Fail> {
     let block = regs.r[2];
     let drive = os.read_word(block)?.to_le_bytes()[0] & (DRIVES - 1);
-    let low = os.read_word(block + 4)?;
-    let high = os.read_word(block + 8)?;
+    let low = os.read_word(block.wrapping_add(4))?;
+    let high = os.read_word(block.wrapping_add(8))?;
     let address = u64::from(low) | u64::from(high) << 32;
     if !client.has(drive) {
         return Err(fail(os, Some(client), code::BAD_DRIVE));
@@ -265,8 +300,8 @@ fn disc_op_64(
     let reached = u64::from(call.r[2] & 0x1FFF_FFFF);
     let reached = if by_sector { reached * sector } else { reached };
     let [low, high] = split64(reached);
-    os.write_word(block + 4, low)?;
-    os.write_word(block + 8, high)?;
+    os.write_word(block.wrapping_add(4), low)?;
+    os.write_word(block.wrapping_add(8), high)?;
     regs.r[3] = call.r[3];
     regs.r[4] = call.r[4];
     Ok(())
@@ -462,16 +497,16 @@ fn disc_format(os: &mut Os<'_>, regs: &Regs) -> Result<(), Fail> {
     let block = regs.r[0];
     os.fill(block, 64, 0)?;
     os.write_word(block, layout.sector)?;
-    os.write_word(block + 4, layout.gap1[0])?;
-    os.write_word(block + 8, layout.gap1[1])?;
-    os.write_word(block + 12, layout.gap3)?;
-    os.write_byte(block + 16, layout.per_track)?;
-    os.write_byte(block + 17, layout.density)?;
-    os.write_byte(block + 18, layout.options)?;
-    os.write_byte(block + 21, layout.side_skew)?;
-    os.write_byte(block + 22, layout.track_skew)?;
-    os.write_byte(block + 23, SECTOR_FILL)?;
-    os.write_word(block + 24, FORMAT_TRACKS)?;
+    os.write_word(block.wrapping_add(4), layout.gap1[0])?;
+    os.write_word(block.wrapping_add(8), layout.gap1[1])?;
+    os.write_word(block.wrapping_add(12), layout.gap3)?;
+    os.write_byte(block.wrapping_add(16), layout.per_track)?;
+    os.write_byte(block.wrapping_add(17), layout.density)?;
+    os.write_byte(block.wrapping_add(18), layout.options)?;
+    os.write_byte(block.wrapping_add(21), layout.side_skew)?;
+    os.write_byte(block.wrapping_add(22), layout.track_skew)?;
+    os.write_byte(block.wrapping_add(23), SECTOR_FILL)?;
+    os.write_word(block.wrapping_add(24), FORMAT_TRACKS)?;
     let mut vet = Regs::default();
     vet.r[0] = block;
     vet.r[1] = regs.r[2];

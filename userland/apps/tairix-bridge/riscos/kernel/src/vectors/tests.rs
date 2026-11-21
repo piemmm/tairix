@@ -10,7 +10,7 @@ use crate::swi::os::{ADD_TO_VECTOR, BYTE, CALL_A_VECTOR, CLAIM, RELEASE};
 use crate::swi::X;
 use crate::testkit::{asm, with_application, Session, CODE, DATA};
 
-const BYTE_V: u32 = 6;
+const BYTE_V: u32 = crate::vectors::BYTE.0;
 /// A vector no kernel default claims, for `OS_CallAVector`.
 const SPARE_V: u32 = 0x40;
 
@@ -157,8 +157,7 @@ fn a_claimant_releasing_itself_mid_call_leaves_the_older_ones_called() {
 
 #[test]
 fn a_device_vector_is_claimed_and_released_by_its_registers() {
-    const CLAIM_DEVICE: u32 = 0x4B;
-    const RELEASE_DEVICE: u32 = 0x4C;
+    use crate::swi::os::{CLAIM_DEVICE_VECTOR, RELEASE_DEVICE_VECTOR};
     let mut s = with_application(&RISC_OS_5, Bits::Bit32);
     let call = |s: &mut Session, swi: u32, r: [u32; 5]| {
         let (regs, _) = s.user_swi(
@@ -171,33 +170,39 @@ fn a_device_vector_is_claimed_and_released_by_its_registers() {
             Ok(())
         }
     };
-    assert_eq!(call(&mut s, CLAIM_DEVICE, [3, 0x9000, 1, 0, 0]), Ok(()));
     assert_eq!(
-        call(&mut s, CLAIM_DEVICE, [3, 0x9000, 1, 0, 0]),
+        call(&mut s, CLAIM_DEVICE_VECTOR, [3, 0x9000, 1, 0, 0]),
+        Ok(())
+    );
+    assert_eq!(
+        call(&mut s, CLAIM_DEVICE_VECTOR, [3, 0x9000, 1, 0, 0]),
         Ok(()),
         "the same again"
     );
-    assert_eq!(call(&mut s, RELEASE_DEVICE, [3, 0x9000, 1, 0, 0]), Ok(()));
     assert_eq!(
-        call(&mut s, RELEASE_DEVICE, [3, 0x9000, 1, 0, 0]),
+        call(&mut s, RELEASE_DEVICE_VECTOR, [3, 0x9000, 1, 0, 0]),
+        Ok(())
+    );
+    assert_eq!(
+        call(&mut s, RELEASE_DEVICE_VECTOR, [3, 0x9000, 1, 0, 0]),
         Err(0x1A3),
         "it was there once"
     );
     assert_eq!(
-        call(&mut s, CLAIM_DEVICE, [13, 0x9000, 1, 0x3000, 4]),
+        call(&mut s, CLAIM_DEVICE_VECTOR, [13, 0x9000, 1, 0x3000, 4]),
         Ok(())
     );
     assert_eq!(
-        call(&mut s, RELEASE_DEVICE, [13, 0x9000, 1, 0x3000, 8]),
+        call(&mut s, RELEASE_DEVICE_VECTOR, [13, 0x9000, 1, 0x3000, 8]),
         Err(0x1A3),
         "an expansion card's mask counts"
     );
     assert_eq!(
-        call(&mut s, RELEASE_DEVICE, [13, 0x9000, 1, 0x3000, 4]),
+        call(&mut s, RELEASE_DEVICE_VECTOR, [13, 0x9000, 1, 0x3000, 4]),
         Ok(())
     );
     assert_eq!(
-        call(&mut s, CLAIM_DEVICE, [27, 0x9000, 1, 0, 0]),
+        call(&mut s, CLAIM_DEVICE_VECTOR, [27, 0x9000, 1, 0, 0]),
         Err(0x1A2),
         "no such device"
     );

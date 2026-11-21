@@ -12,7 +12,7 @@ use tairix_abi::Errno;
 use tairix_geometry::Point;
 use tairix_raster::Color;
 use tairix_rng::{NonCryptoRng, RandU64};
-use tairix_saver::testing::{self, Screen};
+use tairix_saver::testing::{self, Screen, SEC};
 use tairix_saver::NextFrame;
 
 use super::{
@@ -358,7 +358,7 @@ fn the_speed_paces_the_generations_on_every_display() {
                 "{mhz} {speed}: a newborn is still arriving when the next generation comes"
             );
             let (mut now, mut generations) = (0, 0u64);
-            while now < SECONDS * 1_000_000_000 {
+            while now < SECONDS * SEC {
                 let due = life.next_generation_ns;
                 now = draw(&mut screen, &mut life, now);
                 generations += u64::from(life.next_generation_ns != due);

@@ -33,6 +33,9 @@ use tairix_abi::{
 use tairix_browse::{canonical_filetype, media_for_name};
 use tairix_fscopy::tree::{unlink_node, Creation, Dir, FileAccess, Node, WriteAt};
 use tairix_fscopy::{Source, Target};
+use tairix_fsmeta::preset::acorn::fileswitch::{
+    LOCKED, OWNER_READ, OWNER_WRITE, PUBLIC_READ, PUBLIC_WRITE,
+};
 use tairix_fsmeta::preset::acorn::{self, Filetype, LoadExec};
 
 use super::protocol::{
@@ -45,14 +48,11 @@ use transfer::Transfer;
 const ENTRIES_BOUND: usize = 1 << 16;
 
 /// The most files the session may hold open at once, FileSwitch's own bound.
-const FILES: usize = 255;
+const FILES: usize = crate::fileswitch::open::HANDLES as usize;
 
 /// What a file and a directory HostFS makes are born with, less the umask.
 const FILE_MODE: u32 = 0o666;
 const DIR_MODE: u32 = 0o777;
-
-/// RISC OS's Data, the type of a file nothing else types.
-const DATA: u16 = 0xFFD;
 
 /// A root as the server is given it: the directory, the name of its folder,
 /// and whether the session may write to it.
@@ -743,25 +743,18 @@ enum Answer {
     Reply(Reply<'static>),
 }
 
-/// RISC OS's locked attribute, in FileSwitch's byte.
-const LOCKED: u8 = 1 << 3;
-
-/// The owner's read and write attributes.
-const OWNER_READ: u8 = 1 << 0;
-const OWNER_WRITE: u8 = 1 << 1;
-
 /// Each mode bit and the attribute it is: the owner's and the public's read
 /// and write.
 const MODE_ATTRIBUTES: [(u32, u8); 4] = [
     (0o400, OWNER_READ),
     (0o200, OWNER_WRITE),
-    (0o004, 0x10),
-    (0o002, 0x20),
+    (0o004, PUBLIC_READ),
+    (0o002, PUBLIC_WRITE),
 ];
 
 /// What a file HostFS makes is given: read and write for its owner, read for
 /// others.
-const DEFAULT_ATTRIBUTES: u8 = 0x13;
+const DEFAULT_ATTRIBUTES: u8 = OWNER_READ | OWNER_WRITE | PUBLIC_READ;
 
 /// Whether `a` in `a_dir` and `b` in `b_dir` are one entry: a rename that
 /// changes only a name's case.
@@ -889,7 +882,7 @@ fn object<N: Node>(node: &N, stat: &FileStat, name: &str) -> Result<Object, Refu
             (load, exec)
         } else {
             let filetype = match kind {
-                Kind::Directory => DATA,
+                Kind::Directory => Filetype::DATA.get(),
                 _ => implied_type(name),
             };
             typed_stamp(filetype, stat.times.modified)?
@@ -914,7 +907,7 @@ fn implied_type(name: &str) -> u16 {
         Some((_, filetype)) => filetype.get(),
         None => media_for_name(name)
             .and_then(canonical_filetype)
-            .map_or(DATA, Filetype::get),
+            .map_or(Filetype::DATA.get(), Filetype::get),
     }
 }
 

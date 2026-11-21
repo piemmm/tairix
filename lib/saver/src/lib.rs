@@ -80,6 +80,13 @@ impl Setup<'_> {
         })
     }
 
+    /// The screen, as the rectangle at the origin every frame's surface spans.
+    #[must_use]
+    pub fn screen(&self) -> Rect {
+        let region = &self.start.region;
+        Rect::new(0, 0, region.width(), region.height())
+    }
+
     /// The threads the saver may run, its own among them: what the host
     /// granted, and never more than the machine's online cores.
     #[must_use]

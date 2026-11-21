@@ -7,8 +7,7 @@ use tairix_colour::linear_to_srgb;
 use tairix_util::mathf;
 
 use super::{Tone, LIGHT_ONE};
-
-const EXPOSURE: f64 = 1.0;
+use crate::EXPOSURE;
 
 fn tone() -> Tone {
     Tone::new(EXPOSURE).expect("a table")

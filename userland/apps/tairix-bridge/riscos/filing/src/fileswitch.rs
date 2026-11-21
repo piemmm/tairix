@@ -23,7 +23,7 @@ mod call;
 mod commands;
 mod control;
 mod directory;
-pub(crate) mod error;
+pub mod error;
 pub(crate) mod file;
 mod find;
 mod gbpb;
@@ -108,7 +108,7 @@ pub static FILE_SWITCH: Builtin = Builtin {
     ],
     resources: &[Resource {
         name: "Resources.FileSwitch.Messages",
-        file_type: 0xFFF,
+        file_type: tairix_riscos_kernel::filing::filetype::TEXT,
         data: MESSAGES,
     }],
     code: None,

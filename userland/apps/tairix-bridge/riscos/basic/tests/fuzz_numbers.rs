@@ -18,6 +18,7 @@ use tairix_fuzzseed::Prng;
 use tairix_riscos_basic::five::{self, Five};
 use tairix_riscos_basic::six::{self, Arithmetic, Six};
 use tairix_riscos_basic::text::{write, Format, Written};
+use tairix_riscos_basic::STRING_MOST;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 2_000;
@@ -26,13 +27,10 @@ const SMOKE_ITERATIONS: u64 = 2_000;
 /// their noughts, a point and an exponent.
 const LONGEST_TEXT: usize = 64;
 
-/// The longest string BASIC holds.
-const LONGEST_STRING: usize = 255;
-
 /// Text a number may be read from: mostly number-shaped, sometimes any bytes.
 fn text(rng: &mut Prng) -> Vec<u8> {
     const SHAPED: &[u8] = b"0123456789.E+- ";
-    let length = rng.below(LONGEST_STRING + 1);
+    let length = rng.below(STRING_MOST + 1);
     let any = rng.below(4) == 0;
     (0..length)
         .map(|_| {

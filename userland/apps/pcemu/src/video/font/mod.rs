@@ -66,22 +66,6 @@ const fn hex_digit(byte: u8) -> usize {
     }
 }
 
-/// The eight dots of the row at `at`.
-const fn dots(source: &[u8], at: usize) -> u8 {
-    let mut row = 0u8;
-    let mut i = 0;
-    while i < 8 {
-        row <<= 1;
-        match source[at + i] {
-            b'#' => row |= 1,
-            b'.' => {}
-            _ => panic!("a glyph row holds something other than '#' and '.'"),
-        }
-        i += 1;
-    }
-    row
-}
-
 /// Parses a set: every one of the 256 glyphs exactly once, each `H` rows of
 /// eight dots.
 const fn parse<const H: usize>(source: &[u8]) -> [[u8; H]; 256] {
@@ -100,8 +84,8 @@ const fn parse<const H: usize>(source: &[u8]) -> [[u8; H]; 256] {
             while row < H {
                 assert!(at < source.len(), "a glyph is cut short");
                 let row_end = line_end(source, at);
-                assert!(row_end - at == 8, "a glyph row is not eight dots");
-                glyphs[code][row] = dots(source, at);
+                let (_, line) = source.split_at(row_end).0.split_at(at);
+                glyphs[code][row] = tairix_font::art::dots(line, 8);
                 at = row_end + 1;
                 row += 1;
             }

@@ -560,6 +560,11 @@ impl SceneClock {
     /// wake moves it a few frames on rather than all the way to the clock.
     pub const MOST_FRAMES: u64 = 4;
 
+    /// The share of a frame's time a scene's exposure spans: a moving thing is
+    /// drawn across the ground it covered in that time, so motion reads as
+    /// continuous at the pace frames are drawn, and blurs alike in every scene.
+    pub const SHUTTER: f64 = 0.5;
+
     /// A scene setting off at `now_ns` on a display refreshing at `refresh`,
     /// or holding still when `still`.
     #[must_use]

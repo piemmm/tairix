@@ -17,6 +17,7 @@ mod common;
 
 use common::{block, call, save, text};
 use tairix_fuzzseed::Prng;
+use tairix_riscos_arm::mmu::PAGE_SIZE;
 use tairix_riscos_kernel::os::Os;
 use tairix_riscos_kernel::swi::os::{
     fs_control, ARGS, CHANGE_DYNAMIC_AREA, DYNAMIC_AREA, FILE, FIND, FS_CONTROL, GBPB,
@@ -57,21 +58,18 @@ fn scribble(os: &mut Os<'_>, rng: &mut Prng) {
     };
     let at = u32::try_from(at).expect("within the disc");
     let query = block(os, &[0xFF; 16]);
-    os.write_word(query + 8, at / PAGE).expect("written");
+    os.write_word(query + 8, at / PAGE_SIZE).expect("written");
     call(os, DYNAMIC_AREA, &[25, 5, query, 1]).expect("queried");
     if os.read_word(query).expect("read") == u32::MAX {
         return;
     }
-    let room = (PAGE - at % PAGE) as usize;
+    let room = (PAGE_SIZE - at % PAGE_SIZE) as usize;
     let junk: Vec<u8> = (0..=rng.below(32).min(room - 1))
         .map(|_| rng.edge_biased_u8())
         .collect();
     os.write_bytes(base + at, &junk)
         .expect("a page the area shows");
 }
-
-/// A page of the area.
-const PAGE: u32 = 0x1000;
 
 /// One filing call of a random kind, refused or not, its bytes moved through
 /// `data`, which holds a whole disc.

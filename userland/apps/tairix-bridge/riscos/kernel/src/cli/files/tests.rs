@@ -360,7 +360,7 @@ fn exec_takes_the_keyboard_s_input_from_a_file() {
     let file = s.one_file(b"Echo from the file\r");
     assert_eq!(cli(&mut s, "Exec script"), Ok(()));
     assert_eq!(file.word(&mut s, OneFile::OPENED), 0x4C);
-    let (read, _) = s.user_swi(crate::cli::tests::X | 0x04, [0; 13]);
+    let (read, _) = s.user_swi(crate::swi::X | 0x04, [0; 13]);
     assert_eq!(read.r[0], u32::from(b'E'), "OS_ReadC reads the file");
     assert_eq!(cli(&mut s, "Exec"), Ok(()));
     assert_eq!(file.word(&mut s, OneFile::HANDLE), 0, "closed");

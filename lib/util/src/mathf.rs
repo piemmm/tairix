@@ -622,10 +622,8 @@ pub fn cos(x: f64) -> f64 {
 #[derive(Copy, Clone, Debug)]
 pub struct Phasor {
     amplitude: f64,
-    sin: f64,
-    cos: f64,
-    step_sin: f64,
-    step_cos: f64,
+    at: Turn,
+    step: Turn,
 }
 
 impl Phasor {
@@ -634,24 +632,60 @@ impl Phasor {
     pub fn new(amplitude: f64, angle: f64, step: f64) -> Self {
         Self {
             amplitude,
-            sin: sin(angle),
-            cos: cos(angle),
-            step_sin: sin(step),
-            step_cos: cos(step),
+            at: Turn::of(angle),
+            step: Turn::of(step),
         }
     }
 
     /// The sine where the sweep stands, scaled by its amplitude.
     #[must_use]
     pub fn value(&self) -> f64 {
-        self.amplitude * self.sin
+        self.amplitude * self.at.sin
     }
 
     /// Turn on by one step.
     pub fn advance(&mut self) {
-        let sin = self.sin * self.step_cos + self.cos * self.step_sin;
-        self.cos = self.cos * self.step_cos - self.sin * self.step_sin;
-        self.sin = sin;
+        self.at = self.at.then(self.step);
+    }
+}
+
+/// A turn through an angle, held as its sine and cosine, so turns compose by
+/// angle addition rather than each being evaluated afresh.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Turn {
+    sin: f64,
+    cos: f64,
+}
+
+impl Turn {
+    /// The turn through `angle` radians.
+    #[must_use]
+    pub fn of(angle: f64) -> Self {
+        Self {
+            sin: sin(angle),
+            cos: cos(angle),
+        }
+    }
+
+    /// This turn followed by `by`: the turn through both angles.
+    #[must_use]
+    pub fn then(self, by: Self) -> Self {
+        Self {
+            sin: self.sin * by.cos + self.cos * by.sin,
+            cos: self.cos * by.cos - self.sin * by.sin,
+        }
+    }
+
+    /// The sine of the angle.
+    #[must_use]
+    pub const fn sin(self) -> f64 {
+        self.sin
+    }
+
+    /// The cosine of the angle.
+    #[must_use]
+    pub const fn cos(self) -> f64 {
+        self.cos
     }
 }
 

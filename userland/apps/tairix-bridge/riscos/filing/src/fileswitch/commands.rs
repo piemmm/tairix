@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use tairix_riscos_kernel::cmos::{FILESWITCH_OPTIONS, FILE_LANG};
 use tairix_riscos_kernel::error::{Error, BAD_COMMAND, BAD_NUMBER};
-use tairix_riscos_kernel::module::{Command, CommandKind, Help};
+use tairix_riscos_kernel::module::{value_padding, Command, CommandKind, Help, VALUE_COLUMN};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::read_unsigned::{BYTE_SIZED, DECIMAL, TERMINATED};
 use tairix_riscos_kernel::swi::os::{
@@ -23,8 +23,6 @@ use super::{error, with, COPY_OPTIONS, COUNT_OPTIONS, WIPE_OPTIONS};
 /// FileSwitch's option bit for a name too long for its filing system: cut
 /// short where set, refused where clear.
 const TRUNCATE_BIT: u8 = 1 << 0;
-/// The column a status line's value starts at.
-const VALUE_COLUMN: usize = 11;
 
 /// "Bad option": an option letter the command does not take.
 const BAD_OPTION: Error = Error {
@@ -525,7 +523,7 @@ const fn asked(r0: u32) -> Asked {
 fn status_line(os: &mut Os<'_>, keyword: &[u8], value: &[u8], end: &[u8]) -> Result<(), Fail> {
     const SPACES: [u8; VALUE_COLUMN] = [b' '; VALUE_COLUMN];
     os.write_text(keyword)?;
-    os.write_text(&SPACES[keyword.len().min(VALUE_COLUMN - 1)..])?;
+    os.write_text(&SPACES[..value_padding(keyword.len())])?;
     os.write_text(value)?;
     os.write_text(end)
 }

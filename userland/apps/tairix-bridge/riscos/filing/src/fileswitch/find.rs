@@ -9,6 +9,7 @@
 //! be opened to be read, as programs that test for an object that way
 //! expect, and is refused for anything else.
 
+use tairix_riscos_kernel::filing::filetype::DATA;
 use tairix_riscos_kernel::filing::fs::{self, file_info};
 use tairix_riscos_kernel::filing::{BAD_FIND, IS_A_DIRECTORY, NOT_FOUND};
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
@@ -131,7 +132,7 @@ fn create(os: &mut Os<'_>, address: u32, search: Search<'_>) -> Result<u32, Fail
     }
     let always = resolved.calls.has(ALWAYS_OPEN);
     if found.kind == NOTHING && !always {
-        let (load, exec) = super::file::stamp_now(os, super::file::DATA);
+        let (load, exec) = super::file::stamp_now(os, DATA);
         let mut make = Regs::default();
         make.r[2] = load;
         make.r[3] = exec;

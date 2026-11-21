@@ -5,6 +5,8 @@
 
 use alloc::vec::Vec;
 
+use crate::filing::filetype;
+use crate::filing::fs::attribute;
 use crate::memory::{Memory, MemoryError};
 use crate::module::{Builtin, Resource, Services};
 use crate::os::{len32, Fail, Os, Regs, Unwind};
@@ -12,7 +14,7 @@ use crate::resourcefs::{DEREGISTER_FILES, REGISTER_FILES};
 use crate::swi::X;
 
 /// A resource's attributes: readable and writable by its owner.
-const ATTRIBUTES: u32 = 3;
+const ATTRIBUTES: u32 = attribute::OWNER_READ | attribute::OWNER_WRITE;
 
 /// The resources no one built-in module owns: the messages every module
 /// shares, and the Wimp's file-type sprites, drawn from the desktop's icon
@@ -20,12 +22,12 @@ const ATTRIBUTES: u32 = 3;
 static SHARED: [Resource; 2] = [
     Resource {
         name: "Resources.Global.Messages",
-        file_type: 0xFFF,
+        file_type: filetype::TEXT,
         data: crate::msgtrans::GLOBAL,
     },
     Resource {
         name: "Resources.Wimp.Sprites22",
-        file_type: 0xFF9,
+        file_type: filetype::SPRITE,
         data: include_bytes!("../resources/Wimp/Sprites22"),
     },
 ];
@@ -72,7 +74,7 @@ fn block<'a>(
         let name_words = words_of(resource.name.len() + 1);
         let entry = 4 * (6 + name_words + words_of(resource.data.len()));
         let length = len32(resource.data.len());
-        let load = crate::filing::fs::stamp::typed(u32::from(resource.file_type), load_high);
+        let load = crate::filing::fs::stamp::typed(resource.file_type, load_high);
         words.extend_from_slice(&[len32(entry), load, exec, length, ATTRIBUTES]);
         push_padded(&mut words, resource.name.as_bytes(), name_words);
         words.push(length + 4);

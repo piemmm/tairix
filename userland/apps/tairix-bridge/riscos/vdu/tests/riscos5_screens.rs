@@ -7,7 +7,9 @@
 use std::sync::LazyLock;
 
 use tairix_fscopy::fixture::Tree;
-use tairix_riscos_filing::session::{command, disc_file, modules_with, session, Setup, DISC};
+use tairix_riscos_filing::session::{
+    command, disc_file, modules_with, session, Setup, DISC, SLOT_BYTES,
+};
 use tairix_riscos_kernel::module::Builtin;
 use tairix_riscos_kernel::os::{Fail, Unwind};
 use tairix_riscos_vdu::corpus::{self, Answer, Recorded};
@@ -87,7 +89,7 @@ fn every_screen_is_read_and_drawn_as_genuine_risc_os_did() {
     let mut session = session(&Setup {
         vdu: Some(tairix_riscos_vdu::DRIVERS),
         modules: MODULES.as_slice(),
-        bytes: 0x10_0000,
+        bytes: SLOT_BYTES,
         keys: &[],
         disc: Some(&tree),
     });

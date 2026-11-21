@@ -19,10 +19,6 @@ use super::name::{self, Dir, Directories, Prefix, Search, Selection};
 use super::system::{self as systems, Refused, System};
 use super::{args, error, image, open, run, tree, types, with, State};
 
-/// `*Opt` 0, every option reset, and 1, FileSwitch's own.
-const OPT_RESET: u32 = 0;
-const OPT_MESSAGES: u32 = 1;
-
 /// `FSCV`'s default.
 pub(crate) fn fs_control(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     match regs.r[0] {
@@ -270,24 +266,21 @@ fn reserved(os: &mut Os<'_>, regs: &Regs) -> Result<(), Fail> {
 /// disc's `OS_FSControl` reason, and which of R0 to R4 it answers in.
 fn disc_entry(reason: u32) -> Option<(u32, core::ops::Range<usize>)> {
     Some(match reason {
-        reason::DEFECT_LIST => (25, 0..0),
-        reason::ADD_DEFECT => (26, 0..0),
-        reason::READ_BOOT_OPTION => (27, 2..3),
-        reason::WRITE_BOOT_OPTION => (28, 0..0),
-        reason::USED_SPACE_MAP => (29, 0..0),
-        reason::FREE_SPACE => (30, 0..3),
-        reason::NAME_DISC => (31, 0..0),
-        reason::STAMP_IMAGE => (32, 0..0),
-        reason::OBJECT_AT_OFFSET => (33, 2..3),
-        reason::FREE_SPACE_64 => (35, 0..5),
-        reason::DEFECT_LIST_64 => (36, 0..0),
-        reason::ADD_DEFECT_64 => (37, 0..0),
+        reason::DEFECT_LIST => (fs::func::DEFECT_LIST, 0..0),
+        reason::ADD_DEFECT => (fs::func::ADD_DEFECT, 0..0),
+        reason::READ_BOOT_OPTION => (fs::func::READ_BOOT_OPTION, 2..3),
+        reason::WRITE_BOOT_OPTION => (fs::func::WRITE_BOOT_OPTION, 0..0),
+        reason::USED_SPACE_MAP => (fs::func::USED_SPACE_MAP, 0..0),
+        reason::FREE_SPACE => (fs::func::FREE_SPACE, 0..3),
+        reason::NAME_DISC => (fs::func::NAME_DISC, 0..0),
+        reason::STAMP_IMAGE => (fs::func::STAMP_IMAGE, 0..0),
+        reason::OBJECT_AT_OFFSET => (fs::func::OBJECT_AT_OFFSET, 2..3),
+        reason::FREE_SPACE_64 => (fs::func::FREE_SPACE_64, 0..5),
+        reason::DEFECT_LIST_64 => (fs::func::DEFECT_LIST_64, 0..0),
+        reason::ADD_DEFECT_64 => (fs::func::ADD_DEFECT_64, 0..0),
         _ => return None,
     })
 }
-
-/// `FSEntry_Func` 7, the boot option's: `*Opt 4`.
-const OPT_BOOT: u32 = 4;
 
 /// `OS_FSControl` 41, 42, 46 to 52 and 55 to 57: an operation on the disc or
 /// image holding the object R1 names, passed with R2 to R5 to its image
@@ -354,7 +347,7 @@ fn plain_disc_operation(
                 |_, _, _| Ok(()),
             )?;
             let mut option = Regs::default();
-            option.r[1] = OPT_BOOT;
+            option.r[1] = fs::opt::BOOT;
             option.r[2] = regs.r[2];
             call::func_registers(os, &resolved.calls, fs::func::OPT, &mut option)
         }
@@ -406,8 +399,8 @@ fn opt(os: &mut Os<'_>, regs: &Regs) -> Result<(), Fail> {
     let calls = with(os, |state| {
         let system = state.systems.iter_mut().find(|s| s.number == number)?;
         match regs.r[1] {
-            OPT_MESSAGES => system.messages = regs.byte(2) & 3,
-            OPT_RESET => system.messages = 0,
+            fs::opt::MESSAGES => system.messages = regs.byte(2) & 3,
+            fs::opt::RESET => system.messages = 0,
             _ => {}
         }
         Some(system.calls())
@@ -415,7 +408,7 @@ fn opt(os: &mut Os<'_>, regs: &Regs) -> Result<(), Fail> {
     let Some(calls) = calls else {
         return Err(os.error(NOT_PRESENT));
     };
-    if regs.r[1] == OPT_MESSAGES {
+    if regs.r[1] == fs::opt::MESSAGES {
         return Ok(());
     }
     let mut call = Regs::default();

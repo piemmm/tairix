@@ -83,7 +83,7 @@ pub use blend::{Blend, BlendFactor, BlendInputs, BlendOp, BlendRange, LogicOp};
 #[cfg(any(test, feature = "test-util"))]
 pub use blur::halved_reference;
 pub use blur::{
-    box_blur, box_blur16, box_blur_coverage, cast_shadow, halved_reach, soften_coverage,
+    box_blur, box_blur16, box_blur_coverage, cast_shadow, halved_reach, soften16, soften_coverage,
     BlurScratch, Blurring, ShadowCast, SOFTEN_PASSES,
 };
 pub use body::Body;
@@ -130,5 +130,5 @@ pub use surface::{
     RowBands, Surface, BAND_GRAIN, MAX_SURFACE_PIXELS, SUBPIXEL,
 };
 pub use tairix_bezier::Affine;
-pub use transformed::{Mosaic, Picture};
+pub use transformed::{bilinear_weights, Mosaic, Picture};
 pub use view::{Clipped, Perspective, Projected, MAX_CLIPPED};

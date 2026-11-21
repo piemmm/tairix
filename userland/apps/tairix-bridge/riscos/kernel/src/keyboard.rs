@@ -55,9 +55,9 @@ const CAPS_LED: u32 = 4;
 const NARROW_SPECIAL: u32 = 0xFF;
 /// What a special key's code is asked: a shifting key up or down, a key's
 /// first code, a repeat.
-const SHIFT_UP: u32 = 0;
-const SHIFT_DOWN: u32 = 1;
-const FIRST: u32 = 2;
+pub(crate) const SHIFT_UP: u32 = 0;
+pub(crate) const SHIFT_DOWN: u32 = 1;
+pub(crate) const FIRST: u32 = 2;
 const REPEAT: u32 = 3;
 /// The workspace a handler's code is given.
 pub(crate) const HANDLER_WORKSPACE: u32 = 96;

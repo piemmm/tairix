@@ -1,6 +1,8 @@
 //! The Messages module's tests: the ROM's files in one block, registered
 //! while it lives and again when ResourceFS starts again.
 
+use crate::filing::filetype;
+use crate::filing::fs::stamp;
 use crate::module::utility::UTILITY;
 use crate::msgtrans::tests::session;
 use crate::resourcefs::Object;
@@ -36,7 +38,7 @@ fn every_built_in_s_files_are_registered_stamped_as_the_rom_s_are() {
                 resource.name
             );
             assert_eq!(entry.load >> 20, 0xFFF, "typed");
-            assert_eq!((entry.load >> 8) & 0xFFF, u32::from(resource.file_type));
+            assert_eq!((entry.load >> 8) & 0xFFF, resource.file_type);
             assert_eq!(
                 s.peek(entry.data - 4),
                 entry.length + 4,
@@ -70,7 +72,11 @@ fn the_rom_s_files_go_with_messages_and_come_back_with_resourcefs() {
 fn the_wimp_s_sprites_are_a_sprite_area_of_each_type_large_and_small() {
     let mut s = session();
     let entry = file(&mut s, b"Resources.Wimp.Sprites22").expect("the Wimp's sprites");
-    assert_eq!((entry.load >> 8) & 0xFFF, 0xFF9, "a sprite file");
+    assert_eq!(
+        stamp::type_of(entry.load),
+        Some(filetype::SPRITE),
+        "a sprite file"
+    );
     let (count, first) = (s.peek(entry.data), s.peek(entry.data + 4));
     assert_eq!(first, 16, "the sprites after the header");
     let mut names = alloc::vec::Vec::new();

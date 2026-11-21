@@ -20,13 +20,12 @@ use crate::swi::os::fs_control::OPT;
 use crate::swi::os::read_unsigned::{BOUNDED, BYTE_SIZED, DECIMAL, TERMINATED};
 use crate::swi::{os, X};
 use crate::vars::{EXPANDED, MACRO, NUMBER, STRING};
+use crate::word::{read, LONG_FORMAT, READ_CLOCK};
 
 /// Where `*GO` starts the application it is given no address for.
 const APPLICATION: u32 = crate::memory::layout::APPLICATION;
 /// The command `*GO` starts an application as.
 const GO: &[u8] = b"GO \0";
-/// `*Time`'s format.
-const TIME_FORMAT: &[u8] = b"%w3,%dy %m3 %ce%yr.%24:%mi:%se\0";
 /// `*Show`'s pattern given none: every variable.
 const EVERY: &[u8] = b"*\0";
 /// What `*Show` reads a value into before it claims room for a longer one.
@@ -47,9 +46,6 @@ const PRINTER_IGNORE: u32 = 6;
 const SHADOW: u32 = 114;
 const TV: u32 = 144;
 const NO_IGNORE: u32 = crate::byte::var::NO_IGNORE as u32;
-/// `OS_Word` 14 reason 3: the time as five bytes.
-const READ_CLOCK: u32 = 14;
-const UTC: u8 = 3;
 
 /// "Too many parameters".
 pub(crate) const TOO_MANY: Error = Error {
@@ -295,10 +291,10 @@ pub(crate) fn show(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 pub(crate) fn time(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     let (buffer, held) = os.cli_buffer();
     let result = (|| {
-        let format = buffer.wrapping_add(super::BUFFER - len32(TIME_FORMAT.len()));
-        os.write_bytes(format, TIME_FORMAT)?;
+        let format = buffer.wrapping_add(super::BUFFER - len32(LONG_FORMAT.len()));
+        os.write_bytes(format, LONG_FORMAT)?;
         let block = format.wrapping_sub(8);
-        os.write_byte(block, UTC)?;
+        os.write_byte(block, read::UTC)?;
         let mut word = Regs::default();
         word.r[..2].copy_from_slice(&[READ_CLOCK, block]);
         os.perform(X | os::WORD, &mut word)?;

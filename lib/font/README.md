@@ -62,6 +62,11 @@ the payload exceeds the pre-Korean size ceiling.
   losslessly compressed 4-bit coverage, a sorted codepoint→glyph range table,
   and the U+FFFD fallback index. Pure `const`/`static` data with no
   dependencies.
+- `art` — the one reading of glyph art: a bitmap character set drawn as
+  text, a row of `#` for a dot and `.` for none, read as the program compiles
+  so a malformed row is a build error. `lib/vdu`'s system font,
+  `lib/teletext`'s character generator and the PC emulator's code page 437
+  sets are drawn this way.
 - `glyph` — Unicode lookup over the atlas: binary search of the range table,
   bounded single-glyph decompression, the packed-nibble accessor, and the
   U+FFFD fallback for any scalar the face does not map (visibly wrong rather
@@ -226,9 +231,10 @@ its own cell. `tairix_vt::char_width` remains the one layout rule: a wide glyph
 is stored as a lead plus continuation cell, while its atlas bitmap may paint
 across both cells.
 
-The `atlas` and `glyph` modules are allocator-free, so a consumer that brings
-its own blitter (`lib/fbcon`, which blends coverage into device-coherent
-memory itself) depends with `default-features = false`; the
+The `atlas`, `glyph` and `art` modules are allocator-free, so a consumer that
+brings its own blitter (`lib/fbcon`, which blends coverage into
+device-coherent memory itself) or only reads glyph art (`lib/vdu`,
+`lib/teletext`) depends with `default-features = false`; the
 `lib/raster`-backed blitter rides the default-on `render` cargo feature — one
 font definition either way (§2.2).
 

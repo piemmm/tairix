@@ -85,7 +85,7 @@ pub(crate) const NO_SUCH_SWI: Error = Error {
 };
 
 /// The `ABEX` word `OS_Exit` reads a return code beside.
-const ABEX: u32 = 0x5845_4241;
+pub const ABEX: u32 = 0x5845_4241;
 /// The return code limit `Sys$RCLimit` starts at.
 const RC_LIMIT: u32 = 256;
 /// The error buffer's size, as the PRM has it: the PC, then the error block.

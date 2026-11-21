@@ -11,7 +11,6 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use core::num::NonZeroU16;
-use core::ptr;
 
 use tairix_abi::driver::display::DisplayFormat;
 use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapper};

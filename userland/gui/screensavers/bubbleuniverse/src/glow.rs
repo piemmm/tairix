@@ -3,39 +3,27 @@
 //!
 //! Every point's light is gathered at a coarse grid of cells a few pixels
 //! across, softened so a crowd glows more than a lone point but never as all
-//! of its points would, and spread by a Gaussian made of three box blurs
-//! (`tairix_raster::box_blur16`): over the cells themselves for the halo, and
-//! over cells [`HAZE_CELLS`] times wider for the haze. Their sum is read back
-//! at each pixel between the cells about it and added to its light before it
-//! is toned, so the glow costs a small fraction of the pixels it covers.
+//! of its points would, and spread by the near-Gaussian of box blurs
+//! `tairix_raster::soften16` makes: over the cells themselves for the halo,
+//! and over cells [`HAZE_CELLS`] times wider for the haze. Their sum is read
+//! back at each pixel between the cells about it and added to its light
+//! before it is toned, so the glow costs a small fraction of the pixels it
+//! covers.
 //!
 //! The grids hold opaque sixteen-bit pixels whose channels count light:
 //! [`RANGE`] light at the most an opaque channel holds.
 
 use alloc::vec::Vec;
 
-use tairix_parallel::{for_each_drawn, JobRunner};
-use tairix_raster::{box_blur16, Pixel16};
+use tairix_parallel::{for_each_drawn, piece_len, JobRunner};
+use tairix_raster::{bilinear_weights, soften16, Pixel16, SOFTEN_PASSES};
 use tairix_util::fallible;
 
+use crate::light::{pixel_centre, Shed};
 use crate::tone::LIGHT_ONE;
-
-/// An opaque sixteen-bit channel at its fullest.
-const FULL: u16 = 255 * 255;
-
-/// The glow's dark.
-const DARK: Pixel16 = Pixel16 {
-    r: 0,
-    g: 0,
-    b: 0,
-    a: FULL,
-};
 
 /// The light a full channel of a glow grid counts.
 const RANGE: u64 = 4;
-
-/// Box blurs a Gaussian is made of: three are within a few percent of one.
-const PASSES: usize = 3;
 
 /// The halo's box radius, in cells.
 const HALO_RADIUS: usize = 1;
@@ -55,8 +43,19 @@ const HAZE_GAIN: u64 = 192;
 const SOFTEN: u32 = 1500;
 
 /// How far past the light it gathers the glow reaches, in cells: three of the
-/// haze's deviations, beyond which a hundredth of it is left.
-pub(crate) const GLOW_CELLS: u32 = 30;
+/// haze's deviations, beyond which a hundredth of it is left. Its passes of
+/// boxes `HAZE_RADIUS` each way spread as a Gaussian of variance
+/// `passes · r(r + 1) / 3` haze cells squared.
+pub(crate) const GLOW_CELLS: usize = {
+    let passes = SOFTEN_PASSES as usize;
+    let reach = 3 * passes * HAZE_RADIUS * (HAZE_RADIUS + 1) * HAZE_CELLS * HAZE_CELLS;
+    let root = reach.isqrt();
+    if root * root == reach {
+        root
+    } else {
+        root + 1
+    }
+};
 
 /// Where a position lies between the centres of two neighbouring cells: the
 /// nearer one's index, and the further's weight in 256ths.
@@ -120,7 +119,7 @@ impl Axis {
 /// The rows of cells beyond a band of the halo its blur reads: as far as the
 /// passes together carry a cell, so a band blurred alone is the halo blurred
 /// whole.
-const APRON: usize = PASSES * HALO_RADIUS;
+const APRON: usize = HALO_RADIUS * SOFTEN_PASSES as usize;
 
 /// The fewest rows of cells worth blurring as a band of their own.
 const BAND_ROWS: usize = 4 * APRON;
@@ -135,7 +134,7 @@ struct Block {
 pub(crate) struct Glow {
     across: Axis,
     down: Axis,
-    /// What the spots left, softened, before it is spread.
+    /// What the spots left, before it is softened and spread.
     gathered: Vec<Pixel16>,
     /// The gathered light spread into the halo.
     halo: Vec<Pixel16>,
@@ -150,6 +149,8 @@ pub(crate) struct Glow {
     /// grid channels with sixteen fraction bits: its dot's energy over a
     /// cell's area.
     deposit: u64,
+    /// The bits a spot's light is held to past light's own.
+    shift: u32,
     /// For each pixel column of the frame, the cells it lies between.
     columns: Vec<Between>,
     /// For each column of cells, the haze's cells it lies between.
@@ -158,12 +159,13 @@ pub(crate) struct Glow {
 
 impl Glow {
     /// The glow over a `size` frame whose cells span `cell` pixels, for spots
-    /// each shedding `energy` times its light in all, spread in as many bands
-    /// as `runner` takes; `None` when the heap will not hold its grids.
+    /// each shedding `energy` times its light in all, held as `shed` says,
+    /// spread in as many bands as `runner` takes; `None` when the heap will
+    /// not hold its grids.
     pub(crate) fn new(
         size: (u32, u32),
         cell: u32,
-        energy: u64,
+        (energy, shed): (u64, Shed),
         runner: &dyn JobRunner,
     ) -> Option<Self> {
         let cell = cell.max(1);
@@ -176,14 +178,14 @@ impl Glow {
         let haze_cells = haze_size.0.checked_mul(haze_size.1)?;
         let columns = fallible::collected(
             usize::try_from(size.0).ok()?,
-            (0..size.0).map(|x| across.between(x * 256 + 128)),
+            (0..size.0).map(|x| across.between(pixel_centre(x))),
         )?;
         let haze_columns = fallible::collected(
             across.cells,
             (0..across.cells).map(|column| clamped(centre_of(column, HAZE_CELLS), haze_size.0)),
         )?;
         let bands = tairix_parallel::bands(runner, down.cells, BAND_ROWS).max(1);
-        let band_rows = down.cells.div_ceil(bands);
+        let band_rows = piece_len(down.cells, bands);
         let block = across.cells.checked_mul(band_rows + 2 * APRON)?;
         let mut blocks = Vec::new();
         if !fallible::reserve(&mut blocks, bands) {
@@ -191,22 +193,23 @@ impl Glow {
         }
         for _ in 0..bands {
             blocks.push(Block {
-                cells: fallible::filled(block, DARK)?,
-                aux: fallible::filled(block, DARK)?,
+                cells: fallible::filled(block, Pixel16::BLACK)?,
+                aux: fallible::filled(block, Pixel16::BLACK)?,
             });
         }
         let area = u64::from(cell) * u64::from(cell) * RANGE * u64::from(LIGHT_ONE);
         Some(Self {
             across,
             down,
-            gathered: fallible::filled(cells, DARK)?,
-            halo: fallible::filled(cells, DARK)?,
+            gathered: fallible::filled(cells, Pixel16::BLACK)?,
+            halo: fallible::filled(cells, Pixel16::BLACK)?,
             band_rows,
             blocks,
             haze_size,
-            haze: fallible::filled(haze_cells, DARK)?,
-            haze_aux: fallible::filled(haze_cells, DARK)?,
-            deposit: ((energy * u64::from(FULL)) << 16) / area,
+            haze: fallible::filled(haze_cells, Pixel16::BLACK)?,
+            haze_aux: fallible::filled(haze_cells, Pixel16::BLACK)?,
+            deposit: ((energy * u64::from(Pixel16::FULL)) << 16) / area,
+            shift: shed.shift(),
             columns,
             haze_columns,
         })
@@ -214,26 +217,27 @@ impl Glow {
 
     /// Clear what the last frame gathered.
     pub(crate) fn clear(&mut self) {
-        self.gathered.fill(DARK);
+        self.gathered.fill(Pixel16::BLACK);
     }
 
     /// Gather `light` at `x` and `y`, 256ths of a pixel inside the frame.
     #[inline]
     pub(crate) fn gather(&mut self, (x, y): (u32, u32), light: [u16; 3]) {
         let (left, top) = (self.across.between(x), self.down.between(y));
-        let carried = light.map(|light| u64::from(light) * self.deposit);
-        let quarters = [
-            (0, 0, (256 - left.weight) * (256 - top.weight)),
-            (1, 0, left.weight * (256 - top.weight)),
-            (0, 1, (256 - left.weight) * top.weight),
-            (1, 1, left.weight * top.weight),
-        ];
-        for (dx, dy, weight) in quarters {
+        // Brought back once from the bits the spot's light is held to past
+        // light's own, rather than once a cell.
+        let carried = light.map(|light| (u64::from(light) * self.deposit) >> self.shift);
+        let quarters = [(0, 0), (1, 0), (0, 1), (1, 1)];
+        for ((dx, dy), weight) in quarters
+            .into_iter()
+            .zip(bilinear_weights(left.weight, top.weight))
+        {
             let index = (top.cell + dy) * self.across.cells + left.cell + dx;
             if let Some(cell) = self.gathered.get_mut(index) {
                 let add = |channel: u16, carried: u64| {
                     let share = (carried * u64::from(weight)) >> 32;
-                    u16::try_from((u64::from(channel) + share).min(u64::from(FULL))).unwrap_or(FULL)
+                    u16::try_from((u64::from(channel) + share).min(u64::from(Pixel16::FULL)))
+                        .unwrap_or(Pixel16::FULL)
                 };
                 cell.r = add(cell.r, carried[0]);
                 cell.g = add(cell.g, carried[1]);
@@ -242,14 +246,11 @@ impl Glow {
         }
     }
 
-    /// Spread what was gathered into the halo, a band of rows at a time
-    /// across `runner`, and the halo into the haze.
+    /// Soften what was gathered and spread it into the halo, a band of rows
+    /// at a time across `runner`, and the halo into the haze.
     pub(crate) fn spread(&mut self, runner: &dyn JobRunner) {
         let (across, down) = (self.across.cells, self.down.cells);
         let (haze_across, haze_down) = self.haze_size;
-        for cell in &mut self.gathered {
-            (cell.r, cell.g, cell.b) = (soften(cell.r), soften(cell.g), soften(cell.b));
-        }
         let (gathered, band_rows) = (&self.gathered, self.band_rows);
         let bands = self
             .halo
@@ -271,10 +272,12 @@ impl Glow {
             ) else {
                 return;
             };
-            cells.copy_from_slice(source);
-            for _ in 0..PASSES {
-                box_blur16(cells, across, to - from, HALO_RADIUS, aux);
+            // Softened as each band takes its rows, so it runs on every core;
+            // an apron's cells are softened again by the band they belong to.
+            for (cell, &gathered) in cells.iter_mut().zip(source) {
+                *cell = softened(gathered);
             }
+            soften16(cells, across, to - from, HALO_RADIUS, aux);
             let own = (first - from) * across;
             if let Some(blurred) = cells.get(own..own + halo.len()) {
                 halo.copy_from_slice(blurred);
@@ -283,21 +286,18 @@ impl Glow {
         // Gathered from the halo once it is spread, so no block of the haze
         // takes a light alone that its neighbour would have shared.
         gather_haze(&self.halo, across, &mut self.haze, haze_across);
-        for _ in 0..PASSES {
-            box_blur16(
-                &mut self.haze,
-                haze_across,
-                haze_down,
-                HAZE_RADIUS,
-                &mut self.haze_aux,
-            );
-        }
+        soften16(
+            &mut self.haze,
+            haze_across,
+            haze_down,
+            HAZE_RADIUS,
+            &mut self.haze_aux,
+        );
     }
 
     /// Where pixel row `row` of the frame lies between the rows of cells.
     pub(crate) fn rows_about(&self, row: u32) -> Between {
-        self.down
-            .between(row.saturating_mul(256).saturating_add(128))
+        self.down.between(pixel_centre(row))
     }
 
     /// Row `row` of cells, the halo and the haze summed as light, read out
@@ -321,7 +321,7 @@ impl Glow {
             let haze = haze_at(&self.haze, haze_across, haze_column, haze_row);
             let glow = |halo: u16, haze: u32| {
                 let sum = HALO_GAIN * u64::from(halo) + HAZE_GAIN * u64::from(haze);
-                let light = sum * RANGE * u64::from(LIGHT_ONE) / (256 * u64::from(FULL));
+                let light = sum * RANGE * u64::from(LIGHT_ONE) / (256 * u64::from(Pixel16::FULL));
                 u16::try_from(light).unwrap_or(u16::MAX)
             };
             *light = [
@@ -343,13 +343,12 @@ impl Glow {
 }
 
 /// Average each block of [`HAZE_CELLS`] cells each way of `halo`, `across`
-/// cells wide, into one cell of `haze`, `haze_across` wide.
+/// cells wide, into one cell of `haze`, `haze_across` wide: a block the
+/// halo's edge cuts short is the mean of the cells it holds.
 fn gather_haze(halo: &[Pixel16], across: usize, haze: &mut [Pixel16], haze_across: usize) {
-    let block = u32::try_from(HAZE_CELLS * HAZE_CELLS).unwrap_or(1);
-    let mean = |sum: u32| u16::try_from(sum / block).unwrap_or(FULL);
     for (haze_row, haze) in haze.chunks_exact_mut(haze_across).enumerate() {
         for (haze_column, out) in haze.iter_mut().enumerate() {
-            let mut sum = [0u32; 3];
+            let (mut sum, mut count) = ([0u32; 3], 0u32);
             let rows = halo
                 .chunks_exact(across)
                 .skip(haze_row * HAZE_CELLS)
@@ -359,13 +358,15 @@ fn gather_haze(halo: &[Pixel16], across: usize, haze: &mut [Pixel16], haze_acros
                     sum[0] += u32::from(cell.r);
                     sum[1] += u32::from(cell.g);
                     sum[2] += u32::from(cell.b);
+                    count += 1;
                 }
             }
+            let mean = |sum: u32| u16::try_from(sum / count.max(1)).unwrap_or(Pixel16::FULL);
             *out = Pixel16 {
                 r: mean(sum[0]),
                 g: mean(sum[1]),
                 b: mean(sum[2]),
-                a: FULL,
+                a: Pixel16::FULL,
             };
         }
     }
@@ -373,7 +374,7 @@ fn gather_haze(halo: &[Pixel16], across: usize, haze: &mut [Pixel16], haze_acros
 
 /// The haze `across` cells wide between the cells `column` and `row` name.
 fn haze_at(haze: &[Pixel16], across: usize, column: Between, row: Between) -> [u32; 3] {
-    let cell = |x: usize, y: usize| haze.get(y * across + x).copied().unwrap_or(DARK);
+    let cell = |x: usize, y: usize| haze.get(y * across + x).copied().unwrap_or(Pixel16::BLACK);
     let (a, b) = (cell(column.cell, row.cell), cell(column.cell + 1, row.cell));
     let (c, d) = (
         cell(column.cell, row.cell + 1),
@@ -395,7 +396,17 @@ fn haze_at(haze: &[Pixel16], across: usize, column: Between, row: Between) -> [u
 /// [`SOFTEN`] however bright.
 fn soften(light: u16) -> u16 {
     let light = u32::from(light);
-    u16::try_from(light * SOFTEN / (light + SOFTEN)).unwrap_or(FULL)
+    u16::try_from(light * SOFTEN / (light + SOFTEN)).unwrap_or(Pixel16::FULL)
+}
+
+/// `cell` gathered, each channel as it glows.
+fn softened(cell: Pixel16) -> Pixel16 {
+    Pixel16 {
+        r: soften(cell.r),
+        g: soften(cell.g),
+        b: soften(cell.b),
+        a: cell.a,
+    }
 }
 
 /// The centre of cell `index`, in 256ths of a cell `per` times as wide.
@@ -427,7 +438,7 @@ fn clamped(at: u32, cells: usize) -> Between {
 
 /// `from` carried `weight` 256ths of the way to `to`.
 #[inline]
-fn lerp(from: u32, to: u32, weight: u32) -> u32 {
+pub(crate) fn lerp(from: u32, to: u32, weight: u32) -> u32 {
     (from * (256 - weight) + to * weight + 128) >> 8
 }
 

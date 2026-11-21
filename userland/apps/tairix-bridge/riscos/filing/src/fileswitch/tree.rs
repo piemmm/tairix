@@ -13,6 +13,7 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 
 use tairix_riscos_kernel::error::{Error, BAD_PARAMETERS};
+use tairix_riscos_kernel::filing::filetype::DATA;
 use tairix_riscos_kernel::filing::fs;
 use tairix_riscos_kernel::filing::NOT_FOUND;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
@@ -629,8 +630,9 @@ impl Copy {
     /// type, where the copy asks.
     fn info(&self, os: &mut Os<'_>, source: &Info) -> Info {
         let mut info = *source;
-        if self.flags & flag::STAMP != 0 && fs::stamp::type_of(source.load).is_some() {
-            (info.load, info.exec) = file::stamp_now(os, (source.load >> 8) & 0xFFF);
+        let stamped = fs::stamp::type_of(source.load).filter(|_| self.flags & flag::STAMP != 0);
+        if let Some(kind) = stamped {
+            (info.load, info.exec) = file::stamp_now(os, kind);
         }
         info
     }
@@ -753,7 +755,7 @@ impl Copy {
             name::info(os, to, Need::Kind)?
         };
         if there.kind == NOTHING {
-            let (load, exec) = file::stamp_now(os, file::DATA);
+            let (load, exec) = file::stamp_now(os, DATA);
             let mut made = Regs::default();
             made.r[2..5].copy_from_slice(&[load, exec, COPIED_DIRECTORY_ENTRIES]);
             call::file_modifying(os, to, fs::file::CREATE_DIRECTORY, &mut made)?;

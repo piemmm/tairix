@@ -22,11 +22,13 @@ mod still;
 use tairix_fuzzseed::Prng;
 use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::os::{Fail, Kernel, Regs};
-use tairix_riscos_kernel::swi::chunk::{MESSAGE_TRANS, RESOURCE_FS, TERRITORY};
+use tairix_riscos_kernel::swi::chunk::{MESSAGE_TRANS, TERRITORY};
 use tairix_riscos_kernel::swi::os::{
     BYTE, CALL_A_VECTOR, INSTALL_KEY_HANDLER, READ_MONOTONIC_TIME,
 };
+use tairix_riscos_kernel::swi::resource_fs::{DEREGISTER_FILES, REGISTER_FILES};
 use tairix_riscos_kernel::swi::X;
+use tairix_riscos_kernel::vectors;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_RUNS: u64 = 12;
@@ -49,12 +51,6 @@ const OUT_ROOM: u32 = 0x800;
 /// What fills the room past a call's, to show it was not written.
 const CANARY: u8 = 0xA5;
 const CANARY_LEN: u32 = 64;
-
-/// `ResourceFS_RegisterFiles` and `ResourceFS_DeregisterFiles`.
-const RESOURCE_FS_REGISTER: u32 = RESOURCE_FS;
-const RESOURCE_FS_DEREGISTER: u32 = RESOURCE_FS + 1;
-/// `KeyV`.
-const KEY_VECTOR: u32 = 0x13;
 
 /// Pieces message files are made of.
 const TOKENS: [&[u8]; 10] = [
@@ -371,7 +367,7 @@ fn any_message_file_through_any_call_answers_as_a_value() {
             let other = message_file(rng);
             let block = resource_block(rng, &[(b"Fuzz.Messages", &file), (b"Fuzz.Other", &other)]);
             let _ = kernel.os().write_bytes(BLOCK, &block);
-            let registered = swi(&mut kernel, RESOURCE_FS_REGISTER, registers(&[BLOCK])).is_some();
+            let registered = swi(&mut kernel, REGISTER_FILES, registers(&[BLOCK])).is_some();
             let _ = kernel.os().write_bytes(FILE, &file);
             for step in 0..STEPS {
                 message_call(&mut kernel, rng);
@@ -379,7 +375,7 @@ fn any_message_file_through_any_call_answers_as_a_value() {
             }
             let _ = swi(&mut kernel, MESSAGE_TRANS + 4, registers(&[DESCRIPTOR]));
             if registered {
-                let _ = swi(&mut kernel, RESOURCE_FS_DEREGISTER, registers(&[BLOCK]));
+                let _ = swi(&mut kernel, DEREGISTER_FILES, registers(&[BLOCK]));
             }
             still_answers(&mut kernel, STEPS);
         },
@@ -504,7 +500,7 @@ fn key_step(kernel: &mut Kernel, rng: &mut Prng, clock: &std::cell::Cell<u64>) {
             let _ = swi(
                 kernel,
                 CALL_A_VECTOR,
-                registers(&[reason, key, 0, 0, 0, 0, 0, 0, 0, KEY_VECTOR]),
+                registers(&[reason, key, 0, 0, 0, 0, 0, 0, 0, vectors::KEY.0]),
             );
         }
         8 => {
@@ -550,7 +546,7 @@ fn key_step(kernel: &mut Kernel, rng: &mut Prng, clock: &std::cell::Cell<u64>) {
             let _ = swi(
                 kernel,
                 CALL_A_VECTOR,
-                registers(&[0, id, no_debounce, 0, 0, 0, 0, 0, 0, KEY_VECTOR]),
+                registers(&[0, id, no_debounce, 0, 0, 0, 0, 0, 0, vectors::KEY.0]),
             );
         }
         _ => {

@@ -9,12 +9,10 @@ use tairix_abi::saver::SaverFeeds;
 use tairix_abi::saver_ipc::{SaverMessage, Start};
 use tairix_abi::{Errno, APPINFO_FLAG_FEED_SLIDES};
 use tairix_raster::{Color, Surface};
-use tairix_saver::testing::{self, Screen};
+use tairix_saver::testing::{self, Screen, SEC};
 use tairix_saver::NextFrame;
 
 use super::Slideshow;
-
-const SEC: u64 = 1_000_000_000;
 
 const SIZE: (u32, u32) = (64, 36);
 

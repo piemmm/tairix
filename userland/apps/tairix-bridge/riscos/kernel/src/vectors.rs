@@ -596,7 +596,7 @@ impl Os<'_> {
             end -= DELINKED;
             let mut add = Regs::default();
             for (i, slot) in (0..).zip(&mut add.r[..3]) {
-                *slot = self.read_word(end + 4 * i)?;
+                *slot = self.read_word(end.wrapping_add(4 * i))?;
             }
             self.add_to_vector(&mut add)?;
         }

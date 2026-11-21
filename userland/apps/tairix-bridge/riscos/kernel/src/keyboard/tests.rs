@@ -13,9 +13,10 @@ use crate::msgtrans::tests::swi;
 use crate::swi::os::{BYTE, CALL_A_VECTOR, INSTALL_KEY_HANDLER};
 use crate::testkit::asm::{self, Condition};
 use crate::testkit::{Session, DATA};
+use crate::vectors;
 
 /// `KeyV`.
-const KEY_VECTOR: u32 = 0x13;
+const KEY_VECTOR: u32 = vectors::KEY.0;
 
 /// The guest handler's header, and where its tables and code are from it.
 const HANDLER: u32 = DATA + 0x1000;
@@ -451,9 +452,7 @@ fn a_nul_in_the_buffer_keeps_the_next_byte_as_itself() {
 
 #[test]
 fn insv_and_remv_move_blocks_as_far_as_the_buffer_allows() {
-    const INS_V: u32 = 0x14;
-    const REM_V: u32 = 0x15;
-    const BLOCK: u32 = 1 << 31;
+    use crate::input::BLOCK;
     let mut s = session();
     let _ = typed(&mut s);
     let data = DATA + 0x2000;
@@ -461,7 +460,7 @@ fn insv_and_remv_move_blocks_as_far_as_the_buffer_allows() {
     let inserted = swi(
         &mut s,
         CALL_A_VECTOR,
-        [0, BLOCK, data, 3, 0, 0, 0, 0, 0, INS_V, 0, 0, 0],
+        [0, BLOCK, data, 3, 0, 0, 0, 0, 0, vectors::INS.0, 0, 0, 0],
     )
     .expect("called");
     assert_eq!((inserted.r[2], inserted.r[3]), (data + 3, 0));
@@ -470,7 +469,7 @@ fn insv_and_remv_move_blocks_as_far_as_the_buffer_allows() {
     let removed = swi(
         &mut s,
         CALL_A_VECTOR,
-        [0, BLOCK, out, 2, 0, 0, 0, 0, 0, REM_V, 0, 0, 0],
+        [0, BLOCK, out, 2, 0, 0, 0, 0, 0, vectors::REM.0, 0, 0, 0],
     )
     .expect("called");
     assert_eq!((removed.r[2], removed.r[3]), (out + 2, 0));
@@ -479,7 +478,7 @@ fn insv_and_remv_move_blocks_as_far_as_the_buffer_allows() {
     let empty = swi(
         &mut s,
         CALL_A_VECTOR,
-        [0, BLOCK, out, 4, 0, 0, 0, 0, 0, REM_V, 0, 0, 0],
+        [0, BLOCK, out, 4, 0, 0, 0, 0, 0, vectors::REM.0, 0, 0, 0],
     )
     .expect("called");
     assert!(empty.flag(psr::C), "empty");
@@ -489,7 +488,7 @@ fn insv_and_remv_move_blocks_as_far_as_the_buffer_allows() {
     let filled = swi(
         &mut s,
         CALL_A_VECTOR,
-        [0, BLOCK, data, 300, 0, 0, 0, 0, 0, INS_V, 0, 0, 0],
+        [0, BLOCK, data, 300, 0, 0, 0, 0, 0, vectors::INS.0, 0, 0, 0],
     )
     .expect("called");
     assert!(filled.flag(psr::C), "the keyboard buffer holds fewer");

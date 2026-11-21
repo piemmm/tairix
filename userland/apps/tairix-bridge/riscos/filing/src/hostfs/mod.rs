@@ -24,6 +24,7 @@ use alloc::vec::Vec;
 use tairix_fscopy::tree::Dir as _;
 use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::filing::fs::{block, info};
+use tairix_riscos_kernel::filing::UNSUPPORTED;
 use tairix_riscos_kernel::module::{Builtin, Command, CommandKind, Help, Resource, Services};
 use tairix_riscos_kernel::msgtrans::{Own, OWN_DESCRIPTOR, REQUEST};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, Unwind, World};
@@ -34,9 +35,8 @@ use tairix_riscos_kernel::swi::X;
 use crate::filecore::{code, numbered};
 use protocol::{Refusal, Reply, Request};
 
-/// HostFS's filing system number: RPCEmu's HostFS's (recorded under RISC OS
-/// 5), which a program that looks for HostFS asks after.
-const NUMBER: u32 = 0x99;
+/// HostFS's filing system number.
+const NUMBER: u32 = tairix_riscos_kernel::cmos::HOSTFS as u32;
 
 /// Its information word: its number, a host of image filing systems, told
 /// of each flush, and loading and saving through its open files.
@@ -107,7 +107,7 @@ pub static HOST_FS: Builtin = Builtin {
     vectors: &[],
     resources: &[Resource {
         name: "Resources.HostFS.Messages",
-        file_type: 0xFFF,
+        file_type: tairix_riscos_kernel::filing::filetype::TEXT,
         data: MESSAGES,
     }],
     code: None,
@@ -481,15 +481,15 @@ const fn own_error(code: u8, token: &'static str) -> Error {
     }
 }
 const TOO_LARGE: Error = Error {
-    number: 0x40E,
+    number: UNSUPPORTED.number,
     token: "TooLarge",
 };
 const UNKEPT: Error = Error {
-    number: 0x40E,
+    number: UNSUPPORTED.number,
     token: "Unkept",
 };
 const FAILED: Error = Error {
-    number: 0x40E,
+    number: UNSUPPORTED.number,
     token: "Failed",
 };
 

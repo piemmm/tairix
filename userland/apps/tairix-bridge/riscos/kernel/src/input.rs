@@ -43,7 +43,7 @@ const ESCAPE: u8 = 0x1B;
 /// right, down, up.
 const CURSOR_KEYS: core::ops::RangeInclusive<u8> = 0x8B..=0x8F;
 /// `OS_Byte` 126: an escape acknowledged.
-pub(crate) const ACKNOWLEDGE_ESCAPE: u32 = 126;
+pub const ACKNOWLEDGE_ESCAPE: u32 = 126;
 /// "Escape".
 const ESCAPE_ERROR: crate::error::Error = crate::error::Error {
     number: 0x11,
@@ -86,7 +86,7 @@ impl Ring {
 }
 
 /// `InsV`'s and `RemV`'s R1 bit for a block of bytes rather than one.
-const BLOCK: u32 = 1 << 31;
+pub(crate) const BLOCK: u32 = 1 << 31;
 
 /// The buffers and what reading them holds over between calls.
 pub(crate) struct Input {

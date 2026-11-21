@@ -35,6 +35,7 @@ mod workspace;
 
 pub use module::{BASIC, BASIC64};
 pub use tairix_riscos_arm::fpa::Exception;
+pub use value::STRING_MOST;
 
 /// The session's built-in modules this crate provides.
 pub static MODULES: [&tairix_riscos_kernel::module::Builtin; 2] = [&BASIC, &BASIC64];

@@ -5,6 +5,8 @@
 
 use tairix_riscos_kernel::module::Builtin;
 use tairix_riscos_kernel::os::{Ended, Fail, Os, Regs, Unwind};
+use tairix_riscos_kernel::swi::os::environment::{ERROR, ESCAPE, EXIT, UPCALL};
+use tairix_riscos_kernel::swi::os::exit::ABEX;
 use tairix_riscos_kernel::swi::{os as swi, X};
 
 use crate::machine::{flag, Machine, Mode, Trap};
@@ -20,18 +22,10 @@ const HANDLERS: [(u32, usize, bool); 4] = [
     (EXIT, routine::EXIT, false),
     (UPCALL, routine::UPCALL, false),
 ];
-/// The handlers' numbers.
-const ERROR: u32 = 6;
-const ESCAPE: u32 = 9;
-const EXIT: u32 = 11;
-const UPCALL: u32 = 16;
-
 /// `@%`'s value at the start: general layout, ten digits, ten wide.
 const AT_PERCENT: u32 = 0x90A;
 /// `LISTO`'s at the start, as recorded.
 const LISTO: u32 = 0;
-/// `OS_Exit`'s word saying R2 holds a return code.
-const ABEX: u32 = 0x5845_4241;
 
 /// The application's start: the workspace laid out, the handlers taken, the
 /// options followed, then the machine's first slice.

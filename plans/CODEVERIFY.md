@@ -270,8 +270,8 @@ host build script, or fixture), `TODO`/`FIXME`/`HACK`/"for now" markers (§2.1,
 §2.19), `cfg(target_arch …)`/`cfg(target_pointer_width …)` outside the §17.2
 allow-list, and 32-bit absolute time in an ABI or persisted format (§21).
 Also clean, and worth re-checking only when fixture source changes: rustc
-warnings in the freestanding fixture bodies — a `cargo check --target` over all
-149 enrolled package/target pairs reports none.
+warnings in the freestanding fixture bodies — a `cargo check --target` over
+every enrolled package/target pair reports none.
 
 ### Done — every `#[allow(...)]` states an invariant, and three defects it hid
 

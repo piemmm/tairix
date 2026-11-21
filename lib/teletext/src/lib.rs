@@ -53,19 +53,12 @@ pub const fn double_first_line(lower: bool) -> usize {
     }
 }
 
-/// Build a glyph from ten rows of five columns, `#` for a dot.
+/// A glyph from ten rows of five columns of glyph art.
 const fn glyph(art: [&str; 10]) -> [u8; 10] {
     let mut rows = [0u8; 10];
     let mut row = 0;
     while row < 10 {
-        let bytes = art[row].as_bytes();
-        let mut column = 0;
-        while column < 5 {
-            if bytes[column] == b'#' {
-                rows[row] |= 0x10 >> column;
-            }
-            column += 1;
-        }
+        rows[row] = tairix_font::art::dots(art[row].as_bytes(), 5);
         row += 1;
     }
     rows

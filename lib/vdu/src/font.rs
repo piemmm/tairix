@@ -647,18 +647,7 @@ pub const fn draw(art: Art) -> Glyph {
     let mut glyph = [0; 8];
     let mut y = 0;
     while y < 8 {
-        let row = art[y].as_bytes();
-        assert!(row.len() == 8, "a glyph row is eight pixels");
-        let mut x = 0;
-        while x < 8 {
-            glyph[y] <<= 1;
-            match row[x] {
-                b'#' => glyph[y] |= 1,
-                b'.' => {}
-                _ => panic!("a pixel is # or ."),
-            }
-            x += 1;
-        }
+        glyph[y] = tairix_font::art::dots(art[y].as_bytes(), 8);
         y += 1;
     }
     glyph

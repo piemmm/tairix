@@ -7,14 +7,12 @@ use tairix_abi::bounded_text::BoundedText;
 use tairix_abi::saver_ipc::Start;
 use tairix_geometry::Rect;
 use tairix_raster::Surface;
-use tairix_saver::testing::{self, Screen, FRAME_NS};
+use tairix_saver::testing::{self, Screen, FRAME_NS, SEC};
 use tairix_saver::{footprint, NextFrame, SaverValue, Told, WallReading};
 
 use super::{identity_line, ClockFace};
 
 const SCREEN: (u32, u32) = (1920, 1080);
-
-const SEC: u64 = 1_000_000_000;
 
 /// A reading of `time` on `date`, next changing at `next_ns`.
 fn reading(time: &str, date: &str, next_ns: u64) -> WallReading {

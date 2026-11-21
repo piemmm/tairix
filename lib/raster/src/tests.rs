@@ -3073,6 +3073,58 @@ fn a_figure_drawn_in_bands_through_its_scratch_is_the_figure_whole() {
     assert_eq!(few.dispatches(), 0, "one grain's worth of rows is one band");
 }
 
+/// A paint's bands tile its rows, no more of them than it allows, each but the
+/// last a whole number of its unit's rows from its first row and worth its
+/// grain; a unit of one row cuts as the rows alone would.
+#[test]
+fn paint_bands_cut_whole_units_of_rows() {
+    use tairix_parallel::Reversed;
+    let runner = Reversed::new(8);
+    let mut surface = Surface::new(64, 300).expect("allocates");
+    let grain = 3 * 64;
+    let mut cut = |rows: core::ops::Range<u32>, unit: u32, most: usize| {
+        let mut cut = alloc::vec::Vec::new();
+        surface.paint_bands(
+            rows,
+            &runner,
+            (most, grain, unit),
+            |band| cut.push(band.rows()),
+            &|(): &mut ()| {},
+        );
+        cut
+    };
+    for (rows, unit, most) in [
+        (7..300, 16, usize::MAX),
+        (0..300, 16, 5),
+        (0..300, 7, usize::MAX),
+    ] {
+        let bands = cut(rows.clone(), unit, most);
+        assert!(
+            bands.len() > 1 && bands.len() <= most,
+            "{rows:?} by {unit}: {bands:?}"
+        );
+        assert_eq!(bands.first().map(|band| band.start), Some(rows.start));
+        assert_eq!(bands.last().map(|band| band.end), Some(rows.end));
+        for (band, next) in bands.iter().zip(bands.iter().skip(1)) {
+            assert_eq!(band.end, next.start, "{rows:?} by {unit}: tiled");
+            assert_eq!(
+                band.len() % usize::try_from(unit).expect("small"),
+                0,
+                "{band:?}"
+            );
+            assert!(band.len() * 64 >= grain, "{band:?} worth its grain");
+        }
+    }
+    let rows_alone = crate::band_rows(247, tairix_parallel::bands(&runner, 247, 3));
+    let bands = cut(3..250, 1, usize::MAX);
+    assert!(bands.len() > 1);
+    assert!(bands
+        .iter()
+        .rev()
+        .skip(1)
+        .all(|band| u32::try_from(band.len()).ok() == Some(rows_alone)));
+}
+
 /// A masked wash through a band is the wash through the whole surface, band
 /// edges and all, with each pixel's mask read at its own surface position.
 #[test]

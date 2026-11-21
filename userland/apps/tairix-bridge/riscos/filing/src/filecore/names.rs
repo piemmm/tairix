@@ -14,8 +14,7 @@ use tairix_riscos_kernel::os::{Fail, Os};
 use super::disc::{with_volume, ClientDisc};
 use super::{code, fail, with_instance, Client, DRIVES};
 
-/// The longest name FileSwitch hands a filing system: a disc's and a path's.
-pub(crate) const NAME_MOST: usize = 1024;
+pub(crate) use crate::fileswitch::name::NAME_MOST;
 
 /// A name split as FileSwitch hands it.
 pub(crate) struct Named {

@@ -8,7 +8,7 @@ use super::layout::APPLICATION;
 use super::{access_privilege, Holder, Memory};
 
 /// The page flag marking a page claimed exclusively.
-const UNAVAILABLE: u32 = 1 << 15;
+pub(super) const UNAVAILABLE: u32 = 1 << 15;
 /// The page flag marking a page `OS_Memory` 23 reserved.
 pub const RESERVED: u32 = 1 << 7;
 

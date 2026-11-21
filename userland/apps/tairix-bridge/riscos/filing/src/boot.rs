@@ -15,6 +15,7 @@
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
+use tairix_riscos_kernel::filing::filetype::{ABSOLUTE, BASIC, MODULE, OBEY, SPRITE, UTILITY};
 use tairix_riscos_kernel::os::{Fail, Os};
 use tairix_riscos_kernel::release::RELEASE;
 
@@ -48,14 +49,6 @@ const LIBRARY: &[u8] = b",Boot:Library.";
 const COMMANDS: &[u8] = b"commands";
 /// `Boot$Unique` for a boot application on the machine's own disc.
 const LOCAL: &[u8] = b"Local";
-
-/// The file types `PreDesk` runs as the PRM's boot application runs them.
-const OBEY: u32 = 0xFEB;
-const ABSOLUTE: u32 = 0xFF8;
-const UTILITY: u32 = 0xFFC;
-const SPRITE: u32 = 0xFF9;
-const MODULE: u32 = 0xFFA;
-const BASIC: u32 = 0xFFB;
 
 /// The session's home made ready and, on the user's own disc, the
 /// command-line half of the boot run: what the session's start calls once

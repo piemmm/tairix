@@ -12,10 +12,36 @@ use crate::territory::{
 };
 use crate::vectors::{self, Carry};
 
+/// `OS_Word` 14: the real-time clock read, by one of [`read`]'s reasons.
+pub const READ_CLOCK: u32 = 14;
+/// `OS_Word` 15: the real-time clock set, by one of [`set`]'s reasons.
+pub const SET_CLOCK: u32 = 15;
+
+/// `OS_Word` 14's reasons, in its block's first byte.
+pub mod read {
+    /// The time as a string.
+    pub const STRING: u8 = 0;
+    /// The time as five bytes of UTC.
+    pub const UTC: u8 = 3;
+}
+
+/// `OS_Word` 15's reasons, in its block's first byte: a string's is its
+/// length.
+pub mod set {
+    /// From five bytes of UTC.
+    pub const UTC: u8 = 5;
+    /// From a local time.
+    pub const TIME: u8 = 8;
+    /// From a local date.
+    pub const DATE: u8 = 15;
+    /// From a local date and time.
+    pub const DATE_AND_TIME: u8 = 24;
+}
+
 /// The territory `-1` names: the current one.
 const CURRENT: u32 = u32::MAX;
 /// `OS_Word` 14's string form.
-const LONG_FORMAT: &[u8] = b"%w3,%dy %m3 %ce%yr.%24:%mi:%se\0";
+pub(crate) const LONG_FORMAT: &[u8] = b"%w3,%dy %m3 %ce%yr.%24:%mi:%se\0";
 
 impl Os<'_> {
     /// `OS_Word`, through `WordV` with interrupts disabled; C and V as the
@@ -63,7 +89,7 @@ impl Os<'_> {
             }
             7 => {
                 let channel = self.read_word(block)?;
-                let pitch = self.read_word(block + 4)?;
+                let pitch = self.read_word(block.wrapping_add(4))?;
                 let mut sound = Regs::new([channel, pitch, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
                 self.perform_quietly(
                     crate::swi::X | crate::swi::sound::CONTROL_PACKED,
@@ -71,8 +97,8 @@ impl Os<'_> {
                 )?;
                 true
             }
-            14 => self.read_clock(block)?,
-            15 => self.write_clock(block)?,
+            READ_CLOCK => self.read_clock(block)?,
+            SET_CLOCK => self.write_clock(block)?,
             21 => {
                 let reason = self.read_byte(block)?;
                 self.mouse_word(reason, block)?
@@ -125,7 +151,7 @@ impl Os<'_> {
         let mut address = [0; 2];
         self.read_bytes(block, &mut address)?;
         let mut limits = [0; 3];
-        self.read_bytes(block + 2, &mut limits)?;
+        self.read_bytes(block.wrapping_add(2), &mut limits)?;
         let mut line = Regs::new([
             u32::from(u16::from_le_bytes(address)),
             u32::from(limits[0]),
@@ -154,7 +180,7 @@ impl Os<'_> {
     fn read_clock(&mut self, block: u32) -> Result<bool, Fail> {
         let sub = self.read_byte(block)?;
         match sub {
-            0 => {
+            read::STRING => {
                 let now = self.real_time();
                 self.clock_string(block, now)?;
             }
@@ -179,7 +205,7 @@ impl Os<'_> {
             }
             2 => {
                 let mut bcd = [0; 8];
-                self.read_bytes(block + 1, &mut bcd[..7])?;
+                self.read_bytes(block.wrapping_add(1), &mut bcd[..7])?;
                 let decimal = |b: u8| u32::from(b >> 4) * 10 + u32::from(b & 0xF);
                 let ordinals = [
                     0,
@@ -193,7 +219,7 @@ impl Os<'_> {
                 let time = self.time_of_ordinals(&ordinals)?;
                 self.clock_string(block, time)?;
             }
-            3 => {
+            read::UTC => {
                 let now = self.real_time();
                 self.write_five(block, now)?;
             }
@@ -215,7 +241,7 @@ impl Os<'_> {
         let mut text = [0; 24];
         self.read_bytes(out, &mut text)?;
         self.write_bytes(block, &text)?;
-        self.write_byte(block + 24, b'\r')
+        self.write_byte(block.wrapping_add(24), b'\r')
     }
 
     /// `time`'s ordinals in the current territory: centiseconds, seconds,
@@ -250,8 +276,8 @@ impl Os<'_> {
     fn write_clock(&mut self, block: u32) -> Result<bool, Fail> {
         let sub = self.read_byte(block)?;
         let time = match sub {
-            5 => self.read_five(block.wrapping_add(1))?,
-            8 | 15 | 24 => {
+            set::UTC => self.read_five(block.wrapping_add(1))?,
+            set::TIME | set::DATE | set::DATE_AND_TIME => {
                 let length = self.clock_string_length(sub)?;
                 let (text, _) = self.read_until(block.wrapping_add(1), length, |_| false)?;
                 match self.time_from_string(sub, &text) {
@@ -270,8 +296,8 @@ impl Os<'_> {
     /// for a date, seven and the longest weekday, day and month the territory
     /// writes, and nine more with a time.
     fn clock_string_length(&mut self, sub: u8) -> Result<usize, Fail> {
-        if sub == 8 {
-            return Ok(8);
+        if sub == set::TIME {
+            return Ok(usize::from(set::TIME));
         }
         let scratch = self.world.scratch;
         let now = self.real_time();
@@ -283,7 +309,7 @@ impl Os<'_> {
         for word in [24, 28, 40] {
             longest += self.read_word(info + word)? as usize;
         }
-        Ok(if sub == 15 { 7 } else { 16 } + longest)
+        Ok(if sub == set::DATE { 7 } else { 16 } + longest)
     }
 
     /// The time a local time, date or date and time string names, the
@@ -293,8 +319,8 @@ impl Os<'_> {
         let string = scratch + 40;
         self.write_terminated(string, text, 0, text.len() + 1)?;
         let which = match sub {
-            8 => 1,
-            15 => 2,
+            set::TIME => 1,
+            set::DATE => 2,
             _ => 3,
         };
         let mut parse = Regs::new([

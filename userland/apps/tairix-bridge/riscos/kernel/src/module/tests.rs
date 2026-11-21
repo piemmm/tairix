@@ -8,11 +8,14 @@ use tairix_riscos_arm::psr;
 
 use super::header::Field;
 use super::inventory::{Held, INVENTORY};
-use super::{CommandKind, Help};
+use super::{value_padding, CommandKind, Help, VALUE_COLUMN};
+use crate::filing::filetype;
+use crate::filing::fs::stamp;
 use crate::memory::layout::{APPLICATION, RISC_OS_5, SHARED};
 use crate::memory::Bits;
 use crate::os::{len32, Ended, Fail, Outcome, Regs, Unwind};
-use crate::swi::os::{MODULE, READ_DYNAMIC_AREA};
+use crate::swi::os::exit::ABEX;
+use crate::swi::os::{EXIT_AND_DIE, MODULE, READ_DYNAMIC_AREA};
 use crate::swi::X;
 use crate::testkit::asm::{self, Condition};
 use crate::testkit::{with_application, Session, CODE, DATA};
@@ -25,8 +28,6 @@ const NAME: u32 = DATA + 0x800;
 const SEEN: u32 = DATA;
 /// A test module's SWI chunk.
 const CHUNK: u32 = 0x5_A5C0;
-/// `OS_Exit`'s word asking for its return code.
-const ABEX: u32 = 0x5845_4241;
 
 /// A guest module image, every offset from its start.
 struct Guest {
@@ -827,7 +828,7 @@ fn exit_and_die_kills_the_module_and_exits() {
     let code = named(&mut s, 18, b"Dying").expect("found").r[3];
     s.kernel.os().world.env.set_active_object(code);
     s.write(NAME, b"Dying\r");
-    let outcome = s.start_swi(0x50, [0, ABEX, 7, NAME, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let outcome = s.start_swi(EXIT_AND_DIE, [0, ABEX, 7, NAME, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert_eq!(outcome, Outcome::Ended(Ended::Exit { code: 7 }));
     assert_eq!(s.peek(SEEN + 24), 1, "finalised despite being active");
 }
@@ -894,7 +895,7 @@ fn loading_a_module_file_reads_it_through_os_file() {
             asm::subs(6, 6, 4),
             asm::when(Condition::Ne, asm::b(claimant + 56, claimant + 44)),
             asm::claim(),
-            0xFFFF_FA00,
+            stamp::typed(filetype::MODULE, 0),
             length,
         ],
     );
@@ -1287,4 +1288,17 @@ fn a_command_two_modules_have_is_the_first_s_in_the_module_list() {
     let (regs, _) = s.user_swi(X | 0x05, [NAME, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     assert!(!regs.flag(psr::V));
     assert_eq!(s.peek(SEEN + 0x70), 1);
+}
+
+#[test]
+fn a_listing_s_value_starts_at_its_column_or_a_space_past_a_long_keyword() {
+    assert_eq!(value_padding(0), VALUE_COLUMN);
+    assert_eq!(value_padding(4), VALUE_COLUMN - 4);
+    assert_eq!(value_padding(VALUE_COLUMN - 1), 1);
+    assert_eq!(
+        value_padding(VALUE_COLUMN),
+        1,
+        "a keyword that reaches the column"
+    );
+    assert_eq!(value_padding(VALUE_COLUMN + 9), 1, "and one past it");
 }

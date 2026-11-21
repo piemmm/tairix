@@ -20,9 +20,9 @@ use crate::error::BAD_PARAMETERS;
 /// The input function gives physical addresses.
 const PHYSICAL_INPUT: u32 = 1 << 8;
 /// The transfer writes to RAM.
-const DMA_WRITES: u32 = 1 << 9;
+pub(super) const DMA_WRITES: u32 = 1 << 9;
 /// The transfer is over: the regions are walked again, nothing output.
-const COMPLETE: u32 = 1 << 10;
+pub(super) const COMPLETE: u32 = 1 << 10;
 /// The functions use 64-bit physical addresses.
 const WIDE: u32 = 1 << 11;
 /// A region's flag: a bounce buffer is or must be used.

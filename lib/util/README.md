@@ -58,7 +58,8 @@ nothing from here: the rule for a hidden character it needs is `lib/visible`'s.
 * `lanes` — finding a byte eight lanes of a word at a time.
 * `mathf` — bounded, total `f64` maths for `no_std` geometry, with no external
   libm and the same bits on every target, the one clamped `smoothstep` (with
-  its `f32` twin), `Phasor`, a sine swept along a row a turn at a time, the
+  its `f32` twin), `Phasor`, a sine swept along a row a turn at a time, and
+  `Turn`, the angle-addition rotation it turns by, the
   half-precision conversions `to_half`, `from_half` and `quantized_to_half`,
   and `float_of` and `float_bits`, a half, single or double read from its bits
   and rounded once back to them, a `NaN` as its width's one quiet `NaN`. Its

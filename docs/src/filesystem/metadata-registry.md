@@ -44,6 +44,9 @@ HostFS share — a dot and a slash trading places, as a space and RISC OS's hard
 space do — and
 `acorn::filetype_name` gives the name RISC OS gives a type it allocates itself
 (`&FFF` Text, `&AFF` DrawFile), a type elsewhere being its software's to name.
+FileSwitch's attribute byte is `acorn::fileswitch`, which TAIRiX Bridge's
+kernel and HostFS take their attribute bits from; `attr_from_fileswitch` and
+`attr_to_fileswitch` carry it to and from the registry's `acorn.attr` bits.
 
 ## Amiga (AmigaDOS / FFS)
 
