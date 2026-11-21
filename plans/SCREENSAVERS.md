@@ -24,12 +24,13 @@ store), `docs/src/security/sandbox.md`.
 | SV8 | The catalogue and the Settings pane: discovered savers, previews, declared options, feed settings | done |
 | SV9 | Every built-in scene is its own bundle under `userland/gui/screensavers/`; the session draws none of them | done |
 | SV10 | Image build, docs, charter amendments and the QEMU vertical | done |
+| SV11 | Bubble Universe: the Bubble Universe map's curves as additive dots of light with a softened glow, a bundle like the rest | done |
 
 ## 0. The binding decisions
 
 - **A screensaver is a bundle, and only a bundle.** Clock, Ribbon, Starfield,
-  Life, the ray tracer, Retro Games, System Monitor and Slideshow each ship as
-  `<Name>.app` of kind `screensaver`. Blank and Dim stay the session's own
+  Bubble Universe, Life, the ray tracer, Retro Games, System Monitor and
+  Slideshow each ship as `<Name>.app` of kind `screensaver`. Blank and Dim stay the session's own
   display states: they draw nothing a bundle could.
 - **Every saver is sandboxed, system ones too.** A saver runs capability-empty
   in the drawing sandbox (SV3): its two pipes, its one shared region, its own
@@ -285,3 +286,33 @@ machine feed. Its script opens Settings, chooses the first once the catalogue
 has reached the chooser, and previews it; a key typed on its first frame
 takes it down. It passes on the second refused and never loaded, the first
 loaded from the account's store, shown, and dismissed.
+
+## 11. SV11 — Bubble Universe
+
+`userland/gui/screensavers/bubbleuniverse/`, `BubbleUniverse.app`, asking for
+no capability and no feed, `threads = "cores"`. The decisions it holds:
+
+- **Each curve sets off from the origin.** The map's curves are independent,
+  so a gang of eight is stepped to a vector's lanes and the gangs of every
+  moment are spread across the saver's threads; a curve's sine and cosine of
+  `i + φ + v` and `r·i + t + u` come by angle addition from per-moment phases
+  and a short series over `|u|, |v| <= 2`, never a range-reduced sine a step.
+- **The picture is the same at every size.** The bubble is a share of the
+  screen's shorter side; a dot is a tent a whole number of pixels wide, the
+  light it sheds held to its size's worth whatever its radius rounds to, so
+  every screen sheds the same light area for area.
+- **Light adds and is toned.** Dots accumulate in 4.12 fixed point; the tone
+  curve `1 − e^(−light)` is one table load a channel and the ordered dither
+  rounds it. The glow is gathered from one moment's points on a coarse grid,
+  each cell softened so a curve settled on one point glows as a crowd and not
+  as two hundred, and spread into a halo, banded across the threads with an
+  apron that keeps it exact, and a wider haze.
+- **Work follows the bubble.** Each tracing job counting-sorts its own points
+  into strips of sixteen rows; each band of the paint draws a strip's dots
+  into a padded scratch of its own and tones it at once, and only the square
+  about the bubble, and what it uncovered as it wandered, is repainted.
+- **Motion is calm and never repeats.** A frame is exposed at four moments
+  over half its time; the drift `φ` runs a seventh as fast as `t`; the whole
+  turns once in seven minutes and wanders up to eight hundredths of its radius
+  against burn-in. Under reduced motion each picture is a still held a minute,
+  the next set further on and elsewhere.

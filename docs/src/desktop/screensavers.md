@@ -105,6 +105,17 @@ relaying each call.
   of rows at a time across the saver's threads, each streak's brightness
   stepped along its rows in whole numbers. Its options set the density and
   whether it warps; under reduced motion it only cruises and does not turn.
+- **Bubble Universe** (`BubbleUniverse.app`): two hundred curves of the
+  Bubble Universe map `u' = sin(i + φ + v) + sin(r·i + t + u)`,
+  `v' = cos(i + φ + v) + cos(r·i + t + u)`, each stepped two hundred times from
+  the origin, drawn as soft dots whose light adds where they crowd and glows in
+  a softened halo and haze before it is toned and dithered. Each frame is
+  exposed at four moments so the rings and spirals flow; a slow drift of `φ`
+  keeps the picture from repeating, and the bubble turns and wanders a little
+  against burn-in. The curves are stepped eight to a vector's lanes across the
+  saver's threads, and each band of rows draws and tones its own strips, so
+  only the square about the bubble is repainted. Its options set the colours,
+  the speed and the glow; under reduced motion each picture holds a minute.
 - **Game of Life** (`Life.app`): Conway's B3/S23 on a torus, bit-packed and
   stepped a word at a time, a newborn taking the colour of the colony most of
   its parents belong to and cells shading as they age; a world that settles

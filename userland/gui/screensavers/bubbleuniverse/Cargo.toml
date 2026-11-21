@@ -1,0 +1,56 @@
+[package]
+name = "tairix-saver-bubbleuniverse"
+description = "TAIRiX Bubble Universe screensaver: a glowing disc of rings and spirals woven from the Bubble Universe map. The host-tested scene is the crate's [lib]; the freestanding `Run` binary is the on-disk BubbleUniverse.app bundle's entry point, serving it over lib/saver in the drawing sandbox."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+name = "tairix_saver_bubbleuniverse"
+path = "src/lib.rs"
+
+# The `Run` entry point of the on-disk `BubbleUniverse.app` bundle:
+# freestanding on the native Tier-1 targets, an inert host stub elsewhere
+# (`build.rs`).
+[[bin]]
+name = "tairix-saver-bubbleuniverse-run"
+path = "src/run.rs"
+
+[dependencies]
+tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
+# The sRGB transfer the light is toned through, and the L*a*b* the palettes
+# are mixed in.
+tairix-colour = { path = "../../../../lib/colour", version = "=0.0.0" }
+tairix-geometry = { path = "../../../../lib/geometry", version = "=0.0.0" }
+# The pool a frame is traced and drawn across.
+tairix-parallel = { path = "../../../../lib/parallel", version = "=0.0.0" }
+# The surface, its row bands and dither, and the blur the glow spreads by.
+tairix-raster = { path = "../../../../lib/raster", version = "=0.0.0" }
+# The generator the seed sets the universe's phases with.
+tairix-rng = { path = "../../../../lib/rng", version = "=0.0.0" }
+tairix-saver = { path = "../../../../lib/saver", version = "=0.0.0" }
+# The scene clock every idle scene is paced by.
+tairix-theme = { path = "../../../../lib/theme", version = "=0.0.0" }
+# The float functions and the fallible reservations.
+tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }
+
+# The `Run` binary is a userland program serving the saver protocol over its
+# standard streams. Bare-metal only.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../../lib/rt", version = "=0.0.0" }
+tairix-saver = { path = "../../../../lib/saver", version = "=0.0.0", features = ["program"] }
+
+[dev-dependencies]
+tairix-saver = { path = "../../../../lib/saver", version = "=0.0.0", features = ["test-support"] }
+# The order-shuffling and threaded runners a banded frame is proven
+# bit-identical through.
+tairix-parallel = { path = "../../../../lib/parallel", version = "=0.0.0", features = ["test-util"] }
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

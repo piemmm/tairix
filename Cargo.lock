@@ -4870,6 +4870,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-saver-bubbleuniverse"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-colour",
+ "tairix-geometry",
+ "tairix-parallel",
+ "tairix-raster",
+ "tairix-rng",
+ "tairix-rt",
+ "tairix-saver",
+ "tairix-theme",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-saver-clock"
 version = "0.0.0"
 dependencies = [

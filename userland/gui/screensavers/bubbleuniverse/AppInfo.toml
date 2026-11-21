@@ -1,0 +1,15 @@
+# Signed-AppInfo manifest source for Bubble Universe, a desktop screensaver. It
+# runs in the drawing sandbox, so it asks for no capability and no feed; it
+# traces and draws each frame across every core it is granted.
+id = "os.tairix.saver.bubble-universe"
+name = "BubbleUniverse"
+title = "Bubble Universe"
+version = "0.1.0"
+kind = "screensaver"
+purpose = "A glowing disc of rings and spirals woven from two hundred curves, flowing as its time runs"
+author = "The TAIRiX Project"
+capabilities = []
+threads = "cores"
+option.colours = { label = "Colours", note = "The colours the curves are drawn in. Original colours each point by its curve and its place along it, as the first Bubble Universe did.", choice = ["original:Original", "nebula:Nebula", "aurora:Aurora", "ember:Ember", "ice:Ice", "spectrum:Spectrum"], default = "original" }
+option.speed = { label = "Speed", note = "How fast the rings and spirals flow.", choice = ["slow:Slow", "normal:Normal", "fast:Fast"], default = "normal" }
+option.glow = { label = "Glow", note = "Whether the light casts a soft halo and a wide haze about itself, rather than showing only its points.", switch = true }

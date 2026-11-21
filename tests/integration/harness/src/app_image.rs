@@ -1571,6 +1571,7 @@ mod tests {
     /// tree, by manifest name, pinned so dropping or mis-spelling a manifest is
     /// a loud test diff.
     const EXPECTED_PROGRAM_BUNDLES: &[&str] = &[
+        "BubbleUniverse",
         "Clock",
         "Draw",
         "Life",

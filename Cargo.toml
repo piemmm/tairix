@@ -384,6 +384,7 @@ members = [
     "userland/gui/session",
     "userland/gui/switchboard",
     "userland/gui/recorder",
+    "userland/gui/screensavers/bubbleuniverse",
     "userland/gui/screensavers/clock",
     "userland/gui/screensavers/life",
     "userland/gui/screensavers/raytrace",
