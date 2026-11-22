@@ -178,7 +178,9 @@ pub fn command(os: &mut Os<'_>, line: &str) -> Result<(), Fail> {
         .expect("written");
     let mut regs = Regs::default();
     regs.r[0] = at;
-    os.perform(X | CLI, &mut regs)
+    let ran = os.perform(X | CLI, &mut regs);
+    os.rma_free(at).expect("the line's block given back");
+    ran
 }
 
 /// The redirection a command line set up ended and its files closed, as

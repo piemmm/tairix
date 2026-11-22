@@ -9,12 +9,12 @@ use alloc::vec::Vec;
 use tairix_image::{SPRITE_HEADER_LEN, SPRITE_PALETTE_ENTRY_LEN};
 use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
-use tairix_vdu::palette::{default_256, grouped, DEFAULT_2, DEFAULT_4};
 
 use super::create::{new_palette_entries, Target};
 use super::format::Pixels;
 use super::header::{advanced, Sprite};
 use super::{FULL_PALETTE, NO_DEEP_PALETTE, NO_MEMORY, NO_ROOM_TO_GROW, OUTSIDE};
+use crate::palette::{default_words, grouped_colours, GROUP_BASES};
 
 /// A palette word's low byte, the form a colour set for both flash states
 /// takes, as RISC OS 5 writes every palette entry it makes.
@@ -672,44 +672,28 @@ fn palette_colours(
         os.read_word(sprite.address(SPRITE_HEADER_LEN + i * SPRITE_PALETTE_ENTRY_LEN))
     };
     if held != 0 && pixels.log2_bpp == 3 {
-        let mut bases = [([0u8; 3], 0u8); 16];
-        for (k, base) in (0u32..).zip(bases.iter_mut()) {
-            let word = if k < held { entry_word(os, k)? } else { 0 };
-            let [low, r, g, b] = word.to_le_bytes();
-            *base = ([r, g, b].map(|v| (v >> 4) * 0x11), low | low >> 4);
+        let mut bases = [0; GROUP_BASES];
+        for (k, base) in (0..held).zip(bases.iter_mut()) {
+            *base = entry_word(os, k)?;
         }
-        for i in 0..entries {
-            let index = i.to_le_bytes()[0];
-            let (rgb, low) = bases[usize::from(index & 0xF)];
-            colours.push(rgb_word(grouped(rgb, index)) | u32::from(low));
+        for (shown, i) in grouped_colours(&bases).zip(0..entries) {
+            let [low, ..] = bases[i as usize % GROUP_BASES].to_le_bytes();
+            colours.push(shown.riscos_word() | BOTH_STATES | u32::from(low | low >> 4));
         }
     } else if held != 0 {
         for i in 0..entries {
             colours.push(entry_word(os, i)? | BOTH_STATES);
         }
     } else {
-        for i in 0..entries {
-            let index = i.to_le_bytes()[0];
-            let rgb = match pixels.log2_bpp {
-                0 => physical(DEFAULT_2[usize::from(index & 1)]),
-                1 => physical(DEFAULT_4[usize::from(index & 3)]),
-                2 => physical(index & 7),
-                _ => default_256(index),
-            };
-            colours.push(rgb_word(rgb));
-        }
+        let defaults = default_words(pixels.log2_bpp, false);
+        colours.extend(
+            defaults
+                .iter()
+                .take(entries as usize)
+                .map(|&[first, _]| first | BOTH_STATES),
+        );
     }
     Ok(colours)
-}
-
-/// A colour as a palette word set for both flash states.
-fn rgb_word([r, g, b]: [u8; 3]) -> u32 {
-    tairix_colour::Rgb::new(r, g, b).riscos_word() | BOTH_STATES
-}
-
-/// One of the eight solid physical colours, bits 0 to 2 red, green and blue.
-fn physical(colour: u8) -> [u8; 3] {
-    [1, 2, 4].map(|bit| if colour & bit != 0 { 0xFF } else { 0 })
 }
 
 /// Grows or shrinks the palette from `held` entries to `entries`, the image

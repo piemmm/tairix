@@ -47,20 +47,17 @@ const NOT_REGISTERED: Error = Error {
 
 /// The module's own messages.
 const MESSAGES: &[u8] = include_bytes!("../resources/ResourceFS/Messages");
-/// Its file's name, which its descriptor keeps.
-const MESSAGES_NAME: &[u8] = b"Resources:$.Resources.ResourceFS.Messages\0";
+/// Its messages' file, kept at its workspace's start.
+const MESSAGES_FILE: crate::msgtrans::OwnFile =
+    crate::msgtrans::OwnFile::named(b"Resources:$.Resources.ResourceFS.Messages\0");
 
 /// The filing system's name.
 const FS_NAME: &[u8] = b"Resources\0";
 
-/// Where the workspace keeps the messages descriptor, an empty name, the
-/// file's name, an error's request, and the filing system's information
-/// block and name.
-const OWN_AT: u32 = 0;
-const EMPTY_AT: u32 = crate::msgtrans::OWN_DESCRIPTOR;
-const NAME_AT: u32 = EMPTY_AT + 4;
-const REQUEST_AT: u32 = (NAME_AT + len32(MESSAGES_NAME.len())).next_multiple_of(4);
-const FS_BLOCK_AT: u32 = REQUEST_AT + crate::msgtrans::REQUEST;
+/// Where the workspace keeps, after its messages' file, an empty name and
+/// the filing system's information block and name.
+const EMPTY_AT: u32 = MESSAGES_FILE.room();
+const FS_BLOCK_AT: u32 = EMPTY_AT + 4;
 const FS_NAME_AT: u32 = FS_BLOCK_AT + 4 * len32(block::WORDS);
 const WORKSPACE: u32 = (FS_NAME_AT + len32(FS_NAME.len())).next_multiple_of(4);
 
@@ -615,14 +612,10 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let workspace = os.rma_claim(WORKSPACE)?;
     os.write_word(regs.r[12], workspace)?;
     os.write_word(workspace + EMPTY_AT, 0)?;
-    os.write_bytes(workspace + NAME_AT, MESSAGES_NAME)?;
+    let own = MESSAGES_FILE.place(os, workspace)?;
     os.world.resource_fs = State::new();
     os.world.resource_fs.workspace = Some(workspace);
-    os.world.resource_fs.own = Own::at(
-        workspace + OWN_AT,
-        workspace + NAME_AT,
-        workspace + REQUEST_AT,
-    );
+    os.world.resource_fs.own = own;
     os.write_bytes(workspace + FS_NAME_AT, FS_NAME)?;
     os.read_upper_case()?;
     os.declare()?;

@@ -135,6 +135,38 @@ impl Os<'_> {
         self.heap_free(KernelHeap::Rma, block)
     }
 
+    /// A block of the RMA holding `bytes`, given back where they cannot be
+    /// written to it.
+    ///
+    /// # Errors
+    ///
+    /// The RMA's "full" error, or the fault writing the block meets.
+    pub fn rma_claim_with(&mut self, bytes: &[u8]) -> Result<u32, Fail> {
+        let block = self.rma_claim(len32(bytes.len()))?;
+        if let Err(fail) = self.write_bytes(block, bytes) {
+            self.free_rma_quietly(block);
+            return Err(fail);
+        }
+        Ok(block)
+    }
+
+    /// Frees each of `blocks` of the RMA, every one tried whatever the heap
+    /// refuses of the others.
+    ///
+    /// # Errors
+    ///
+    /// The heap's error for the first block it does not hold.
+    pub fn rma_free_all(&mut self, blocks: impl IntoIterator<Item = u32>) -> Result<(), Fail> {
+        let mut first = Ok(());
+        for block in blocks {
+            let freed = self.rma_free(block);
+            if first.is_ok() {
+                first = freed;
+            }
+        }
+        first
+    }
+
     /// `OS_Module` 1: the module file R1 names loaded into the RMA and
     /// linked, initialised with the parameters after its name.
     fn module_load(&mut self, name: u32) -> Result<ModuleKey, Fail> {

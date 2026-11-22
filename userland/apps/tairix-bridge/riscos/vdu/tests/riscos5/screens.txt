@@ -2677,3 +2677,259 @@ case sprite_utils
 480 WHILE NOT EOF#F%:S$=GET$#F%:i%=1:WHILE i%<=LEN(S$) AND INSTR("0123456789",MID$(S$,i%,1))=0:i%+=1:ENDWHILE
 490 IF i%<=LEN(S$) THEN PROCr("  figure",VAL(MID$(S$,i%)))
 500 ENDWHILE:CLOSE#F%:ENDPROC
+
+case colourtrans_matches_at_every_depth
+10 DIM c%(23):s%=97:FOR i%=0 TO 23:s%=s% EOR (s%<<13):s%=s% EOR (s%>>>17):s%=s% EOR (s%<<5):c%(i%)=s% AND &FFFFFF00:NEXT
+20 c%(0)=0:c%(1)=&FFFFFF00:c%(2)=&0000FF00:c%(3)=&80808000
+30 DIM m$(8):m$()="0","1","2","9","12","15","X640 Y480 C256","X640 Y480 C32K","X640 Y480 C16M"
+40 FOR m%=0 TO 8:IF LEN(m$(m%))<3 THEN PROCmode(VAL(m$(m%))) ELSE MODE m$(m%):PROCfont
+50 PROCr(m$(m%),FNm(9))
+60 FOR i%=0 TO 23:PROCt(" n",&40744,c%(i%)):PROCt(" g",&40742,c%(i%)):PROCt(" on",&40749,c%(i%)):PROCt(" og",&40747,c%(i%)):NEXT
+70 NEXT:PROCmode(12):GOTO 9000
+80 DEFPROCt(n$,s%,c%):LOCAL r%:SYS s%,c% TO r%:PROCr(n$,r%):ENDPROC
+
+case colourtrans_for_mode_and_palette
+10 PROCmode(12):DIM p% 1024,s% 32:FOR i%=0 TO 255:p%!(4*i%)=(((i%*&3B5) EOR (i%<<7)) AND &FFFFFF)<<8:NEXT
+20 s%!0=1:s%!4=640:s%!8=480:s%!12=3:s%!16=-1:s%!20=-1
+30 DIM c%(7):c%()=0,&FFFFFF00,&0000FF00,&80808000,&40C02000,&2060A000,&FF800000,&10203000
+40 DIM m%(7):m%()=0,9,15,28,128,s%,&301680B5,-1:DIM q%(2):q%()=0,-1,p%
+50 FOR j%=0 TO 7:FOR k%=0 TO 2:PROCr("mode "+STR$j%+" palette "+STR$k%,0)
+60 FOR i%=0 TO 7:PROCt(" n",&40746,c%(i%),m%(j%),q%(k%)):PROCt(" g",&40745,c%(i%),m%(j%),q%(k%))
+70 PROCt(" on",&4074B,c%(i%),m%(j%),q%(k%)):PROCt(" og",&4074A,c%(i%),m%(j%),q%(k%)):NEXT:NEXT:NEXT
+80 FOR k%=0 TO 3:SYS "XColourTrans_ReturnColourNumberForMode",&FF00,VAL(MID$("99 127255 1",1+3*k%,3)),0 TO r%;f%:PROCr("bad "+STR$k%,FNe(r%,f%)):NEXT
+90 s%!0=0:SYS "XColourTrans_ReturnGCOLForMode",&FF00,s%,0 TO r%;f%:PROCr("selector of nothing",FNe(r%,f%))
+100 GOTO 9000
+110 DEFPROCt(n$,w%,c%,m%,p%):LOCAL r%:SYS w%,c%,m%,p% TO r%:PROCr(n$,r%):ENDPROC
+
+case colourtrans_loadings_misc_and_conversions
+10 PROCmode(12):SYS "ColourTrans_MiscOp",0,&07050300 TO r0%,,old%:PROCr("misc0 r0",r0%):PROCr("misc0 old",old%)
+20 DIM c%(7):c%()=0,&FFFFFF00,&0000FF00,&80808000,&40C02000,&2060A000,&FF800000,&10203000
+30 FOR i%=0 TO 7:SYS "ColourTrans_ReturnColourNumber",c%(i%) TO r%:PROCr(" weighed",r%):NEXT
+40 PROCmode(15):FOR i%=0 TO 7:SYS "ColourTrans_ReturnColourNumber",c%(i%) TO r%:PROCr(" weighed 256",r%):NEXT
+50 SYS "ColourTrans_MiscOp",0,&01040200:PROCmode(12)
+60 DIM t$(6):t$()="2x 4 1","&10 4 1","-1 4 1","4_10 4 1","99999999999 4 1","1 2 3 ","256 257 258"
+70 FOR i%=0 TO 6:SYS "XOS_CLI","ColourTransLoadings "+t$(i%) TO r%;f%:PROCr("cmd "+STR$i%,FNe(r%,f%))
+80 SYS "ColourTrans_MiscOp",0,&01040200 TO ,,l%:PROCr(" set",l%):NEXT
+90 SYS "XOS_CLI","ColourTransLoadings 1 2" TO r%;f%:PROCr("cmd two",FNe(r%,f%))
+100 SYS "ColourTrans_MiscOp",0,&03050700:h%=OPENOUT"HostFS:$.T":SYS "ColourTrans_WriteLoadingsToFile",,h%:CLOSE#h%:PROCb
+110 h%=OPENOUT"HostFS:$.T":SYS "OS_ServiceCall",0,&5C,h% TO ,s%:CLOSE#h%:PROCr("desktop save claimed",s%):PROCb
+120 SYS "ColourTrans_MiscOp",0,&01040200:SYS "XOS_File",6,"HostFS:$.T"
+130 SYS "ColourTrans_MiscOp",1 TO a%,b%,c%:PROCr("misc1",a%):PROCr(" depth",c%):SYS "ColourTrans_MiscOp",2,7 TO a%:PROCr("misc2",a%)
+140 SYS "XColourTrans_MiscOp",3 TO r%;f%:PROCr("misc3",FNe(r%,f%))
+150 FOR i%=0 TO 255 STEP 17:SYS "ColourTrans_GCOLToColourNumber",i% TO a%:SYS "ColourTrans_ColourNumberToGCOL",i% TO b%:PROCr(" gcol "+STR$i%,a%):PROCr(" number "+STR$i%,b%):NEXT
+160 SYS "XOS_CallAVector",&FF00,0,0,0,0,0,0,0,99,&22 TO r%;f%:PROCr("colourv 99",FNe(r%,f%))
+170 SYS "XOS_CallAVector",&FF00,-1,-1,0,0,0,0,0,4,&22 TO r%:PROCr("colourv 4",r%)
+180 SYS &60764 TO r%;f%:PROCr("swi 36",FNe(r%,f%))
+190 GOTO 9000
+200 DEFPROCb:LOCAL F%,S$:F%=OPENIN"HostFS:$.T":WHILE NOT EOF#F%:S$+=" "+STR$~BGET#F%:ENDWHILE:CLOSE#F%:BPUT#R%,"bytes"+S$:ENDPROC
+
+case colourtrans_palette_read_when_stale
+10 PROCmode(12):SYS "ColourTrans_ReturnColourNumber",&00FF0000 TO a%:PROCr("green",a%)
+20 VDU 19,9,16,0,255,0:SYS "ColourTrans_ReturnColourNumber",&00FF0000 TO a%:PROCr("stale",a%)
+30 VDU 19,2,16,0,0,0:SYS "ColourTrans_ReturnColourNumber",&00FF0000 TO a%:PROCr("still stale",a%)
+40 SYS "ColourTrans_InvalidateCache":SYS "ColourTrans_ReturnColourNumber",&00FF0000 TO a%:PROCr("fresh",a%)
+50 PROCmode(12):SYS "ColourTrans_ReturnColourNumber",&00FF0000 TO a%:PROCr("mode change",a%)
+60 DIM s% 8192:!s%=8192:s%!8=16:SYS "OS_SpriteOp",&109,s%:SYS "OS_SpriteOp",&10F,s%,"e",0,16,16,15
+70 VDU 19,4,16,0,255,0:SYS "OS_SpriteOp",&13C,s%,"e",0 TO r0%,r1%,r2%,r3%
+80 SYS "ColourTrans_ReturnColourNumber",&00FF0000 TO a%:SYS "ColourTrans_ReturnGCOL",&00FF0000 TO b%:PROCr("in sprite",a%):PROCr(" gcol",b%)
+90 SYS "OS_SpriteOp",r0%,r1%,r2%,r3%:SYS "ColourTrans_ReturnColourNumber",&00FF0000 TO a%:PROCr("back",a%)
+100 PROCmode(12):GOTO 9000
+
+case colourtrans_setting_colours
+10 DIM c%(7):c%()=0,&FFFFFF00,&0000FF00,&80808000,&40C02000,&2060A000,&FF800000,&10203000
+20 DIM m$(6):m$()="0","1","12","15","X640 Y480 C256","X640 Y480 C32K","X640 Y480 C16M":DIM b% 40
+30 FOR m%=0 TO 6:IF LEN(m$(m%))<3 THEN PROCmode(VAL(m$(m%))) ELSE MODE m$(m%):PROCfont
+40 PROCr(m$(m%),FNm(9))
+50 FOR i%=0 TO 7:PROCg(" set",&40743,c%(i%),0,0):PROCg(" setbg",&40743,c%(i%),&80,3):PROCg(" opp",&40748,c%(i%),&100,1)
+60 PROCt(" text",&40761,c%(i%),0):PROCt(" textbg",&40761,c%(i%),&80):PROCt(" opptext",&40762,c%(i%),0):NEXT
+70 FOR i%=0 TO 3:v%=VAL(MID$("5   200 3   255 ",1+4*i%,4)):PROCg(" colour",&4075E,v%,0,2):PROCg(" colourbg",&4075E,v%,&80,0)
+80 PROCt(" colourtext",&4075E,v%,&200):PROCt(" colourtextbg",&4075E,v%,&280):NEXT
+90 NEXT:PROCmode(12):GOTO 9000
+100 DEFPROCg(n$,s%,c%,r3%,r4%):LOCAL a%,d%,e%,g%
+110 SYS s%,c%,&1111,&2222,r3%,r4% TO a%,,d%,e%,g%:PROCr(n$,a%):PROCr("  r2",d%):PROCr("  r3",e%):PROCr("  r4",g%)
+120 PROCv:SYS "OS_SetColour",&80,b%:PROCr("  fore",!b%):SYS "OS_SetColour",&90,b%:PROCr("  back",!b%):ENDPROC
+130 DEFPROCt(n$,s%,c%,r3%):LOCAL a%,t%:SYS s%,c%,,,r3% TO a%:PROCr(n$,a%)
+140 SYS "OS_SetColour",&C0 TO ,t%:PROCr("  text fore",t%):SYS "OS_SetColour",&D0 TO ,t%:PROCr("  text back",t%):ENDPROC
+150 DEFPROCv:LOCAL i%:FOR i%=151 TO 160:PROCr("  v"+STR$i%,FNv(i%)):NEXT:ENDPROC
+
+case colourtrans_ecf_patterns
+10 DIM b% 40:PROCmode(0)
+20 FOR v%=0 TO 255 STEP 15:PROCe("grey "+STR$v%,(v%<<8) OR (v%<<16) OR (v%<<24)):NEXT
+30 FOR v%=0 TO 255 STEP 51:PROCe("red "+STR$v%,v%<<8):PROCe("green "+STR$v%,v%<<16):PROCe("blue "+STR$v%,v%<<24):NEXT
+50 PROCmode(12):FOR v%=0 TO 255 STEP 21:PROCe("red "+STR$v%,v%<<8):PROCe("blue "+STR$v%,v%<<24):NEXT
+60 GOTO 9000
+70 DEFPROCe(n$,c%):LOCAL i%,g%:SYS "ColourTrans_SetGCOL",c%,,,&100,0 TO g%:PROCr(n$,g%)
+80 SYS "OS_SetColour",&80,b%:FOR i%=0 TO 3:PROCr("  row",b%!(4*i%)):NEXT:ENDPROC
+
+case colourtrans_palettes_held
+10 PROCmode(12):DIM b% 2100,w% 1100:FOR i%=0 TO 31:w%!(4*i%)=((((i%*&3B5) EOR (i%<<9)) AND &FFFFFF)<<8) OR ((i%*&29+&5A) AND &FF):NEXT
+20 VDU 19,4,144,1,2,3:VDU 19,3,17,&FF,0,0:VDU 19,3,18,&FF,0,0:VDU 19,7,145,&40,&40,&40
+30 FOR i%=3 TO 8:SYS "OS_ReadPalette",i%,16 TO ,,a%,c%:PROCr("reported "+STR$i%,a%):PROCr(" second",c%):NEXT
+40 SYS "ColourTrans_ReadPalette",-1,-1,b%,256,2 TO ,,e%,f%:PROCr("end",e%-b%):PROCr("left",f%):FOR i%=6 TO 17:PROCr(" held",b%!(4*i%)):NEXT
+50 SYS "ColourTrans_ReadPalette",-1,-1,0,0,0 TO ,,,n%:PROCr("size",n%):SYS "ColourTrans_ReadPalette",15,0,0,0,2 TO ,,,n%:PROCr("size 15",n%)
+60 SYS "XColourTrans_ReadPalette",-1,-1,b%,20,0 TO r%;f%:PROCr("small",FNe(r%,f%))
+70 SYS "ColourTrans_ReadPalette",0,0,b%,8,0:PROCr("mode 0",b%!4):SYS "ColourTrans_ReadPalette",-1,0,b%,128,2:PROCr("default 8",b%!64):PROCr(" second",b%!68)
+80 SYS "ColourTrans_ReadPalette",0,w%,b%,8,0:PROCr("given",b%!4)
+90 SYS "ColourTrans_InvalidateCache":SYS "ColourTrans_ReturnColourNumber",&FF00 TO a%:PROCr("red",a%)
+100 SYS "ColourTrans_WritePalette",-1,-1,w%,0,0 TO a%,c%,d%,e%,f%:PROCr("written",a%):PROCr(" r4",f%)
+110 SYS "ColourTrans_ReturnColourNumber",&FF00 TO a%:PROCr("red stale",a%):SYS "ColourTrans_InvalidateCache":SYS "ColourTrans_ReturnColourNumber",&FF00 TO a%:PROCr("red",a%)
+120 SYS "ColourTrans_ReadPalette",-1,-1,b%,256,2:FOR i%=0 TO 5:PROCr(" as written",b%!(4*i%)):NEXT
+130 SYS "ColourTrans_WritePalette",-1,-1,w%+64,0,2:SYS "ColourTrans_ReadPalette",-1,-1,b%,256,2:FOR i%=0 TO 3:PROCr(" pairs",b%!(4*i%)):NEXT
+140 FOR i%=0 TO 2:SYS "OS_ReadPalette",i%,16 TO ,,a%,c%:PROCr(" reported",a%):PROCr("  second",c%):NEXT
+150 DIM s% 16384:!s%=16384:s%!8=16:SYS "OS_SpriteOp",&109,s%:SYS "OS_SpriteOp",&10F,s%,"n4",0,8,8,12:SYS "OS_SpriteOp",&10F,s%,"s8",1,8,8,15
+160 SYS "ColourTrans_ReadPalette",s%,"n4",b%,64,0:PROCr("sprite default",b%!4):SYS "ColourTrans_ReadPalette",s%,"s8",0,0,0 TO ,,,n%:PROCr("sprite 8 size",n%)
+170 SYS "ColourTrans_ReadPalette",s%,"s8",b%,1024,0:PROCr(" s8 1",b%!4):PROCr(" s8 16",b%!64)
+180 SYS "ColourTrans_WritePalette",s%,"n4",w%,0,0:SYS "ColourTrans_ReadPalette",s%,"n4",b%,128,2:PROCr("sprite written",b%!8):PROCr(" second",b%!12)
+190 SYS "OS_SpriteOp",&13C,s%,"n4",0 TO r0%,r1%,r2%,r3%:SYS "XColourTrans_WritePalette",-1,-1,w%,0,0 TO r%;f%:SYS "OS_SpriteOp",r0%,r1%,r2%,r3%:PROCr("switched",FNe(r%,f%))
+200 PROCmode(12):GOTO 9000
+
+case colourtrans_calibration
+10 PROCmode(12):DIM t% 256,b% 256:PROCt(2,2,2,&02010300,&0203FDFF,&02010300,&03FC02FF,&02010300,&FF0302FF,0)
+20 SYS "ColourTrans_ReadCalibration",0 TO ,n%:PROCr("default size",n%):SYS "ColourTrans_ConvertDeviceColour",,&80808000,,0 TO ,,c%:PROCr("default",c%)
+30 SYS "ColourTrans_SetCalibration",t%:SYS "ColourTrans_ReadCalibration",0 TO ,n%:PROCr("size",n%):SYS "ColourTrans_ReadCalibration",b%:FOR i%=0 TO n%-4 STEP 4:PROCr(" word",b%!i%):NEXT
+40 FOR i%=0 TO 13:v%=VAL(MID$("000011051064085127128136170204221238254255",1+3*i%,3)):PROCd("r "+STR$v%,v%<<8):PROCd("g "+STR$v%,v%<<16):PROCd("b "+STR$v%,v%<<24):NEXT
+50 PROCd("grey",&80808000):PROCd("mixed",&12345600):PROCd("white",&FFFFFF00)
+60 PROCt(3,2,2,&10101000,&20402080,&FF0000FF,0,&00FF00FF,0,&FF0000FF):SYS "ColourTrans_SetCalibration",t%
+70 FOR i%=0 TO 13:v%=VAL(MID$("000011051064085127128136170204221238254255",1+3*i%,3)):PROCd("three r "+STR$v%,v%<<8):NEXT
+80 DIM m%(3):m%()=&FF00,&80808000,&40C02000,&FFFFFF00:SYS "ColourTrans_InvalidateCache":FOR i%=0 TO 3:SYS "ColourTrans_ReturnColourNumber",m%(i%) TO a%:PROCr("match",a%):NEXT
+90 SYS "ColourTrans_ReturnColourNumberForMode",&FF00,12,0 TO a%:PROCr("for mode",a%)
+100 t%!12=&10101010:SYS "XColourTrans_SetCalibration",t% TO r%;f%:PROCr("bad start",FNe(r%,f%)):SYS "ColourTrans_ReadCalibration",0 TO ,n%:PROCr(" size",n%)
+110 PROCt(3,2,2,0,&800000FF,&FF000080,0,&FF0000FF,0,&FF0000FF):SYS "XColourTrans_SetCalibration",t% TO r%;f%:PROCr("unsorted",FNe(r%,f%))
+120 PROCt(1,2,2,0,0,&FF0000FF,0,&FF0000FF,0,0):SYS "XColourTrans_SetCalibration",t% TO r%;f%:PROCr("one pair",FNe(r%,f%))
+130 PROCt(3,2,2,&10101000,&20402080,&FF0000FF,0,&00FF00FF,0,&FF0000FF):SYS "ColourTrans_SetCalibration",t%:SYS "ColourTrans_SetCalibration",0:SYS "ColourTrans_ReadCalibration",0 TO ,n%:PROCr("reset",n%)
+140 SYS "ColourTrans_WriteCalibrationToFile",2,0 TO a%:PROCr("nothing written",a%)
+150 GOTO 9000
+160 DEFPROCt(a%,b%,c%,d%,e%,f%,g%,h%,i%,j%):t%!0=a%:t%!4=b%:t%!8=c%:t%!12=d%:t%!16=e%:t%!20=f%:t%!24=g%:t%!28=h%:t%!32=i%:t%!36=j%:ENDPROC
+170 DEFPROCd(n$,c%):LOCAL a%,d%,e%,f%:SYS "ColourTrans_ConvertDeviceColour",&5A,c%,,0 TO a%,d%,e%,f%:PROCr(n$,e%):PROCr("  r0",a%):PROCr("  r1",d%):ENDPROC
+
+case colourtrans_models
+10 PROCmode(12):DIM v%(9):v%()=0,&4000,&8000,&C000,&10000,&2345,&ABCD,&FFFF,&18000,-&4000
+20 FOR i%=0 TO 9:a%=v%(i%):b%=v%((i%*3) MOD 10):c%=v%((i%*7) MOD 10)
+30 PROCm("hsv",&40758,a%,b%,c%,0):PROCm("cmyk",&4075A,a%,b%,c%,0):PROCm("cie",&40755,a%,b%,c%,&5A):PROCm("ciergb",&40756,a%,b%,c%,&5A)
+40 PROCm("hsvrgb",&40759,(i%*41)<<16,v%((i%*3) MOD 5),v%(4-(i% MOD 5)),0):PROCm("cmykrgb",&4075B,a%,b%,c%,v%((i%*5) MOD 10)):NEXT
+50 PROCm("hsvrgb none",&40759,0,0,&8000,0):PROCm("cie past",&40755,&7FFFFFFF,&7FFFFFFF,&7FFFFFFF,0):PROCm("ciergb past",&40756,&3FFFFFFF,0,0,0)
+60 PROCm("cie large",&40755,&40000000,0,0,0):PROCm("ciergb large",&40756,0,0,&3FFFFFFF,0)
+70 GOTO 9000
+80 DEFPROCm(n$,s%,a%,b%,c%,d%):LOCAL p%,q%,r%,t%,f%:SYS s%+&20000,a%,b%,c%,d% TO p%,q%,r%,t%;f%
+90 IF f% AND 1 THEN PROCr(n$,FNe(p%,f%)) ELSE PROCr(n$,p%):PROCr(" r1",q%):PROCr(" r2",r%):PROCr(" r3",t%)
+100 ENDPROC
+
+case colourtrans_font_colours
+10 PROCmode(12):FOR i%=0 TO 15:VDU 19,i%,16,i%*17,i%*8,255-i%*17:NEXT:SYS "ColourTrans_InvalidateCache"
+20 FOR v%=0 TO 255 STEP 15:PROCf((v%<<8) OR (v%<<16) OR (v%<<24),0,14):PROCf(0,(v%<<8) OR (v%<<16) OR (v%<<24),14):PROCf(v%<<8,&FF00,14):NEXT
+30 PROCf(0,&FFFFFF00,14):PROCf(&5A5A5A00,&FFFFFF00,14):PROCf(0,&FFFFFF00,-1):PROCf(0,&FFFFFF00,3):PROCf(&FFFFFF00,0,&7FFFFFFF)
+40 FOR i%=0 TO 15:VDU 19,i%,16,16*i%+15,16*i%+15,16*i%+15:NEXT:SYS "ColourTrans_InvalidateCache"
+50 PROCf(0,&FFFFFF00,15):PROCf(0,&FFFFFF00,255):PROCf(0,&FFFFFF00,3)
+60 PROCmode(15):PROCf(&10203000,&FFFFFF00,14):PROCf(&10203000,&FFFFFF00,-14):PROCf(&10203000,&FFFFFF00,15):PROCf(&10203000,&FFFFFF00,-15)
+70 PROCmode(12):GOTO 9000
+80 DEFPROCf(b%,c%,o%):LOCAL p%,q%,r%,t%,f%:SYS "XColourTrans_ReturnFontColours",3,b%,c%,o% TO p%,q%,r%,t%;f%
+90 IF f% AND 1 THEN PROCr("refused",FNe(p%,f%)) ELSE PROCr("font",p%):PROCr(" bg",q%):PROCr(" fg",r%):PROCr(" offset",t%)
+100 ENDPROC
+
+case inverse_and_blend_tables
+10 PROCmode(12):SYS "XInverseTable_Calculate" TO r%;f%:PROCr("calc 16",FNe(r%,f%))
+20 DIM p% 1100,b% 4100,c% 1100,d% 33000:FOR i%=0 TO 255:p%!(4*i%)=(((i%*&3B5) EOR (i%<<9)) AND &FFFFFF)<<8:NEXT
+30 DIM q% 64:q%!0=1:q%!4=640:q%!8=480:q%!12=3:q%!16=-1:q%!20=0:q%!24=&80:q%!28=3:q%!32=255:q%!36=-1:PROCscreen(q%)
+40 SYS "ColourTrans_WritePalette",-1,-1,p%,0,0:SYS "InverseTable_Calculate" TO r%,a%
+50 FOR i%=0 TO 7:PROCr("rgb",r%!(4*i%*31)):PROCr("inverse",a%?(i%*4093)):NEXT
+60 SYS "InverseTable_Calculate" TO s%,t%:PROCr("kept",(s%=r%) AND (t%=a%))
+70 SYS "InverseTable_SpriteTable",c%,d%,-1,-1:FOR i%=0 TO 3:PROCr("sprite table",d%?(i%*8191)):NEXT
+80 SYS "BlendTable_GenerateTable",0,12,0,12,0,128,0 TO a%,c%,e%:PROCr("blend counts",a%):PROCr(" dest",c%):PROCr(" size",e%)
+90 SYS "BlendTable_GenerateTable",0,12,0,12,0,128,b%:FOR i%=0 TO 15:PROCr(" 12 on 12",b%?(i%*17)):NEXT
+100 SYS "BlendTable_GenerateTable",0,-1,0,12,0,64,b%:FOR i%=0 TO 15:PROCr(" 256 on 12",b%?(i%*257)):NEXT
+110 SYS "BlendTable_GenerateTable",0,12,0,-1,0,200,b%:FOR i%=0 TO 15:PROCr(" 12 on 256",b%?(i%*251)):NEXT
+120 SYS "BlendTable_GenerateTable",4,12,0,12,0,0,0 TO ,,,,,,l%:PROCr("locked",l%?(16+3)):SYS "BlendTable_UnlockTable",l%
+130 SYS "XBlendTable_GenerateTable",0,12,0,12,0,256,0 TO r%;f%:PROCr("past 255",FNe(r%,f%))
+140 q%!12=4:q%!20=-1:PROCscreen(q%):SYS "XBlendTable_GenerateTable",0,-1,0,-1,0,128,0 TO r%;f%:PROCr("deep",FNe(r%,f%))
+150 SYS "XInverseTable_Calculate" TO r%;f%:PROCr("calc deep",FNe(r%,f%))
+160 PROCmode(12):GOTO 9000
+
+case sprite_blends_onto_sixteen_colours
+10 DIM A% 32768,S% 16,U% 80,T% 16,W% 1100,Q% 64,G% 16,H% 16,B% 260,D% 8,C% 64,X% 66000:S%!0=1:S%!4=1:S%!8=1:S%!12=1
+20 FOR i%=0 TO 15:U%!(4*i%)=(((i%*91+40) AND 255) OR (((i%*53+200) AND 255)<<8) OR (((i%*147+77) AND 255)<<16))<<8:NEXT:T%!0=U%!0:T%!4=U%!8:T%!8=U%!36:T%!12=U%!44
+30 FOR i%=0 TO 255:W%!(4*i%)=(((i%*167+13) AND 255) OR (((i%*73+(i%>>3)*29) AND 255)<<8) OR (((i%*11+(i%>>4)*97) AND 255)<<16))<<8:NEXT:W%!0=0
+40 !A%=32768:A%!8=16:SYS "OS_SpriteOp",256+9,A%:SYS "OS_SpriteOp",256+15,A%,"d16",0,16,16,&281680B5:SYS "OS_SpriteOp",256+15,A%,"d32",0,16,16,&301680B5
+50 SYS "OS_SpriteOp",256+15,A%,"g",0,16,16,&301680B5:SYS "OS_SpriteOp",256+15,A%,"p8",1,16,16,28
+60 FOR y%=0 TO 15:FOR x%=0 TO 15:SYS "OS_SpriteOp",256+42,A%,"d16",x%,y%,(x%*2) OR ((y%*2)<<5) OR (((x%+y%) AND 31)<<10),0
+70 SYS "OS_SpriteOp",256+42,A%,"d32",x%,y%,(x%*16+7) OR ((y%*16+3)<<8) OR (((x%*y%) AND 255)<<16),0
+80 SYS "OS_SpriteOp",256+42,A%,"g",x%,y%,200 OR (100<<8) OR (50<<16),0:SYS "OS_SpriteOp",256+42,A%,"p8",x%,y%,x%+16*y%,0:NEXT:NEXT
+90 SYS "OS_SpriteOp",256+38,A%,"g",&80000000:FOR y%=0 TO 15:FOR x%=0 TO 15:SYS "OS_SpriteOp",256+44,A%,"g",x%,y%,x%+16*y%:NEXT:NEXT
+100 P%=C%:[OPT 0:EOR R0,R0,#&FF00:EOR R0,R0,#&FF0000:EOR R0,R0,#&FF000000:MOV PC,R14:]:D%!0=C%:D%!4=C%
+110 PROCmode(12):SYS "ColourTrans_WritePalette",-1,-1,U%,0,0:SYS "ColourTrans_InvalidateCache"
+120 SYS "ColourTrans_SelectTable",A%,"d32",-1,-1,H%:SYS "ColourTrans_SelectTable",A%,"d16",-1,-1,G%:SYS "ColourTrans_SelectTable",A%,"p8",-1,-1,B%
+130 SYS "OS_SetColour",0,9:RECTANGLE FILL 0,200,1279,100
+140 FOR Y%=0 TO 200 STEP 200:PROCs("d32",0,Y%,&5000,H%):PROCs("p8",80,Y%,&5000,B%):PROCs("p8",160,Y%,&1800,B%):PROCs("g",240,Y%,&5008,H%)
+150 PROCs("d16",320,Y%,&5000,G%):PROCs("d32",400,Y%,&C800,H%):PROCs("g",480,Y%,8,H%):PROCs("d32",560,Y%,&80,D%):NEXT
+160 PROCs("p8",640,0,&8000,0):PROCs("d32",720,0,0,0)
+170 SYS "BlendTable_GenerateTable",0,-1,-1,-1,-1,80,X%:FOR i%=0 TO 255 STEP 11:PROCr("blend",X%?i%):NEXT:GOTO 9000
+180 DEFPROCs(s$,x%,y%,f%,t%):SYS "XOS_SpriteOp",256+52,A%,s$,x%,y%,f%,S%,t% TO r%;f%:PROCr(s$,FNe(r%,f%)):ENDPROC
+
+case sprite_blends_onto_four_colours
+10 DIM A% 32768,S% 16,U% 80,T% 16,W% 1100,Q% 64,G% 16,H% 16,B% 260,D% 8,C% 64,X% 66000:S%!0=1:S%!4=1:S%!8=1:S%!12=1
+20 FOR i%=0 TO 15:U%!(4*i%)=(((i%*91+40) AND 255) OR (((i%*53+200) AND 255)<<8) OR (((i%*147+77) AND 255)<<16))<<8:NEXT:T%!0=U%!0:T%!4=U%!8:T%!8=U%!36:T%!12=U%!44
+30 FOR i%=0 TO 255:W%!(4*i%)=(((i%*167+13) AND 255) OR (((i%*73+(i%>>3)*29) AND 255)<<8) OR (((i%*11+(i%>>4)*97) AND 255)<<16))<<8:NEXT:W%!0=0
+40 !A%=32768:A%!8=16:SYS "OS_SpriteOp",256+9,A%:SYS "OS_SpriteOp",256+15,A%,"d16",0,16,16,&281680B5:SYS "OS_SpriteOp",256+15,A%,"d32",0,16,16,&301680B5
+50 SYS "OS_SpriteOp",256+15,A%,"g",0,16,16,&301680B5:SYS "OS_SpriteOp",256+15,A%,"p8",1,16,16,28
+60 FOR y%=0 TO 15:FOR x%=0 TO 15:SYS "OS_SpriteOp",256+42,A%,"d16",x%,y%,(x%*2) OR ((y%*2)<<5) OR (((x%+y%) AND 31)<<10),0
+70 SYS "OS_SpriteOp",256+42,A%,"d32",x%,y%,(x%*16+7) OR ((y%*16+3)<<8) OR (((x%*y%) AND 255)<<16),0
+80 SYS "OS_SpriteOp",256+42,A%,"g",x%,y%,200 OR (100<<8) OR (50<<16),0:SYS "OS_SpriteOp",256+42,A%,"p8",x%,y%,x%+16*y%,0:NEXT:NEXT
+90 SYS "OS_SpriteOp",256+38,A%,"g",&80000000:FOR y%=0 TO 15:FOR x%=0 TO 15:SYS "OS_SpriteOp",256+44,A%,"g",x%,y%,x%+16*y%:NEXT:NEXT
+100 P%=C%:[OPT 0:EOR R0,R0,#&FF00:EOR R0,R0,#&FF0000:EOR R0,R0,#&FF000000:MOV PC,R14:]:D%!0=C%:D%!4=C%
+110 PROCmode(8):SYS "ColourTrans_WritePalette",-1,-1,T%,0,0:SYS "ColourTrans_InvalidateCache"
+120 SYS "ColourTrans_SelectTable",A%,"d32",-1,-1,H%:SYS "ColourTrans_SelectTable",A%,"d16",-1,-1,G%:SYS "ColourTrans_SelectTable",A%,"p8",-1,-1,B%
+130 SYS "OS_SetColour",0,2:RECTANGLE FILL 0,200,1279,100
+140 FOR Y%=0 TO 200 STEP 200:PROCs("d32",0,Y%,&5000,H%):PROCs("p8",80,Y%,&5000,B%):PROCs("p8",160,Y%,&1800,B%):PROCs("g",240,Y%,&5008,H%)
+150 PROCs("d16",320,Y%,&5000,G%):PROCs("d32",400,Y%,&C800,H%):PROCs("g",480,Y%,8,H%):PROCs("d32",560,Y%,&80,D%):NEXT
+160 PROCs("p8",640,0,&8000,0):PROCs("d32",720,0,0,0)
+170 SYS "BlendTable_GenerateTable",0,-1,-1,-1,-1,80,X%:FOR i%=0 TO 15:PROCr("blend",X%?i%):NEXT:GOTO 9000
+180 DEFPROCs(s$,x%,y%,f%,t%):SYS "XOS_SpriteOp",256+52,A%,s$,x%,y%,f%,S%,t% TO r%;f%:PROCr(s$,FNe(r%,f%)):ENDPROC
+
+case sprite_blends_onto_256_colours
+10 DIM A% 32768,S% 16,U% 80,T% 16,W% 1100,Q% 64,G% 16,H% 16,B% 260,D% 8,C% 64,X% 66000:S%!0=1:S%!4=1:S%!8=1:S%!12=1
+20 FOR i%=0 TO 15:U%!(4*i%)=(((i%*91+40) AND 255) OR (((i%*53+200) AND 255)<<8) OR (((i%*147+77) AND 255)<<16))<<8:NEXT:T%!0=U%!0:T%!4=U%!8:T%!8=U%!36:T%!12=U%!44
+30 FOR i%=0 TO 255:W%!(4*i%)=(((i%*167+13) AND 255) OR (((i%*73+(i%>>3)*29) AND 255)<<8) OR (((i%*11+(i%>>4)*97) AND 255)<<16))<<8:NEXT:W%!0=0
+40 !A%=32768:A%!8=16:SYS "OS_SpriteOp",256+9,A%:SYS "OS_SpriteOp",256+15,A%,"d16",0,16,16,&281680B5:SYS "OS_SpriteOp",256+15,A%,"d32",0,16,16,&301680B5
+50 SYS "OS_SpriteOp",256+15,A%,"g",0,16,16,&301680B5:SYS "OS_SpriteOp",256+15,A%,"p8",1,16,16,28
+60 FOR y%=0 TO 15:FOR x%=0 TO 15:SYS "OS_SpriteOp",256+42,A%,"d16",x%,y%,(x%*2) OR ((y%*2)<<5) OR (((x%+y%) AND 31)<<10),0
+70 SYS "OS_SpriteOp",256+42,A%,"d32",x%,y%,(x%*16+7) OR ((y%*16+3)<<8) OR (((x%*y%) AND 255)<<16),0
+80 SYS "OS_SpriteOp",256+42,A%,"g",x%,y%,200 OR (100<<8) OR (50<<16),0:SYS "OS_SpriteOp",256+42,A%,"p8",x%,y%,x%+16*y%,0:NEXT:NEXT
+90 SYS "OS_SpriteOp",256+38,A%,"g",&80000000:FOR y%=0 TO 15:FOR x%=0 TO 15:SYS "OS_SpriteOp",256+44,A%,"g",x%,y%,x%+16*y%:NEXT:NEXT
+100 P%=C%:[OPT 0:EOR R0,R0,#&FF00:EOR R0,R0,#&FF0000:EOR R0,R0,#&FF000000:MOV PC,R14:]:D%!0=C%:D%!4=C%
+110 Q%!0=1:Q%!4=640:Q%!8=480:Q%!12=3:Q%!16=-1:Q%!20=0:Q%!24=&80:Q%!28=3:Q%!32=255:Q%!36=-1:PROCscreen(Q%):SYS "ColourTrans_WritePalette",-1,-1,W%,0,0:SYS "ColourTrans_InvalidateCache"
+120 SYS "ColourTrans_SelectTable",A%,"d32",-1,-1,H%:SYS "ColourTrans_SelectTable",A%,"d16",-1,-1,G%:SYS "ColourTrans_SelectTable",A%,"p8",-1,-1,B%
+130 SYS "OS_SetColour",0,77:RECTANGLE FILL 0,200,1279,100
+140 FOR Y%=0 TO 200 STEP 200:PROCs("d32",0,Y%,&5000,H%):PROCs("p8",80,Y%,&5000,B%):PROCs("p8",160,Y%,&1800,B%)
+150 PROCs("d16",320,Y%,&5000,G%):PROCs("d32",400,Y%,&C800,H%):PROCs("g",480,Y%,8,H%):PROCs("d32",560,Y%,&80,D%):NEXT
+160 PROCs("p8",640,0,&8000,0):PROCs("d32",720,0,0,0)
+170 SYS "BlendTable_GenerateTable",0,-1,-1,-1,-1,80,X%:FOR i%=0 TO 65535 STEP 2053:PROCr("blend",X%?i%):NEXT:GOTO 9000
+180 DEFPROCs(s$,x%,y%,f%,t%):SYS "XOS_SpriteOp",256+52,A%,s$,x%,y%,f%,S%,t% TO r%;f%:PROCr(s$,FNe(r%,f%)):ENDPROC
+
+case sprite_blends_onto_sixteen_bit_colour
+10 DIM Q% 64:Q%!0=1:Q%!4=640:Q%!8=480:Q%!12=4:Q%!16=-1:Q%!20=-1:PROCscreen(Q%)
+20 DIM A% 65536:!A%=65536:A%!8=16:SYS "OS_SpriteOp",256+9,A%:DIM S% 16:S%!0=1:S%!4=1:S%!8=1:S%!12=1:DIM V% 16
+30 V%!0=148:V%!4=6:V%!8=-1:SYS "OS_ReadVduVariables",V%,V%:B%=V%!0:L%=V%!4
+40 FOR y%=380 TO 479:FOR x%=0 TO 319:B%!(y%*L%+x%*4)=((x%*37+y%*11) AND &FFFF) OR (((x%*13+y%*29) AND &FFFF)<<16):NEXT:NEXT
+50 SYS "OS_SpriteOp",256+15,A%,"g",0,16,16,&301680B5:SYS "OS_SpriteOp",256+38,A%,"g",&80000000
+60 SYS "OS_SpriteOp",256+15,A%,"d32",0,16,16,&301680B5:SYS "OS_SpriteOp",256+15,A%,"d16",0,16,16,&281680B5
+70 SYS "OS_SpriteOp",256+15,A%,"h",0,16,16,&281680B5:SYS "OS_SpriteOp",256+38,A%,"h",&80000000
+80 FOR y%=0 TO 15:FOR x%=0 TO 15:c%=(x%*16+7) OR ((y%*16+3)<<8) OR (((x%*y%) AND 255)<<16):e%=(x%*2) OR ((y%*2)<<5) OR (((x%+y%) AND 31)<<10)
+90 SYS "OS_SpriteOp",256+42,A%,"g",x%,y%,c%,0:SYS "OS_SpriteOp",256+42,A%,"d32",x%,y%,c%,0:SYS "OS_SpriteOp",256+42,A%,"d16",x%,y%,e%,0:SYS "OS_SpriteOp",256+42,A%,"h",x%,y%,e%,0
+100 SYS "OS_SpriteOp",256+44,A%,"g",x%,y%,x%+16*y%:SYS "OS_SpriteOp",256+44,A%,"h",x%,y%,255-x%-16*y%:NEXT:NEXT
+110 FOR Y%=16 TO 100 STEP 84:PROCs("g",16,Y%,&8):PROCs("g",64,Y%,&4008):PROCs("g",112,Y%,&8008):PROCs("g",160,Y%,&C008)
+120 PROCs("d32",208,Y%,&4000):PROCs("d32",256,Y%,&8000):PROCs("d32",304,Y%,&C000):PROCs("d16",352,Y%,&4000)
+130 PROCs("d16",400,Y%,&8000):PROCs("d16",448,Y%,&C000):PROCs("h",496,Y%,&8):PROCs("h",544,Y%,&8008):NEXT
+140 GOTO 9000
+150 DEFPROCs(s$,x%,y%,f%):SYS "XOS_SpriteOp",256+52,A%,s$,x%,y%,f%,S%,0 TO r%;f%:PROCr(s$,FNe(r%,f%)):ENDPROC
+
+case sprite_blends_onto_32_bit_colour
+10 DIM Q% 64:Q%!0=1:Q%!4=640:Q%!8=480:Q%!12=5:Q%!16=-1:Q%!20=-1:PROCscreen(Q%)
+20 DIM A% 65536:!A%=65536:A%!8=16:SYS "OS_SpriteOp",256+9,A%:DIM S% 16:S%!0=1:S%!4=1:S%!8=1:S%!12=1:DIM V% 16
+30 V%!0=148:V%!4=6:V%!8=-1:SYS "OS_ReadVduVariables",V%,V%:B%=V%!0:L%=V%!4
+40 FOR y%=430 TO 479:FOR x%=0 TO 639:B%!(y%*L%+x%*4)=((x%*7+y%*3) AND 255) OR (((x%*5+y%*11) AND 255)<<8) OR (((x%*3+y%*13) AND 255)<<16):NEXT:NEXT
+50 SYS "OS_SpriteOp",256+15,A%,"d16",0,16,16,&281680B5:SYS "OS_SpriteOp",256+15,A%,"h",0,16,16,&281680B5:SYS "OS_SpriteOp",256+38,A%,"h",&80000000
+60 FOR y%=0 TO 15:FOR x%=0 TO 15:e%=(x%*2) OR ((y%*2)<<5) OR (((x%+y%) AND 31)<<10):SYS "OS_SpriteOp",256+42,A%,"d16",x%,y%,e%,0:SYS "OS_SpriteOp",256+42,A%,"h",x%,y%,e%,0
+70 SYS "OS_SpriteOp",256+44,A%,"h",x%,y%,x%+16*y%:NEXT:NEXT
+80 PROCs("d16",16,16,&4000):PROCs("d16",64,16,&8000):PROCs("d16",112,16,&C000):PROCs("d16",160,16,&1000):PROCs("d16",208,16,&F000)
+90 PROCs("h",16,200,&8):PROCs("h",64,200,&8008):PROCs("h",112,200,&4008)
+100 GOTO 9000
+110 DEFPROCs(s$,x%,y%,f%):SYS "XOS_SpriteOp",256+52,A%,s$,x%,y%,f%,S%,0 TO r%;f%:PROCr(s$,FNe(r%,f%)):ENDPROC

@@ -123,33 +123,38 @@ pub(crate) fn read_vdu_variables(os: &mut Os<'_>, regs: &mut Regs) -> Result<(),
 /// or a sprite mode word; R1 the variable; R2 its value with C clear, or C
 /// set where either is none.
 pub(crate) fn read_mode_variable(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    let (mode, number) = (regs.r[0], regs.r[1]);
-    let value = if mode == u32::MAX {
-        with(os, |vdu, _| Ok(vdu.mode_var(number)))?
-    } else if mode & 1 != 0 && mode >= 0x100 && mode >> 27 != 0 {
-        crate::sprite::mode_variable(mode, number)
-    } else {
-        match select::read_spec(os, mode)? {
-            Some(spec) => named_var(os, &spec, number)?,
-            None => None,
-        }
-    };
+    let [value] = mode_variables(os, regs.r[0], [regs.r[1]])?;
     regs.r[2] = value.unwrap_or(0);
     regs.set_flag(psr::C, value.is_none());
     Ok(())
 }
 
-/// Variable `number` of the mode `spec` names, as a mode named reads it.
-fn named_var(os: &mut Os<'_>, spec: &Spec, number: u32) -> Result<Option<u32>, Fail> {
+/// Variables `numbers` of `mode`, named as `OS_ReadModeVariable` takes it,
+/// the mode read once: none where either is none.
+pub(crate) fn mode_variables<const N: usize>(
+    os: &mut Os<'_>,
+    mode: u32,
+    numbers: [u32; N],
+) -> Result<[Option<u32>; N], Fail> {
+    if mode == u32::MAX {
+        return with(os, |vdu, _| Ok(numbers.map(|number| vdu.mode_var(number))));
+    }
+    if mode & 1 != 0 && mode >= 0x100 && mode >> 27 != 0 {
+        return Ok(numbers.map(|number| crate::sprite::mode_variable(mode, number)));
+    }
+    let Some(spec) = select::read_spec(os, mode)? else {
+        return Ok([None; N]);
+    };
     if let Spec::Number(n) = spec {
         if let Some(m) = tairix_vdu::mode::numbered(n & 0x7F) {
-            return Ok(Format::numbered(m).var(number));
+            let format = Format::numbered(m);
+            return Ok(numbers.map(|number| format.var(number)));
         }
     }
     let monitor = with(os, |vdu, _| Ok(vdu.monitor))?;
-    Ok(match select::resolve(os, spec, monitor)? {
-        Outcome::Valid(resolved) => resolved.format.var(number),
-        Outcome::Substitute(_) | Outcome::Unknown => None,
+    Ok(match select::resolve(os, &spec, monitor)? {
+        Outcome::Valid(resolved) => numbers.map(|number| resolved.format.var(number)),
+        Outcome::Substitute(_) | Outcome::Unknown => [None; N],
     })
 }
 

@@ -146,6 +146,15 @@ impl Pixels {
         self.log2_bpp <= 3
     }
 
+    /// The colours its pixels name through a palette; none in direct colour.
+    pub(crate) const fn colours(&self) -> u32 {
+        if self.paletted() {
+            1 << self.bits()
+        } else {
+            0
+        }
+    }
+
     /// The bits a pixel of its mask takes.
     pub(crate) const fn mask_bits(&self) -> u32 {
         if self.old_format {

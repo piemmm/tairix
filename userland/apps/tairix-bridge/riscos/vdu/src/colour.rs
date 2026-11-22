@@ -17,19 +17,24 @@ use tairix_vdu::mode::{repeated, Flags};
 
 use crate::mode::Format;
 
-/// A `GCOL`: its action, its colour number as the VDU variable reads it, and
-/// its tint; or a pixel value `OS_SetColour` gave.
+/// The action bits `OS_SetColour` gives a graphics colour it sets, beside
+/// the operation: what RISC OS 5 reads back as the action.
+pub(crate) const SET_COLOUR_ACTION: u32 = 0x60;
+
+/// A graphics colour: its action, the colour number `GCOL` gave and its
+/// tint, which the VDU variables report, and what `OS_SetColour` gave in
+/// their place, which plots draw with but the variables never show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Gcol {
     /// 0 to 7, plus 8 where pixels of the opposite colour leave the screen as
     /// it is, plus 16 times the ECF pattern, 1 to 4, or 5 for all four side
-    /// by side.
+    /// by side, or 6 for a colour or pattern `OS_SetColour` gave.
     pub(crate) action: u32,
     pub(crate) colour: u32,
     pub(crate) tint: u32,
-    /// `OS_SetColour` gave the colour as a pixel value.
-    pub(crate) literal: bool,
-    /// `OS_SetColour` gave a pattern of a word a row.
+    /// The pixel value `OS_SetColour` gave.
+    pub(crate) set: Option<u32>,
+    /// The pattern `OS_SetColour` gave, a word a row.
     pub(crate) pattern: Option<[u32; 8]>,
 }
 
@@ -39,18 +44,19 @@ impl Gcol {
             action: 0,
             colour,
             tint,
-            literal: false,
+            set: None,
             pattern: None,
         }
     }
 }
 
-/// A text colour: its number and tint, or a pixel value.
+/// A text colour: the number `COLOUR` gave and its tint, which the VDU
+/// variables report, and the value `OS_SetColour` gave in their place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TextColour {
     pub(crate) colour: u32,
     pub(crate) tint: u32,
-    pub(crate) literal: bool,
+    pub(crate) set: Option<u32>,
 }
 
 /// The ECF patterns' default forms, a byte a row, as each depth's
@@ -105,12 +111,12 @@ impl Colours {
             text_fore: TextColour {
                 colour: default_text_white(format),
                 tint: 0xFF,
-                literal: false,
+                set: None,
             },
             text_back: TextColour {
                 colour: if format.has(Flags::TELETEXT) { 8 } else { 0 },
                 tint: 0,
-                literal: false,
+                set: None,
             },
             patterns: default_patterns(format),
             native: false,
@@ -128,12 +134,12 @@ impl Colours {
         self.text_fore = TextColour {
             colour: default_text_white(format),
             tint: 0xFF,
-            literal: false,
+            set: None,
         };
         self.text_back = TextColour {
             colour: if format.has(Flags::TELETEXT) { 8 } else { 0 },
             tint: 0,
-            literal: false,
+            set: None,
         };
     }
 
@@ -145,7 +151,7 @@ impl Colours {
             (&mut self.text_back, c - 128)
         };
         target.colour = colour_var(format, c, number);
-        target.literal = false;
+        target.set = None;
     }
 
     /// `VDU 18`: a graphics action and colour, the background's from 128.
@@ -157,7 +163,7 @@ impl Colours {
         };
         target.action = u32::from(action);
         target.colour = colour_var(format, c, number);
-        target.literal = false;
+        target.set = None;
         target.pattern = None;
     }
 
@@ -214,20 +220,15 @@ impl Colours {
 
     /// The pixel value of graphics colour `gcol`, before any pattern.
     pub(crate) fn gcol_pixel(format: &Format, gcol: &Gcol) -> u32 {
-        if gcol.literal {
-            gcol.colour
-        } else {
-            pixel(format, gcol.colour, gcol.tint)
-        }
+        gcol.set
+            .unwrap_or_else(|| pixel(format, gcol.colour, gcol.tint))
     }
 
     /// The pixel value of text colour `colour`.
     pub(crate) fn text_pixel(format: &Format, colour: &TextColour) -> u32 {
-        if colour.literal {
-            colour.colour
-        } else {
-            pixel(format, colour.colour, colour.tint)
-        }
+        colour
+            .set
+            .unwrap_or_else(|| pixel(format, colour.colour, colour.tint))
     }
 
     /// The text colours' pixel values, replicated across a word.
@@ -236,6 +237,24 @@ impl Colours {
             replicate(format, Self::text_pixel(format, &self.text_fore)),
             replicate(format, Self::text_pixel(format, &self.text_back)),
         )
+    }
+
+    /// A text colour as `OS_SetColour` reads it back: the value it gave as
+    /// given, else the colour's pixel replicated across a word.
+    pub(crate) fn text_read(format: &Format, colour: &TextColour) -> u32 {
+        colour
+            .set
+            .unwrap_or_else(|| replicate(format, pixel(format, colour.colour, colour.tint)))
+    }
+
+    /// The pixel value `OS_SetColour` takes `value` for: in a 256-colour mode
+    /// whose palette is grouped, a GCOL with its tint below; else itself.
+    pub(crate) fn set_colour_pixel(format: &Format, value: u32) -> u32 {
+        if format.log2_bpp() == 3 && !format.has(Flags::FULL_PALETTE) {
+            u32::from(number_of_gcol(value.to_le_bytes()[0]))
+        } else {
+            value
+        }
     }
 
     /// Writes the colour blocks and the ECF offsets into zero page, as each
@@ -360,7 +379,7 @@ const fn five_of_four(n: u32) -> u32 {
 }
 
 /// A five-bit channel as eight, its top bits repeated below it.
-const fn eight_of_five(v: u32) -> u32 {
+pub(crate) const fn eight_of_five(v: u32) -> u32 {
     (v << 3) | (v >> 2)
 }
 
@@ -407,6 +426,18 @@ pub(crate) const fn number_of_internal(pixel: u8) -> (u32, u32) {
         | (bit(p, 3) << 4)
         | bit(p, 2);
     (colour, (p & 3) << 6)
+}
+
+/// A 256-colour mode's GCOL for colour number `number`: its colour's bits
+/// as `GCOL` lays them out, above its tint.
+pub(crate) const fn gcol_of_number(number: u8) -> u8 {
+    let (colour, tint) = number_of_internal(number);
+    ((colour << 2) | (tint >> 6)).to_le_bytes()[0]
+}
+
+/// The colour number of a 256-colour mode's GCOL `gcol`.
+pub(crate) const fn number_of_gcol(gcol: u8) -> u8 {
+    internal((gcol >> 2) as u32, ((gcol & 3) as u32) << 6)
 }
 
 /// The direct-colour pixel the eight-bit default palette's entry `pixel` is
@@ -485,6 +516,24 @@ impl Direct {
         }
     }
 
+    /// The bytes a pixel takes.
+    pub(crate) const fn bytes(self) -> usize {
+        match self.layout {
+            Layout::TwentyFour => 4,
+            Layout::Twelve | Layout::Sixteen | Layout::Fifteen => 2,
+        }
+    }
+
+    /// Every bit a pixel's colour takes.
+    pub(crate) const fn colour_bits(self) -> u32 {
+        match self.layout {
+            Layout::Twelve => 0xFFF,
+            Layout::Sixteen => 0xFFFF,
+            Layout::Fifteen => 0x7FFF,
+            Layout::TwentyFour => 0xFF_FFFF,
+        }
+    }
+
     /// A pixel's red, green and blue, each widened to eight bits by repeating
     /// its top bits below it, as a deep sprite's colours widen.
     pub(crate) const fn unpack_replicated(self, pixel: u32) -> [u32; 3] {
@@ -510,6 +559,47 @@ impl Direct {
             [high, g, low]
         } else {
             [low, g, high]
+        }
+    }
+
+    /// The bits each of red, green and blue takes.
+    pub(crate) const fn channel_bits(self) -> [u32; 3] {
+        let (low, g, high) = match self.layout {
+            Layout::Twelve => (4, 4, 4),
+            Layout::Sixteen => (5, 6, 5),
+            Layout::Fifteen => (5, 5, 5),
+            Layout::TwentyFour => (8, 8, 8),
+        };
+        if self.swapped {
+            [high, g, low]
+        } else {
+            [low, g, high]
+        }
+    }
+
+    /// A pixel's red, green and blue as it holds them, each in its own bits.
+    pub(crate) const fn channels(self, pixel: u32) -> [u32; 3] {
+        let (low, g, high) = match self.layout {
+            Layout::Twelve => (pixel & 0xF, (pixel >> 4) & 0xF, (pixel >> 8) & 0xF),
+            Layout::Sixteen => (pixel & 0x1F, (pixel >> 5) & 0x3F, (pixel >> 11) & 0x1F),
+            Layout::Fifteen => (pixel & 0x1F, (pixel >> 5) & 0x1F, (pixel >> 10) & 0x1F),
+            Layout::TwentyFour => (pixel & 0xFF, (pixel >> 8) & 0xFF, (pixel >> 16) & 0xFF),
+        };
+        if self.swapped {
+            [high, g, low]
+        } else {
+            [low, g, high]
+        }
+    }
+
+    /// Red, green and blue, each in its own bits, packed into a pixel.
+    pub(crate) const fn pack_channels(self, [r, g, b]: [u32; 3]) -> u32 {
+        let (low, high) = if self.swapped { (b, r) } else { (r, b) };
+        match self.layout {
+            Layout::Twelve => low | (g << 4) | (high << 8),
+            Layout::Sixteen => low | (g << 5) | (high << 11),
+            Layout::Fifteen => low | (g << 5) | (high << 10),
+            Layout::TwentyFour => low | (g << 8) | (high << 16),
         }
     }
 

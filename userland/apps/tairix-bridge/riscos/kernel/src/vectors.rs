@@ -77,6 +77,8 @@ pub const UPCALL: Vector = Vector(0x1D);
 pub const CHANGE_ENVIRONMENT: Vector = Vector(0x1E);
 /// `SpriteV`: `OS_SpriteOp`.
 pub const SPRITE: Vector = Vector(0x1F);
+/// `ColourV`: every ColourTrans SWI, its offset in R8.
+pub const COLOUR: Vector = Vector(0x22);
 /// `SerialV`.
 pub const SERIAL: Vector = Vector(0x24);
 /// `GraphicsV`.

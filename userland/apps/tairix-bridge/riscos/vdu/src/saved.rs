@@ -26,7 +26,7 @@ pub(crate) const SAVE_AREA_BYTES: u32 = 0x180;
 /// nought is not their layout.
 const WRITTEN: u32 = 0x5644_5553;
 /// The words of the layout, `WRITTEN` among them.
-const WORDS: usize = 86;
+const WORDS: usize = 90;
 const _: () = assert!(WORDS * 4 <= SAVE_AREA_BYTES as usize);
 /// The longest dot pattern, in dots.
 const MOST_DOTS: u32 = 64;
@@ -442,7 +442,8 @@ impl Words {
         self.put(gcol.action);
         self.put(gcol.colour);
         self.put(gcol.tint);
-        self.put(u32::from(gcol.literal) | u32::from(gcol.pattern.is_some()) << 1);
+        self.put(u32::from(gcol.set.is_some()) | u32::from(gcol.pattern.is_some()) << 1);
+        self.put(gcol.set.unwrap_or(0));
         for &word in &gcol.pattern.unwrap_or([0; 8]) {
             self.put(word);
         }
@@ -453,6 +454,7 @@ impl Words {
         let colour = self.take()?;
         let tint = self.take().filter(|&t| t <= 0xFF)?;
         let bits = self.take().filter(|&b| b <= 3)?;
+        let set = self.take()?;
         let mut pattern = [0u32; 8];
         for word in &mut pattern {
             *word = self.take()?;
@@ -461,7 +463,7 @@ impl Words {
             action,
             colour,
             tint,
-            literal: bits & 1 != 0,
+            set: (bits & 1 != 0).then_some(set),
             pattern: (bits & 2 != 0).then_some(pattern),
         })
     }
@@ -469,17 +471,19 @@ impl Words {
     fn text_colour(&mut self, colour: &TextColour) {
         self.put(colour.colour);
         self.put(colour.tint);
-        self.put(u32::from(colour.literal));
+        self.put(u32::from(colour.set.is_some()));
+        self.put(colour.set.unwrap_or(0));
     }
 
     fn take_text_colour(&mut self) -> Option<TextColour> {
         let colour = self.take()?;
         let tint = self.take().filter(|&t| t <= 0xFF)?;
-        let literal = flag(self.take()?)?;
+        let given = flag(self.take()?)?;
+        let set = self.take()?;
         Some(TextColour {
             colour,
             tint,
-            literal,
+            set: given.then_some(set),
         })
     }
 }

@@ -181,16 +181,16 @@ fn file_size(bytes: u64, fixed: bool) -> Vec<u8> {
 
 /// `bytes` as hex digits, the highest first, upper or lower case.
 fn hex(bytes: &[u8], digits: usize, upper: bool) -> Vec<u8> {
-    let table: &[u8; 16] = if upper {
-        b"0123456789ABCDEF"
+    let spell = if upper {
+        tairix_util::hex::upper_digit
     } else {
-        b"0123456789abcdef"
+        tairix_util::hex::digit
     };
     (0..digits)
         .rev()
         .map(|nibble| {
             let byte = bytes.get(nibble / 2).copied().unwrap_or(0);
-            table[usize::from((byte >> (4 * (nibble % 2))) & 0xF)]
+            spell(byte >> (4 * (nibble % 2)))
         })
         .collect()
 }

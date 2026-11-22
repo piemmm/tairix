@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 
 use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::module::{Builtin, Command, CommandKind, Help, Resource, Services, Swis};
-use tairix_riscos_kernel::msgtrans::{Own, OWN_DESCRIPTOR, REQUEST};
+use tairix_riscos_kernel::msgtrans::{Own, OwnFile};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, Unwind, World};
 use tairix_riscos_kernel::service;
 use tairix_riscos_kernel::swi::os::FILE;
@@ -28,14 +28,10 @@ const MOST_MODES: usize = 256;
 /// The depths each of a file's modes is offered in.
 const DEPTHS: [u32; 6] = [0, 1, 2, 3, 4, 5];
 
-/// Its messages, and where its workspace keeps their descriptor, the
-/// file's name and a request's room.
+/// Its messages, and their file, kept at its workspace's start.
 const MESSAGES: &[u8] = include_bytes!("../resources/ScreenModes/Messages");
-const MESSAGES_NAME: &[u8] = b"Resources:$.Resources.ScreenMode.Messages\0";
-const OWN_AT: u32 = 0;
-const NAME_AT: u32 = OWN_DESCRIPTOR;
-const REQUEST_AT: u32 = (NAME_AT + len32(MESSAGES_NAME.len())).next_multiple_of(4);
-const TITLE_AT: u32 = REQUEST_AT + REQUEST;
+const MESSAGES_FILE: OwnFile = OwnFile::named(b"Resources:$.Resources.ScreenMode.Messages\0");
+const TITLE_AT: u32 = MESSAGES_FILE.room();
 /// A monitor's title, kept with its terminator.
 const TITLE_ROOM: u32 = TITLE_MOST + 1;
 /// A VIDC list of type 3 for the mode a service answers with.
@@ -245,12 +241,7 @@ fn own(world: &mut World) -> Option<&mut Own> {
 fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let workspace = os.rma_claim(WORKSPACE)?;
     os.write_word(regs.r[12], workspace)?;
-    os.write_bytes(workspace + NAME_AT, MESSAGES_NAME)?;
-    let own = Own::at(
-        workspace + OWN_AT,
-        workspace + NAME_AT,
-        workspace + REQUEST_AT,
-    );
+    let own = MESSAGES_FILE.place(os, workspace)?;
     os.write_byte(workspace + TITLE_AT, 0)?;
     os.hold_extension(State {
         own,
@@ -260,10 +251,11 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     })
 }
 
+/// Its messages closed; its workspace the kernel frees from its private
+/// word.
 fn finalise(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
-    if let Some(state) = os.release_extension::<State>() {
-        os.rma_free(state.workspace)?;
-    }
+    os.close_own(own)?;
+    os.release_extension::<State>();
     Ok(())
 }
 

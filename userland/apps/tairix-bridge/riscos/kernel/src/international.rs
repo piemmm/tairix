@@ -50,7 +50,8 @@ const UNKNOWN_COUNTRY: Error = Error {
 
 /// Its messages.
 const MESSAGES: &[u8] = include_bytes!("../resources/Internatio/Messages");
-const MESSAGES_NAME: &[u8] = b"Resources:$.Resources.Internatio.Messages\0";
+const MESSAGES_FILE: crate::msgtrans::OwnFile =
+    crate::msgtrans::OwnFile::named(b"Resources:$.Resources.Internatio.Messages\0");
 
 /// The countries by number, so an abbreviation names the first it matches:
 /// each number, name, alphabet and ISO 3166 code. The keyboards that have no country's
@@ -137,13 +138,9 @@ const NAME_ROOM: u32 = 16;
 /// The listing `*Alphabets` and `*Countries` make, each name and a tab.
 const LISTING_ROOM: u32 = 512;
 
-/// Where its workspace keeps its messages' descriptor, the file's name, a
-/// request's room, the room a listing is made in, then each alphabet's table
-/// of 256 words, in [`ALPHABETS`]' order.
-const OWN_AT: u32 = 0;
-const NAME_AT: u32 = crate::msgtrans::OWN_DESCRIPTOR;
-const REQUEST_AT: u32 = (NAME_AT + len32(MESSAGES_NAME.len())).next_multiple_of(4);
-const LISTING_AT: u32 = REQUEST_AT + crate::msgtrans::REQUEST;
+/// Where its workspace keeps its messages' file, the room a listing is made
+/// in, then each alphabet's table of 256 words, in [`ALPHABETS`]' order.
+const LISTING_AT: u32 = MESSAGES_FILE.room();
 const TABLES_AT: u32 = LISTING_AT + LISTING_ROOM;
 const TABLE: u32 = 256 * 4;
 const WORKSPACE: u32 = TABLES_AT + TABLE * len32(ALPHABETS.len());
@@ -366,7 +363,7 @@ impl Os<'_> {
 
     /// The name `reason` gives `number`, or "Unknown".
     fn international_name(&mut self, reason: u32, number: u32) -> Result<Vec<u8>, Fail> {
-        let buffer = self.world.international.workspace.unwrap_or(0) + REQUEST_AT + 128;
+        let buffer = self.world.international.own.reply();
         if let Some((_, length)) = self.ask_international(reason, number, buffer, NAME_ROOM - 1)? {
             return Ok(self.read_until(buffer, length as usize, |_| false)?.0);
         }
@@ -394,7 +391,7 @@ impl Os<'_> {
 fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let workspace = os.rma_claim(WORKSPACE)?;
     os.write_word(regs.r[12], workspace)?;
-    os.write_bytes(workspace + NAME_AT, MESSAGES_NAME)?;
+    let own = MESSAGES_FILE.place(os, workspace)?;
     for (n, &(alphabet, _)) in (0..).zip(ALPHABETS.iter()) {
         let at = workspace + TABLES_AT + TABLE * n;
         let mut table = [0u8; TABLE as usize];
@@ -406,11 +403,7 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     }
     os.world.international = State::new();
     os.world.international.workspace = Some(workspace);
-    os.world.international.own = Own::at(
-        workspace + OWN_AT,
-        workspace + NAME_AT,
-        workspace + REQUEST_AT,
-    );
+    os.world.international.own = own;
     Ok(())
 }
 

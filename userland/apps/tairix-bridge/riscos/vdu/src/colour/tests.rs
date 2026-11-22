@@ -82,3 +82,21 @@ fn a_mode_s_default_patterns_are_its_depth_s() {
     assert_eq!(default_patterns(&numbered(1))[0][..2], [0x66, 0x55]);
     assert_eq!(default_patterns(&numbered(15))[1][..4], [3, 2, 1, 0]);
 }
+
+#[test]
+fn a_256_colour_gcol_and_colour_number_shuffle_their_bits() {
+    for (number, gcol) in [
+        (0x15, 0x0D),
+        (0x62, 0x32),
+        (0x88, 0xC0),
+        (0xF0, 0xB8),
+        (0x25, 0x15),
+        (0x98, 0xC8),
+    ] {
+        assert_eq!(gcol_of_number(number), gcol);
+        assert_eq!(number_of_gcol(gcol), number);
+    }
+    for n in 0..=u8::MAX {
+        assert_eq!(number_of_gcol(gcol_of_number(n)), n);
+    }
+}

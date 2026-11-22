@@ -8,8 +8,8 @@
 //!   workspace a plot needs is RISC OS 5's figure for the width;
 //! - the plots decode the raster as stored through `lib/image` and draw it as
 //!   a deep sprite is drawn, scaled; on a palettised destination each colour
-//!   becomes the palette's nearest. A transformed plot is made only where its
-//!   transform is a scaling, as RISC OS 5's SpriteExtend makes it;
+//!   is found in the destination's 32K table. A transformed plot is made only
+//!   where its transform is a scaling, as RISC OS 5's SpriteExtend makes it;
 //! - with `JPEG_PDriverIntercept`'s bit 0 set, the plots pass to
 //!   `PDriver_JPEGSWI` with the JPEG SWI's offset in R8.
 //!
@@ -28,7 +28,7 @@ use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::{file as reason, FILE, SWI_NUMBER_FROM_STRING};
 use tairix_riscos_kernel::swi::X;
 
-use super::extend::SPRITE_EXTEND;
+use super::extend::{State, SPRITE_EXTEND};
 use super::paint::{self, PlotFlags, Scale};
 use super::{NO_MEMORY, RESERVED_FLAGS};
 
@@ -91,12 +91,6 @@ const PASS_TO: &[u8] = b"PDriver_JPEGSWI";
 /// The pictures a plot decodes at most: far past any screen, within what one
 /// session's memory holds.
 const LIMITS: DecodeLimits = DecodeLimits::new(1 << 14, 1 << 14, 1 << 24, 1 << 27);
-
-/// SpriteExtend's JPEG state: `JPEG_PDriverIntercept`'s flags.
-#[derive(Default)]
-pub(crate) struct State {
-    intercept: u32,
-}
 
 /// SpriteExtend's JPEG SWIs.
 pub(crate) fn swi(os: &mut Os<'_>, offset: u32, regs: &mut Regs) -> Result<(), Fail> {
@@ -367,18 +361,6 @@ fn file_bytes(os: &mut Os<'_>, name: u32) -> Result<Vec<u8>, Fail> {
     let freed = os.rma_free(block);
     let read = read?;
     freed.map(|()| read)
-}
-
-/// SpriteExtend's start: the JPEG state.
-pub(crate) fn init(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
-    os.hold_extension(State::default())
-}
-
-/// SpriteExtend's end.
-#[expect(clippy::unnecessary_wraps, reason = "a module entry's signature")]
-pub(crate) fn finalise(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
-    os.release_extension::<State>();
-    Ok(())
 }
 
 #[cfg(test)]

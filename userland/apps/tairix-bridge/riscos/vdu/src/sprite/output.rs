@@ -14,7 +14,6 @@
 
 use tairix_image::{sprite_dpi_of_eig, sprite_eig_of_dpi, sprite_type, SpriteModeWord};
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
-use tairix_riscos_kernel::service::SWITCHING_OUTPUT_TO_SPRITE;
 use tairix_vdu::mode::{var, Flags};
 
 use super::area::{Area, Naming};
@@ -87,22 +86,7 @@ pub(crate) fn switch(os: &mut Os<'_>, naming: Naming, regs: &mut Regs) -> Result
         state.restore(vdu, os)
     })?;
     regs.r[..4].copy_from_slice(&previous.0);
-    let mut service = Regs::new([
-        0,
-        SWITCHING_OUTPUT_TO_SPRITE,
-        asked[0],
-        asked[1],
-        asked[2],
-        asked[3],
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]);
-    os.service(&mut service).map_err(Fail::Unwind)
+    crate::output::announce(os, asked)
 }
 
 /// Keeps `saved` where save area `save_area` says.

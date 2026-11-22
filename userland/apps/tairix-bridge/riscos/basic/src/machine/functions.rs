@@ -915,11 +915,7 @@ pub(crate) fn instr(haystack: &[u8], needle: &[u8], start: i32) -> i32 {
 /// `n` in hexadecimal, its leading noughts dropped.
 pub(crate) fn hex_text(n: u32) -> Text {
     let mut text = Text::EMPTY;
-    let digits = (32 - n.leading_zeros()).div_ceil(4).max(1);
-    for shift in (0..digits).rev() {
-        let d = (n >> (4 * shift)) & 0xF;
-        let _ = text.push_bytes(&[b"0123456789ABCDEF"[d as usize]]);
-    }
+    let _ = text.push_bytes(tairix_riscos_kernel::hex(n).as_bytes());
     text
 }
 

@@ -44,6 +44,11 @@ pub const MODE_TRANSLATION: u32 = 0x51;
 pub const RESOURCE_FS_STARTED: u32 = 0x59;
 /// `Service_ResourceFSDying`.
 pub const RESOURCE_FS_DYING: u32 = 0x5A;
+/// `Service_CalibrationChanged`: the screen's calibration was set.
+pub const CALIBRATION_CHANGED: u32 = 0x5B;
+/// `Service_WimpSaveDesktop`: the commands that restore a module's settings
+/// written to R2's file; R0 an error and R1 nought where one fails.
+pub const WIMP_SAVE_DESKTOP: u32 = 0x5C;
 /// `Service_MessageFileClosed`.
 pub const MESSAGE_FILE_CLOSED: u32 = 0x5E;
 /// `Service_ResourceFSStarting`: R2 the registration to call, R3 its R3.

@@ -73,7 +73,7 @@ impl Source {
         } else {
             (0, Vec::new())
         };
-        let entries = sprite.palette_entries();
+        let entries = sprite.named_entries();
         let mut palette = Vec::new();
         if palette.try_reserve_exact(entries as usize).is_err() {
             return Err(os.error(NO_MEMORY));

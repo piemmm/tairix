@@ -26,7 +26,7 @@ use tairix_riscos_kernel::output::workspace;
 
 use super::super::format::variable;
 use super::super::header::Sprite;
-use super::colours::Conversion;
+use super::colours::Converted;
 use super::scaled::{paint, plot_block};
 use super::source::Source;
 use super::{read, Destination, Mapping, PlotFlags};
@@ -57,7 +57,7 @@ pub(crate) fn put_transformed(
 ) -> Result<(), Fail> {
     let source = read(os, sprite)?;
     let destination = Destination::now(os)?;
-    let conversion = Conversion::of(os, &source, &destination.format, flags, table)?;
+    let converted = Converted::of(os, &source, &destination.format, flags, table)?;
     let Some(mut transform) =
         Transform::read(os, sprite, &source, &destination, form, rectangle, shape)?
     else {
@@ -68,7 +68,7 @@ pub(crate) fn put_transformed(
         os,
         &source,
         &destination,
-        &conversion,
+        &converted,
         flags,
         bounds,
         &mut transform,

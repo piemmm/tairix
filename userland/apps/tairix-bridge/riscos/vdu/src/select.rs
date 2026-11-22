@@ -15,6 +15,7 @@ use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::mouse::Bounds;
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::service;
+use tairix_riscos_kernel::swi::os::screen_mode as reason;
 use tairix_riscos_kernel::swi::os::{CHANGE_DYNAMIC_AREA, READ_SYS_INFO};
 use tairix_riscos_kernel::swi::X;
 use tairix_vdu::mode::{Flags, DEFAULT_MODE};
@@ -445,7 +446,8 @@ pub(crate) fn vdu_22(os: &mut Os<'_>, mode: u8) -> Result<(), Fail> {
 }
 
 /// Selects the mode `spec` names, through the services: one the monitor
-/// lacks becomes its substitute; one nothing can show refuses.
+/// lacks becomes its substitute; one nothing can show refuses. Output goes
+/// back to the screen, announced as a switch to it.
 pub(crate) fn select(os: &mut Os<'_>, spec: &Spec) -> Result<(), Fail> {
     let mut pre = Regs::new([
         0,
@@ -512,6 +514,7 @@ pub(crate) fn select(os: &mut Os<'_>, spec: &Spec) -> Result<(), Fail> {
     let named = name(os, &resolved.spec)?;
     with(os, |vdu, os| apply(vdu, os, &resolved, named, shadow))?;
     bound_mouse(os, &resolved.format);
+    crate::output::announce(os, crate::output::Context::SCREEN.0)?;
     let mut changed = Regs::new([
         0,
         service::MODE_CHANGE,
@@ -661,7 +664,7 @@ pub(crate) fn check_mode_valid(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), F
 /// mode.
 pub(crate) fn screen_mode(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     match regs.r[0] {
-        0 => {
+        reason::SELECT => {
             let spec = read_spec(os, regs.r[1])?.ok_or_else(|| os.error(BAD_MODE))?;
             select(os, &spec)
         }
@@ -725,7 +728,7 @@ pub(crate) fn screen_mode(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> 
             regs.r[3] = 0;
             Ok(())
         }
-        15 => {
+        reason::SELECT_BY_STRING => {
             let text = os.read_text(regs.r[1], 256)?;
             let selector =
                 crate::modestring::parse(&text).ok_or_else(|| os.error(BAD_MODE_STRING))?;

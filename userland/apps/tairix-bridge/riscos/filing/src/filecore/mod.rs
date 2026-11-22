@@ -28,7 +28,7 @@ use alloc::vec::Vec;
 use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::filing::fs::{block, info};
 use tairix_riscos_kernel::module::{Builtin, Resource, Services, Swis};
-use tairix_riscos_kernel::msgtrans::{Own, OWN_DESCRIPTOR, REQUEST};
+use tairix_riscos_kernel::msgtrans::{Own, OwnFile};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, Target, Unwind, World};
 use tairix_riscos_kernel::service::FS_REDECLARE;
 use tairix_riscos_kernel::swi::os::{fs_control, FS_CONTROL};
@@ -83,15 +83,9 @@ const INFO: u32 = info::FLUSH_NOTIFY | info::IMAGES | info::LOAD_BY_OPEN | info:
 
 /// Its messages, in the emulator's own words.
 const MESSAGES: &[u8] = include_bytes!("../../resources/FileCore/Messages");
-/// Its file's name, which its descriptor keeps.
-const MESSAGES_NAME: &[u8] = b"Resources:$.Resources.FileCore.Messages\0";
-
-/// Where FileCore's own workspace keeps its messages' descriptor, the file's
-/// name and an error's request.
-const OWN_AT: u32 = 0;
-const MESSAGES_NAME_AT: u32 = OWN_DESCRIPTOR;
-const REQUEST_AT: u32 = (MESSAGES_NAME_AT + len32(MESSAGES_NAME.len())).next_multiple_of(4);
-const OWN_WORKSPACE: u32 = REQUEST_AT + REQUEST;
+/// FileCore's own workspace: its messages' file.
+const MESSAGES_FILE: OwnFile = OwnFile::named(b"Resources:$.Resources.FileCore.Messages\0");
+const OWN_WORKSPACE: u32 = MESSAGES_FILE.room();
 
 /// Where an instance's workspace keeps the filing system's information
 /// block, an empty start-up text, `MiscOp` 6's block, each drive's disc record
@@ -496,19 +490,20 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 /// private word stays zero, as RISC OS 5's does.
 fn start(os: &mut Os<'_>) -> Result<(), Fail> {
     let workspace = os.rma_claim(OWN_WORKSPACE)?;
-    os.write_bytes(workspace + MESSAGES_NAME_AT, MESSAGES_NAME)?;
-    let own = Own::at(
-        workspace + OWN_AT,
-        workspace + MESSAGES_NAME_AT,
-        workspace + REQUEST_AT,
-    );
-    os.hold_extension(State {
-        own,
-        workspace,
-        pending: None,
-        created: None,
-        instances: Vec::new(),
-    })
+    let held = MESSAGES_FILE.place(os, workspace).and_then(|own| {
+        os.hold_extension(State {
+            own,
+            workspace,
+            pending: None,
+            created: None,
+            instances: Vec::new(),
+        })
+    });
+    // With its private word zero, nothing else frees the workspace.
+    if held.is_err() {
+        os.rma_free(workspace)?;
+    }
+    held
 }
 
 /// The instance for `client`, its incarnation's private word at

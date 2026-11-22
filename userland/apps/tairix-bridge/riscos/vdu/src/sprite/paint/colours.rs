@@ -14,26 +14,160 @@
 //!   and without one draws nothing;
 //! - flag bit 7 makes R7 a colour mapping descriptor for a deep sprite: its
 //!   transfer function is called once for each colour the sprite holds, and
-//!   what it gives is drawn on a deep destination. A palettised one would
-//!   need ColourTrans's colour match, so nothing is drawn there;
+//!   what it gives is drawn on a deep destination, or found in a palettised
+//!   one's 32K table;
 //! - a picture, a JPEG decoded, is drawn as a deep sprite is on a deep
-//!   destination, and on a palettised one in the palette colour nearest each
-//!   of its colours.
+//!   destination, and on a palettised one each of its colours is found in
+//!   the 32K table.
 
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 
+use tairix_colour::Rgb;
 use tairix_riscos_kernel::os::{Entry, Fail, Os, Regs};
 
+use super::super::extend::State;
 use super::super::{NO_MEMORY, TABLE_REQUIRED};
-use super::source::Source;
+use super::source::{Source, Transparency};
 use super::PlotFlags;
 use crate::colour::Direct;
+use crate::colourtrans::palettes;
+use crate::inverse::{self, fifteen, CELLS, GUARD};
 use crate::mode::Format;
 
-/// A 32K table's guard block: its two marker words about the table's address.
-const GUARD: u32 = u32::from_le_bytes(*b"32K.");
-/// The entries of a 32K table: every five-bit red, green and blue.
-const THIRTY_TWO_K: usize = 1 << 15;
+/// A palettised destination's colours, each first flash state's, and the
+/// 32K table colours are found in, kept by SpriteExtend until they differ.
+pub(crate) struct Palettised {
+    pub(crate) colours: Vec<Rgb>,
+    table: Rc<Vec<u8>>,
+}
+
+impl Palettised {
+    /// The current destination's, as ColourTrans reads them, a sprite with
+    /// no palette its mode's default; none for a direct-colour one.
+    pub(crate) fn now(os: &mut Os<'_>) -> Result<Option<Self>, Fail> {
+        let against = palettes::destination_colours(os)?;
+        let Some((_, colours)) = against.palette() else {
+            return Ok(None);
+        };
+        let palettised = match os.extension::<State>() {
+            Some(state) => state
+                .inverse
+                .table(colours)
+                .and_then(|(table, _)| Self::with_table(colours, table)),
+            None => Self::of(colours),
+        };
+        match palettised {
+            Some(palettised) => Ok(Some(palettised)),
+            None => Err(os.error(NO_MEMORY)),
+        }
+    }
+
+    /// `colours` with their 32K table, none where there is no room.
+    pub(crate) fn of(colours: &[Rgb]) -> Option<Self> {
+        Self::with_table(colours, Rc::new(inverse::table(colours)?))
+    }
+
+    fn with_table(colours: &[Rgb], table: Rc<Vec<u8>>) -> Option<Self> {
+        let mut kept = Vec::new();
+        kept.try_reserve_exact(colours.len()).ok()?;
+        kept.extend_from_slice(colours);
+        Some(Self {
+            colours: kept,
+            table,
+        })
+    }
+
+    /// The colour number the 32K table gives `colour`.
+    pub(crate) fn number(&self, colour: Rgb) -> u32 {
+        self.number_of_cell(fifteen(colour))
+    }
+
+    /// The colour number the 32K table gives fifteen-bit colour `cell`.
+    pub(crate) fn number_of_cell(&self, cell: usize) -> u32 {
+        self.table.get(cell).map_or(0, |&number| u32::from(number))
+    }
+
+    /// Colour number `number`'s colour, black past the palette.
+    pub(crate) fn colour(&self, number: u32) -> Rgb {
+        self.colours
+            .get(number as usize)
+            .copied()
+            .unwrap_or(Rgb::BLACK)
+    }
+}
+
+/// How a plot turns its pixels into the destination's: the conversion, and
+/// a palettised destination's colours where the plot blends or maps onto
+/// them.
+pub(crate) struct Converted {
+    pub(crate) conversion: Conversion,
+    pub(crate) palettised: Option<Palettised>,
+}
+
+impl Converted {
+    /// A plot of `source` on `destination` with `flags` and R7 `table`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Conversion::of`].
+    pub(crate) fn of(
+        os: &mut Os<'_>,
+        source: &Source,
+        destination: &Format,
+        flags: PlotFlags,
+        table: u32,
+    ) -> Result<Self, Fail> {
+        let mapped = flags.mapping() && !source.pixels.paletted();
+        let palettised = if !destination.direct() && (blends(source, flags) || mapped) {
+            Palettised::now(os)?
+        } else {
+            None
+        };
+        let conversion =
+            Conversion::of(os, source, destination, palettised.as_ref(), flags, table)?;
+        Ok(Self {
+            conversion,
+            palettised,
+        })
+    }
+
+    /// A picture's plot on `destination`, through the colour mapping
+    /// descriptor at `mapping` where one is given.
+    pub(crate) fn of_picture(
+        os: &mut Os<'_>,
+        source: &Source,
+        destination: &Format,
+        mapping: Option<u32>,
+    ) -> Result<Self, Fail> {
+        let palettised = if destination.direct() {
+            None
+        } else {
+            Palettised::now(os)?
+        };
+        let conversion =
+            Conversion::of_picture(os, source, destination, palettised.as_ref(), mapping)?;
+        Ok(Self {
+            conversion,
+            palettised,
+        })
+    }
+}
+
+/// Whether a plot of `source` with `flags` blends: translucent, or alpha
+/// asked for from a sprite that has it.
+pub(crate) fn blends(source: &Source, flags: PlotFlags) -> bool {
+    flags.translucency() != 0 || alpha_blended(source, flags)
+}
+
+/// Whether a plot of `source` with `flags` blends by the sprite's alpha.
+pub(crate) const fn alpha_blended(source: &Source, flags: PlotFlags) -> bool {
+    flags.masked()
+        && matches!(
+            source.transparency,
+            Transparency::Wide | Transparency::Channel(_)
+        )
+}
 
 /// A pixel turned into the destination's.
 pub(crate) enum Conversion {
@@ -53,9 +187,9 @@ pub(crate) enum Conversion {
     /// A palettised destination's colour number from a deep pixel's five-bit
     /// channels through a 32K table.
     ThirtyTwoK(Vec<u8>, Direct),
-    /// The destination's pixel for each colour a deep sprite holds, as a
-    /// colour mapping or the nearest palette colour gave it, ordered by the
-    /// sprite's pixel.
+    /// The destination's pixel for each colour a deep sprite or a picture
+    /// holds, through a colour mapping or a 32K table, ordered by the
+    /// source's pixel.
     Mapped(Vec<(u32, u32)>),
     /// Nothing drawn.
     Nothing,
@@ -67,12 +201,12 @@ impl Conversion {
     ///
     /// # Errors
     ///
-    /// "A translation table is needed" where it is needed and not given, or
-    /// given for a destination shallower than the sprite.
-    pub(crate) fn of(
+    /// "A translation table is needed" where it is needed and not given.
+    fn of(
         os: &mut Os<'_>,
         source: &Source,
         destination: &Format,
+        palettised: Option<&Palettised>,
         flags: PlotFlags,
         table: u32,
     ) -> Result<Self, Fail> {
@@ -100,23 +234,18 @@ impl Conversion {
                     Err(os.error(TABLE_REQUIRED))
                 };
             }
-            if to < from {
-                return Err(os.error(TABLE_REQUIRED));
-            }
             return Ok(Self::Bytes(os.read_vec(table, entries)?));
         }
         if flags.mapping() {
-            if !destination.direct() {
-                return Ok(Self::Nothing);
-            }
             let colours = distinct_colours(os, source)?;
-            return Ok(Self::Mapped(map_colours(
-                os,
-                source,
-                colours,
-                table,
-                |rgb| direct.pack(rgb),
-            )?));
+            let mapped = match (palettised, destination.direct()) {
+                (Some(palettised), _) => map_colours(os, source, colours, table, |rgb| {
+                    palettised.number(Rgb::new(rgb[0], rgb[1], rgb[2]))
+                })?,
+                (None, true) => map_colours(os, source, colours, table, |rgb| direct.pack(rgb))?,
+                (None, false) => return Ok(Self::Nothing),
+            };
+            return Ok(Self::Mapped(mapped));
         }
         if destination.direct() {
             return Ok(Self::Direct(source.direct, direct));
@@ -128,10 +257,7 @@ impl Conversion {
             return Ok(Self::Nothing);
         }
         let at = os.read_word(table.wrapping_add(4))?;
-        Ok(Self::ThirtyTwoK(
-            os.read_vec(at, THIRTY_TWO_K)?,
-            source.direct,
-        ))
+        Ok(Self::ThirtyTwoK(os.read_vec(at, CELLS)?, source.direct))
     }
 
     /// The destination's pixel for colour `colour`, if one is drawn.
@@ -151,9 +277,8 @@ impl Conversion {
                 Some(to.pack(from.unpack_replicated(colour).map(|v| v.to_le_bytes()[0])))
             }
             Self::ThirtyTwoK(table, from) => {
-                let [r, g, b] = from.unpack_replicated(colour);
-                let index = (r >> 3) | (g >> 3) << 5 | (b >> 3) << 10;
-                table.get(index as usize).map(|&b| u32::from(b))
+                let [r, g, b] = from.unpack_replicated(colour).map(|v| v.to_le_bytes()[0]);
+                table.get(fifteen(Rgb::new(r, g, b))).map(|&b| u32::from(b))
             }
             Self::Mapped(colours) => colours
                 .binary_search_by_key(&colour, |&(from, _)| from)
@@ -167,27 +292,26 @@ impl Conversion {
 
 impl Conversion {
     /// How a picture's pixels become the destination's: as a deep sprite's
-    /// on a deep destination, else each the palette colour `palette` holds
-    /// nearest it; through the colour mapping descriptor at `mapping` first
-    /// where one is given.
-    pub(crate) fn of_picture(
+    /// on a deep destination, else each found in `palettised`'s 32K table;
+    /// through the colour mapping descriptor at `mapping` first where one is
+    /// given.
+    fn of_picture(
         os: &mut Os<'_>,
         source: &Source,
         destination: &Format,
-        palette: &[[u8; 3]],
+        palettised: Option<&Palettised>,
         mapping: Option<u32>,
     ) -> Result<Self, Fail> {
         let direct = Direct::of(destination);
-        if destination.direct() && mapping.is_none() {
-            return Ok(Self::Direct(source.direct, direct));
+        match (palettised, destination.direct()) {
+            (None, false) => return Ok(Self::Nothing),
+            (None, true) if mapping.is_none() => return Ok(Self::Direct(source.direct, direct)),
+            _ => {}
         }
         let colours = distinct_colours(os, source)?;
-        let to = |rgb: [u8; 3]| {
-            if destination.direct() {
-                direct.pack(rgb)
-            } else {
-                nearest(palette, rgb)
-            }
+        let to = |rgb: [u8; 3]| match palettised {
+            Some(palettised) => palettised.number(Rgb::new(rgb[0], rgb[1], rgb[2])),
+            None => direct.pack(rgb),
         };
         let colours = match mapping {
             Some(descriptor) => map_colours(os, source, colours, descriptor, to)?,
@@ -205,75 +329,6 @@ impl Conversion {
                 .collect(),
         };
         Ok(Self::Mapped(colours))
-    }
-}
-
-/// The index of the colour of `palette` nearest `rgb`, the first of any
-/// equally near.
-pub(crate) fn nearest(palette: &[[u8; 3]], rgb: [u8; 3]) -> u32 {
-    let distance = |entry: &[u8; 3]| -> u32 {
-        entry
-            .iter()
-            .zip(rgb)
-            .map(|(&a, b)| u32::from(a.abs_diff(b)).pow(2))
-            .sum()
-    };
-    let (mut best, mut least) = (0, u32::MAX);
-    for (index, entry) in (0u32..).zip(palette) {
-        let d = distance(entry);
-        if d < least {
-            (best, least) = (index, d);
-        }
-    }
-    best
-}
-
-/// The groups of near colours [`NearestKept`] keeps an answer for: each
-/// channel's top four bits.
-const KEPT: usize = 1 << 12;
-
-/// [`nearest`] for one palette, its last answer in each group of near
-/// colours kept, so a blend of a few colours searches the palette once for
-/// each rather than once a pixel.
-pub(crate) struct NearestKept<'a> {
-    palette: &'a [[u8; 3]],
-    kept: Vec<Option<([u8; 3], u8)>>,
-}
-
-impl<'a> NearestKept<'a> {
-    /// The palette's answers, none kept yet; no room is taken for an empty
-    /// palette, which no plot searches. None where the room is refused.
-    pub(crate) fn of(palette: &'a [[u8; 3]]) -> Option<Self> {
-        let mut kept = Vec::new();
-        if !palette.is_empty() {
-            kept.try_reserve_exact(KEPT).ok()?;
-            kept.resize(KEPT, None);
-        }
-        Some(Self { palette, kept })
-    }
-
-    /// The palette.
-    pub(crate) const fn palette(&self) -> &'a [[u8; 3]] {
-        self.palette
-    }
-
-    /// The index of the palette's colour nearest `rgb`, as [`nearest`]
-    /// gives it.
-    pub(crate) fn index(&mut self, rgb: [u8; 3]) -> u32 {
-        let group = usize::from(rgb[0] >> 4) << 8
-            | usize::from(rgb[1] >> 4) << 4
-            | usize::from(rgb[2] >> 4);
-        let Some(slot) = self.kept.get_mut(group) else {
-            return nearest(self.palette, rgb);
-        };
-        if let Some((kept, index)) = *slot {
-            if kept == rgb {
-                return u32::from(index);
-            }
-        }
-        let index = nearest(self.palette, rgb);
-        *slot = u8::try_from(index).ok().map(|index| (rgb, index));
-        index
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-riscos-vdu"
-description = "TAIRiX Bridge's VDU drivers: screen modes and their memory, the VDU stream, OS_Plot, colours and palettes, the pointer and the ScreenModes module, as RISC OS 5 has them, over guest memory. no_std, forbids unsafe."
+description = "TAIRiX Bridge's VDU drivers: screen modes and their memory, the VDU stream, OS_Plot, colours and palettes, the pointer, sprites, and the ScreenModes, ColourTrans, InverseTable, BlendTable, SpriteExtend and SpriteUtils modules, as RISC OS 5 has them, over guest memory. no_std, forbids unsafe."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

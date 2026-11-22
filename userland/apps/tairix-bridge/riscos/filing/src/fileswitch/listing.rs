@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 
 use tairix_riscos_kernel::filing::fs;
 use tairix_riscos_kernel::filing::{IS_A_FILE, NOT_FOUND, NO_DIRECTORY};
+use tairix_riscos_kernel::hex8;
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::names::{CONVERT_DATE_AND_TIME, CONVERT_STANDARD_DATE_AND_TIME};
 use tairix_riscos_kernel::swi::os::READ_MODE_VARIABLE;
@@ -322,9 +323,9 @@ fn type_text(os: &mut Os<'_>, info: &Info, width: usize) -> Result<Vec<u8>, Fail
 /// `info`'s addresses, load then execution, in hex.
 fn addresses(info: &Info) -> Vec<u8> {
     let mut text = Vec::new();
-    text.extend_from_slice(&hex(info.load));
+    text.extend_from_slice(&hex8(info.load));
     text.push(b' ');
-    text.extend_from_slice(&hex(info.exec));
+    text.extend_from_slice(&hex8(info.exec));
     text
 }
 
@@ -357,7 +358,7 @@ fn entry_line(
         line.extend_from_slice(&stamp);
     }
     if full {
-        line.extend_from_slice(&hex(info.length));
+        line.extend_from_slice(&hex8(info.length));
     } else {
         let mut digits = Vec::new();
         decimal(&mut digits, info.length);
@@ -391,17 +392,8 @@ pub(crate) fn announce(os: &mut Os<'_>, number: u8, leaf: &[u8], info: &Info) ->
         line.extend_from_slice(&addresses(info));
     }
     line.push(b' ');
-    line.extend_from_slice(&hex(info.length));
+    line.extend_from_slice(&hex8(info.length));
     os.write_line(&line)
-}
-
-/// `value` as eight upper-case hex digits.
-fn hex(value: u32) -> [u8; 8] {
-    let mut digits = [0; 8];
-    for (i, digit) in digits.iter_mut().enumerate() {
-        *digit = b"0123456789ABCDEF"[((value >> (28 - 4 * i)) & 0xF) as usize];
-    }
-    digits
 }
 
 /// `value`'s decimal digits onto `out`.

@@ -180,3 +180,22 @@ fn a_monitor_file_risc_os_5_refuses_is_refused_with_its_error() {
         "still none loaded"
     );
 }
+
+#[test]
+fn a_reinitialised_screenmodes_closes_the_messages_its_errors_opened() {
+    let mut session = with_files(&[]);
+    let os = &mut session.kernel.os();
+    let mut cycle = || {
+        assert!(
+            call(os, READ_INFO, [9, 0, 0]).is_err(),
+            "a reason past the last"
+        );
+        command(os, "RMReInit ScreenModes").expect("reinitialised");
+        let mut described = Regs::new([5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        os.perform(X | tairix_riscos_kernel::swi::os::MODULE, &mut described)
+            .expect("the RMA described");
+        described.r[3]
+    };
+    let first = cycle();
+    assert_eq!(cycle(), first, "the RMA as it was");
+}

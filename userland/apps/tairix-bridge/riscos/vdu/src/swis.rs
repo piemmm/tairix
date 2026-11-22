@@ -113,7 +113,8 @@ fn claim_screen_memory(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 /// `OS_SetColour`: R0 bits 0 to 3 the action, bit 4 the background, bit 5
 /// R1 a pattern block of a word a row rather than a colour number, bit 6 a
 /// text colour rather than a graphics one, bit 7 read the colour rather
-/// than set it.
+/// than set it. What it sets is drawn with, the VDU variables still
+/// reporting the colours `GCOL` and `COLOUR` gave.
 fn set_colour(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let flags = regs.r[0];
     let background = flags & set_colour::BACKGROUND != 0;
@@ -122,8 +123,12 @@ fn set_colour(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         let words = with(os, |vdu, _| {
             let format = *vdu.format();
             if text {
-                let (fore, back) = vdu.colours.text_words(&format);
-                return Ok(Err(if background { back } else { fore }));
+                let colour = if background {
+                    &vdu.colours.text_back
+                } else {
+                    &vdu.colours.text_fore
+                };
+                return Ok(Err(crate::colour::Colours::text_read(&format, colour)));
             }
             let gcol = if background {
                 vdu.colours.back
@@ -158,14 +163,14 @@ fn set_colour(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     };
     with(os, |vdu, os| {
         let format = *vdu.format();
+        let pixel = crate::colour::Colours::set_colour_pixel(&format, regs.r[1]);
         if text {
             let target = if background {
                 &mut vdu.colours.text_back
             } else {
                 &mut vdu.colours.text_fore
             };
-            target.colour = regs.r[1];
-            target.literal = true;
+            target.set = Some(pixel);
             return Ok(());
         }
         let target = if background {
@@ -173,11 +178,10 @@ fn set_colour(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         } else {
             &mut vdu.colours.fore
         };
-        target.action = flags & set_colour::ACTION;
-        target.literal = true;
+        target.action = crate::colour::SET_COLOUR_ACTION | (flags & set_colour::ACTION);
         target.pattern = pattern;
         if pattern.is_none() {
-            target.colour = regs.r[1];
+            target.set = Some(pixel);
         }
         vdu.colours.publish(os, &format)
     })

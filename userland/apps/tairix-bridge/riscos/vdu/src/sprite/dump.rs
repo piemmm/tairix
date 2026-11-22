@@ -9,7 +9,7 @@ use tairix_image::{
     sprite_area as block, SpriteModeWord, SpriteName, SPRITE_HEADER_LEN, SPRITE_PALETTE_ENTRY_LEN,
 };
 use tairix_riscos_kernel::os::{Entry, Fail, Os, Regs};
-use tairix_riscos_kernel::swi::os::SCREEN_MODE;
+use tairix_riscos_kernel::swi::os::{screen_mode, SCREEN_MODE};
 use tairix_riscos_kernel::swi::X;
 use tairix_vdu::mode::var;
 
@@ -25,8 +25,6 @@ use crate::state;
 
 /// The name a screen dump's sprite takes.
 const SCREEN_DUMP: &[u8] = b"screendump";
-/// `OS_ScreenMode`'s reason selecting a mode.
-const SELECT_MODE: u32 = 0;
 
 /// `OS_SpriteOp` 2: the graphics window saved as file R2, the screen's
 /// palette with it where R3 is nonzero.
@@ -100,7 +98,7 @@ fn adopt_mode(os: &mut Os<'_>, sprite: &Sprite) -> Result<(), Fail> {
         return Ok(());
     }
     let mut regs = Regs::default();
-    regs.r[0] = SELECT_MODE;
+    regs.r[0] = screen_mode::SELECT;
     let selected = if let SpriteModeWord::Number(number) = SpriteModeWord::of(sprite.mode) {
         regs.r[1] = u32::from(number);
         os.perform(X | SCREEN_MODE, &mut regs)
@@ -148,7 +146,7 @@ fn select_like(os: &mut Os<'_>, sprite: &Sprite, regs: &mut Regs) -> Result<(), 
 /// Sets each palette entry `sprite` holds as the screen's, both flash
 /// colours as it gives them.
 fn adopt_palette(os: &mut Os<'_>, sprite: &Sprite) -> Result<(), Fail> {
-    for entry in 0..sprite.palette_entries() {
+    for entry in 0..sprite.named_entries() {
         let at = sprite.address(SPRITE_HEADER_LEN + entry * SPRITE_PALETTE_ENTRY_LEN);
         let (first, second) = (os.read_word(at)?, os.read_word(at.wrapping_add(4))?);
         let mut set = Regs::new([

@@ -3,8 +3,9 @@
 //! pseudo-variables a statement sets.
 
 use tairix_riscos_kernel::os::Regs;
+use tairix_riscos_kernel::swi::os::screen_mode;
 use tairix_riscos_kernel::swi::os::set_colour::{ACTION, BACKGROUND, TEXT};
-use tairix_riscos_kernel::swi::{os as swi, sound, X};
+use tairix_riscos_kernel::swi::{colour_trans, os as swi, sound, X};
 use tairix_riscos_kernel::word;
 
 use super::super::functions::{string_of, Guest};
@@ -823,12 +824,12 @@ impl Machine<'_, '_> {
         let mut regs = Regs::default();
         regs.r[0] = palette_entry(rgb);
         regs.r[3] = if background {
-            COLOUR_TRANS_BACKGROUND
+            colour_trans::BACKGROUND
         } else {
             0
         };
         self.os
-            .perform(X | COLOUR_TRANS_SET_TEXT_COLOUR, &mut regs)?;
+            .perform(X | colour_trans::SET_TEXT_COLOUR, &mut regs)?;
         Ok(())
     }
 
@@ -843,12 +844,12 @@ impl Machine<'_, '_> {
         let mut regs = Regs::default();
         regs.r[0] = palette_entry(rgb);
         regs.r[3] = if background {
-            COLOUR_TRANS_BACKGROUND
+            colour_trans::BACKGROUND
         } else {
             0
         };
         regs.r[4] = action.cast_unsigned();
-        self.os.perform(X | COLOUR_TRANS_SET_GCOL, &mut regs)?;
+        self.os.perform(X | colour_trans::SET_GCOL, &mut regs)?;
         Ok(())
     }
 
@@ -868,17 +869,14 @@ impl Machine<'_, '_> {
         self.vdu_codes(&[23, 17, which, byte(tint), 0, 0, 0, 0, 0, 0])
     }
 
-    /// `MODE "string"`.
+    /// `MODE "string"`: the mode `OS_ScreenMode` 15 selects by its string.
     fn mode_string(&mut self, text: &Text) -> Step {
         let at = ws::STRACC.at();
         self.os.write_bytes(at, text.as_bytes())?;
         self.os.write_byte(at + u32::from(text.len()), 0)?;
         let mut regs = Regs::default();
-        regs.r[..2].copy_from_slice(&[15, at]);
+        regs.r[..2].copy_from_slice(&[screen_mode::SELECT_BY_STRING, at]);
         self.os.perform(X | swi::SCREEN_MODE, &mut regs)?;
-        let mut select = Regs::default();
-        select.r[..2].copy_from_slice(&[0, regs.r[1]]);
-        self.os.perform(X | swi::SCREEN_MODE, &mut select)?;
         self.os.write_word(ws::TALLY.at(), 0)?;
         Ok(())
     }
@@ -907,7 +905,7 @@ impl Machine<'_, '_> {
             self.os.write_word(block + 4 * i, w)?;
         }
         let mut regs = Regs::default();
-        regs.r[..2].copy_from_slice(&[0, block]);
+        regs.r[..2].copy_from_slice(&[screen_mode::SELECT, block]);
         self.os.perform(X | swi::SCREEN_MODE, &mut regs)?;
         self.os.write_word(ws::TALLY.at(), 0)?;
         Ok(())
@@ -1465,11 +1463,6 @@ mod plot {
     pub(super) const ELLIPSE_FILL: i32 = code(vdu::ELLIPSE_FILL | vdu::ABSOLUTE | vdu::FOREGROUND);
 }
 
-/// `ColourTrans_SetGCOL` and `ColourTrans_SetTextColour`, and their flag
-/// for the background.
-const COLOUR_TRANS_SET_GCOL: u32 = 0x4_0743;
-const COLOUR_TRANS_SET_TEXT_COLOUR: u32 = 0x4_0761;
-const COLOUR_TRANS_BACKGROUND: u32 = 1 << 7;
 /// `PRINT#`'s markers: an integer, BASIC V's real, BASIC VI's real and a
 /// string.
 const FILE_INT: u8 = 0x40;

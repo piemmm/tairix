@@ -1290,9 +1290,48 @@ pub struct Own {
 }
 
 /// The room a module's workspace gives an own file's request.
-pub const REQUEST: u32 = 256;
+const REQUEST: u32 = 256;
 /// An own file's descriptor.
-pub const OWN_DESCRIPTOR: u32 = 16;
+const OWN_DESCRIPTOR: u32 = 16;
+
+/// Where a module's workspace keeps its own message file: from where it is
+/// placed, the descriptor, the file's name and the room its requests are
+/// made in.
+#[derive(Clone, Copy, Debug)]
+pub struct OwnFile(&'static [u8]);
+
+impl OwnFile {
+    /// The file `name`, its terminator included.
+    #[must_use]
+    pub const fn named(name: &'static [u8]) -> Self {
+        Self(name)
+    }
+
+    const fn request_at(self) -> u32 {
+        (OWN_DESCRIPTOR + len32(self.0.len())).next_multiple_of(4)
+    }
+
+    /// The workspace it takes.
+    #[must_use]
+    pub const fn room(self) -> u32 {
+        self.request_at() + REQUEST
+    }
+
+    /// The file kept from `at`, its name written there.
+    ///
+    /// # Errors
+    ///
+    /// Where `at` cannot be written.
+    pub fn place(self, os: &mut Os<'_>, at: u32) -> Result<Own, Fail> {
+        os.write_bytes(at + OWN_DESCRIPTOR, self.0)?;
+        Ok(Own {
+            descriptor: at,
+            name: at + OWN_DESCRIPTOR,
+            request: at + self.request_at(),
+            open: false,
+        })
+    }
+}
 
 impl Default for Own {
     fn default() -> Self {
@@ -1312,18 +1351,6 @@ impl Own {
         }
     }
 
-    /// The file named at `name`, its descriptor at `descriptor` and its
-    /// requests made at `request`, all in the module's workspace.
-    #[must_use]
-    pub const fn at(descriptor: u32, name: u32, request: u32) -> Self {
-        Self {
-            descriptor,
-            name,
-            request,
-            open: false,
-        }
-    }
-
     pub(crate) const fn is_open(self) -> bool {
         self.open
     }
@@ -1334,6 +1361,12 @@ impl Own {
 
     pub(crate) const fn request(self) -> u32 {
         self.request
+    }
+
+    /// Where a lookup the module makes itself may be answered: its
+    /// request's room's second half.
+    pub(crate) const fn reply(self) -> u32 {
+        self.request + REQUEST / 2
     }
 }
 

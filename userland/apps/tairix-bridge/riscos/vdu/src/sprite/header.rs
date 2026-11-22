@@ -145,6 +145,13 @@ impl Sprite {
         self.image.min(self.mask).saturating_sub(SPRITE_HEADER_LEN) / SPRITE_PALETTE_ENTRY_LEN
     }
 
+    /// The palette entries its pixels can name, as RISC OS 5 reads its
+    /// palette: those it holds, but no more than its pixels' colours.
+    pub(crate) fn named_entries(&self) -> u32 {
+        self.palette_entries()
+            .min(Pixels::verified(self.mode).colours())
+    }
+
     /// The address of byte `offset` of it.
     pub(crate) const fn address(&self, offset: u32) -> u32 {
         self.at.wrapping_add(offset)

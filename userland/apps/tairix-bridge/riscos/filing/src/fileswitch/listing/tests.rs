@@ -27,9 +27,7 @@ fn a_name_column_holds_its_longest_name_and_a_space() {
 }
 
 #[test]
-fn numbers_show_in_hex_and_decimal() {
-    assert_eq!(&hex(0x3E8), b"000003E8");
-    assert_eq!(&hex(0xFFFF_FD45), b"FFFFFD45");
+fn numbers_show_in_decimal() {
     let mut digits = Vec::new();
     decimal(&mut digits, 0);
     decimal(&mut digits, 4_294_967_295);

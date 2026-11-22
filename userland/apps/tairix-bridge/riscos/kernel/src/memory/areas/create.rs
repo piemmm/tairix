@@ -67,8 +67,7 @@ pub struct Created {
 /// The title an area made with none takes: its number in hex.
 fn hex_title(number: u32) -> Title {
     let mut title = Title::new();
-    for shift in (0..8).rev() {
-        let digit = b"0123456789ABCDEF"[((number >> (shift * 4)) & 0xF) as usize];
+    for digit in crate::env::hex8(number) {
         let _ = title.try_push(digit);
     }
     title

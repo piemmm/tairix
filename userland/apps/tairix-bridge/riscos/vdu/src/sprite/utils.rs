@@ -31,7 +31,7 @@ pub(crate) static SPRITE_UTILS: Builtin = Builtin {
             1,
             1,
             "Selects a sprite of the system area for PLOT's sprite plots.",
-            "<name>",
+            "Syntax: *SChoose <name>",
             choose,
         ),
         command(
@@ -39,7 +39,7 @@ pub(crate) static SPRITE_UTILS: Builtin = Builtin {
             2,
             2,
             "Copies a sprite of the system area under a new name.",
-            "<name> <new name>",
+            "Syntax: *SCopy <name> <new name>",
             copy,
         ),
         command(
@@ -47,7 +47,7 @@ pub(crate) static SPRITE_UTILS: Builtin = Builtin {
             1,
             1,
             "Plots a sprite file's first sprite at the graphics window's corner.",
-            "<file>",
+            "Syntax: *ScreenLoad <file>",
             screen_load,
         ),
         command(
@@ -55,7 +55,7 @@ pub(crate) static SPRITE_UTILS: Builtin = Builtin {
             1,
             1,
             "Saves the graphics window and the palette as a sprite file.",
-            "<file>",
+            "Syntax: *ScreenSave <file>",
             screen_save,
         ),
         command(
@@ -63,7 +63,7 @@ pub(crate) static SPRITE_UTILS: Builtin = Builtin {
             1,
             255,
             "Deletes sprites from the system area.",
-            "<name> [<name> ...]",
+            "Syntax: *SDelete <name> [<name> ...]",
             delete,
         ),
         command(
@@ -71,7 +71,7 @@ pub(crate) static SPRITE_UTILS: Builtin = Builtin {
             1,
             1,
             "Turns a sprite of the system area upside down.",
-            "<name>",
+            "Syntax: *SFlipX <name>",
             flip_x,
         ),
         command(
@@ -79,7 +79,7 @@ pub(crate) static SPRITE_UTILS: Builtin = Builtin {
             1,
             1,
             "Turns a sprite of the system area left to right.",
-            "<name>",
+            "Syntax: *SFlipY <name>",
             flip_y,
         ),
         command(
@@ -87,7 +87,7 @@ pub(crate) static SPRITE_UTILS: Builtin = Builtin {
             1,
             1,
             "Takes a sprite into the system area from between the last two graphics points.",
-            "<name>",
+            "Syntax: *SGet <name>",
             get,
         ),
         command(
@@ -95,16 +95,23 @@ pub(crate) static SPRITE_UTILS: Builtin = Builtin {
             0,
             0,
             "Gives the system sprite area's size, free space and sprites.",
-            "",
+            "Syntax: *SInfo",
             info,
         ),
-        command("SList", 0, 0, "Lists the system area's sprites.", "", list),
+        command(
+            "SList",
+            0,
+            0,
+            "Lists the system area's sprites.",
+            "Syntax: *SList",
+            list,
+        ),
         command(
             "SLoad",
             1,
             1,
             "Loads a sprite file into the system area, replacing its sprites.",
-            "<file>",
+            "Syntax: *SLoad <file>",
             load,
         ),
         command(
@@ -112,7 +119,7 @@ pub(crate) static SPRITE_UTILS: Builtin = Builtin {
             1,
             1,
             "Merges a sprite file's sprites into the system area.",
-            "<file>",
+            "Syntax: *SMerge <file>",
             merge,
         ),
         command(
@@ -120,7 +127,7 @@ pub(crate) static SPRITE_UTILS: Builtin = Builtin {
             0,
             0,
             "Deletes every sprite of the system area.",
-            "",
+            "Syntax: *SNew",
             new,
         ),
         command(
@@ -128,7 +135,7 @@ pub(crate) static SPRITE_UTILS: Builtin = Builtin {
             2,
             2,
             "Renames a sprite of the system area.",
-            "<name> <new name>",
+            "Syntax: *SRename <name> <new name>",
             rename,
         ),
         command(
@@ -136,7 +143,7 @@ pub(crate) static SPRITE_UTILS: Builtin = Builtin {
             1,
             1,
             "Saves the system area as a sprite file.",
-            "<file>",
+            "Syntax: *SSave <file>",
             save,
         ),
     ],

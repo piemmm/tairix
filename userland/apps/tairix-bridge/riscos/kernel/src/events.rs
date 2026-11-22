@@ -175,7 +175,7 @@ impl Os<'_> {
         let number = regs.r[11] & !crate::swi::X;
         if self.world.env.is_default(crate::env::UNUSED_SWI) {
             let name = crate::env::hex(number);
-            return Err(self.error_with(crate::env::NO_SUCH_SWI, &[&name]));
+            return Err(self.error_with(crate::env::NO_SUCH_SWI, &[name.as_bytes()]));
         }
         let mut call = *regs;
         call.r[11] = number;

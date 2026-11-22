@@ -185,8 +185,8 @@ fn line_number(line: u32, out: &mut Vec<u8>) {
 
 /// `byte` in two hexadecimal digits.
 fn hex2(byte: u8) -> [u8; 2] {
-    let digit = |n: u8| b"0123456789ABCDEF"[usize::from(n & 0xF)];
-    [digit(byte >> 4), digit(byte)]
+    use tairix_util::hex::upper_digit;
+    [upper_digit(byte >> 4), upper_digit(byte)]
 }
 
 /// How `*Dump` lays out a line.
@@ -315,9 +315,7 @@ impl Os<'_> {
     /// `@LoadType_XXX` alias run with the name.
     fn load_by_type(&mut self, kind: u32, tail: u32) -> Result<(), Fail> {
         let mut alias = *b"@LoadType_000";
-        let hex = crate::env::hex(kind & 0xFFF);
-        let digits = &hex[hex.len().saturating_sub(3)..];
-        alias[13 - digits.len()..].copy_from_slice(digits);
+        alias[10..].copy_from_slice(&crate::filing::filetype::digits(kind));
         let mut variable = *b"Alias$@LoadType_000";
         variable[6..].copy_from_slice(&alias);
         if self.variable_text(&variable)?.is_none() {

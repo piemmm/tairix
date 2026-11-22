@@ -29,10 +29,7 @@ const NAME_ROOM: u32 = 256;
 /// digits.
 fn variable_of(kind: u32) -> [u8; 13] {
     let mut name = *b"File$Type_000";
-    for (i, slot) in name[10..].iter_mut().enumerate() {
-        let digit = (kind >> (8 - 4 * i)) & 0xF;
-        *slot = b"0123456789ABCDEF"[digit as usize];
-    }
+    name[10..].copy_from_slice(&tairix_riscos_kernel::filing::filetype::digits(kind));
     name
 }
 

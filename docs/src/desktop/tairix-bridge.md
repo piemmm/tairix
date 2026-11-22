@@ -935,7 +935,7 @@ with.
 | ADFSFiler | 1.16 | absent | — |
 | BASIC | 1.85 | provided | RO20 |
 | BASIC64 | 1.85 | provided | RO20 |
-| BlendTable | 0.02 | provided | RO22 |
+| BlendTable | 0.02 | provided | RO23 |
 | BufferManager | 0.39 | provided | RO26 |
 | ColourTrans | 1.97 | provided | RO23 |
 | Debugger | 2.08 | provided | RO30 |
@@ -1817,7 +1817,13 @@ there.
   sixteen and thirty-two bits that form's default colour, packed. The colour
   blocks are each GCOL action on the colour or ECF pattern row, rotated for
   the ECF origin: the shift is `-(x << Log2BPC)` modulo 32, the row offset
-  the screen's height less `y`, modulo 8.
+  the screen's height less `y`, modulo 8. A graphics colour `OS_SetColour`
+  sets reads back with an action of &60 beside its own, as RISC OS 5's does.
+  What `OS_SetColour` sets is drawn with, but the VDU variables go on
+  reporting the colours and tints `GCOL`, `COLOUR` and `TINT` gave. In a
+  256-colour mode whose palette is grouped it takes a GCOL, its tint in the
+  low two bits. A text colour it set reads back as given, one `COLOUR` set as
+  its pixel repeated across the word.
 - **`OS_Plot`.** Lines walk from their leftmost or lowest end; polygons fill
   between their edges' lines; circles soften their squared radius by its
   root. Ellipses are worked in RISC OS's fixed point — the width's ratio to
@@ -1884,7 +1890,8 @@ are read through `lib/image`'s sprite structures.
   — the screen or a sprite or its mask — in its own pixel form, with
   `Service_SwitchingOutputToSprite`; save areas hold the VDU state in the
   drivers' own layout, validated before it is restored, and a mode change
-  returns output to the screen.
+  returns output to the screen, announced as a switch to it between
+  `Service_ModeChanging` and `Service_ModeChange`, as RISC OS 5 announces it.
 - **The kernel's plots** (28, 34, 48, 49) copy the sprite's rows bit for bit
   whatever the depths, combined by the GCOL action, a mask pixel covering its
   image pixel's bits. A mask plot without a mask fills a rectangle of the
@@ -1902,10 +1909,32 @@ are read through `lib/image`'s sprite structures.
   wide or not; onto a deep one a narrow table gives colours in their
   colour-number form, and flag bit 4 lets a palette naming every pixel value
   stand for it; a deep sprite reaches a palettised destination only through
-  a 32K table. Alpha blends each channel as
-  `((S × A) >> 8) + ((D × (256 − A)) >> 8)`, `A` the alpha widened to 256 and
-  scaled by the translucency; a colour mapping descriptor's transfer function
-  is called once for each colour a deep sprite holds.
+  a 32K table. A blend's weight is the alpha, 255 where none is blended,
+  widened to 256 and scaled by the opacity, 256 less the translucency:
+  `W = (A + (A >> 7)) × (256 − T)` 65536ths. Onto a deep destination each
+  channel of the source pixel, in its own form where it is direct colour
+  drawn without a mapping and else in the destination's, of `s` bits, meets
+  the destination's of `d`,
+  each share rounded down apart: an eight-bit source at 256ths,
+  `((S × w) >> (8 + s − d)) + ((D × (256 − w)) >> 8)`, `w` being `W >> 8`;
+  a narrower one at the whole weight, its bits repeated once below
+  themselves where `d` is wider and `s` then counting them,
+  `((S × W) >> (16 + s − d)) + ((D × (65536 − W)) >> 16)`. A colour mapping
+  descriptor's transfer function is called once for each colour a deep
+  sprite holds.
+- **Onto a palettised destination** each source pixel is made the
+  destination's colour number first, and that colour is mixed with the
+  destination pixel's. The destination's colours are its palette's first
+  flash states, as ColourTrans reads them, a sprite with no palette of its
+  own showing its mode's default; its 32K table is the one ColourTrans gives
+  a deep source.
+  - With 256 colours, a translucency mixes the two as BlendTable does, and an
+    alpha mixes their five-bit forms at the whole weight, as a narrower
+    source meets a deep destination; the mix is found in the 32K table.
+  - With fewer, the alpha's share is taken in steps of 32 after the
+    translucency scales it, and the mix, as BlendTable makes it, takes the
+    palette's nearest colour by plain squares, the last of equally near.
+  - A colour mapping's colours, and a JPEG's, are found in the 32K table.
 - **Pointer shapes** (36): a sprite of 256 colours or fewer, its pixels
   through the table to the pointer's four colours, scaled by the eigen
   factors where no factors are given, cut to 32 by 32; its palette entries 1
@@ -1928,18 +1957,18 @@ are read through `lib/image`'s sprite structures.
   `*SList` and `*SInfo` give the names, and the area's size, free space and
   count, in the emulator's own words.
 
-Known differences from RISC OS 5, each deliberate:
+Known differences from RISC OS 5, each deliberate and accepted:
 
 - a transformed plot that steps through source rows unevenly — a vertical
   shear, a turn other than a right angle, a parallelogram whose height does
   not divide evenly — can take the neighbouring source row at an exact tie,
   about one pixel in a hundred, RISC OS 5 rounding its row arithmetic where
   this is exact;
-- a blend onto a palettised destination, and a JPEG drawn on one, take the
-  palette colour nearest the result, where RISC OS 5 matches through
-  ColourTrans's table (RO23); dithering is not offered, and a colour mapping
-  onto a palettised destination draws nothing;
-- a JPEG's pixels are `lib/image`'s decoder's;
+- a sixteen-bit sprite blended by its alpha onto a 32-bit destination keeps
+  the destination's blue, where RISC OS 5 drops it;
+- a translucent deep sprite plotted onto a palettised destination without a
+  32K table draws nothing, where RISC OS 5 draws part of a row and aborts;
+- a JPEG's pixels are `lib/image`'s decoder's, and are not dithered;
 - a sprite taken from the screen has its wastage zeroed, and removing
   wastage fills with zeros, where RISC OS 5 leaves bytes from beyond the
   rectangle or the row;
@@ -1949,6 +1978,112 @@ Known differences from RISC OS 5, each deliberate:
   text, where RISC OS 5 writes outside the sprite; output to a sprite of no
   pixels is refused (&71E); a save area that is not one the drivers wrote is
   restored as a fresh state.
+
+## ColourTrans, InverseTable and BlendTable
+
+ColourTrans (`vdu/src/colourtrans.rs`) answers each of its 36 SWIs through
+`ColourV`, R8 the call's offset, so a claimant may answer any of them.
+
+- **The match.** A colour's nearest or furthest colour number and GCOL, in
+  any mode with any palette, minimises each channel's squared error weighed
+  by the loadings (`*ColourTransLoadings`, `MiscOp` 0; red 2, green 4, blue 1
+  at first). The first of equally near and the last of equally far win. The
+  default 256-colour palette is matched a tint at a time, any other grouped
+  one at VIDC1's four bits a channel, and a direct-colour mode takes each
+  channel's top bits. A grouped palette's GCOLs are its colour numbers'
+  bits shuffled, a full palette's the numbers themselves; `SetGCOL` reports
+  both in the shuffled form. The palette is one of four:
+  - the current one, as last read;
+  - a mode's default;
+  - a block of words;
+  - a sprite's.
+
+  ColourTrans reads the current palette again only once it is made stale: by
+  `InvalidateCache`, a mode change or output switching, never by a palette
+  write. While output goes to a sprite with a palette, that palette is the
+  current one; while it goes to one without, the screen's mode and palette
+  are.
+- **Calibration.** A table of three lists of device-level pairs maps a device
+  colour to the standard colour it shows. Each channel is interpolated in
+  16.16 between the pairs either side of it, and the three are summed before
+  the sum is cut.
+  - A palettised match looks for the wanted colour through the table; a
+    direct-colour match and a 32K table do not use it.
+  - A refused table restores the default, and the refusal is announced with
+    `Service_CalibrationChanged`, as a table set is.
+  - `*ColourTransMapSize` and `*ColourTransMap` set a table: sizes blue first,
+    pairs last first. `WriteCalibrationToFile` and a saved desktop write the
+    table in that order.
+- **Tables.** A table from a palettised source gives a byte for each source
+  colour, a wide pixel for a deep destination, or the source's palette.
+  - A deep source gives a palettised destination a 32K table. Each
+    fifteen-bit colour maps to the entry nearest by the sum of its channels'
+    differences in five-bit steps, the first of equally near. Each palette
+    entry's own colour then takes the last entry holding it.
+  - InverseTable builds its table by the same rule. BlendTable, and the
+    sprite plots, JPEGs and colour mappings onto palettised destinations,
+    find colours through it.
+  - `SelectTable` reads its flags in R5 only for a sprite, `GenerateTable`
+    always. A sprite with no palette gives its mode's default whatever bit 1
+    asks.
+- **Palettes.** `ReadPalette` and `WritePalette` work on words as they are
+  held. `VDU 19` holds a colour bare, or with its low byte all ones where it
+  has supremacy. A written word is held as given. `OS_ReadPalette` reports
+  each entry with its supremacy bit, and how it shows, in its words' low
+  byte.
+  - The current palette cannot be written while output goes to a sprite.
+  - A sprite written to without a palette is given one of its mode's size.
+  - A sprite's palette is read no further than its pixels' colours, however
+    many entries it holds.
+- **Models.** HSV, CMYK and CIE XYZ, all as 16.16 numbers. CIE uses RISC OS
+  5's matrices, each sum cut toward minus infinity. An answer past a
+  register is refused (&A01).
+- **Font colours.** In a mode of up to sixteen colours the run is the
+  longest, at most fourteen, of colour numbers stepping up or down from the
+  foreground's. Each colour in it lies nearer than a whole step to the shade
+  between background and foreground it stands for. In a deeper mode the words
+  are left to the Font Manager: R2 is nought, and R3 must lie between -14 and
+  14 (&206).
+
+InverseTable (`vdu/src/inversetable.rs`) gives a 256-colour palette's colours
+in fifteen-bit form and its 32K table. It keeps the current destination's
+tables until its palette differs, and writes any palette's or sprite's tables
+into the caller's blocks; `SpriteTable` given the current mode and palette
+hands back the kept tables as `Calculate` does. BlendTable
+(`vdu/src/blendtable.rs`) mixes each source colour over each destination
+colour in 256ths at a translucency up to 256, wholly transparent, a further
+one refused (&94). Source and destination are a mode and palette, or a
+sprite, as `ColourTrans_SelectTable` takes them. It finds each mix by the
+destination's inverse table where the destination has 256 colours, else by
+plain squares, the last of equally near. A table may be locked in the
+module's own block until unlocked.
+
+Known differences from RISC OS 5, each deliberate:
+
+- an ECF for a mixed colour, and for a tint of the default 256-colour
+  palette, places its cells by the emulator's own rule, which RISC OS 5's
+  placement has not been pinned to;
+- `MiscOp` 1's block holds only the current mode's depth. RISC OS 5's is
+  internal, and it aborts in a deep mode;
+- a GCOL or colour number past 255 takes its low byte, where RISC OS 5 reads
+  past its table;
+- the C flag on return is not modelled;
+- the default 256-colour palette's 32K tables are built by ColourTrans's own
+  match by the default loadings. RISC OS 5 hands back prebuilt tables:
+  - InverseTable's differs in about three cells in a hundred, and blends onto
+    that palette follow it;
+  - ColourTrans's disagrees with ColourTrans's own match;
+- `InverseTable_SpriteTable` given a mode selector builds the selector's
+  mode's tables, where RISC OS 5 aborts;
+- a 32K table for a palette given as nought takes the mode's default, where
+  RISC OS 5 reads words from address nought;
+- `ConvertDevicePalette` converts as documented, where RISC OS 5 branches
+  through zero;
+- `*ColourTransMap` sets the table it is given, where RISC OS 5 aborts or
+  sets nothing;
+- `WriteCalibrationToFile` writes `*ColourTransMapSize` with its sizes blue
+  first. RISC OS 5 writes `*ColourTransMapColo`, with the sizes in the
+  table's order.
 
 ## The reference harness
 

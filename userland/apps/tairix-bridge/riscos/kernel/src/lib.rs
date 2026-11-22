@@ -33,6 +33,7 @@ pub mod corpus;
 mod dictionary;
 mod dynamic;
 mod env;
+pub use env::{hex, hex8, Hex};
 pub mod error;
 mod events;
 mod extension;

@@ -14,6 +14,7 @@ use super::create::Target;
 use super::edit::{self, Change};
 use super::paint::{self, PlotFlags};
 use super::{alpha, join, jpeg, reason, verify};
+use crate::inverse::Kept;
 use tairix_riscos_kernel::module::Swis;
 
 /// "SpriteExtend does not plot grey-scaled sprites": reason 53, gone since
@@ -36,8 +37,8 @@ pub(crate) static SPRITE_EXTEND: Builtin = Builtin {
     }),
     services: None,
     commands: &[],
-    init: Some(jpeg::init),
-    finalise: Some(jpeg::finalise),
+    init: Some(init),
+    finalise: Some(finalise),
     start: None,
     routines: &[],
     vectors: &[VectorDefault {
@@ -47,6 +48,24 @@ pub(crate) static SPRITE_EXTEND: Builtin = Builtin {
     resources: &[],
     code: None,
 };
+
+/// SpriteExtend's state: `JPEG_PDriverIntercept`'s flags, and the 32K table
+/// its plots onto a palettised destination last took.
+#[derive(Default)]
+pub(crate) struct State {
+    pub(super) intercept: u32,
+    pub(super) inverse: Kept,
+}
+
+fn init(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
+    os.hold_extension(State::default())
+}
+
+#[expect(clippy::unnecessary_wraps, reason = "a module entry's signature")]
+fn finalise(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
+    os.release_extension::<State>();
+    Ok(())
+}
 
 /// `SpriteV` while SpriteExtend is active.
 fn vector(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {

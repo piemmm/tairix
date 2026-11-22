@@ -707,6 +707,241 @@ fn refusal(session: &mut Session, number: u32, low: [u32; 8]) -> (u32, Vec<u8>) 
     }
 }
 
+/// The first pixel of 8-bit sprite `name`.
+fn first_pixel(session: &mut Session, name: &[u8]) -> u8 {
+    let at = address(session, name);
+    let os = &mut session.kernel.os();
+    let image = at + os.read_word(at + 32).expect("read");
+    let mut pixel = [0];
+    os.read_bytes(image, &mut pixel).expect("read");
+    pixel[0]
+}
+
+#[test]
+fn a_blend_into_a_sprite_with_no_palette_takes_its_mode_s_default_colours() {
+    use tairix_riscos_kernel::swi::os::READ_VDU_VARIABLES;
+    let mut session = with_area();
+    vdu(&mut session, &[22, 12]).expect("mode 12");
+    make(&mut session, b"into", 4, 1, 28, false);
+    make(&mut session, b"over", 1, 1, 28, false);
+    put_name(&mut session, NAME, b"into");
+    op(&mut session, [USER + 42, AREA, NAME, 0, 0, 63, 192, 0]).expect("white");
+    put_name(&mut session, OTHER_NAME, b"over");
+    let switched =
+        op(&mut session, [USER + 60, AREA, NAME, 0, 0, 0, 0, 0]).expect("output to the sprite");
+    op(
+        &mut session,
+        [USER + 52, AREA, OTHER_NAME, 0, 0, 0x8000, 0, 0],
+    )
+    .expect("half black over white");
+    op(
+        &mut session,
+        [
+            switched.r[0],
+            switched.r[1],
+            switched.r[2],
+            switched.r[3],
+            0,
+            0,
+            0,
+            0,
+        ],
+    )
+    .expect("back");
+    let into_sprite = first_pixel(&mut session, b"into");
+    vdu(&mut session, &[22, 28]).expect("mode 28, the default 256 colours");
+    let asked = AREA + 0x7100;
+    session.kernel.os().write_word(asked, 148).expect("written");
+    session
+        .kernel
+        .os()
+        .write_word(asked + 4, u32::MAX)
+        .expect("written");
+    swi(
+        &mut session,
+        READ_VDU_VARIABLES,
+        [asked, asked + 8, 0, 0, 0, 0, 0, 0],
+    )
+    .expect("read");
+    let screen = session
+        .kernel
+        .os()
+        .read_word(asked + 8)
+        .expect("the screen");
+    let bottom_left = screen + 479 * 640;
+    session
+        .kernel
+        .os()
+        .write_bytes(bottom_left, &[0xFF])
+        .expect("white");
+    op(
+        &mut session,
+        [USER + 52, AREA, OTHER_NAME, 0, 0, 0x8000, 0, 0],
+    )
+    .expect("half black over white");
+    let mut on_screen = [0];
+    session
+        .kernel
+        .os()
+        .read_bytes(bottom_left, &mut on_screen)
+        .expect("read");
+    assert_eq!(
+        into_sprite, on_screen[0],
+        "the sprite's own mode's colours, not the screen's sixteen"
+    );
+}
+
+#[test]
+fn a_sprite_deeper_than_the_destination_is_drawn_through_its_table() {
+    use tairix_riscos_kernel::swi::os::READ_VDU_VARIABLES;
+    let mut session = with_area();
+    vdu(&mut session, &[22, 12]).expect("mode 12");
+    make(&mut session, b"deep", 2, 1, 28, false);
+    put_name(&mut session, NAME, b"deep");
+    op(&mut session, [USER + 42, AREA, NAME, 0, 0, 0, 0, 0]).expect("pixel 0");
+    op(&mut session, [USER + 42, AREA, NAME, 1, 0, 1, 0, 0]).expect("pixel 1");
+    let table = AREA + 0x8000;
+    let colours: Vec<u8> = (0..=255u8).map(|n| 15 - (n & 15)).collect();
+    session
+        .kernel
+        .os()
+        .write_bytes(table, &colours)
+        .expect("written");
+    op(&mut session, [USER + 52, AREA, NAME, 0, 0, 0, 0, table]).expect("drawn through the table");
+    let asked = AREA + 0x7100;
+    session.kernel.os().write_word(asked, 148).expect("written");
+    session
+        .kernel
+        .os()
+        .write_word(asked + 4, u32::MAX)
+        .expect("written");
+    swi(
+        &mut session,
+        READ_VDU_VARIABLES,
+        [asked, asked + 8, 0, 0, 0, 0, 0, 0],
+    )
+    .expect("read");
+    let screen = session
+        .kernel
+        .os()
+        .read_word(asked + 8)
+        .expect("the screen");
+    let mut bottom_left = [0];
+    session
+        .kernel
+        .os()
+        .read_bytes(screen + 255 * 320, &mut bottom_left)
+        .expect("read");
+    assert_eq!(
+        bottom_left[0], 0xBF,
+        "colours 0 and 1, pixels 0 and 4, drawn as 15 and 11"
+    );
+}
+
+#[test]
+fn a_jpeg_on_a_palettised_screen_takes_each_colour_from_colourtrans_s_32k_table() {
+    use tairix_riscos_kernel::swi::colour_trans::{SELECT_TABLE, WRITE_PALETTE};
+    use tairix_riscos_kernel::swi::os::READ_VDU_VARIABLES;
+    let mut session = with_area();
+    common::select_full_palette(&mut session).expect("256 colours");
+    let words = AREA + 0x4000;
+    for i in 0..256u32 {
+        let colour = (((i * 0x3B5) ^ (i << 9)) & 0xFF_FFFF) << 8;
+        session
+            .kernel
+            .os()
+            .write_word(words + 4 * i, colour)
+            .expect("written");
+    }
+    swi(
+        &mut session,
+        WRITE_PALETTE,
+        [u32::MAX, u32::MAX, words, 0, 0, 0, 0, 0],
+    )
+    .expect("written");
+    let side = 16usize;
+    let gradient: Vec<u8> = (0..side * side)
+        .flat_map(|at| {
+            let (across, down) = (at % side, at / side);
+            let [red, ..] = (across * 16).to_le_bytes();
+            let [green, ..] = (down * 16).to_le_bytes();
+            let [blue, ..] = (255 - across * 8 - down * 8).to_le_bytes();
+            [red, green, blue, 0xFF]
+        })
+        .collect();
+    let picture = tairix_image::Picture::rgba(16, 16, gradient).expect("a picture");
+    let options = tairix_image::JpegOptions::new(90, [0, 0, 0]).expect("options");
+    let bytes = tairix_image::encode_jpeg(&picture, options).expect("encoded");
+    let at = AREA + 0x8000;
+    session
+        .kernel
+        .os()
+        .write_bytes(at, &bytes)
+        .expect("written");
+    let length = u32::try_from(bytes.len()).expect("short");
+    swi(
+        &mut session,
+        JPEG_PLOT_SCALED,
+        [at, 0, 0, 0, length, 0, 0, 0],
+    )
+    .expect("plotted");
+    let guard = AREA + 0x7000;
+    let deep_mode = 0x3016_80B5;
+    swi(
+        &mut session,
+        SELECT_TABLE,
+        [deep_mode, u32::MAX, u32::MAX, u32::MAX, guard, 0, 0, 0],
+    )
+    .expect("a 32K table");
+    let table = session
+        .kernel
+        .os()
+        .read_word(guard + 4)
+        .expect("its address");
+    let limits = tairix_image::DecodeLimits::new(64, 64, 1 << 12, 1 << 20);
+    let decoded = tairix_image::jpeg_decode_stored(&bytes, &limits).expect("decoded");
+    let asked = AREA + 0x7100;
+    session.kernel.os().write_word(asked, 148).expect("written");
+    session
+        .kernel
+        .os()
+        .write_word(asked + 4, u32::MAX)
+        .expect("written");
+    swi(
+        &mut session,
+        READ_VDU_VARIABLES,
+        [asked, asked + 8, 0, 0, 0, 0, 0, 0],
+    )
+    .expect("read");
+    let screen = session
+        .kernel
+        .os()
+        .read_word(asked + 8)
+        .expect("the screen");
+    for (at, rgba) in decoded.pixels().as_chunks::<4>().0.iter().enumerate() {
+        let (x, y) = (
+            u32::try_from(at % side).expect("small"),
+            u32::try_from(at / side).expect("small"),
+        );
+        let cell =
+            u32::from(rgba[0] >> 3) | u32::from(rgba[1] >> 3) << 5 | u32::from(rgba[2] >> 3) << 10;
+        let mut wanted = [0];
+        session
+            .kernel
+            .os()
+            .read_bytes(table + cell, &mut wanted)
+            .expect("read");
+        let mut drawn = [0];
+        let row = 479 - 15 + y;
+        session
+            .kernel
+            .os()
+            .read_bytes(screen + row * 640 + x, &mut drawn)
+            .expect("read");
+        assert_eq!(drawn, wanted, "pixel {x}, {y}");
+    }
+}
+
 #[test]
 fn the_jpeg_swis_refuse_in_their_own_words_and_past_their_last_swi() {
     let mut session = with_area();

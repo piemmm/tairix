@@ -15,7 +15,7 @@ use tairix_filecore::Disc;
 use tairix_riscos_arm::mmu::PAGE_SIZE;
 use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::module::{Builtin, Command, CommandKind, Help, Resource};
-use tairix_riscos_kernel::msgtrans::{Own, OWN_DESCRIPTOR, REQUEST};
+use tairix_riscos_kernel::msgtrans::{Own, OwnFile};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, World};
 use tairix_riscos_kernel::ramdisc::{Occupant, AREA};
 use tairix_riscos_kernel::swi::os::{
@@ -40,17 +40,11 @@ const DISC_NAME: [u8; 10] = *b"RamDisc0\0\0";
 
 /// Its messages, in the emulator's own words.
 const MESSAGES: &[u8] = include_bytes!("../resources/RamFS/Messages");
-/// Its file's name, which its descriptor keeps.
-const MESSAGES_NAME: &[u8] = b"Resources:$.Resources.RamFS.Messages\0";
-
-/// What its workspace keeps: its messages' descriptor, the file's name and
-/// an error's request; the descriptor block `FileCore_Create` is given, the
-/// filing system's name, which is its boot text too, and the media name
-/// `MiscOp` 4 points at.
-const OWN_AT: u32 = 0;
-const MESSAGES_NAME_AT: u32 = OWN_DESCRIPTOR;
-const REQUEST_AT: u32 = (MESSAGES_NAME_AT + len32(MESSAGES_NAME.len())).next_multiple_of(4);
-const DESCRIPTOR_AT: u32 = REQUEST_AT + REQUEST;
+/// What its workspace keeps: its messages' file; the descriptor block
+/// `FileCore_Create` is given, the filing system's name, which is its boot
+/// text too, and the media name `MiscOp` 4 points at.
+const MESSAGES_FILE: OwnFile = OwnFile::named(b"Resources:$.Resources.RamFS.Messages\0");
+const DESCRIPTOR_AT: u32 = MESSAGES_FILE.room();
 const NAME_AT: u32 = DESCRIPTOR_AT + 4 * len32(filecore::DESCRIPTOR_WORDS);
 const MEDIA_AT: u32 = NAME_AT + 4;
 const WORKSPACE: u32 = MEDIA_AT + 8;
@@ -154,12 +148,13 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     }
     mapped.resize(words, 0);
     let workspace = os.rma_claim(WORKSPACE)?;
-    os.write_bytes(workspace + MESSAGES_NAME_AT, MESSAGES_NAME)?;
-    let messages = Own::at(
-        workspace + OWN_AT,
-        workspace + MESSAGES_NAME_AT,
-        workspace + REQUEST_AT,
-    );
+    let messages = match MESSAGES_FILE.place(os, workspace) {
+        Ok(messages) => messages,
+        Err(failure) => {
+            os.rma_free(workspace)?;
+            return Err(failure);
+        }
+    };
     if let Err(failure) = os.hold_extension(State {
         own: messages,
         workspace,

@@ -246,12 +246,9 @@ pub(crate) struct GsState {
 /// blocks it hands the SWIs it calls.
 pub(crate) const SCRATCH: usize = 256;
 
-/// The kernel's message file's name, which its descriptor keeps; the
-/// descriptor, the name and the room its lookups are asked in.
-const KERNEL_MESSAGES: &[u8] = b"Resources:$.Resources.Kernel.Messages\0";
-const KERNEL_MESSAGES_REQUEST: u32 =
-    (crate::msgtrans::OWN_DESCRIPTOR + len32(KERNEL_MESSAGES.len())).next_multiple_of(4);
-const KERNEL_MESSAGES_ROOM: u32 = KERNEL_MESSAGES_REQUEST + crate::msgtrans::REQUEST;
+/// The kernel's message file.
+const KERNEL_MESSAGES: crate::msgtrans::OwnFile =
+    crate::msgtrans::OwnFile::named(b"Resources:$.Resources.Kernel.Messages\0");
 
 /// Everything the kernel holds but the address space: the processors and
 /// the kernel's own state. Kept apart from [`Memory`] so the address space
@@ -566,14 +563,10 @@ impl Kernel {
         os.reset_mouse();
         os.world.vars.buffer = claim(&mut os, crate::vars::preset::BUFFER)?;
         os.set_presets().map_err(|_| BootError::NoMemory)?;
-        let messages = claim(&mut os, KERNEL_MESSAGES_ROOM)?;
-        os.write_bytes(messages + crate::msgtrans::OWN_DESCRIPTOR, KERNEL_MESSAGES)
+        let messages = claim(&mut os, KERNEL_MESSAGES.room())?;
+        os.world.kernel_messages = KERNEL_MESSAGES
+            .place(&mut os, messages)
             .map_err(|_| BootError::NoMemory)?;
-        os.world.kernel_messages = crate::msgtrans::Own::at(
-            messages,
-            messages + crate::msgtrans::OWN_DESCRIPTOR,
-            messages + KERNEL_MESSAGES_REQUEST,
-        );
         let keyboard = claim(&mut os, crate::keyboard::HANDLER_WORKSPACE + 4)?;
         os.write_word(keyboard + crate::keyboard::HANDLER_WORKSPACE, 0)
             .map_err(|_| BootError::NoMemory)?;

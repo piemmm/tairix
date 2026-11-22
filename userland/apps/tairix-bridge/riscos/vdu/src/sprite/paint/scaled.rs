@@ -13,12 +13,15 @@ use tairix_riscos_kernel::output::workspace;
 use super::super::header::Sprite;
 use super::super::NO_MEMORY;
 use super::blit::combine;
-use super::colours::{Conversion, NearestKept};
-use super::source::{Source, Transparency};
+use super::colours::{alpha_blended, blends, Conversion, Converted, Palettised};
+use super::source::Source;
 use super::{changed, read, Destination, Mapping, PlotFlags, Scale};
+use crate::blendtable;
 use crate::canvas::Block;
 use crate::changed::Rect;
 use crate::colour::Direct;
+use crate::inverse;
+use crate::palette::EIGHT_BIT_COLOURS;
 use crate::raster::Point;
 use crate::state;
 
@@ -98,7 +101,7 @@ pub(crate) fn put_scaled(
         return Ok(());
     };
     let destination = Destination::now(os)?;
-    let conversion = Conversion::of(os, &source, &destination.format, flags, table)?;
+    let converted = Converted::of(os, &source, &destination.format, flags, table)?;
     let (width, height) = scale.size(source.width, source.height);
     let Some(bounds) = destination.visible(at, width, height) else {
         return Ok(());
@@ -108,7 +111,7 @@ pub(crate) fn put_scaled(
         os,
         &source,
         &destination,
-        &conversion,
+        &converted,
         flags,
         bounds,
         &mut mapping,
@@ -130,7 +133,7 @@ pub(crate) fn tile(
         return Ok(());
     };
     let destination = Destination::now(os)?;
-    let conversion = Conversion::of(os, &source, &destination.format, flags, table)?;
+    let converted = Converted::of(os, &source, &destination.format, flags, table)?;
     let (width, height) = scale.size(source.width, source.height);
     if width == 0 || height == 0 {
         return Ok(());
@@ -145,7 +148,7 @@ pub(crate) fn tile(
         os,
         &source,
         &destination,
-        &conversion,
+        &converted,
         flags,
         bounds,
         &mut mapping,
@@ -166,8 +169,7 @@ pub(crate) fn put_picture(
 ) -> Result<(), Fail> {
     let source = Source::of_rgba(os, width, height, rgba)?;
     let destination = Destination::now(os)?;
-    let palette = destination_palette(os, &destination)?;
-    let conversion = Conversion::of_picture(os, &source, &destination.format, &palette, mapping)?;
+    let converted = Converted::of_picture(os, &source, &destination.format, mapping)?;
     let (across, down) = scale.size(width, height);
     let Some(bounds) = destination.visible(at, across, down) else {
         return Ok(());
@@ -177,28 +179,11 @@ pub(crate) fn put_picture(
         os,
         &source,
         &destination,
-        &conversion,
+        &converted,
         flags,
         bounds,
         &mut mapping,
     )
-}
-
-/// The colour each pixel value of a palettised destination shows, none for
-/// a deep one.
-fn destination_palette(os: &mut Os<'_>, destination: &Destination) -> Result<Vec<[u8; 3]>, Fail> {
-    if destination.format.direct() {
-        return Ok(Vec::new());
-    }
-    let colours = 1u32 << destination.format.log2_bpp();
-    state::with(os, |vdu, _| {
-        Ok((0..colours)
-            .map(|pixel| {
-                let rgb = vdu.palette.shown(pixel);
-                [rgb.r, rgb.g, rgb.b]
-            })
-            .collect())
-    })
 }
 
 /// `OS_SpriteOp` 50: the background colour plotted at `at` under the
@@ -315,40 +300,31 @@ pub(crate) fn plot_block(
 
 /// Paints the pixels within `bounds` that `mapping` covers, each from its
 /// source pixel by `flags`: converted, under the mask or blended by its
-/// alpha, kept from by translucency, combined by the action. A palettised
-/// destination blends the two pixels' colours and takes the palette's
-/// nearest.
+/// alpha, kept from by translucency, combined by the action.
 pub(crate) fn paint(
     os: &mut Os<'_>,
     source: &Source,
     destination: &Destination,
-    conversion: &Conversion,
+    converted: &Converted,
     flags: PlotFlags,
     bounds: Rect,
     mapping: &mut impl Mapping,
 ) -> Result<(), Fail> {
+    let conversion = &converted.conversion;
     if matches!(conversion, Conversion::Nothing) {
         return Ok(());
     }
     let format = destination.format;
     let canvas = destination.canvas;
     let mask = format.pixel_mask();
-    let direct = format.direct().then(|| Direct::of(&format));
     let opacity = OPAQUE - flags.translucency();
-    let blends = opacity != OPAQUE
-        || (flags.masked()
-            && matches!(
-                source.transparency,
-                Transparency::Wide | Transparency::Channel(_)
-            ));
-    let palette = if blends && direct.is_none() {
-        destination_palette(os, destination)?
-    } else {
-        Vec::new()
-    };
-    let Some(mut nearest) = NearestKept::of(&palette) else {
-        return Err(os.error(NO_MEMORY));
-    };
+    let meeting = Meeting::of(
+        source,
+        &format,
+        conversion,
+        converted.palettised.as_ref(),
+        flags,
+    );
     let mut line = Vec::new();
     let width = usize::try_from(i64::from(bounds.right) - i64::from(bounds.left) + 1).unwrap_or(0);
     if line.try_reserve_exact(width).is_err() {
@@ -374,63 +350,189 @@ pub(crate) fn paint(
             } else {
                 0xFF
             };
-            let alpha = effective_alpha(alpha, opacity);
             if alpha == 0 {
                 continue;
             }
-            let Some(pixel) = conversion.pixel(source.colour(sx, sy)) else {
-                continue;
+            let colour = source.colour(sx, sy);
+            let drawn = match &meeting {
+                Meeting::Combined => conversion
+                    .pixel(colour)
+                    .map(|pixel| combine(flags.action(), *slot, pixel) & mask),
+                Meeting::Channels(blending) => {
+                    blending.pixel(conversion, colour, *slot, weight(alpha, opacity))
+                }
+                Meeting::Palette(blending) => conversion
+                    .pixel(colour)
+                    .and_then(|pixel| blending.pixel(pixel, *slot, alpha, opacity)),
             };
-            *slot = match (blends, direct) {
-                (true, Some(direct)) => blend(direct, pixel, *slot, alpha),
-                (true, None) => blend_in_palette(&mut nearest, pixel, *slot, alpha),
-                _ => combine(flags.action(), *slot, pixel) & mask,
-            };
+            if let Some(drawn) = drawn {
+                *slot = drawn;
+            }
         }
         canvas.put_pixels(os, row, left.cast_unsigned(), &line)?;
     }
     changed(os, bounds)
 }
 
-/// Full opacity: an alpha of 255 widened to 256 so a solid pixel blends
-/// to itself.
-const OPAQUE: u32 = 0x100;
-
-/// `over` drawn over `under` with alpha `alpha` of 256, each channel's two
-/// shares rounded down apart, as RISC OS 5 blends.
-fn blend(direct: Direct, over: u32, under: u32, alpha: u32) -> u32 {
-    let (s, d) = (
-        direct.unpack_replicated(over),
-        direct.unpack_replicated(under),
-    );
-    direct.pack(mixed(s, d, alpha))
+/// How a plot's pixels meet the destination's.
+enum Meeting<'a> {
+    /// Each combined with the destination's pixel by the GCOL action.
+    Combined,
+    /// Blended into a direct-colour destination's channels.
+    Channels(ChannelBlend),
+    /// Blended onto a palettised destination.
+    Palette(PaletteBlend<'a>),
 }
 
-/// As [`blend`], the two palettised pixels' colours from `nearest`'s
-/// palette, the result the palette's nearest.
-fn blend_in_palette(nearest: &mut NearestKept<'_>, over: u32, under: u32, alpha: u32) -> u32 {
-    let colour = |pixel: u32| {
-        nearest
-            .palette()
-            .get(pixel as usize)
-            .map_or([0; 3], |rgb| rgb.map(u32::from))
+impl<'a> Meeting<'a> {
+    /// A plot of `source` by `flags` through `conversion` on a destination of
+    /// `format`, whose colours `palettised` gives where it is palettised and
+    /// blended on. A blend onto a destination ColourTrans reads as
+    /// direct-colour is combined unblended.
+    fn of(
+        source: &Source,
+        format: &crate::mode::Format,
+        conversion: &Conversion,
+        palettised: Option<&'a Palettised>,
+        flags: PlotFlags,
+    ) -> Self {
+        if !blends(source, flags) {
+            return Self::Combined;
+        }
+        if format.direct() {
+            let from = match conversion {
+                Conversion::Direct(from, _) => Some(*from),
+                _ => None,
+            };
+            return Self::Channels(ChannelBlend {
+                from,
+                to: Direct::of(format),
+            });
+        }
+        palettised.map_or(Self::Combined, |palettised| {
+            Self::Palette(PaletteBlend {
+                palettised,
+                alpha: alpha_blended(source, flags),
+                full: palettised.colours.len() == EIGHT_BIT_COLOURS,
+            })
+        })
+    }
+}
+
+/// A blend onto a palettised destination: the colour of the source pixel's
+/// colour number mixed with the destination pixel's, then matched in the
+/// palette, as RISC OS 5 blends.
+struct PaletteBlend<'a> {
+    palettised: &'a Palettised,
+    /// The sprite's alpha is blended, not only a translucency.
+    alpha: bool,
+    /// The palette has 256 colours: each mix is found in its 32K table.
+    full: bool,
+}
+
+impl PaletteBlend<'_> {
+    /// Colour number `over` drawn on `under` at alpha `alpha` of 255 and
+    /// `opacity` of 256; none where nothing is drawn.
+    ///
+    /// With 256 colours a translucency mixes the two colours as `BlendTable`
+    /// does and an alpha mixes their five-bit forms, each found in the 32K
+    /// table. With fewer, an alpha is taken in steps of 32, and each mix
+    /// takes the palette's nearest colour, as `BlendTable` matches.
+    fn pixel(&self, over: u32, under: u32, alpha: u32, opacity: u32) -> Option<u32> {
+        let (over, under) = (self.palettised.colour(over), self.palettised.colour(under));
+        if self.full {
+            let weight = weight(alpha, opacity);
+            if !self.alpha {
+                let mix = blendtable::mix(over, under, OPAQUE - (weight >> 8));
+                return Some(self.palettised.number(mix));
+            }
+            let (over, under) = (over.to_array(), under.to_array());
+            let mix = core::array::from_fn(|c| {
+                let [s, d] = [over[c], under[c]].map(|v| u32::from(v >> 3));
+                channel(s, FIVE_BITS, d, FIVE_BITS, weight).to_le_bytes()[0]
+            });
+            return Some(self.palettised.number_of_cell(inverse::cell(mix)));
+        }
+        let share = if self.alpha {
+            ((alpha * opacity) >> 8) & !ALPHA_STEP_LOW
+        } else {
+            opacity
+        };
+        if share == 0 {
+            return None;
+        }
+        let mix = blendtable::mix(over, under, OPAQUE - share);
+        Some(u32::from(blendtable::nearest_last(
+            &self.palettised.colours,
+            mix,
+        )))
+    }
+}
+
+/// The bits below an alpha's step of 32, which a destination of fewer than
+/// 256 colours drops.
+const ALPHA_STEP_LOW: u32 = 31;
+
+/// Full opacity, a blend's whole: an alpha of 255 widened to 256 so a solid
+/// pixel blends to itself.
+const OPAQUE: u32 = blendtable::WHOLE;
+
+/// A blend into a direct-colour destination's channels.
+struct ChannelBlend {
+    /// The source's own pixel form, where the blend takes its pixels as they
+    /// are; else it takes them turned into the destination's.
+    from: Option<Direct>,
+    to: Direct,
+}
+
+impl ChannelBlend {
+    /// Source pixel `colour`, through `conversion` where it must be, drawn on
+    /// `under` with the source's share `weight` of 65536; none where the
+    /// conversion draws nothing.
+    fn pixel(&self, conversion: &Conversion, colour: u32, under: u32, weight: u32) -> Option<u32> {
+        let (over, from) = match self.from {
+            Some(from) => (colour, from),
+            None => (conversion.pixel(colour)?, self.to),
+        };
+        let (s, source_bits) = (from.channels(over), from.channel_bits());
+        let (d, bits) = (self.to.channels(under), self.to.channel_bits());
+        Some(self.to.pack_channels(core::array::from_fn(|c| {
+            channel(s[c], source_bits[c], d[c], bits[c], weight)
+        })))
+    }
+}
+
+/// The bits of a five-bit channel.
+const FIVE_BITS: u32 = 5;
+
+/// A source's share of a blend in 65536ths: its alpha, 255 solid, widened to
+/// 256 and kept from by `opacity` of 256.
+const fn weight(alpha: u32, opacity: u32) -> u32 {
+    (alpha + (alpha >> 7)) * opacity
+}
+
+/// Channel `s` of `source_bits` over channel `d` of `bits`, the source's
+/// share `weight` of 65536, each share rounded down apart, as RISC OS 5
+/// blends: an eight-bit source's share cut to 256ths, a narrower one's kept
+/// whole, its bits repeated below themselves where the destination's channel
+/// is wider.
+const fn channel(s: u32, source_bits: u32, d: u32, bits: u32, weight: u32) -> u32 {
+    if source_bits >= 8 {
+        let share = weight >> 8;
+        return ((s * share) >> (8 + source_bits).saturating_sub(bits))
+            + ((d * (OPAQUE - share)) >> 8);
+    }
+    let (s, source_bits) = if source_bits < bits {
+        ((s << source_bits) | s, 2 * source_bits)
+    } else {
+        (s, source_bits)
     };
-    let rgb = mixed(colour(over), colour(under), alpha);
-    nearest.index(rgb)
+    ((s * weight) >> (16 + source_bits).saturating_sub(bits))
+        + ((d * (WHOLE_WEIGHT - weight)) >> 16)
 }
 
-/// Each channel of `s` over `d` with alpha `alpha` of 256.
-fn mixed(s: [u32; 3], d: [u32; 3], alpha: u32) -> [u8; 3] {
-    let mix =
-        |s: u32, d: u32| (((s * alpha) >> 8) + ((d * (OPAQUE - alpha)) >> 8)).to_le_bytes()[0];
-    [mix(s[0], d[0]), mix(s[1], d[1]), mix(s[2], d[2])]
-}
-
-/// A mask's alpha, 255 solid, widened to 256 and kept from by `opacity`,
-/// as RISC OS 5 takes it.
-const fn effective_alpha(alpha: u32, opacity: u32) -> u32 {
-    ((alpha + (alpha >> 7)) * opacity) >> 8
-}
+/// A blend's whole in 65536ths, as [`weight`] counts.
+const WHOLE_WEIGHT: u32 = OPAQUE * OPAQUE;
 
 #[cfg(test)]
 mod tests;

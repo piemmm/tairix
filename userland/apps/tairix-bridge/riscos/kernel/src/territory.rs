@@ -128,18 +128,15 @@ pub(crate) const UNKNOWN_SWI: Error = Error {
 
 /// Its messages.
 const MESSAGES: &[u8] = include_bytes!("../resources/TerrMgr/Messages");
-const MESSAGES_NAME: &[u8] = b"Resources:$.Resources.TerrMgr.Messages\0";
+const MESSAGES_FILE: crate::msgtrans::OwnFile =
+    crate::msgtrans::OwnFile::named(b"Resources:$.Resources.TerrMgr.Messages\0");
 /// The path its territories are found on, set if it is not.
 const PATH: &[u8] = b"TerritoryManager$Path";
 const PATH_DEFAULT: &[u8] = b"Resources:$.Resources.TerrMgr.";
 
-/// Its workspace: its messages' descriptor, the file's name, the room a
-/// lookup is asked in, the name a time zone the territory has none for
-/// goes by, and a block for what it asks others.
-const OWN_AT: u32 = 0;
-const NAME_AT: u32 = crate::msgtrans::OWN_DESCRIPTOR;
-const REQUEST_AT: u32 = (NAME_AT + len32(MESSAGES_NAME.len())).next_multiple_of(4);
-const CUSTOM_AT: u32 = REQUEST_AT + crate::msgtrans::REQUEST;
+/// Its workspace: its messages' file, the name a time zone the territory
+/// has none for goes by, and a block for what it asks others.
+const CUSTOM_AT: u32 = MESSAGES_FILE.room();
 const CUSTOM_ROOM: u32 = 32;
 const SCRATCH_AT: u32 = CUSTOM_AT + CUSTOM_ROOM;
 const WORKSPACE: u32 = SCRATCH_AT + 16;
@@ -578,14 +575,10 @@ impl Os<'_> {
 fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let workspace = os.rma_claim(WORKSPACE)?;
     os.write_word(regs.r[12], workspace)?;
-    os.write_bytes(workspace + NAME_AT, MESSAGES_NAME)?;
+    let own = MESSAGES_FILE.place(os, workspace)?;
     os.world.territory = Manager::new();
     os.world.territory.workspace = Some(workspace);
-    os.world.territory.own = Own::at(
-        workspace + OWN_AT,
-        workspace + NAME_AT,
-        workspace + REQUEST_AT,
-    );
+    os.world.territory.own = own;
     if os.variable_text(PATH)?.is_none() {
         os.set_string_variable(PATH, PATH_DEFAULT)?;
     }
@@ -764,11 +757,7 @@ const fn asked(r0: u32) -> Asked {
 
 /// A token of the Manager's messages, written with a new line.
 fn message_line(os: &mut Os<'_>, token: &[u8]) -> Result<(), Fail> {
-    let buffer = os
-        .world
-        .territory
-        .workspace
-        .map_or(0, |w| w + REQUEST_AT + 128);
+    let buffer = os.world.territory.own.reply();
     let length = os.manager_message(token, buffer, 120)?;
     let text = os.read_until(buffer, length as usize, |_| false)?.0;
     line(os, &text)

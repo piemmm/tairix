@@ -26,7 +26,7 @@ use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::filing::fs::{block, info};
 use tairix_riscos_kernel::filing::UNSUPPORTED;
 use tairix_riscos_kernel::module::{Builtin, Command, CommandKind, Help, Resource, Services};
-use tairix_riscos_kernel::msgtrans::{Own, OWN_DESCRIPTOR, REQUEST};
+use tairix_riscos_kernel::msgtrans::{Own, OwnFile};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, Unwind, World};
 use tairix_riscos_kernel::service::FS_REDECLARE;
 use tairix_riscos_kernel::swi::os::{fs_control, FS_CONTROL};
@@ -45,18 +45,15 @@ const INFO: u32 =
 
 /// Its messages, in the emulator's own words.
 const MESSAGES: &[u8] = include_bytes!("../../resources/HostFS/Messages");
-/// Its file's name, which its descriptor keeps.
-const MESSAGES_NAME: &[u8] = b"Resources:$.Resources.HostFS.Messages\0";
+/// Its messages' file, kept at its workspace's start.
+const MESSAGES_FILE: OwnFile = OwnFile::named(b"Resources:$.Resources.HostFS.Messages\0");
 /// The filing system's name, its module's title and the command that
 /// selects it.
 pub const NAME: &str = "HostFS";
 
-/// Where its workspace keeps the messages descriptor, the file's name, an
-/// error's request, the information block and the name.
-const OWN_AT: u32 = 0;
-const MESSAGES_NAME_AT: u32 = OWN_DESCRIPTOR;
-const REQUEST_AT: u32 = (MESSAGES_NAME_AT + len32(MESSAGES_NAME.len())).next_multiple_of(4);
-const BLOCK_AT: u32 = REQUEST_AT + REQUEST;
+/// Where its workspace keeps, after its messages' file, the information
+/// block and the name.
+const BLOCK_AT: u32 = MESSAGES_FILE.room();
 const NAME_AT: u32 = BLOCK_AT + 4 * len32(block::WORDS);
 const EMPTY_AT: u32 = (NAME_AT + len32(NAME.len() + 1)).next_multiple_of(4);
 const WORKSPACE: u32 = EMPTY_AT + 4;
@@ -216,14 +213,9 @@ fn with<T>(os: &mut Os<'_>, work: impl FnOnce(&mut State) -> T) -> Result<T, Fai
 fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let workspace = os.rma_claim(WORKSPACE)?;
     os.write_word(regs.r[12], workspace)?;
-    os.write_bytes(workspace + MESSAGES_NAME_AT, MESSAGES_NAME)?;
+    let messages = MESSAGES_FILE.place(os, workspace)?;
     os.write_terminated(workspace + NAME_AT, NAME.as_bytes(), 0, NAME.len() + 1)?;
     os.write_word(workspace + EMPTY_AT, 0)?;
-    let messages = Own::at(
-        workspace + OWN_AT,
-        workspace + MESSAGES_NAME_AT,
-        workspace + REQUEST_AT,
-    );
     let Roots {
         seed,
         own,

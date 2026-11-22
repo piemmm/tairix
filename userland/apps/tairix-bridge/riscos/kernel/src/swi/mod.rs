@@ -40,6 +40,104 @@ pub mod chunk {
     pub const SOUND_CHANNELS: u32 = 0x4_0180;
     /// `SoundScheduler`.
     pub const SOUND_SCHEDULER: u32 = 0x4_01C0;
+    /// `ColourTrans`.
+    pub const COLOUR_TRANS: u32 = 0x4_0740;
+    /// The Font Manager.
+    pub const FONT: u32 = 0x4_0080;
+    /// `InverseTable`.
+    pub const INVERSE_TABLE: u32 = 0x4_BF40;
+    /// `BlendTable`.
+    pub const BLEND_TABLE: u32 = 0x5_6280;
+}
+
+/// The Font Manager's SWIs ColourTrans calls.
+pub mod font {
+    use super::chunk::FONT;
+
+    /// `Font_SetFontColours`.
+    pub const SET_FONT_COLOURS: u32 = FONT + 0x12;
+    /// `Font_SetPalette`.
+    pub const SET_PALETTE: u32 = FONT + 0x13;
+}
+
+/// ColourTrans's SWIs, and their flag for the background.
+pub mod colour_trans {
+    use super::chunk::COLOUR_TRANS;
+
+    /// `ColourTrans_SelectTable`.
+    pub const SELECT_TABLE: u32 = COLOUR_TRANS;
+    /// `ColourTrans_SelectGCOLTable`.
+    pub const SELECT_GCOL_TABLE: u32 = COLOUR_TRANS + 1;
+    /// `ColourTrans_ReturnGCOL`.
+    pub const RETURN_GCOL: u32 = COLOUR_TRANS + 2;
+    /// `ColourTrans_SetGCOL`.
+    pub const SET_GCOL: u32 = COLOUR_TRANS + 3;
+    /// `ColourTrans_ReturnColourNumber`.
+    pub const RETURN_COLOUR_NUMBER: u32 = COLOUR_TRANS + 4;
+    /// `ColourTrans_ReturnGCOLForMode`.
+    pub const RETURN_GCOL_FOR_MODE: u32 = COLOUR_TRANS + 5;
+    /// `ColourTrans_ReturnColourNumberForMode`.
+    pub const RETURN_COLOUR_NUMBER_FOR_MODE: u32 = COLOUR_TRANS + 6;
+    /// `ColourTrans_ReturnOppGCOL`.
+    pub const RETURN_OPP_GCOL: u32 = COLOUR_TRANS + 7;
+    /// `ColourTrans_SetOppGCOL`.
+    pub const SET_OPP_GCOL: u32 = COLOUR_TRANS + 8;
+    /// `ColourTrans_ReturnOppColourNumber`.
+    pub const RETURN_OPP_COLOUR_NUMBER: u32 = COLOUR_TRANS + 9;
+    /// `ColourTrans_ReturnOppGCOLForMode`.
+    pub const RETURN_OPP_GCOL_FOR_MODE: u32 = COLOUR_TRANS + 0xA;
+    /// `ColourTrans_ReturnOppColourNumberForMode`.
+    pub const RETURN_OPP_COLOUR_NUMBER_FOR_MODE: u32 = COLOUR_TRANS + 0xB;
+    /// `ColourTrans_GCOLToColourNumber`.
+    pub const GCOL_TO_COLOUR_NUMBER: u32 = COLOUR_TRANS + 0xC;
+    /// `ColourTrans_ColourNumberToGCOL`.
+    pub const COLOUR_NUMBER_TO_GCOL: u32 = COLOUR_TRANS + 0xD;
+    /// `ColourTrans_ReturnFontColours`.
+    pub const RETURN_FONT_COLOURS: u32 = COLOUR_TRANS + 0xE;
+    /// `ColourTrans_SetFontColours`.
+    pub const SET_FONT_COLOURS: u32 = COLOUR_TRANS + 0xF;
+    /// `ColourTrans_InvalidateCache`.
+    pub const INVALIDATE_CACHE: u32 = COLOUR_TRANS + 0x10;
+    /// `ColourTrans_SetCalibration`.
+    pub const SET_CALIBRATION: u32 = COLOUR_TRANS + 0x11;
+    /// `ColourTrans_ReadCalibration`.
+    pub const READ_CALIBRATION: u32 = COLOUR_TRANS + 0x12;
+    /// `ColourTrans_ConvertDeviceColour`.
+    pub const CONVERT_DEVICE_COLOUR: u32 = COLOUR_TRANS + 0x13;
+    /// `ColourTrans_ConvertDevicePalette`.
+    pub const CONVERT_DEVICE_PALETTE: u32 = COLOUR_TRANS + 0x14;
+    /// `ColourTrans_ConvertRGBToCIE`.
+    pub const CONVERT_RGB_TO_CIE: u32 = COLOUR_TRANS + 0x15;
+    /// `ColourTrans_ConvertCIEToRGB`.
+    pub const CONVERT_CIE_TO_RGB: u32 = COLOUR_TRANS + 0x16;
+    /// `ColourTrans_WriteCalibrationToFile`.
+    pub const WRITE_CALIBRATION_TO_FILE: u32 = COLOUR_TRANS + 0x17;
+    /// `ColourTrans_ConvertRGBToHSV`.
+    pub const CONVERT_RGB_TO_HSV: u32 = COLOUR_TRANS + 0x18;
+    /// `ColourTrans_ConvertHSVToRGB`.
+    pub const CONVERT_HSV_TO_RGB: u32 = COLOUR_TRANS + 0x19;
+    /// `ColourTrans_ConvertRGBToCMYK`.
+    pub const CONVERT_RGB_TO_CMYK: u32 = COLOUR_TRANS + 0x1A;
+    /// `ColourTrans_ConvertCMYKToRGB`.
+    pub const CONVERT_CMYK_TO_RGB: u32 = COLOUR_TRANS + 0x1B;
+    /// `ColourTrans_ReadPalette`.
+    pub const READ_PALETTE: u32 = COLOUR_TRANS + 0x1C;
+    /// `ColourTrans_WritePalette`.
+    pub const WRITE_PALETTE: u32 = COLOUR_TRANS + 0x1D;
+    /// `ColourTrans_SetColour`.
+    pub const SET_COLOUR: u32 = COLOUR_TRANS + 0x1E;
+    /// `ColourTrans_MiscOp`.
+    pub const MISC_OP: u32 = COLOUR_TRANS + 0x1F;
+    /// `ColourTrans_WriteLoadingsToFile`.
+    pub const WRITE_LOADINGS_TO_FILE: u32 = COLOUR_TRANS + 0x20;
+    /// `ColourTrans_SetTextColour`.
+    pub const SET_TEXT_COLOUR: u32 = COLOUR_TRANS + 0x21;
+    /// `ColourTrans_SetOppTextColour`.
+    pub const SET_OPP_TEXT_COLOUR: u32 = COLOUR_TRANS + 0x22;
+    /// `ColourTrans_GenerateTable`.
+    pub const GENERATE_TABLE: u32 = COLOUR_TRANS + 0x23;
+    /// R3's bit asking for the background colour.
+    pub const BACKGROUND: u32 = 1 << 7;
 }
 
 /// The sound modules' SWIs.
@@ -326,6 +424,14 @@ pub mod os {
     /// `OS_Exit`'s word beside a return code.
     pub mod exit {
         pub use crate::env::ABEX;
+    }
+
+    /// `OS_ScreenMode`'s reasons that callers outside the VDU drivers make.
+    pub mod screen_mode {
+        /// Select the mode a number or a specifier names.
+        pub const SELECT: u32 = 0;
+        /// Select the mode a string describes.
+        pub const SELECT_BY_STRING: u32 = 15;
     }
 
     /// `OS_SetColour`'s flags.
@@ -731,7 +837,7 @@ impl Os<'_> {
     /// "SWI &… not known", naming `number`.
     pub fn no_such_swi(&mut self, number: u32) -> Fail {
         let name = crate::env::hex(number);
-        self.error_with(crate::env::NO_SUCH_SWI, &[&name])
+        self.error_with(crate::env::NO_SUCH_SWI, &[name.as_bytes()])
     }
 
     /// A SWI no module provides: UKSWIV, with its number in R11; whatever

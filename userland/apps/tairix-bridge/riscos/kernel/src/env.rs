@@ -271,26 +271,37 @@ impl Environment {
     }
 }
 
-/// The text of `n` in hex, leading zeros dropped, as the kernel's error
-/// messages show an address or number.
-pub(crate) fn hex(n: u32) -> alloc::vec::Vec<u8> {
-    let mut text = alloc::vec::Vec::new();
-    let digits = (32 - n.leading_zeros()).div_ceil(4).max(1);
-    if text.try_reserve(digits as usize).is_ok() {
-        for shift in (0..digits).rev() {
-            text.push(b"0123456789ABCDEF"[((n >> (4 * shift)) & 0xF) as usize]);
-        }
+/// `n` in hex, upper case, its leading noughts dropped: as RISC OS shows a
+/// number or an address.
+#[must_use]
+pub fn hex(n: u32) -> Hex {
+    let len = (32 - n.leading_zeros()).div_ceil(4).max(1) as usize;
+    let mut digits = [0; 8];
+    for (digit, shift) in digits[..len].iter_mut().zip((0..len).rev()) {
+        *digit = tairix_util::hex::upper_digit((n >> (4 * shift)).to_le_bytes()[0]);
     }
-    text
+    Hex { digits, len }
 }
 
-/// The text of `n` as eight hex digits.
-pub(crate) fn hex8(n: u32) -> [u8; 8] {
-    let mut text = [0; 8];
-    for (i, digit) in text.iter_mut().enumerate() {
-        *digit = b"0123456789ABCDEF"[((n >> (28 - 4 * i)) & 0xF) as usize];
+/// A number's text in hex.
+#[derive(Clone, Copy, Debug)]
+pub struct Hex {
+    digits: [u8; 8],
+    len: usize,
+}
+
+impl Hex {
+    /// Its digits.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.digits[..self.len]
     }
-    text
+}
+
+/// `n` as eight hex digits, upper case.
+#[must_use]
+pub fn hex8(n: u32) -> [u8; 8] {
+    core::array::from_fn(|i| tairix_util::hex::upper_digit((n >> (28 - 4 * i)).to_le_bytes()[0]))
 }
 
 impl Os<'_> {
@@ -430,7 +441,7 @@ impl Os<'_> {
             return Fail::Error(block);
         }
         let name = hex(number & !crate::swi::X);
-        self.error_with(BAD_ERROR_POINTER, &[&name])
+        self.error_with(BAD_ERROR_POINTER, &[name.as_bytes()])
     }
 
     /// An error from a SWI without X: `Service_Error`, then `ErrorV`. A claimant
@@ -654,7 +665,7 @@ impl Os<'_> {
             .read_until(buffer.wrapping_add(8), ERROR_TEXT, |b| b == 0)
             .map(|(text, _)| text)
             .unwrap_or_default();
-        let line = self.message_with(b"ErrorReport", &[&text, &hex(number)]);
+        let line = self.message_with(b"ErrorReport", &[&text, hex(number).as_bytes()]);
         if let Ok(line) = line {
             if let Err(Fail::Unwind(unwind)) = self.write_line(&line) {
                 return unwind;
@@ -805,7 +816,7 @@ impl Os<'_> {
             UNUSED_SWI => {
                 let number = self.world.processor.cpu().reg(Reg::field(11));
                 let name = hex(number & !crate::swi::X);
-                let block = match self.error_with(NO_SUCH_SWI, &[&name]) {
+                let block = match self.error_with(NO_SUCH_SWI, &[name.as_bytes()]) {
                     Fail::Error(block) => block,
                     Fail::Unwind(unwind) => return Err(unwind),
                 };
@@ -1006,3 +1017,22 @@ const ADDRESS_EXCEPTION_ERROR: Error = Error {
     number: 0x8000_0003,
     token: "AddressExceptionAt",
 };
+
+#[cfg(test)]
+mod tests {
+    use super::{hex, hex8};
+
+    #[test]
+    fn a_number_in_hex_drops_its_leading_noughts_but_one() {
+        assert_eq!(hex(0).as_bytes(), b"0");
+        assert_eq!(hex(0xA).as_bytes(), b"A");
+        assert_eq!(hex(0x3E8).as_bytes(), b"3E8");
+        assert_eq!(hex(0xFFFF_FD45).as_bytes(), b"FFFFFD45");
+    }
+
+    #[test]
+    fn eight_hex_digits_keep_their_noughts() {
+        assert_eq!(&hex8(0x3E8), b"000003E8");
+        assert_eq!(&hex8(0xFFFF_FD45), b"FFFFFD45");
+    }
+}

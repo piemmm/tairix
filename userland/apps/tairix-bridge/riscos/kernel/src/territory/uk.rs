@@ -46,7 +46,7 @@ const BAD_FIELD: Error = Error {
 
 /// Its messages, and the path they are found on.
 const MESSAGES: &[u8] = include_bytes!("../../resources/UK/Messages");
-const MESSAGES_NAME: &[u8] = b"UK:Messages\0";
+const MESSAGES_FILE: crate::msgtrans::OwnFile = crate::msgtrans::OwnFile::named(b"UK:Messages\0");
 const PATH: &[u8] = b"UK$Path";
 const PATH_DEFAULT: &[u8] = b"Resources:$.Resources.UK.";
 
@@ -101,15 +101,12 @@ const ZONE_NAME_ROOM: u32 = 16;
 
 /// The workspace, laid out from nought.
 mod at {
-    use super::{MESSAGES_NAME, NAME_ROOM, ZONE_NAME_ROOM};
+    use super::{MESSAGES_FILE, NAME_ROOM, ZONE_NAME_ROOM};
     use crate::os::len32;
     use crate::territory::collate::PROPERTY_COUNT;
     use crate::territory::ENTRIES;
 
-    pub(super) const OWN: u32 = 0;
-    pub(super) const NAME: u32 = crate::msgtrans::OWN_DESCRIPTOR;
-    pub(super) const REQUEST: u32 = (NAME + len32(MESSAGES_NAME.len())).next_multiple_of(4);
-    pub(super) const TABLE: u32 = REQUEST + crate::msgtrans::REQUEST;
+    pub(super) const TABLE: u32 = MESSAGES_FILE.room();
     pub(super) const PROPERTIES: u32 = TABLE + 4 * len32(ENTRIES);
     pub(super) const LOWER: u32 = PROPERTIES + 32 * len32(PROPERTY_COUNT);
     pub(super) const UPPER: u32 = LOWER + 256;
@@ -382,7 +379,7 @@ impl Os<'_> {
 fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let workspace = os.rma_claim(at::END)?;
     os.write_word(regs.r[12], workspace)?;
-    os.write_bytes(workspace + at::NAME, MESSAGES_NAME)?;
+    let own = MESSAGES_FILE.place(os, workspace)?;
     for (n, map) in (0..).zip(collate::PROPERTY_MAPS) {
         os.write_bytes(workspace + at::PROPERTIES + 32 * n, &map)?;
     }
@@ -411,11 +408,7 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     }
     os.world.uk = State::new();
     os.world.uk.workspace = Some(workspace);
-    os.world.uk.own = Own::at(
-        workspace + at::OWN,
-        workspace + at::NAME,
-        workspace + at::REQUEST,
-    );
+    os.world.uk.own = own;
     if os.variable_text(PATH)?.is_none() {
         os.set_string_variable(PATH, PATH_DEFAULT)?;
     }

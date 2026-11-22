@@ -9,6 +9,12 @@ pub const fn digit(nibble: u8) -> u8 {
     DIGITS[(nibble & 0x0f) as usize]
 }
 
+/// The uppercase hex digit spelling the low four bits of `nibble`.
+#[must_use]
+pub const fn upper_digit(nibble: u8) -> u8 {
+    digit(nibble).to_ascii_uppercase()
+}
+
 /// The two lowercase hex digits spelling `byte`.
 #[must_use]
 pub const fn digits(byte: u8) -> [u8; 2] {
@@ -57,7 +63,7 @@ const fn value(digit: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_into, digits};
+    use super::{decode_into, digits, upper_digit};
 
     #[test]
     fn every_byte_round_trips_through_its_digits() {
@@ -69,6 +75,12 @@ mod tests {
             assert_eq!(back[0], byte);
         }
         assert_eq!(digits(0xab), *b"ab");
+    }
+
+    #[test]
+    fn an_upper_digit_spells_its_nibble_in_capitals_and_ignores_the_high_bits() {
+        let spelled: alloc::vec::Vec<u8> = (0..16u8).map(|n| upper_digit(n | 0xF0)).collect();
+        assert_eq!(spelled, b"0123456789ABCDEF");
     }
 
     #[test]

@@ -39,8 +39,8 @@ mod types;
 use alloc::vec::Vec;
 
 use tairix_riscos_kernel::module::{Builtin, Resource, Services, VectorDefault};
-use tairix_riscos_kernel::msgtrans::{Own, OWN_DESCRIPTOR, REQUEST};
-use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, Unwind, World};
+use tairix_riscos_kernel::msgtrans::{Own, OwnFile};
+use tairix_riscos_kernel::os::{Fail, Os, Regs, Unwind, World};
 use tairix_riscos_kernel::service;
 use tairix_riscos_kernel::vectors;
 
@@ -51,15 +51,9 @@ use system::System;
 /// FileSwitch's own messages: those the filing vectors' defaults do not
 /// share with it.
 const MESSAGES: &[u8] = include_bytes!("../resources/FileSwitch/Messages");
-/// Its file's name, which its descriptor keeps.
-const MESSAGES_NAME: &[u8] = b"Resources:$.Resources.FileSwitch.Messages\0";
-
-/// Where its workspace keeps the messages descriptor, the file's name and an
-/// error's request.
-const OWN_AT: u32 = 0;
-const NAME_AT: u32 = OWN_DESCRIPTOR;
-const REQUEST_AT: u32 = (NAME_AT + len32(MESSAGES_NAME.len())).next_multiple_of(4);
-const WORKSPACE: u32 = REQUEST_AT + REQUEST;
+/// Its messages' file, its workspace's whole.
+const MESSAGES_FILE: OwnFile = OwnFile::named(b"Resources:$.Resources.FileSwitch.Messages\0");
+const WORKSPACE: u32 = MESSAGES_FILE.room();
 
 /// FileSwitch.
 pub static FILE_SWITCH: Builtin = Builtin {
@@ -241,12 +235,7 @@ pub(crate) fn with<T>(os: &mut Os<'_>, work: impl FnOnce(&mut State) -> T) -> Re
 fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let workspace = os.rma_claim(WORKSPACE)?;
     os.write_word(regs.r[12], workspace)?;
-    os.write_bytes(workspace + NAME_AT, MESSAGES_NAME)?;
-    let own = Own::at(
-        workspace + OWN_AT,
-        workspace + NAME_AT,
-        workspace + REQUEST_AT,
-    );
+    let own = MESSAGES_FILE.place(os, workspace)?;
     os.hold_extension(State::new(own))?;
     for &(name, value) in DEFAULTS {
         if os.variable_text(name)?.is_none() {

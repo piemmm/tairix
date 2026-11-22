@@ -26,20 +26,21 @@ pub(crate) mod utils;
 mod verify;
 
 use tairix_riscos_kernel::error::Error;
-use tairix_riscos_kernel::os::{Fail, Os, Regs};
+use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 
 use crate::canvas::Block;
+use crate::palette::EIGHT_BIT_COLOURS;
 use crate::plot::Ink;
 use crate::state;
 
-pub(crate) use format::variable as mode_variable;
+pub(crate) use format::{variable as mode_variable, UNKNOWN_MODE};
 pub(crate) use system::{
     area_handler as system_area_handler, make_area as make_system_area, selected_size,
     size as system_size, Sprites,
 };
 
-use area::Area;
-pub(crate) use area::Naming;
+pub(crate) use area::{Area, Naming};
+pub(crate) use header::Sprite;
 
 /// `OS_SpriteOp`'s reasons, R0's low byte.
 pub(crate) mod reason {
@@ -97,7 +98,7 @@ pub(crate) mod reason {
 
 /// The entries of an eight-bit palette that makes its pixels plain colour
 /// numbers, each its own: the full palette.
-pub(crate) const FULL_PALETTE: u32 = 256;
+pub(crate) const FULL_PALETTE: u32 = len32(EIGHT_BIT_COLOURS);
 
 /// "No system sprite area": dynamic area 3 holds nothing.
 pub(crate) const NO_SYSTEM_AREA: Error = Error {

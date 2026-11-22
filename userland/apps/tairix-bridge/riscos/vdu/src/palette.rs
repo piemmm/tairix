@@ -1,12 +1,15 @@
 //! The palette (`plans/RISCOS-EMULATOR.md` §8): each logical colour's two
 //! flash states, the border and the pointer's three colours, as `&BBGGRRxx`
-//! words whose low byte says how each was set; the 256-colour modes' VIDC1
-//! groups of sixteen; and the direct-colour modes' gamma ramp. `VDU 19`,
+//! words held as they were set, a colour of supremacy's low byte all ones;
+//! the 256-colour modes' VIDC1 groups of sixteen; and the direct-colour
+//! modes' gamma ramp. Reading one entry reports in its words' low bytes how
+//! it shows, as RISC OS 5's `OS_ReadPalette` does; reading a block gives the
+//! words as held. `VDU 19`,
 //! `OS_Word` 11 and 12 and `OS_ReadPalette` go through `PaletteV`, whose
 //! default is here, so a claimant may stand in front of it.
 
 use tairix_colour::Rgb;
-use tairix_riscos_kernel::os::{Entry, Fail, Os, Regs};
+use tairix_riscos_kernel::os::{len32, Entry, Fail, Os, Regs};
 use tairix_riscos_kernel::vectors::Vector;
 use tairix_vdu::mode::Flags;
 use tairix_vdu::palette::{default_256, DEFAULT_2, DEFAULT_4};
@@ -17,7 +20,7 @@ use crate::state::with;
 /// `PaletteV`.
 pub(crate) const PALETTE_V: Vector = Vector(0x23);
 
-/// How an entry was set, its word's low byte.
+/// How an entry shows, its reported word's low byte.
 pub(crate) mod kind {
     /// Both flash states alike.
     pub(crate) const NORMAL: u32 = 16;
@@ -33,6 +36,9 @@ pub(crate) mod kind {
     pub(super) const SUPREMACY: u32 = 0x80;
 }
 
+/// The low byte a colour of supremacy is held with.
+const SUPREME: u32 = 0xFF;
+
 /// `PaletteV`'s reasons.
 pub(crate) mod reason {
     pub(crate) const READ: u32 = 1;
@@ -41,8 +47,8 @@ pub(crate) mod reason {
     pub(super) const SECOND_FLASH: u32 = 4;
     pub(super) const DEFAULT: u32 = 5;
     pub(super) const BLANK: u32 = 6;
-    pub(super) const READ_BLOCK: u32 = 7;
-    pub(super) const WRITE_BLOCK: u32 = 8;
+    pub(crate) const READ_BLOCK: u32 = 7;
+    pub(crate) const WRITE_BLOCK: u32 = 8;
     pub(super) const GAMMA: u32 = 9;
 }
 
@@ -69,9 +75,26 @@ const PHYSICAL: [[Rgb; 2]; 16] = {
     table
 };
 
-/// A colour word: `rgb` with `how` in the low byte.
-const fn word(rgb: Rgb, how: u32) -> u32 {
-    rgb.riscos_word() | how
+/// A colour word as held: `rgb`, its low byte all ones where it has
+/// supremacy.
+const fn word(rgb: Rgb, supreme: bool) -> u32 {
+    rgb.riscos_word() | if supreme { SUPREME } else { 0 }
+}
+
+/// What reading entry `how` reports of its held words: each word's low byte
+/// its supremacy bit and how the entry shows, both states alike or which
+/// state it is.
+const fn reported(how: u32, [first, second]: [u32; 2]) -> [u32; 2] {
+    match how {
+        kind::BORDER | kind::POINTER => [marked(first, how), marked(second, how)],
+        _ if first == second => [marked(first, kind::NORMAL), marked(second, kind::NORMAL)],
+        _ => [marked(first, kind::FIRST), marked(second, kind::SECOND)],
+    }
+}
+
+/// A held word reported as showing `how`, its supremacy bit kept.
+const fn marked(word: u32, how: u32) -> u32 {
+    (word & !0xFF) | (word & kind::SUPREMACY) | how
 }
 
 /// Physical colour `physical`'s solid state.
@@ -84,9 +107,9 @@ const fn physical(physical: u8) -> Rgb {
 pub(crate) struct Palette {
     /// Each logical colour's first and second flash states; the direct
     /// modes' gamma ramp.
-    pub(crate) entries: [[u32; 2]; 256],
-    /// The VIDC1 groups' sixteen base colours.
-    base: [[u32; 2]; 16],
+    pub(crate) entries: [[u32; 2]; EIGHT_BIT_COLOURS],
+    /// The VIDC1 groups' base colours.
+    base: [[u32; 2]; GROUP_BASES],
     pub(crate) border: [u32; 2],
     pub(crate) pointer: [[u32; 2]; 3],
     /// The second flash state is showing.
@@ -99,10 +122,10 @@ impl Palette {
     /// The palette a mode starts with.
     pub(crate) fn for_mode(format: &Format) -> Self {
         let mut palette = Self {
-            entries: [[0; 2]; 256],
-            base: [[0; 2]; 16],
-            border: [word(physical(0), kind::BORDER); 2],
-            pointer: [[word(physical(0), kind::POINTER); 2]; 3],
+            entries: [[0; 2]; EIGHT_BIT_COLOURS],
+            base: [[0; 2]; GROUP_BASES],
+            border: [word(physical(0), false); 2],
+            pointer: [[word(physical(0), false); 2]; 3],
             second: false,
             blanked: false,
         };
@@ -113,44 +136,10 @@ impl Palette {
     /// The mode's default entries; the border and the pointer's colours as
     /// they were.
     pub(crate) fn set_default(&mut self, format: &Format) {
-        let solid = |rgb: Rgb| [word(rgb, kind::NORMAL); 2];
-        self.entries = [[0; 2]; 256];
-        match format.log2_bpp() {
-            0 => {
-                for (entry, &p) in self.entries.iter_mut().zip(&DEFAULT_2) {
-                    *entry = solid(physical(p));
-                }
-            }
-            1 => {
-                for (entry, &p) in self.entries.iter_mut().zip(&DEFAULT_4) {
-                    *entry = solid(physical(p));
-                }
-            }
-            2 => {
-                for (i, entry) in self.entries.iter_mut().take(16).enumerate() {
-                    let [first, second] = PHYSICAL[i];
-                    *entry = if i < 8 {
-                        solid(first)
-                    } else if format.has(Flags::TELETEXT) {
-                        [word(first, kind::NORMAL | kind::SUPREMACY); 2]
-                    } else {
-                        [word(first, kind::FIRST), word(second, kind::SECOND)]
-                    };
-                }
-            }
-            3 => {
-                for (i, entry) in self.entries.iter_mut().enumerate() {
-                    let [r, g, b] = default_256(i.to_le_bytes()[0]);
-                    *entry = solid(Rgb::new(r, g, b));
-                }
-                for (i, base) in self.base.iter_mut().enumerate() {
-                    *base = self.entries[i];
-                }
-            }
-            _ => {
-                for (i, entry) in (0..=u8::MAX).zip(self.entries.iter_mut()) {
-                    *entry = solid(Rgb::new(i, i, i));
-                }
+        self.entries = default_words(format.log2_bpp(), format.has(Flags::TELETEXT));
+        if format.log2_bpp() == 3 {
+            for (i, base) in self.base.iter_mut().enumerate() {
+                *base = self.entries[i];
             }
         }
         self.second = false;
@@ -180,14 +169,14 @@ impl Palette {
                 }
             }
             _ if format.grouped() => {
-                let base = logical & 15;
-                self.base[base as usize] = words;
+                let base = logical as usize % GROUP_BASES;
+                self.base[base] = words;
                 for (entry, i) in self
                     .entries
                     .iter_mut()
                     .zip(0u32..)
-                    .skip(base as usize)
-                    .step_by(16)
+                    .skip(base)
+                    .step_by(GROUP_BASES)
                 {
                     *entry = words.map(|w| grouped(w, i));
                 }
@@ -210,6 +199,50 @@ impl Palette {
     }
 }
 
+/// The entries a mode of `log2_bpp` starts with, each logical colour's two
+/// flash states; a Teletext mode's flashing colours steady, with the
+/// supremacy bit; the direct-colour modes' gamma ramp.
+pub(crate) fn default_words(log2_bpp: u32, teletext: bool) -> [[u32; 2]; EIGHT_BIT_COLOURS] {
+    let solid = |rgb: Rgb| [word(rgb, false); 2];
+    let mut entries = [[0; 2]; EIGHT_BIT_COLOURS];
+    match log2_bpp {
+        0 => {
+            for (entry, &p) in entries.iter_mut().zip(&DEFAULT_2) {
+                *entry = solid(physical(p));
+            }
+        }
+        1 => {
+            for (entry, &p) in entries.iter_mut().zip(&DEFAULT_4) {
+                *entry = solid(physical(p));
+            }
+        }
+        2 => {
+            for (i, entry) in entries.iter_mut().take(16).enumerate() {
+                let [first, second] = PHYSICAL[i];
+                *entry = if i < 8 {
+                    solid(first)
+                } else if teletext {
+                    [word(first, true); 2]
+                } else {
+                    [word(first, false), word(second, false)]
+                };
+            }
+        }
+        3 => {
+            for (pixel, entry) in (0..=u8::MAX).zip(entries.iter_mut()) {
+                let [r, g, b] = default_256(pixel);
+                *entry = solid(Rgb::new(r, g, b));
+            }
+        }
+        _ => {
+            for (i, entry) in (0..=u8::MAX).zip(entries.iter_mut()) {
+                *entry = solid(Rgb::new(i, i, i));
+            }
+        }
+    }
+    entries
+}
+
 /// The highest entry a mode's logical colours reach.
 const fn colours(format: &Format) -> u32 {
     if format.log2_bpp() >= 3 {
@@ -219,40 +252,60 @@ const fn colours(format: &Format) -> u32 {
     }
 }
 
+/// The colours of a palette of eight bits a pixel.
+pub(crate) const EIGHT_BIT_COLOURS: usize = 1 << 8;
+/// The base colours a grouped 256-colour palette makes its colours from:
+/// VIDC1's palette registers, a pixel's low four bits choosing one.
+pub(crate) const GROUP_BASES: usize = 16;
+
+/// The colour pixel `pixel` of a 256-colour mode whose palette is grouped
+/// shows from base colour `base` at VIDC1's four bits a channel, as RISC OS
+/// 5's ColourTrans and sprite palettes take it: each channel's top four bits.
+const fn vidc1_shown(base: [u8; 3], pixel: u8) -> [u8; 3] {
+    let nibbles = [
+        (base[0] >> 4) * 0x11,
+        (base[1] >> 4) * 0x11,
+        (base[2] >> 4) * 0x11,
+    ];
+    tairix_vdu::palette::grouped(nibbles, pixel)
+}
+
+/// The 256 colours a grouped palette of base words `bases` shows, as VIDC1
+/// shows them, a base it lacks black.
+pub(crate) fn grouped_colours(bases: &[u32]) -> impl Iterator<Item = Rgb> + '_ {
+    (0..=u8::MAX).map(|pixel| {
+        let base = bases
+            .get(usize::from(pixel) % GROUP_BASES)
+            .copied()
+            .unwrap_or(0);
+        let [r, g, b] = vidc1_shown(Rgb::from_riscos_word(base).to_array(), pixel);
+        Rgb::new(r, g, b)
+    })
+}
+
 /// A base colour word as entry `i` of its group shows it, its low byte kept.
 const fn grouped(base: u32, i: u32) -> u32 {
     let [r, g, b] =
         tairix_vdu::palette::grouped(Rgb::from_riscos_word(base).to_array(), i.to_le_bytes()[0]);
-    word(Rgb::new(r, g, b), base & 0xFF)
+    Rgb::new(r, g, b).riscos_word() | (base & 0xFF)
 }
 
 /// What `VDU 19,logical,physical,red,green,blue` sets: the kind of entry and
 /// its two flash states, the state not set kept from `current`. `None` for a
 /// physical colour no form names.
 pub(crate) fn vdu_19(physical: u8, rgb: [u8; 3], current: [u32; 2]) -> Option<(u32, [u32; 2])> {
-    let supremacy = u32::from(physical & 0x80);
-    let given = Rgb::new(rgb[0], rgb[1], rgb[2]);
-    let mark = |how: u32| how | supremacy;
+    let supreme = physical & 0x80 != 0;
+    let given = word(Rgb::new(rgb[0], rgb[1], rgb[2]), supreme);
     match u32::from(physical & 0x7F) {
         p @ 0..=15 => {
             let [first, second] = PHYSICAL[p as usize];
-            Some(if p < 8 {
-                (kind::NORMAL, [word(first, mark(kind::NORMAL)); 2])
-            } else {
-                (
-                    kind::NORMAL,
-                    [
-                        word(first, mark(kind::FIRST)),
-                        word(second, mark(kind::SECOND)),
-                    ],
-                )
-            })
+            Some((kind::NORMAL, [word(first, supreme), word(second, supreme)]))
         }
-        kind::NORMAL => Some((kind::NORMAL, [word(given, mark(kind::NORMAL)); 2])),
-        kind::FIRST => Some((kind::NORMAL, [word(given, mark(kind::FIRST)), current[1]])),
-        kind::SECOND => Some((kind::NORMAL, [current[0], word(given, mark(kind::SECOND))])),
-        kind::BORDER => Some((kind::BORDER, [word(given, mark(kind::BORDER)); 2])),
-        kind::POINTER => Some((kind::POINTER, [word(given, mark(kind::POINTER)); 2])),
+        kind::NORMAL => Some((kind::NORMAL, [given; 2])),
+        kind::FIRST => Some((kind::NORMAL, [given, current[1]])),
+        kind::SECOND => Some((kind::NORMAL, [current[0], given])),
+        kind::BORDER => Some((kind::BORDER, [given; 2])),
+        kind::POINTER => Some((kind::POINTER, [given; 2])),
         _ => None,
     }
 }
@@ -318,12 +371,11 @@ pub(crate) fn vector(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let handled = match regs.r[4] {
         reason::READ => with(os, |vdu, _| {
             let format = vdu.screen.format;
-            let [first, second] = vdu
+            let held = vdu
                 .palette
                 .read(&format, regs.r[0], regs.r[1])
                 .unwrap_or([0, 0]);
-            regs.r[2] = first;
-            regs.r[3] = second;
+            [regs.r[2], regs.r[3]] = reported(regs.r[1], held);
             Ok(true)
         })?,
         reason::SET => with(os, |vdu, _| {
@@ -362,52 +414,51 @@ pub(crate) fn vector(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 }
 
 /// `PaletteV` 7 and 8: many entries read or written at once. R0 the list of
-/// logical colours, or nought for those from R1's own count up; R1 the count
-/// in its low 24 bits and the kind in its top eight; R2 and R3 the first and
-/// second states' words, either nought where not wanted.
+/// logical colours, or nought for those from nought up; R1 the count in its
+/// low 24 bits and the kind in its top eight. A read gives the first and
+/// second states' words at R2 and R3, either nought where not wanted. A
+/// write takes its words from R2, as RISC OS 5 takes them: an entry's two
+/// states in turn, or for the first or second flash state alone that
+/// state's word.
 fn block(os: &mut Os<'_>, regs: &mut Regs) -> Result<bool, Fail> {
     let (list, count, how) = (regs.r[0], regs.r[1] & 0xFF_FFFF, regs.r[1] >> 24);
-    let (firsts, seconds) = (regs.r[2], regs.r[3]);
     let write = regs.r[4] == reason::WRITE_BLOCK;
-    for i in 0..count.min(256) {
+    for i in 0..count.min(len32(EIGHT_BIT_COLOURS)) {
         let logical = if list == 0 {
             i
         } else {
             os.read_word(list.wrapping_add(4 * i))?
         };
-        let at = |base: u32| base.wrapping_add(4 * i);
         if write {
-            let first = if firsts == 0 {
-                None
-            } else {
-                Some(os.read_word(at(firsts))?)
+            let words = regs.r[2];
+            let pair = how == kind::NORMAL;
+            let given = |os: &mut Os<'_>, k: u32| {
+                os.read_word(words.wrapping_add(4 * (if pair { 2 * i } else { i } + k)))
             };
-            let second = if seconds == 0 {
-                None
-            } else {
-                Some(os.read_word(at(seconds))?)
-            };
+            let first = given(os, 0)?;
+            let second = if pair { given(os, 1)? } else { first };
             with(os, |vdu, _| {
                 let format = vdu.screen.format;
                 let [old_first, old_second] = current(&vdu.palette, &format, logical, how);
-                vdu.palette.write(
-                    &format,
-                    logical,
-                    how,
-                    [first.unwrap_or(old_first), second.unwrap_or(old_second)],
-                );
+                let set = match how {
+                    kind::FIRST => [first, old_second],
+                    kind::SECOND => [old_first, second],
+                    _ => [first, second],
+                };
+                vdu.palette.write(&format, logical, how, set);
                 Ok(())
             })?;
         } else {
+            let (firsts, seconds) = (regs.r[2], regs.r[3]);
             let [first, second] = with(os, |vdu, _| {
                 let format = vdu.screen.format;
                 Ok(current(&vdu.palette, &format, logical, how))
             })?;
             if firsts != 0 {
-                os.write_word(at(firsts), first)?;
+                os.write_word(firsts.wrapping_add(4 * i), first)?;
             }
             if seconds != 0 {
-                os.write_word(at(seconds), second)?;
+                os.write_word(seconds.wrapping_add(4 * i), second)?;
             }
         }
     }
@@ -425,7 +476,7 @@ fn gamma(os: &mut Os<'_>, regs: &mut Regs) -> Result<bool, Fail> {
         if vdu.screen.format.direct() {
             for (i, entry) in vdu.palette.entries.iter_mut().enumerate() {
                 let rgb = Rgb::new(tables[0][i], tables[1][i], tables[2][i]);
-                *entry = [word(rgb, kind::NORMAL); 2];
+                *entry = [word(rgb, false); 2];
             }
         }
         Ok(true)

@@ -19,3 +19,20 @@ pub const UTILITY: u32 = 0xFFC;
 pub const DATA: u32 = Filetype::DATA.get() as u32;
 /// `Text`.
 pub const TEXT: u32 = 0xFFF;
+
+/// File type `kind`'s three hex digits, as `File$Type_` and `@LoadType_`
+/// names spell them.
+#[must_use]
+pub fn digits(kind: u32) -> [u8; 3] {
+    core::array::from_fn(|i| tairix_util::hex::upper_digit((kind >> (8 - 4 * i)).to_le_bytes()[0]))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_file_type_is_three_hex_digits_its_higher_bits_ignored() {
+        assert_eq!(super::digits(super::TEXT), *b"FFF");
+        assert_eq!(super::digits(0x5), *b"005");
+        assert_eq!(super::digits(0xFFFF_F0AB), *b"0AB");
+    }
+}

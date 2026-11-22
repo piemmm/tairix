@@ -4,6 +4,9 @@
 //! on, asks here; only the display, the frames and mode changes work on the
 //! screen itself.
 
+use tairix_riscos_kernel::os::{Fail, Os, Regs};
+use tairix_riscos_kernel::service::SWITCHING_OUTPUT_TO_SPRITE;
+
 use crate::canvas::Canvas;
 use crate::mode::Format;
 use crate::state::Vdu;
@@ -33,6 +36,28 @@ impl Context {
     pub(crate) const fn save_area(&self) -> u32 {
         self.0[3]
     }
+}
+
+/// `Service_SwitchingOutputToSprite`, R2 to R5 the registers the switch was
+/// made with.
+pub(crate) fn announce(os: &mut Os<'_>, switched_with: [u32; 4]) -> Result<(), Fail> {
+    let [r2, r3, r4, r5] = switched_with;
+    let mut service = Regs::new([
+        0,
+        SWITCHING_OUTPUT_TO_SPRITE,
+        r2,
+        r3,
+        r4,
+        r5,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ]);
+    os.service(&mut service).map_err(Fail::Unwind)
 }
 
 /// The destination drawn.

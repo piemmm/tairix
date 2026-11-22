@@ -1,0 +1,9 @@
+# ColourTrans' messages, in TAIRiX Bridge's own words.
+BadCalib:A calibration table must run each channel from level 0 to 255 in rising levels
+Overflow:The converted colour is too large to hold
+BadHSV:A colour with neither hue nor saturation cannot be converted
+Switched:The screen's palette cannot be written while output goes to a sprite
+BufferSmall:The buffer is too small for the palette
+NoPalette:This depth of display holds no palette
+BadFontOffset:A font colour offset must lie between -14 and 14
+BadMiscOp:ColourTrans_MiscOp has no such reason

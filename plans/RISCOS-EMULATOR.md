@@ -73,7 +73,12 @@ an application's own documents folder, the reference harness);
 | RO22.3 | Plotting: the kernel's plots, SpriteExtend's scaled, tiled and transformed plots with translation tables, alpha and colour mapping, `PLOT` &E8–&EF, pointer shapes, screen save and load, with the known differences §8 states | done |
 | RO22.4 | SpriteExtend's JPEG SWIs through `lib/image`'s decoder, the stored raster unturned | done |
 | RO22.5 | SpriteUtils' commands | done |
-| RO23 | ColourTrans; its colour match then taken by sprite blends, JPEGs and colour mapping onto palettised destinations | planned |
+| RO23.1 | ColourTrans's match: closest and furthest colour numbers and GCOLs for every depth and palette (current, a mode's default, given, a sprite's), the loadings, calibration's part, the cache and what invalidates it, `MiscOp` | done |
+| RO23.2 | Setting colours: `SetGCOL` with its ECFs, `SetOppGCOL`, `SetColour`, `SetTextColour`, `SetOppTextColour` | done |
+| RO23.3 | Tables and palettes: `SelectTable`, `SelectGCOLTable` and `GenerateTable` — byte, wide, 32K and transfer-function tables and the physical palette form — `ReadPalette`, `WritePalette` | done |
+| RO23.4 | Calibration and the colour models: `SetCalibration`, `ReadCalibration`, `ConvertDeviceColour`, `ConvertDevicePalette`, CIE, HSV and CMYK, the `*` commands and the file writers | done |
+| RO23.5 | Font colours: `ReturnFontColours`, `SetFontColours` | done |
+| RO23.6 | ColourTrans's match taken by sprite blends, JPEGs and colour mapping onto palettised destinations, and the InverseTable and BlendTable modules that serve them | done |
 | RO24 | Draw and DrawFile | planned |
 | RO25 | The Font Manager: TAIRiX faces through the font service, Acorn outline fonts, painting, the cache | planned |
 | RO26 | SharedCLibrary; the FPEmulator, VFPSupport, CallASWI and DDEUtils SWIs | planned |
@@ -1175,20 +1180,47 @@ is fuzzed.
     that does not hold together is refused where RISC OS 5 reads on.
   - Plotting is the emulator's own path into the destination's format: masked,
     scaled and transformed, with translation tables, alpha and colour mapping,
-    each pixel rule pinned by recorded observation. Known differences:
+    each pixel rule pinned by recorded observation. Onto a deep destination a
+    blend mixes each channel from the source pixel's own form, an eight-bit
+    source at 256ths of its weight and a narrower one at the whole weight,
+    its bits repeated where the destination's are wider. Onto a palettised
+    destination a blend, a JPEG and a colour mapping match through
+    ColourTrans's 32K table and BlendTable's rule (RO23.6). Accepted known
+    differences:
     a transformed plot stepping unevenly through source rows can take the
-    neighbouring row at an exact tie, about a pixel in a hundred; a blend or a
-    JPEG onto a palettised destination takes the nearest palette colour, until
-    ColourTrans's match (RO23), and is not dithered; a JPEG's pixels are
-    `lib/image`'s; wastage is zeroed where RISC OS 5 copies bytes from beyond
-    a rectangle or row.
+    neighbouring row at an exact tie, about a pixel in a hundred; a JPEG's
+    pixels are `lib/image`'s, undithered; wastage is zeroed where RISC OS 5
+    copies bytes from beyond a rectangle or row; the rest are on the docs
+    page.
   - Output redirection to a sprite or its mask; screen save and load.
   - SpriteExtend's JPEG SWIs, through `lib/image`'s JPEG decoder, which gives
     the raster as stored as RISC OS 5's SpriteExtend reads it.
   - SpriteUtils' commands, their listings in the emulator's own words.
-- **ColourTrans** (RO23): every SWI. Colours are matched as ColourTrans
-  documents, pinned by observation. Calibration and the font colour calls are
-  included.
+- **ColourTrans** (RO23): every SWI, pinned by observation.
+  - **Matching.** A colour is matched by squared error weighed by the
+    loadings, a grouped 256-colour palette at VIDC1's four bits a channel. A
+    palettised match goes through the calibration, which is interpolated in
+    16.16 and summed before it is cut. While output goes to a sprite with no
+    palette, the screen's mode and palette are matched.
+  - **The 32K rule.** It is the nearest entry by five-bit differences, with
+    each colour's own cell taking its last entry. ColourTrans,
+    InverseTable and BlendTable share it through `vdu/src/inverse.rs`.
+  - **Palettes as held.** Words keep the low byte they were given, and
+    `OS_ReadPalette` reports how each entry shows. A sprite's palette is read
+    no further than its pixels' colours.
+  - **Tables' flags.** `SelectTable` reads R5 only for a sprite,
+    `GenerateTable` always; neither takes the current palette for a sprite
+    with none, whatever bit 1 asks.
+  - **The rest.** The HSV, CMYK and CIE models, and the font colours' ramp
+    rule.
+  - **InverseTable and BlendTable** are provided. BlendTable matches a
+    destination of fewer than 256 colours by plain squares, the last of
+    equally near.
+  - **SpriteExtend onto palettised destinations** translates each source
+    pixel to a colour number first, then mixes as BlendTable does, an alpha
+    on 256 colours in five-bit form, and matches through the 32K table or,
+    below 256 colours, BlendTable's rule, an alpha's share in steps of 32.
+  - Known differences are on the docs page.
 - **Draw** (RO24):
   - `Draw_Fill`, `Draw_Stroke`, `Draw_StrokePath`, `Draw_FlattenPath`,
     `Draw_TransformPath`, and `Draw_ProcessPath` with every output option.
@@ -1209,6 +1241,8 @@ is fuzzed.
     sequences, kerning and matrices.
   - **Colour and output.** Anti-aliasing to the colour ranges `Font_SetFontColours`
     and ColourTrans give. `Font_SwitchOutputToBuffer` writes to Draw objects.
+    `ColourTrans_SetFontColours` in a mode of 256 colours or more calls
+    `Font_SetPalette`. What it passes there is pinned with the Font Manager.
   - **The cache.** Bounded by the memory policy.
   - **The desktop font.** It is the TAIRiX interface face.
 
