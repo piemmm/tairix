@@ -8,7 +8,8 @@ samplers and transfers of `plans/GPU.md` GP3.1; GP3.2's bind set layouts, bind
 sets, pipeline layouts and shader modules; GP3.3's compute pipelines, their
 dispatches and the interpreter that runs them; and GP3.4's render pipelines,
 passes and draws, direct and indirect, rasterised through `lib/raster`'s
-stages. Reaching a hardware device's driver arrives with GP11.
+stages; and GP11.1's seam between the model and the backend its work runs on.
+Reaching a hardware device's driver arrives with GP11.2.
 
 ## A device and what it is
 
@@ -127,11 +128,13 @@ draw. It holds its memory while it lives.
 
 ## Images, views and samplers
 
-An `Image` is placed in an allocation like a buffer, at an offset that is a
-multiple of the alignment and within the size `Context::image_requirements`
-states — answered from the device's description alone, without its lock; the
-texels' layout is the device's own, and they enter and leave only through
-copies. Its `ImageDesc` is checked against the device:
+An `Image` is placed in an allocation like a buffer: in one of the memory
+types `Context::image_requirements` names (`Error::Usage`), at an offset that
+is a multiple of its alignment (`Error::Misaligned`) and holding its size
+(`Error::OutOfRange`) — answered by the device's backend without the device's
+lock. The texels' layout within that placement is the backend's own, and they
+enter and leave only through copies. Its `ImageDesc` is checked against the
+device:
 
 | Refused | As |
 |---|---|
@@ -314,12 +317,12 @@ A `CommandBuffer` records:
 | `copy_buffer` | moves regions of one buffer into another | whole words; at most `MAX_COPY_REGIONS` regions; no byte written twice, and within one memory no byte both read and written |
 | `fill_buffer` | fills a span with a 32-bit word, little-endian | offset and size whole words |
 | `update_buffer` | writes bytes recorded with the command | whole words, at most `MAX_UPDATE_BYTES` |
-| `copy_buffer_to_image`, `copy_image_to_buffer` | moves texels between a buffer laid out in rows and slices and one aspect of a single-sampled image's level and layers | each region within both; a row at least the region's width and whole texels, as many rows a slice as the region; the depth of `Depth24PlusStencil8` never copied; no texel or byte written twice; the buffer and the image not sharing memory |
-| `copy_image` | moves texels between images of one sample count, the same plane, and texels of one size | each region within both; no texel written twice, and within one image none both read and written; two images sharing memory refused |
+| `copy_buffer_to_image`, `copy_image_to_buffer` | moves texels between a buffer laid out in rows and slices and one aspect of a single-sampled image's level and layers | each region within both; a row at least the region's width and whole texels, as many rows a slice as the region; the depth of `Depth24PlusStencil8` never copied; no texel or byte written twice; the buffer's range not meeting the image's placement |
+| `copy_image` | moves texels between images of one sample count, the same plane, and texels of one size | each region within both; no texel written twice, and within one image none both read and written; two images whose placements meet refused |
 | `clear_image` | writes one value over ranges of an image, in each aspect a range names, an integer channel keeping the value's low bits | a float, signed or unsigned colour of the format's kind, or a depth within `0.0..=1.0` and a stencil value |
 | `dispatch` | runs a compute pipeline's workgroups, so many along each axis, with its bind sets and push constants, read as words once as they are recorded and shared by every submission | one bind set for each set of the pipeline's layout, each laid out as that set (`Error::Bindings`); the push constants exactly the layout's bytes (`Error::Shape`); counts within `max_workgroup_count` (`Error::TooLarge`); at most `MAX_DISPATCH_SETS` sets and `MAX_PUSH_BYTES` bytes (`Error::TooMany`, when recorded) |
 | `dispatch_indirect` | `dispatch` with its counts three little-endian words read from a buffer when it runs | the buffer made `INDIRECT` (`Error::Usage`), the offset whole words (`Error::Misaligned`), and twelve bytes within the buffer (`Error::OutOfRange`) |
-| `render_pass` | loads its attachments — keeping what each held or clearing it within the pass's area — runs the draws its closure records in order, and resolves its four-sample targets | some attachment (`Error::Empty`); each a two-dimensional view of one level and layer of an image made for the attachment use (`Error::Usage`, `Error::Shape`), in a format the device states the use and sample count of (`Error::Unsupported`), a depth-stencil view of all its format's aspects (`Error::Aspect`); all of one extent (`Error::Shape`) and sample count (`Error::Samples`), none overlapping another in memory (`Error::Overlap`); a resolve from four samples to one (`Error::Samples`) of the same extent and format (`Error::Shape`) the device resolves (`Error::Unsupported`); a clear of the format's kind, its depth within `0.0..=1.0` (`Error::Shape`); an area not empty (`Error::Empty`) and within the attachments (`Error::OutOfRange`); at most `max_color_attachments` targets (`Error::TooMany`), and `MAX_PASS_ATTACHMENTS` when recorded |
+| `render_pass` | loads its attachments — keeping what each held or clearing it within the pass's area — runs the draws its closure records in order, and resolves its four-sample targets | some attachment (`Error::Empty`); each a two-dimensional view of one level and layer of an image made for the attachment use (`Error::Usage`, `Error::Shape`), in a format the device states the use and sample count of (`Error::Unsupported`), a depth-stencil view of all its format's aspects (`Error::Aspect`); all of one extent (`Error::Shape`) and sample count (`Error::Samples`), none meeting another (`Error::Overlap`); a resolve from four samples to one (`Error::Samples`) of the same extent and format (`Error::Shape`) the device resolves (`Error::Unsupported`); a clear of the format's kind, its depth within `0.0..=1.0` (`Error::Shape`); an area not empty (`Error::Empty`) and within the attachments (`Error::OutOfRange`); at most `max_color_attachments` targets (`Error::TooMany`), and `MAX_PASS_ATTACHMENTS` when recorded |
 | `draw`, `draw_indexed` | within a pass: instances of a range of vertices, or of the vertices a range of indices names, each index added to a base vertex, drawn with a pipeline, its bind sets, push constants and vertex buffers, a viewport, a scissor, a stencil reference and a blend constant | the pipeline's targets and depth-stencil format the pass's (`Error::Interface`), at its sample count (`Error::Samples`); sets and push constants as a dispatch's; a vertex buffer made `VERTEX` for each of the pipeline's (`Error::Bindings`, `Error::Usage`), indices made `INDEX` at a multiple of their size (`Error::Misaligned`); each buffer's offset within it, a viewport finite, wider than nought and not flat, within the device's dimensions and bounds and its depths within `0.0..=1.0`, a scissor whose far edges a `u32` holds, ranges in order and a blend constant finite (`Error::OutOfRange`); nothing a stage of it sees, nor its vertices, indices or records, reaching an attachment the pass writes, and nothing a stage of it writes reaching a depth-stencil attachment the pass only tests, which its loads keep and none of its draws writes (`Error::Overlap`); at most `MAX_DRAW_VERTEX_BUFFERS` vertex buffers when recorded (`Error::TooMany`) |
 | `draw_indirect`, `draw_indexed_indirect` | within a pass: `draw` or `draw_indexed` once for each of `count` records in a buffer, `stride` bytes apart, each four little-endian words — its vertices, its instances, its first vertex and its first instance (`DRAW_RECORD_BYTES`) — or for an indexed draw five — its indices, its instances, its first index, the signed word added to each index and its first instance (`INDEXED_DRAW_RECORD_BYTES`) | as `draw` and `draw_indexed`; the buffer made `INDIRECT` (`Error::Usage`); its offset whole words, and where there are several records the stride too (`Error::Misaligned`); several records a record or more apart (`Error::OutOfRange`); no more than the device's `max_draw_indirect_count` (`Error::TooLarge`); every record within the buffer, and for none the offset (`Error::OutOfRange`) |
 
@@ -394,6 +397,15 @@ index's place does not, so one past the index buffer however far reads nought.
 A record naming a first instance other than nought loses the context on a
 device that does not state `DRAW_INDIRECT_FIRST_INSTANCE` (`Loss::Fault`).
 
+Whether two things a submission names **meet** is the model's decision, the
+same on every backend whatever its texel layout. A buffer's range meets the
+bytes it spans. An image meets anything else wherever its placement — its
+offset and the size its requirements state — meets it, since no backend says
+where in its placement an image's texels lie; two views of one image meet only
+where they share a plane, a level and a layer, so a pass may render to one
+level or layer of an image while a draw samples another. Two images placed
+over each other in one allocation meet throughout.
+
 ## Deadlines and loss
 
 Every submission carries a deadline, counted from when its work starts. Work
@@ -408,6 +420,27 @@ vouched for; the rest go back to wait their turn, ahead of what came after
 them. Work the device finds malformed while running it loses its context too
 (`Loss::Fault`), and so does work whose tables the host refuses as it starts,
 past what its submission reserved (`Loss::OutOfMemory`).
+
+## Backends
+
+The model — contexts, their tables and charges, every check, the order work
+runs in, timelines, deadlines and loss — is generic over a *backend*: what
+memory is to the device, the form each object the model files takes on it,
+and how a ready job runs on an engine. A backend states the device's
+`DeviceInfo` and its engines' depths; makes memory, zeroed, under the charges
+the model took for it, and reads and writes the host-visible kinds; states an
+image's requirements and how its texels lie; makes a bind set's descriptors
+and each pipeline's programs from what the model checked; keeps, under the
+device's lock, whatever its pipelines reserve and their jobs borrow; runs a
+ready job and answers its outcome; and resets an engine.
+
+No backend's work — a lowering, a host round trip — is done under the
+device's lock. Memory, and the working memory a pipeline reserves, are charged
+and given room under it, made with it let go, and filed under it, so neither
+is made only to be refused after; an image's layout, a set's descriptors and a
+pipeline's programs are made with it let go from what the model checked, and
+charged as they are filed. The software device is the first backend; a
+hardware backend is its driver's own.
 
 ## The software device
 
@@ -656,6 +689,11 @@ fill of the whole heap runs far past a deadline.
   engine's list grown by doubling, memory made for a context released
   meanwhile refused and given back, work a queue's family does not run
   refused, and descriptions refused.
+- The backend tests run the model over the software backend and a test
+  backend of another texel layout, padded, aligned to pages and placeable in
+  one memory type alone: an image is placed by each one's own requirements,
+  and what a binding reaches decides the same over both. No object is made
+  under the device's lock.
 - The device's tests run the seam on the software device: commands landing
   where asked, handles refused across contexts and devices, export and import,
   refusals that change nothing, ranges refused rather than clamped, copies of

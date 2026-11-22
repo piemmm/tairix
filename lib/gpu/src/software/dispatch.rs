@@ -16,14 +16,17 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering
 use tairix_inline::ArrayVec;
 use tairix_rt::sync::Mutex;
 
+use super::memory::{self, Memory};
 use super::shader::exec::{Env, Machine, Placement, Ran, Resolved, Space};
 use super::shader::ir::{owns_tiles, Program, LANES};
+use super::Software;
 use super::{Meter, Outcome, WORK_PER_CHECK};
+use crate::backend::Pool;
 use crate::binding::{BindSetState, Bound};
+use crate::command::{DispatchWork, Groups};
 use crate::device::Shared;
-use crate::memory::{self, Budget, Charge, Held, Memory};
+use crate::memory::{Budget, Charge, Held};
 use crate::model::exhausted;
-use crate::pipeline::ComputePipelineState;
 use crate::Error;
 
 /// What one participant of a pipeline's dispatch works in: words for its
@@ -466,12 +469,10 @@ impl Shape {
     }
 }
 
-/// What a plan made, with the hold it was made for: installed into the set,
-/// it is left holding what the set let go, to be dropped outside the
-/// device's lock.
+/// What a plan made: installed into the set, it is left holding what the set
+/// let go, to be dropped outside the device's lock.
 #[derive(Default)]
 pub(crate) struct Grown {
-    hold: Option<Hold>,
     words: Vec<Part<u32>>,
     masks: Vec<Part<u64>>,
     whole: Vec<Workspace>,
@@ -479,8 +480,8 @@ pub(crate) struct Grown {
 
 impl Plan {
     /// What it plans, made without the device's lock, each part charged
-    /// from its room.
-    pub(crate) fn make(mut self) -> Result<Grown, Error> {
+    /// from its room, and the hold it was planned for.
+    pub(crate) fn make(mut self) -> Result<(Hold, Grown), Error> {
         let mut grown = Grown::default();
         match self.shape {
             Shape::Parts { lengths, count } => {
@@ -495,8 +496,7 @@ impl Plan {
                 }
             }
         }
-        grown.hold = Some(self.hold);
-        Ok(grown)
+        Ok((self.hold, grown))
     }
 }
 
@@ -596,6 +596,99 @@ impl Workspaces {
         self.width
     }
 
+    /// What the set lacks of `rounded`: for each workspace it has, lent or
+    /// free, a part of each kind shorter there, the lent set counted with what
+    /// is kept for it; or the set whole where it has none.
+    fn shape(&self, rounded: Need) -> Shape {
+        let (have, count) = match self.lent() {
+            Some(lent) => (
+                self.stash
+                    .as_ref()
+                    .map_or(lent.size, |stash| stash.covers(lent)),
+                lent.count,
+            ),
+            None => match self.free.first() {
+                Some(first) => (first.size(), self.free.len()),
+                None => {
+                    return Shape::Whole {
+                        size: rounded,
+                        count: self.width,
+                    }
+                }
+            },
+        };
+        let longer = |rounded: usize, have: usize| if rounded > have { rounded } else { 0 };
+        Shape::Parts {
+            lengths: Need {
+                words: longer(rounded.words, have.words),
+                masks: longer(rounded.masks, have.masks),
+            },
+            count,
+        }
+    }
+
+    /// The largest of each part any counted pipeline needs, found from the
+    /// pool's size down, as it covers every counted pipeline.
+    fn largest(&self) -> Need {
+        let from = self.size.classes().unwrap_or([CLASSES - 1; 2]);
+        let largest = [0, 1].map(|part| {
+            self.needs
+                .largest(part, from.get(part).copied().unwrap_or(CLASSES - 1))
+        });
+        match largest {
+            [Some(words), Some(masks)] => Need::of_classes([words, masks]),
+            _ => Need::default(),
+        }
+    }
+
+    /// What a job holds of the workspaces, while it does.
+    fn lent(&self) -> Option<Lent> {
+        self.needs.lease.lock().lent
+    }
+}
+
+impl Pool for Workspaces {
+    type Need = Need;
+    type Hold = Hold;
+    type Plan = Plan;
+    type Grown = Grown;
+    type Lease = Vec<Workspace>;
+
+    fn wider(a: Need, b: Need) -> Need {
+        a.max(b)
+    }
+
+    fn make(plan: Plan) -> Result<(Hold, Grown), Error> {
+        plan.make()
+    }
+
+    /// Fit the set to the largest of each part still held, shrinking it in
+    /// place, and answer what it let go, to be dropped without the device's
+    /// lock: once nothing is held, every free workspace, or what pipelines
+    /// added while a job holds the set.
+    fn prune(&mut self) -> Grown {
+        self.size = self.largest();
+        if self.size == Need::default() {
+            // Lent, the stash is all there is; else there is no stash.
+            let mut gone = self.stash.take().unwrap_or_default();
+            if gone.whole.is_empty() {
+                core::mem::swap(&mut gone.whole, &mut self.free);
+            }
+            return gone;
+        }
+        for workspace in &mut self.free {
+            workspace.shrink(self.size);
+        }
+        let lent = self.lent();
+        let (Some(stash), Some(lent)) = (self.stash.as_mut(), lent) else {
+            return Grown::default();
+        };
+        // What would grow nothing goes first, so it is not shrunk only to go.
+        let gone = stash.outgrown(lent.size, self.size);
+        stash.shrink(self.size);
+        gone
+    }
+
     /// The first phase of holding room for a pipeline needing `need` of each
     /// participant: its claim, its need rounded up to its classes for every
     /// participant, charged to its context's `budget`, and counted in; and
@@ -605,7 +698,7 @@ impl Workspaces {
     /// `besides` bytes the pipeline charges it and the heap beside, then where
     /// the heap has none for what the set lacks and those. Answers too what
     /// the set let go, to be dropped without the lock.
-    pub(crate) fn plan(
+    fn plan(
         &mut self,
         need: Need,
         (budget, besides): (&Arc<Budget>, u64),
@@ -655,106 +748,28 @@ impl Workspaces {
         (Ok(Plan { hold, shape, room }), shrunk)
     }
 
-    /// What the set lacks of `rounded`: for each workspace it has, lent or
-    /// free, a part of each kind shorter there, the lent set counted with what
-    /// is kept for it; or the set whole where it has none.
-    fn shape(&self, rounded: Need) -> Shape {
-        let (have, count) = match self.lent() {
-            Some(lent) => (
-                self.stash
-                    .as_ref()
-                    .map_or(lent.size, |stash| stash.covers(lent)),
-                lent.count,
-            ),
-            None => match self.free.first() {
-                Some(first) => (first.size(), self.free.len()),
-                None => {
-                    return Shape::Whole {
-                        size: rounded,
-                        count: self.width,
-                    }
-                }
-            },
-        };
-        let longer = |rounded: usize, have: usize| if rounded > have { rounded } else { 0 };
-        Shape::Parts {
-            lengths: Need {
-                words: longer(rounded.words, have.words),
-                masks: longer(rounded.masks, have.masks),
-            },
-            count,
-        }
-    }
-
     /// The last phase of holding room: what `grown` made swapped into the
     /// free set where it is longer, or taken as the set where there is none;
-    /// while a job holds the set, kept until it comes back. The hold is
-    /// answered, and `grown` left holding what the set let go.
-    pub(crate) fn install(&mut self, mut grown: Grown) -> (Option<Hold>, Grown) {
-        let hold = grown.hold.take();
+    /// while a job holds the set, kept until it comes back. `grown` is left
+    /// holding what the set let go.
+    fn install(&mut self, mut grown: Grown) -> Grown {
         if self.lent().is_some() {
             let Some(stash) = self.stash.as_mut() else {
                 self.stash = Some(grown);
-                return (hold, Grown::default());
+                return Grown::default();
             };
             stash.merge(&mut grown);
-            return (hold, grown);
+            return grown;
         }
         grown.apply(&mut self.free);
-        (hold, grown)
-    }
-
-    /// Fit the set to the largest of each part still held, shrinking it in
-    /// place, and answer what it let go, to be dropped without the device's
-    /// lock: once nothing is held, every free workspace, or what pipelines
-    /// added while a job holds the set.
-    pub(crate) fn prune(&mut self) -> Grown {
-        self.size = self.largest();
-        if self.size == Need::default() {
-            // Lent, the stash is all there is; else there is no stash.
-            let mut gone = self.stash.take().unwrap_or_default();
-            if gone.whole.is_empty() {
-                core::mem::swap(&mut gone.whole, &mut self.free);
-            }
-            return gone;
-        }
-        for workspace in &mut self.free {
-            workspace.shrink(self.size);
-        }
-        let lent = self.lent();
-        let (Some(stash), Some(lent)) = (self.stash.as_mut(), lent) else {
-            return Grown::default();
-        };
-        // What would grow nothing goes first, so it is not shrunk only to go.
-        let gone = stash.outgrown(lent.size, self.size);
-        stash.shrink(self.size);
-        gone
-    }
-
-    /// The largest of each part any counted pipeline needs, found from the
-    /// pool's size down, as it covers every counted pipeline.
-    fn largest(&self) -> Need {
-        let from = self.size.classes().unwrap_or([CLASSES - 1; 2]);
-        let largest = [0, 1].map(|part| {
-            self.needs
-                .largest(part, from.get(part).copied().unwrap_or(CLASSES - 1))
-        });
-        match largest {
-            [Some(words), Some(masks)] => Need::of_classes([words, masks]),
-            _ => Need::default(),
-        }
-    }
-
-    /// What a job holds of the workspaces, while it does.
-    fn lent(&self) -> Option<Lent> {
-        self.needs.lease.lock().lent
+        grown
     }
 
     /// The workspaces a job needing `need` runs in, fitted to what is still
     /// held and lent until the job gives them back: none for a job of no
     /// dispatch, none where they do not cover it, and none while another job
     /// holds them, as a pipeline's claim pays for one set.
-    pub(crate) fn take(&mut self, need: Need) -> Vec<Workspace> {
+    fn take(&mut self, need: Need) -> Vec<Workspace> {
         if need == Need::default() {
             return Vec::new();
         }
@@ -791,7 +806,7 @@ impl Workspaces {
     /// meanwhile added to them, and the set fitted to what is still held:
     /// answering what it let go, to be dropped without the device's lock,
     /// once the claims kept while the job ran are given back.
-    pub(crate) fn give(&mut self, workspaces: Vec<Workspace>) -> [Grown; 2] {
+    fn give(&mut self, workspaces: Vec<Workspace>) -> [Grown; 2] {
         if workspaces.is_empty() {
             return [self.prune(), Grown::default()];
         }
@@ -920,69 +935,40 @@ fn swap_longer_parts<T>(into: &mut Vec<Part<T>>, from: &mut Vec<Part<T>>) {
     }
 }
 
-/// A checked dispatch: its pipeline, its bind sets, its push constants as
-/// words, and its workgroup counts.
-pub(crate) struct Dispatch {
-    pub(crate) pipeline: Arc<ComputePipelineState>,
-    pub(crate) sets: Vec<Arc<BindSetState>>,
-    /// Shared with the command buffer it was recorded in.
-    pub(crate) push: Option<Arc<Vec<u32>>>,
-    pub(crate) groups: Groups,
+/// The host bytes the placements a dispatch's tiles take on a device of
+/// `participants`, kept for its job: a job's dispatches share them.
+pub(crate) fn place_bytes(work: &DispatchWork<Software>, participants: usize) -> u64 {
+    let tiles = Tiling::of(&work.pipeline.stages).tiles.max(1) as u64;
+    (participants as u64)
+        .saturating_mul(tiles)
+        .saturating_mul(size_of::<Placement>() as u64)
 }
 
-impl Dispatch {
-    /// The host bytes it holds queued, its push constants and their sharing
-    /// counted as though no other held them.
-    pub(crate) fn held_bytes(&self) -> u64 {
-        [
-            core::mem::size_of::<Self>() as u64,
-            self.push.as_deref().map_or(0, |words| {
-                crate::model::shared_bytes::<Vec<u32>>()
-                    .saturating_add(tairix_util::fallible::held(words))
-            }),
-            tairix_util::fallible::held(&self.sets),
-        ]
-        .into_iter()
-        .fold(0, u64::saturating_add)
-    }
-
-    /// The host bytes the placements its tiles take on a device of
-    /// `participants`, kept for its job: a job's dispatches share them.
-    pub(crate) fn place_bytes(&self, participants: usize) -> u64 {
-        let tiles = Tiling::of(&self.pipeline.stages).tiles.max(1) as u64;
-        (participants as u64)
-            .saturating_mul(tiles)
-            .saturating_mul(size_of::<Placement>() as u64)
-    }
-
-    /// The host bytes its run makes on a device of `participants`: the
-    /// memories it locks and views, the lists it merges them from, where each
-    /// set's memories are among them, the descriptors it resolves, and a slot
-    /// for each participant.
-    pub(crate) fn run_bytes(&self, participants: usize) -> u64 {
-        use core::mem::size_of;
-        let wide = |n: usize| n as u64;
-        let placed = self.sets.iter().fold(0u64, |total, set| {
-            total.saturating_add(wide(set.memories.len()))
-        });
-        let program = &self.pipeline.stages;
-        table_bytes([
-            (
-                placed.saturating_add(1),
-                size_of::<&Arc<Memory>>()
-                    + size_of::<memory::Words<'_>>()
-                    + size_of::<&[AtomicU32]>(),
-            ),
-            (
-                wide(self.sets.len()).saturating_add(1),
-                size_of::<&[Arc<Memory>]>(),
-            ),
-            (placed, size_of::<u32>()),
-            (program.descriptors, size_of::<Resolved<'_>>()),
-            (wide(program.bindings.len()), size_of::<&[Resolved<'_>]>()),
-            (wide(participants), size_of::<Slot<'_>>()),
-        ])
-    }
+/// The host bytes a dispatch's run makes on a device of `participants`: the
+/// memories it locks and views, the lists it merges them from, where each
+/// set's memories are among them, the descriptors it resolves, and a slot
+/// for each participant.
+pub(crate) fn run_bytes(work: &DispatchWork<Software>, participants: usize) -> u64 {
+    use core::mem::size_of;
+    let wide = |n: usize| n as u64;
+    let placed = work.sets.iter().fold(0u64, |total, set| {
+        total.saturating_add(wide(set.form.memories.len()))
+    });
+    let program = &work.pipeline.stages;
+    table_bytes([
+        (
+            placed.saturating_add(1),
+            size_of::<&Arc<Memory>>() + size_of::<memory::Words<'_>>() + size_of::<&[AtomicU32]>(),
+        ),
+        (
+            wide(work.sets.len()).saturating_add(1),
+            size_of::<&[Arc<Memory>]>(),
+        ),
+        (placed, size_of::<u32>()),
+        (program.descriptors, size_of::<Resolved<'_>>()),
+        (wide(program.bindings.len()), size_of::<&[Resolved<'_>]>()),
+        (wide(participants), size_of::<Slot<'_>>()),
+    ])
 }
 
 /// What a run's tables take, holding each count of entries of so many
@@ -994,19 +980,12 @@ fn table_bytes(tables: [(u64, usize); 6]) -> u64 {
     })
 }
 
-/// How many workgroups a dispatch makes: given, or read from a buffer when
-/// the dispatch runs.
-pub(crate) enum Groups {
-    Direct([u32; 3]),
-    Indirect { memory: Arc<Memory>, offset: u64 },
-}
-
 /// Run a dispatch in `workspaces`, its tiles placed in the job's `places`,
 /// its work counted by the job's `meter`.
 pub(crate) fn run(
-    dispatch: &Dispatch,
+    dispatch: &DispatchWork<Software>,
     meter: &mut Meter<'_>,
-    device: &Shared,
+    device: &Shared<Software>,
     (workspaces, places): (&mut [Workspace], &mut Vec<Placement>),
 ) -> Outcome {
     // Every memory the dispatch reaches, once each, merged from its sets'
@@ -1039,7 +1018,7 @@ pub(crate) fn run(
             program,
             bindings: &rows,
             push: dispatch.push.as_deref().map_or(&[], Vec::as_slice),
-            srgb: &device.srgb,
+            srgb: &device.backend.srgb,
             subgroup_size: limits.subgroup_size,
             groups,
         };
@@ -1052,11 +1031,11 @@ pub(crate) fn run(
 
 /// Each distinct set of `sets`' memories, in the order memories are locked
 /// in, added to `lists`, which has room for them.
-fn add_sets<'m>(lists: &mut Vec<&'m [Arc<Memory>]>, sets: &'m [Arc<BindSetState>]) {
+fn add_sets<'m>(lists: &mut Vec<&'m [Arc<Memory>]>, sets: &'m [Arc<BindSetState<Software>>]) {
     for (at, set) in sets.iter().enumerate() {
         let repeated = sets.iter().take(at).any(|seen| Arc::ptr_eq(seen, set));
         if !repeated {
-            lists.push(&set.memories);
+            lists.push(&set.form.memories);
         }
     }
 }
@@ -1177,7 +1156,7 @@ fn merge<'m>(
 /// The workgroup counts along each axis, read from their buffer where the
 /// dispatch is indirect; `None` past the device's `most`.
 fn counts<'d>(
-    groups: &Groups,
+    groups: &Groups<Software>,
     view: &dyn Fn(&Arc<Memory>) -> Option<&'d [AtomicU32]>,
     most: &[u32; 3],
 ) -> Option<[u32; 3]> {
@@ -1226,13 +1205,13 @@ fn share(
     env: &Env<'_>,
     total: u64,
     meter: &mut Meter<'_>,
-    device: &Shared,
+    device: &Shared<Software>,
     (workspaces, places): (&mut [Workspace], &mut Vec<Placement>),
 ) -> Outcome {
     let fault = AtomicBool::new(false);
     let (stop, deadline) = (meter.stop, meter.deadline);
     let tiling = Tiling::of(env.program);
-    let runner = &*device.runner;
+    let runner = &*device.backend.runner;
     let grain = tiling.packed as u64;
     let batches = usize::try_from(total.div_ceil(grain)).unwrap_or(usize::MAX);
     let pieces = runner.width().max(1).min(batches).min(workspaces.len());
@@ -1330,7 +1309,7 @@ const CLAIMS_PER_PIECE: usize = 8;
 /// lone set, unless an indirect dispatch reads its counts from another memory —
 /// needs none: its own places are the merged ones.
 pub(crate) fn place_sets(
-    sets: &[Arc<BindSetState>],
+    sets: &[Arc<BindSetState<Software>>],
     merged: &[&Arc<Memory>],
     meter: &mut Meter<'_>,
 ) -> Result<Mapping, Outcome> {
@@ -1338,11 +1317,11 @@ pub(crate) fn place_sets(
         places: Vec::new(),
         starts: tairix_inline::ArrayVec::new(),
     };
-    let whole = |set: &BindSetState| set.memories.len() == merged.len();
+    let whole = |set: &BindSetState<Software>| set.form.memories.len() == merged.len();
     let total = sets
         .iter()
         .filter(|set| !whole(set))
-        .map(|set| set.memories.len())
+        .map(|set| set.form.memories.len())
         .sum::<usize>();
     mapping
         .places
@@ -1355,7 +1334,7 @@ pub(crate) fn place_sets(
             continue;
         }
         let mut from = 0;
-        for memory in &set.memories {
+        for memory in &set.form.memories {
             if !meter.proceed(1) {
                 return Err(Outcome::Overran);
             }
@@ -1417,7 +1396,7 @@ fn place_from(merged: &[&Arc<Memory>], from: usize, memory: &Arc<Memory>) -> Opt
 /// first.
 pub(crate) fn resolve<'d>(
     program: &Program,
-    sets: &'d [Arc<BindSetState>],
+    sets: &'d [Arc<BindSetState<Software>>],
     (views, mapping): (&[&'d [AtomicU32]], &Mapping),
     meter: &mut Meter<'_>,
 ) -> Result<Vec<Resolved<'d>>, Outcome> {
@@ -1435,7 +1414,11 @@ pub(crate) fn resolve<'d>(
             .resources
             .get(first..first + count)
             .ok_or(Outcome::Fault)?;
-        let places = set.places.get(first..first + count).ok_or(Outcome::Fault)?;
+        let places = set
+            .form
+            .places
+            .get(first..first + count)
+            .ok_or(Outcome::Fault)?;
         for (bound, &place) in bound.iter().zip(places) {
             if !meter.proceed(1) {
                 return Err(Outcome::Overran);
@@ -1451,12 +1434,15 @@ pub(crate) fn resolve<'d>(
 
 /// `bound` as a dispatch reads it, its memory's words `words`: none for a
 /// sampler, which reaches none.
-fn resolved<'d>(bound: &'d Bound, words: Option<&'d [AtomicU32]>) -> Option<Resolved<'d>> {
-    let image = |state: &'d crate::resource::ViewState| {
+fn resolved<'d>(
+    bound: &'d Bound<Software>,
+    words: Option<&'d [AtomicU32]>,
+) -> Option<Resolved<'d>> {
+    let image = |state: &'d super::ViewState| {
         Some(super::shader::exec::ImageAt {
             words: words?,
             base: state.image.offset,
-            layout: &state.image.layout,
+            layout: &state.image.form,
             desc: &state.image.desc,
             view: &state.desc,
         })
@@ -1717,40 +1703,56 @@ fn workgroup_id(linear: u64, groups: [u32; 3]) -> [u32; 3] {
     ]
 }
 
-/// The memories `resources` reach, once each, in the order every holder
-/// locks memories in: by address; and each resource's memory by its place
-/// among them, [`NO_MEMORY`] for a sampler's. Sorted as borrowed, so each
-/// memory is counted once more however many resources reach it.
-pub(crate) fn memories_of(resources: &[Bound]) -> Result<(Vec<Arc<Memory>>, Vec<u32>), Error> {
-    let mut reached: Vec<(&Arc<Memory>, u32)> = Vec::new();
-    reached
-        .try_reserve_exact(resources.len())
-        .map_err(exhausted)?;
-    for (index, bound) in resources.iter().enumerate() {
-        if let Some(memory) = bound.memory() {
-            reached.push((memory, u32::try_from(index).map_err(exhausted)?));
-        }
-    }
-    reached.sort_unstable_by_key(|&(memory, _)| Arc::as_ptr(memory));
-    let same = |a: &(&Arc<Memory>, u32), b: &(&Arc<Memory>, u32)| Arc::ptr_eq(a.0, b.0);
-    let unique = reached.chunk_by(same).count();
-    let mut memories = Vec::new();
-    memories.try_reserve_exact(unique).map_err(exhausted)?;
-    let mut places =
-        tairix_util::fallible::filled(resources.len(), NO_MEMORY).ok_or(Error::OutOfMemory)?;
-    for run in reached.chunk_by(same) {
-        let Some(&(memory, _)) = run.first() else {
-            continue;
-        };
-        let place = u32::try_from(memories.len()).map_err(exhausted)?;
-        memories.push(Arc::clone(memory));
-        for &(_, index) in run {
-            if let Some(slot) = places.get_mut(index as usize) {
-                *slot = place;
+/// A bind set's descriptors as the software device reads them: the memories
+/// its resources reach, once each, in the order every holder locks memories
+/// in, by address; and each resource's memory by its place among them,
+/// [`NO_MEMORY`] for a sampler's.
+#[derive(Debug)]
+pub(crate) struct SetMemories {
+    pub(crate) memories: Vec<Arc<Memory>>,
+    pub(crate) places: Vec<u32>,
+}
+
+impl SetMemories {
+    /// Sorted as borrowed, so each memory is counted once more however many
+    /// resources reach it.
+    pub(crate) fn of(resources: &[Bound<Software>]) -> Result<Self, Error> {
+        let mut reached: Vec<(&Arc<Memory>, u32)> = Vec::new();
+        reached
+            .try_reserve_exact(resources.len())
+            .map_err(exhausted)?;
+        for (index, bound) in resources.iter().enumerate() {
+            if let Some(memory) = bound.memory() {
+                reached.push((memory, u32::try_from(index).map_err(exhausted)?));
             }
         }
+        reached.sort_unstable_by_key(|&(memory, _)| Arc::as_ptr(memory));
+        let same = |a: &(&Arc<Memory>, u32), b: &(&Arc<Memory>, u32)| Arc::ptr_eq(a.0, b.0);
+        let unique = reached.chunk_by(same).count();
+        let mut memories = Vec::new();
+        memories.try_reserve_exact(unique).map_err(exhausted)?;
+        let mut places =
+            tairix_util::fallible::filled(resources.len(), NO_MEMORY).ok_or(Error::OutOfMemory)?;
+        for run in reached.chunk_by(same) {
+            let Some(&(memory, _)) = run.first() else {
+                continue;
+            };
+            let place = u32::try_from(memories.len()).map_err(exhausted)?;
+            memories.push(Arc::clone(memory));
+            for &(_, index) in run {
+                if let Some(slot) = places.get_mut(index as usize) {
+                    *slot = place;
+                }
+            }
+        }
+        Ok(Self { memories, places })
     }
-    Ok((memories, places))
+
+    /// The host bytes it keeps.
+    pub(crate) fn held_bytes(&self) -> u64 {
+        tairix_util::fallible::held(&self.memories)
+            .saturating_add(tairix_util::fallible::held(&self.places))
+    }
 }
 
 /// The place a resource that reaches no memory has.

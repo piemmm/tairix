@@ -1,12 +1,11 @@
 //! Texels moved on the software device: copies between buffers and images
 //! and between images, and clears, row by row through each image's layout.
 
+use super::memory::{read_bytes, write_bytes, Memory};
+use super::{BufferState, ImageState, Software};
 use crate::command::Op;
 use crate::format::{Aspects, Format};
 use crate::image::{BufferImageCopy, ClearValue, ImageCopy, ImageRange};
-use crate::memory::{read_bytes, write_bytes, Memory};
-use crate::model::BufferState;
-use crate::resource::ImageState;
 use crate::software::texel::{encode, Plane, Srgb};
 use crate::software::Meter;
 use crate::transfer::Direction;
@@ -167,7 +166,7 @@ fn buffer_region(
                     buffer.offset + region.buffer_offset + slice + u64::from(y) * per_row;
                 let at = [region.origin.x, region.origin.y + y, region.origin.z + z];
                 let in_image = image.offset
-                    + image.layout.texel_offset(
+                    + image.form.texel_offset(
                         region.image.level,
                         region.image.base_layer + layer,
                         at,
@@ -248,19 +247,16 @@ fn image_region(
                     region.dst_origin.z + z,
                 ];
                 let from = src.offset
-                    + src.layout.texel_offset(
+                    + src.form.texel_offset(
                         region.src.level,
                         region.src.base_layer + layer,
                         from,
                         0,
                     );
                 let to = dst.offset
-                    + dst.layout.texel_offset(
-                        region.dst.level,
-                        region.dst.base_layer + layer,
-                        to,
-                        0,
-                    );
+                    + dst
+                        .form
+                        .texel_offset(region.dst.level, region.dst.base_layer + layer, to, 0);
                 let (from, to) = (index(from)?, index(to)?);
                 if whole {
                     pair.copy(from, to, units * src_unit)?;
@@ -368,7 +364,7 @@ fn clear_range(
         [u32::MAX, !0xff, u32::MAX, !0xff]
     };
     for level in range.base_level..range.base_level + range.levels {
-        let placed = image.layout.levels.get(level as usize)?;
+        let placed = image.form.levels.get(level as usize)?;
         let row_bytes = placed.extent.width as usize * texel * image.desc.samples as usize;
         for layer in range.base_layer..range.base_layer + range.layers {
             for z in 0..placed.extent.depth {
@@ -376,7 +372,7 @@ fn clear_range(
                     if !meter.proceed(0) {
                         return Some(false);
                     }
-                    let at = image.offset + image.layout.texel_offset(level, layer, [0, y, z], 0);
+                    let at = image.offset + image.form.texel_offset(level, layer, [0, y, z], 0);
                     let row = row_words(words, index(at)?, row_bytes)?;
                     if whole {
                         fill_row(row, &pattern)?;
@@ -460,7 +456,7 @@ fn keep_row(row: &mut [u32], pattern: &[u32; 4], kept: &[u32; 4]) {
 }
 
 /// Run one transfer `op`.
-pub(crate) fn apply(op: &Op, srgb: &Srgb, meter: &mut Meter<'_>) -> Option<Moved> {
+pub(crate) fn apply(op: &Op<Software>, srgb: &Srgb, meter: &mut Meter<'_>) -> Option<Moved> {
     match op {
         Op::BufferImage {
             buffer,

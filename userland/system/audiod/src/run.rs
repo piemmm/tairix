@@ -74,6 +74,9 @@ mod program {
     /// beside the lease's at the top of the range.
     const ROOM_TOKEN: u64 = u64::MAX - 1;
 
+    /// Wait-set token of the exits of the instances whose streams are open.
+    const PEER_EXIT_TOKEN: u64 = u64::MAX - 2;
+
     /// The engine over this process's live seams.
     type Service = AudioService<RtRegions, RtNotifier, ClockDelay>;
 
@@ -264,6 +267,17 @@ mod program {
         {
             return exit::NO_RESOURCES;
         }
+        // A stream ends with the instance that opened it.
+        if tairix_rt::waitset_ctl(
+            set,
+            WaitSetOp::Add,
+            WaitSourceKind::PeerExit,
+            0,
+            PEER_EXIT_TOKEN,
+        ) != 0
+        {
+            return exit::NO_RESOURCES;
+        }
         // The mixing path must not be preempted by ordinary work, and an
         // audio buffer must never be paged out — releasing one under memory
         // pressure buys a few kibibytes and costs an audible glitch. Both are
@@ -357,6 +371,11 @@ mod program {
                 CONTROL_TOKEN => serve_control(&mut service, set, pid, &mut request, &mut reply),
                 LEASE_TOKEN => follow_seat(&mut service),
                 ROOM_TOKEN => service.wakes().flush(),
+                PEER_EXIT_TOKEN => {
+                    while let Ok(owner) = tairix_rt::peer_exit_take() {
+                        service.client_exited(owner, &LogSink);
+                    }
+                }
                 device => drain_device(&mut service, device, &mut notify),
             }
         }
@@ -498,6 +517,16 @@ mod program {
             return;
         }
         let reply_len = service.handle(&origin, &request[..len], reply, &LogSink);
+        // A stream is answered only once its owner's exit is watched: one
+        // already gone, or that cannot be watched, has it taken back.
+        if let Some(owner) = service.take_watch() {
+            if let Err(err) = tairix_rt::peer_watch(owner) {
+                service.client_exited(owner, &LogSink);
+                let _ =
+                    tairix_rt::call_reply(AUDIO_ENDPOINT, ticket, &encode_status_reply(Err(err)));
+                return;
+            }
+        }
         let _ = tairix_rt::call_reply(AUDIO_ENDPOINT, ticket, &reply[..reply_len]);
     }
 

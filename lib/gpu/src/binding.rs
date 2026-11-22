@@ -9,16 +9,17 @@ use core::ops::Range;
 use tairix_spirv::enumerant::{Dim, ImageFormat};
 use tairix_spirv::{Access, Admitted, Binding, BindingKind, ImageShape, Layout, Stages};
 
-use crate::device::{owned, Buffer, Context, Shared};
+use crate::backend::Backend;
+use crate::device::{owned, Buffer, Context, Shared, SoftwareShared};
 use crate::format::{Aspects, Format, FormatFeatures};
 use crate::image::{ImageUsage, ViewDimension};
 use crate::info::{BufferUsage, DeviceInfo};
 use tairix_util::fallible;
 
-use crate::memory::Charge;
+use crate::memory::{overlaps, Charge};
 use crate::model::{
-    exhausted, shared_bytes, BindSetKey, BindSetLayoutKey, BufferState, ContextKey, ContextState,
-    Model, PipelineLayoutKey, ShaderModuleKey,
+    exhausted, shared_bytes, BindSetKey, BindSetLayoutKey, BufferKey, BufferState, BufferViewKey,
+    ContextKey, ContextState, Model, PipelineLayoutKey, SamplerKey, ShaderModuleKey, ViewKey,
 };
 use crate::objects::{BufferView, ImageView, Sampler};
 use crate::resource::{BufferViewState, SamplerState, ViewState};
@@ -151,22 +152,22 @@ impl BindSetLayoutState {
 /// One descriptor of a bind set: what it binds, held for as long as the set
 /// is.
 #[derive(Debug)]
-pub(crate) enum Bound {
+pub(crate) enum Bound<B: Backend> {
     Sampler(Arc<SamplerState>),
-    Image(Arc<ViewState>),
-    ImageSampler(Arc<ViewState>, Arc<SamplerState>),
-    TexelBuffer(Arc<BufferViewState>),
+    Image(Arc<ViewState<B>>),
+    ImageSampler(Arc<ViewState<B>>, Arc<SamplerState>),
+    TexelBuffer(Arc<BufferViewState<B>>),
     /// `size` bytes from `offset` into the buffer.
     Buffer {
-        buffer: Arc<BufferState>,
+        buffer: Arc<BufferState<B>>,
         offset: u64,
         size: u64,
     },
 }
 
-impl Bound {
+impl<B: Backend> Bound<B> {
     /// The memory it reaches: none for a sampler.
-    pub(crate) fn memory(&self) -> Option<&Arc<crate::memory::Memory>> {
+    pub(crate) fn memory(&self) -> Option<&Arc<B::Memory>> {
         match self {
             Self::Buffer { buffer, .. } => Some(&buffer.memory),
             Self::TexelBuffer(texels) => Some(&texels.buffer.memory),
@@ -175,8 +176,9 @@ impl Bound {
         }
     }
 
-    /// Feed `each` the bytes of its memory it reaches.
-    fn spans(&self, mut each: impl FnMut(Range<u64>)) {
+    /// Where it lies, by memory: the bytes of a buffer, the views of an
+    /// image; nothing for a sampler.
+    fn lies(&self) -> Option<Lies<'_, B>> {
         match self {
             Self::Buffer {
                 buffer,
@@ -184,142 +186,353 @@ impl Bound {
                 size,
             } => {
                 let start = buffer.offset + offset;
-                each(start..start + size);
+                Some(Lies::Bytes(identity(&buffer.memory), start..start + size))
             }
             Self::TexelBuffer(texels) => {
                 let start = texels.buffer.offset + texels.desc.offset;
-                each(start..start + texels.desc.size);
+                Some(Lies::Bytes(
+                    identity(&texels.buffer.memory),
+                    start..start + texels.desc.size,
+                ))
             }
-            Self::Image(view) | Self::ImageSampler(view, _) => view.spans(each),
-            Self::Sampler(_) => {}
+            Self::Image(view) | Self::ImageSampler(view, _) => Some(Lies::View(view)),
+            Self::Sampler(_) => None,
         }
     }
 }
 
+/// Where a descriptor lies.
+enum Lies<'d, B: Backend> {
+    /// A span of a memory, by the memory's identity.
+    Bytes(usize, Range<u64>),
+    /// A view of an image.
+    View(&'d ViewState<B>),
+}
+
+/// The identity a bind set's reach and a pass's attachments order a memory
+/// or an image by: where it lies, which nothing else does while it is held.
+pub(crate) fn identity<T>(held: &Arc<T>) -> usize {
+    Arc::as_ptr(held).addr()
+}
+
 /// A bind set: every descriptor of its layout, binding by binding in the
-/// layout's order, every memory they reach, once each, in the order memories
-/// are locked in, each descriptor's memory by its place among those, and
-/// what its descriptors a draw's stages see reach.
+/// layout's order, the descriptors as its backend reads them, and what its
+/// descriptors a draw's stages see reach.
 #[derive(Debug)]
-pub(crate) struct BindSetState {
+pub(crate) struct BindSetState<B: Backend> {
     pub(crate) layout: Arc<BindSetLayoutState>,
-    pub(crate) resources: Vec<Bound>,
-    pub(crate) memories: Vec<Arc<crate::memory::Memory>>,
-    pub(crate) places: Vec<u32>,
+    pub(crate) resources: Vec<Bound<B>>,
+    pub(crate) form: B::Set,
     pub(crate) reach: Reach,
     _charge: Charge,
 }
 
-/// The bytes a bind set's descriptors that a vertex or fragment stage sees
-/// reach, merged into disjoint spans ordered by memory, as its set places
-/// them, and address: those all such descriptors reach, and those reached by
-/// descriptors those stages may write. A pass refuses a draw whose sets
-/// reach what it renders to, at a cost of the spans' logarithm.
-#[derive(Debug, Default)]
-pub(crate) struct Reach {
-    any: Vec<(u32, Range<u64>)>,
-    written: Vec<(u32, Range<u64>)>,
+/// What a pass's attachment holds of its image: its image's identity and
+/// placement in its memory, and the planes, level and layer it is.
+#[derive(Clone, Debug)]
+pub(crate) struct Touched {
+    pub(crate) memory: usize,
+    pub(crate) placement: Range<u64>,
+    pub(crate) image: usize,
+    pub(crate) aspects: Aspects,
+    pub(crate) level: u32,
+    pub(crate) layer: u32,
 }
 
-/// A span of the memory at a place among a set's, and whether a stage may
-/// write it.
-type Placed = (u32, Range<u64>, bool);
+impl Touched {
+    /// Whether it and `other` share a texel: of one image, a plane, level
+    /// and layer; of two, where their placements meet, since no backend
+    /// says where in its placement an image's texels lie.
+    pub(crate) fn meets(&self, other: &Self) -> bool {
+        if self.image == other.image {
+            self.aspects.intersects(other.aspects)
+                && self.level == other.level
+                && self.layer == other.layer
+        } else {
+            self.memory == other.memory && overlaps(&self.placement, &other.placement)
+        }
+    }
+
+    /// Whether `bytes` of the memory `memory` meet its image's placement.
+    pub(crate) fn meets_bytes(&self, memory: usize, bytes: &Range<u64>) -> bool {
+        self.memory == memory && overlaps(&self.placement, bytes)
+    }
+}
+
+/// What a bind set's descriptors that a vertex or fragment stage sees reach:
+/// those all such descriptors reach, and those reached by descriptors those
+/// stages may write. A pass refuses a draw whose sets reach what it renders
+/// to, at a cost of the reach's logarithm.
+#[derive(Debug, Default)]
+pub(crate) struct Reach {
+    any: Reached,
+    written: Reached,
+}
+
+/// What some descriptors reach, independent of any backend's texel layout:
+/// the bytes of buffers, merged into disjoint spans by memory and address;
+/// each memory's image placements, merged into disjoint runs, a run's one
+/// image named where it holds only one; and the subresources each image's
+/// views see, merged into disjoint spans of layers by image, plane and level.
+#[derive(Debug, Default)]
+struct Reached {
+    bytes: Vec<(usize, Range<u64>)>,
+    runs: Vec<Run>,
+    seen: Vec<Seen>,
+}
+
+/// A run of image placements in one memory.
+#[derive(Clone, Debug)]
+struct Run {
+    memory: usize,
+    span: Range<u64>,
+    lone: Option<usize>,
+}
+
+/// The layers of one plane and level of an image that views see.
+#[derive(Clone, Debug)]
+struct Seen {
+    image: usize,
+    aspect: u32,
+    level: u32,
+    layers: Range<u32>,
+}
 
 impl Reach {
-    /// What `resources`, laid out as `layout` lays them out and each in the
-    /// memory its entry of `places` names, reach.
-    fn of(layout: &BindSetLayoutState, resources: &[Bound], places: &[u32]) -> Result<Self, Error> {
+    /// What `resources`, laid out as `layout` lays them out, reach.
+    fn of<'r, B: Backend>(
+        layout: &BindSetLayoutState,
+        resources: &'r [Bound<B>],
+    ) -> Result<Self, Error> {
         let seen = Stages::VERTEX.with(Stages::FRAGMENT);
-        let walk = |each: &mut dyn FnMut(u32, bool, &Bound)| -> Result<(), Error> {
+        let walk = |each: &mut dyn FnMut(bool, Lies<'r, B>)| -> Result<(), Error> {
             for (binding, &first) in layout.bindings.iter().zip(&layout.firsts) {
                 if !binding.stages.intersects(seen) {
                     continue;
                 }
                 let first = usize::try_from(first).map_err(exhausted)?;
                 let held = first..first.saturating_add(binding.count as usize);
-                let (Some(bound), Some(places)) = (resources.get(held.clone()), places.get(held))
-                else {
-                    return Err(Error::Malformed);
-                };
+                let bound = resources.get(held).ok_or(Error::Malformed)?;
                 let writes = binding.access.contains(Access::WRITE);
-                for (resource, &place) in bound.iter().zip(places) {
-                    if place != crate::software::dispatch::NO_MEMORY {
-                        each(place, writes, resource);
-                    }
+                for lies in bound.iter().filter_map(Bound::lies) {
+                    each(writes, lies);
                 }
             }
             Ok(())
         };
         let mut count = 0usize;
-        walk(&mut |_, _, resource| resource.spans(|_| count += 1))?;
-        if count == 0 {
-            return Ok(Self::default());
-        }
-        let mut spans: Vec<Placed> = Vec::new();
-        spans.try_reserve_exact(count).map_err(exhausted)?;
-        walk(&mut |place, writes, resource| {
-            resource.spans(|span| {
-                // Counted above, so within what is reserved.
-                if spans.len() < spans.capacity() {
-                    spans.push((place, span, writes));
-                }
-            });
+        walk(&mut |_, _| count += 1)?;
+        let mut lies: Vec<(bool, Lies<'r, B>)> = Vec::new();
+        lies.try_reserve_exact(count).map_err(exhausted)?;
+        walk(&mut |writes, lie| {
+            // Counted above, so within what is reserved.
+            if lies.len() < lies.capacity() {
+                lies.push((writes, lie));
+            }
         })?;
-        spans.sort_unstable_by_key(|(place, span, _)| (*place, span.start));
         Ok(Self {
-            any: merged(&spans, |_| true)?,
-            written: merged(&spans, |(_, _, writes)| *writes)?,
+            any: Reached::of(lies.iter().map(|(_, lie)| lie))?,
+            written: Reached::of(
+                lies.iter()
+                    .filter(|(writes, _)| *writes)
+                    .map(|(_, lie)| lie),
+            )?,
         })
     }
 
-    /// Whether a byte of `span` of the memory at `place` among its set's is
-    /// reached by a descriptor a draw's stages see — where `written`, by one
-    /// they may write.
-    pub(crate) fn meets(&self, place: u32, span: &Range<u64>, written: bool) -> bool {
-        let spans = if written { &self.written } else { &self.any };
-        let after = spans.partition_point(|(held, reached)| {
-            *held < place || (*held == place && reached.end <= span.start)
-        });
-        spans
-            .get(after)
-            .is_some_and(|(held, reached)| *held == place && reached.start < span.end)
+    /// Whether a descriptor a draw's stages see reaches `touched` — where
+    /// `written`, one they may write.
+    pub(crate) fn meets(&self, touched: &Touched, written: bool) -> bool {
+        if written {
+            self.written.meets(touched)
+        } else {
+            self.any.meets(touched)
+        }
     }
 
     /// The host bytes it keeps.
     fn held_bytes(&self) -> u64 {
-        fallible::held(&self.any).saturating_add(fallible::held(&self.written))
+        self.any
+            .held_bytes()
+            .saturating_add(self.written.held_bytes())
     }
 }
 
-/// The disjoint spans those of `sorted`, by place and then start, that `keep`
-/// keeps merge into.
-fn merged(
-    sorted: &[Placed],
-    keep: impl Fn(&Placed) -> bool,
-) -> Result<Vec<(u32, Range<u64>)>, Error> {
-    let runs = |each: &mut dyn FnMut(u32, Range<u64>)| {
-        let mut open: Option<(u32, Range<u64>)> = None;
-        for (place, span, _) in sorted.iter().filter(|placed| keep(placed)) {
-            match &mut open {
-                Some((held, run)) if held == place && span.start <= run.end => {
-                    run.end = run.end.max(span.end);
+impl Reached {
+    fn of<'l, 'd: 'l, B: Backend>(
+        lies: impl Iterator<Item = &'l Lies<'d, B>> + Clone,
+    ) -> Result<Self, Error> {
+        let (mut spans, mut views, mut levels) = (0usize, 0usize, 0usize);
+        for lie in lies.clone() {
+            match lie {
+                Lies::Bytes(..) => spans += 1,
+                Lies::View(view) => {
+                    views += 1;
+                    let range = &view.desc.range;
+                    let planes = range.aspects.bits().count_ones() as usize;
+                    levels = levels.saturating_add(planes.saturating_mul(range.levels as usize));
                 }
-                _ => {
-                    if let Some((held, run)) = open.replace((*place, span.clone())) {
-                        each(held, run);
+            }
+        }
+        let mut bytes: Vec<(usize, Range<u64>)> = Vec::new();
+        bytes.try_reserve_exact(spans).map_err(exhausted)?;
+        let mut runs: Vec<Run> = Vec::new();
+        runs.try_reserve_exact(views).map_err(exhausted)?;
+        let mut seen: Vec<Seen> = Vec::new();
+        seen.try_reserve_exact(levels).map_err(exhausted)?;
+        for lie in lies {
+            match lie {
+                Lies::Bytes(memory, span) => bytes.push((*memory, span.clone())),
+                Lies::View(view) => {
+                    let image = &view.image;
+                    runs.push(Run {
+                        memory: identity(&image.memory),
+                        span: image.offset..image.offset.saturating_add(image.size),
+                        lone: Some(identity(image)),
+                    });
+                    let range = &view.desc.range;
+                    let layers = range.base_layer..range.base_layer.saturating_add(range.layers);
+                    let levels = range.base_level..range.base_level.saturating_add(range.levels);
+                    for plane in range.aspects.planes() {
+                        for level in levels.clone() {
+                            seen.push(Seen {
+                                image: identity(image),
+                                aspect: plane.bits(),
+                                level,
+                                layers: layers.clone(),
+                            });
+                        }
                     }
                 }
             }
         }
-        if let Some((held, run)) = open {
-            each(held, run);
-        }
-    };
+        Self::folded(bytes, runs, seen)
+    }
+
+    /// What `bytes`, `runs` and `seen` hold, each list merged where its parts
+    /// meet: spans of one memory that overlap or touch, placements of one
+    /// memory that overlap, keeping one image's name only while its run holds
+    /// no other, and layers of one image's plane and level that overlap or
+    /// touch.
+    fn folded(
+        bytes: Vec<(usize, Range<u64>)>,
+        runs: Vec<Run>,
+        seen: Vec<Seen>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            bytes: merged(
+                bytes,
+                |(memory, span)| (*memory, span.start),
+                |held, next| held.0 == next.0 && next.1.start <= held.1.end,
+                |held, next| held.1.end = held.1.end.max(next.1.end),
+            )?,
+            runs: merged(
+                runs,
+                |run| (run.memory, run.span.start),
+                |held, next| held.memory == next.memory && next.span.start < held.span.end,
+                |held, next| {
+                    held.span.end = held.span.end.max(next.span.end);
+                    if held.lone != next.lone {
+                        held.lone = None;
+                    }
+                },
+            )?,
+            seen: merged(
+                seen,
+                |seen| (seen.image, seen.aspect, seen.level, seen.layers.start),
+                |held, next| {
+                    (held.image, held.aspect, held.level) == (next.image, next.aspect, next.level)
+                        && next.layers.start <= held.layers.end
+                },
+                |held, next| held.layers.end = held.layers.end.max(next.layers.end),
+            )?,
+        })
+    }
+
+    fn meets(&self, touched: &Touched) -> bool {
+        self.meets_bytes(touched) || self.meets_other_image(touched) || self.sees(touched)
+    }
+
+    /// Whether a buffer's bytes meet the attachment's image's placement.
+    fn meets_bytes(&self, touched: &Touched) -> bool {
+        let key = (touched.memory, touched.placement.start);
+        let after = self
+            .bytes
+            .partition_point(|(memory, span)| (*memory, span.end) <= key);
+        self.bytes
+            .get(after)
+            .is_some_and(|(memory, span)| touched.meets_bytes(*memory, span))
+    }
+
+    /// Whether an image other than the attachment's has a placement meeting
+    /// its image's: a run meeting it of another image, or of more than one,
+    /// which then holds one that meets it.
+    fn meets_other_image(&self, touched: &Touched) -> bool {
+        let key = (touched.memory, touched.placement.start);
+        let after = self
+            .runs
+            .partition_point(|run| (run.memory, run.span.end) <= key);
+        self.runs
+            .get(after..)
+            .unwrap_or(&[])
+            .iter()
+            .take_while(|run| {
+                run.memory == touched.memory && run.span.start < touched.placement.end
+            })
+            .any(|run| run.lone != Some(touched.image))
+    }
+
+    /// Whether a view of the attachment's own image sees its plane, level
+    /// and layer.
+    fn sees(&self, touched: &Touched) -> bool {
+        touched.aspects.planes().any(|plane| {
+            let key = (touched.image, plane.bits(), touched.level);
+            let after = self.seen.partition_point(|seen| {
+                let held = (seen.image, seen.aspect, seen.level);
+                held < key || (held == key && seen.layers.end <= touched.layer)
+            });
+            self.seen.get(after).is_some_and(|seen| {
+                (seen.image, seen.aspect, seen.level) == key && seen.layers.start <= touched.layer
+            })
+        })
+    }
+
+    fn held_bytes(&self) -> u64 {
+        fallible::held(&self.bytes)
+            .saturating_add(fallible::held(&self.runs))
+            .saturating_add(fallible::held(&self.seen))
+    }
+}
+
+/// `items` sorted by `key`, each folded by `join` into the last kept where
+/// `joins` says it meets it: two passes, so the list is held in exactly the
+/// room it takes.
+fn merged<T: Clone, K: Ord>(
+    mut items: Vec<T>,
+    key: impl Fn(&T) -> K,
+    joins: impl Fn(&T, &T) -> bool,
+    join: impl Fn(&mut T, &T),
+) -> Result<Vec<T>, Error> {
+    items.sort_unstable_by_key(|item| key(item));
     let mut count = 0usize;
-    runs(&mut |_, _| count += 1);
-    let mut out = Vec::new();
+    let mut run: Option<T> = None;
+    for item in &items {
+        match &mut run {
+            Some(held) if joins(held, item) => join(held, item),
+            _ => {
+                count += 1;
+                run = Some(item.clone());
+            }
+        }
+    }
+    let mut out: Vec<T> = Vec::new();
     out.try_reserve_exact(count).map_err(exhausted)?;
-    runs(&mut |place, run| out.push((place, run)));
+    for item in items {
+        match out.last_mut() {
+            Some(held) if joins(held, &item) => join(held, &item),
+            _ => out.push(item),
+        }
+    }
     Ok(out)
 }
 
@@ -403,6 +616,50 @@ pub struct BindSetEntry<'a> {
     pub resources: &'a [Resource<'a>],
 }
 
+/// A resource as a request names it.
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum Named {
+    Sampler(SamplerKey),
+    Image(ViewKey),
+    ImageSampler(ViewKey, SamplerKey),
+    TexelBuffer(BufferViewKey),
+    Buffer {
+        buffer: BufferKey,
+        offset: u64,
+        size: u64,
+    },
+}
+
+impl Named {
+    fn of(resource: &Resource<'_>) -> Self {
+        match *resource {
+            Resource::Sampler(sampler) => Self::Sampler(sampler.key),
+            Resource::Image(view) => Self::Image(view.key),
+            Resource::ImageSampler(view, sampler) => Self::ImageSampler(view.key, sampler.key),
+            Resource::TexelBuffer(view) => Self::TexelBuffer(view.key),
+            Resource::Buffer {
+                buffer,
+                offset,
+                size,
+            } => Self::Buffer {
+                buffer: buffer.key,
+                offset,
+                size,
+            },
+        }
+    }
+}
+
+/// A bind set as a request names it: its layout, and for each of the
+/// layout's bindings in order its number and how many of `resources` it
+/// takes.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct SetRequest<'a> {
+    pub(crate) layout: BindSetLayoutKey,
+    pub(crate) entries: &'a [(u32, usize)],
+    pub(crate) resources: &'a [Named],
+}
+
 /// A bind set layout's tables, checked against the device's description and
 /// built before its lock is taken: what is left under it is the filing.
 pub(crate) struct LayoutTables {
@@ -443,7 +700,7 @@ impl LayoutTables {
     }
 }
 
-impl Model {
+impl<B: Backend> Model<B> {
     pub(crate) fn create_bind_set_layout(
         &mut self,
         key: ContextKey,
@@ -472,23 +729,31 @@ impl Model {
         )
     }
 
-    pub(crate) fn create_bind_set(
-        &mut self,
+    /// The layout and every resource of a bind set `request` names, each
+    /// checked for the binding it fills: the first step of making one, taken
+    /// under the device's lock, as each resource is looked up there.
+    fn bind_set_resources(
+        &self,
         key: ContextKey,
-        layout: BindSetLayoutKey,
-        entries: &[BindSetEntry<'_>],
-    ) -> Result<BindSetKey, Error> {
+        request: &SetRequest<'_>,
+    ) -> Result<(Arc<BindSetLayoutState>, Vec<Bound<B>>), Error> {
         let info = self.info();
         let context = self.live(key)?;
-        let layout = Arc::clone(context.bind_set_layouts.get(layout).ok_or(Error::Stale)?);
-        let filled = entries.len() == layout.bindings.len()
-            && entries
-                .iter()
-                .zip(&layout.bindings)
-                .all(|(entry, binding)| {
-                    entry.binding == binding.binding
-                        && usize::try_from(binding.count).is_ok_and(|n| n == entry.resources.len())
-                });
+        let layout = Arc::clone(
+            context
+                .bind_set_layouts
+                .get(request.layout)
+                .ok_or(Error::Stale)?,
+        );
+        let filled =
+            request.entries.len() == layout.bindings.len()
+                && request.entries.iter().zip(&layout.bindings).all(
+                    |(&(number, count), binding)| {
+                        number == binding.binding
+                            && usize::try_from(binding.count).is_ok_and(|n| n == count)
+                    },
+                )
+                && usize::try_from(layout.descriptors).is_ok_and(|n| n == request.resources.len());
         if !filled {
             return Err(Error::Bindings);
         }
@@ -496,45 +761,26 @@ impl Model {
         // limit is refused before any is looked up.
         let least = layout
             .descriptors
-            .saturating_mul(size_of::<Bound>() as u64)
-            .saturating_add(shared_bytes::<BindSetState>());
+            .saturating_mul(size_of::<Bound<B>>() as u64)
+            .saturating_add(shared_bytes::<BindSetState<B>>());
         context.budget.admit(least)?;
         let mut resources = Vec::new();
-        let total = usize::try_from(layout.descriptors).map_err(exhausted)?;
-        resources.try_reserve_exact(total).map_err(exhausted)?;
-        for (entry, binding) in entries.iter().zip(&layout.bindings) {
-            for resource in entry.resources {
+        resources
+            .try_reserve_exact(request.resources.len())
+            .map_err(exhausted)?;
+        let mut named = request.resources.iter();
+        for (binding, &(_, count)) in layout.bindings.iter().zip(request.entries) {
+            for &resource in named.by_ref().take(count) {
                 resources.push(bound(info, context, binding.kind, resource)?);
             }
         }
-        let (memories, places) = crate::software::dispatch::memories_of(&resources)?;
-        let reach = Reach::of(&layout, &resources, &places)?;
-        let bytes = shared_bytes::<BindSetState>()
-            .saturating_add(fallible::held(&resources))
-            .saturating_add(fallible::held(&memories))
-            .saturating_add(fallible::held(&places))
-            .saturating_add(reach.held_bytes());
-        self.file_charged(
-            key,
-            |context| &mut context.bind_sets,
-            bytes,
-            |charge| {
-                crate::shared(BindSetState {
-                    layout,
-                    resources,
-                    memories,
-                    places,
-                    reach,
-                    _charge: charge,
-                })
-            },
-        )
+        Ok((layout, resources))
     }
 
     pub(crate) fn create_pipeline_layout(
         &mut self,
         key: ContextKey,
-        sets: &[&BindSetLayout],
+        sets: &[BindSetLayoutKey],
         push_constants: PushConstants,
     ) -> Result<PipelineLayoutKey, Error> {
         let limits = &self.info().limits;
@@ -556,9 +802,9 @@ impl Model {
         let context = self.live(key)?;
         let mut held = Vec::new();
         held.try_reserve_exact(sets.len()).map_err(exhausted)?;
-        for set in sets {
+        for &set in sets {
             held.push(Arc::clone(
-                context.bind_set_layouts.get(set.key).ok_or(Error::Stale)?,
+                context.bind_set_layouts.get(set).ok_or(Error::Stale)?,
             ));
         }
         let mut bindings = Vec::new();
@@ -622,53 +868,53 @@ impl Model {
 }
 
 /// `resource` held for a binding of `kind`, or why it cannot be.
-fn bound(
+fn bound<B: Backend>(
     info: &DeviceInfo,
-    context: &ContextState,
+    context: &ContextState<B>,
     kind: BindingKind,
-    resource: &Resource<'_>,
-) -> Result<Bound, Error> {
+    resource: Named,
+) -> Result<Bound<B>, Error> {
     let limits = &info.limits;
-    match (kind, *resource) {
-        (BindingKind::Sampler, Resource::Sampler(sampler)) => {
+    match (kind, resource) {
+        (BindingKind::Sampler, Named::Sampler(sampler)) => {
             Ok(Bound::Sampler(sampler_state(context, sampler)?))
         }
-        (BindingKind::SampledImage(shape), Resource::Image(view)) => {
+        (BindingKind::SampledImage(shape), Named::Image(view)) => {
             let view = view_state(context, view)?;
             sampled(info, &view, shape)?;
             Ok(Bound::Image(view))
         }
-        (BindingKind::StorageImage(shape), Resource::Image(view)) => {
+        (BindingKind::StorageImage(shape), Named::Image(view)) => {
             let view = view_state(context, view)?;
             storage(info, &view, shape)?;
             Ok(Bound::Image(view))
         }
-        (BindingKind::CombinedImageSampler(shape), Resource::ImageSampler(view, sampler)) => {
+        (BindingKind::CombinedImageSampler(shape), Named::ImageSampler(view, sampler)) => {
             let view = view_state(context, view)?;
             let sampler = sampler_state(context, sampler)?;
             sampled(info, &view, shape)?;
             combined(info, &view, &sampler)?;
             Ok(Bound::ImageSampler(view, sampler))
         }
-        (BindingKind::UniformTexelBuffer(shape), Resource::TexelBuffer(view)) => {
+        (BindingKind::UniformTexelBuffer(shape), Named::TexelBuffer(view)) => {
             let view = texel_state(context, view)?;
             texel(info, &view, shape, false)?;
             Ok(Bound::TexelBuffer(view))
         }
-        (BindingKind::StorageTexelBuffer(shape), Resource::TexelBuffer(view)) => {
+        (BindingKind::StorageTexelBuffer(shape), Named::TexelBuffer(view)) => {
             let view = texel_state(context, view)?;
             texel(info, &view, shape, true)?;
             Ok(Bound::TexelBuffer(view))
         }
         (
             BindingKind::UniformBuffer | BindingKind::StorageBuffer,
-            Resource::Buffer {
+            Named::Buffer {
                 buffer,
                 offset,
                 size,
             },
         ) => {
-            let state = context.buffers.get(buffer.key).ok_or(Error::Stale)?;
+            let state = context.buffers.get(buffer).ok_or(Error::Stale)?;
             let need = if kind == BindingKind::UniformBuffer {
                 Span {
                     usage: BufferUsage::UNIFORM,
@@ -693,30 +939,35 @@ fn bound(
     }
 }
 
-fn sampler_state(context: &ContextState, sampler: &Sampler) -> Result<Arc<SamplerState>, Error> {
-    context
-        .samplers
-        .get(sampler.key)
-        .cloned()
-        .ok_or(Error::Stale)
+fn sampler_state<B: Backend>(
+    context: &ContextState<B>,
+    sampler: SamplerKey,
+) -> Result<Arc<SamplerState>, Error> {
+    context.samplers.get(sampler).cloned().ok_or(Error::Stale)
 }
 
-fn view_state(context: &ContextState, view: &ImageView) -> Result<Arc<ViewState>, Error> {
-    context.views.get(view.key).cloned().ok_or(Error::Stale)
+fn view_state<B: Backend>(
+    context: &ContextState<B>,
+    view: ViewKey,
+) -> Result<Arc<ViewState<B>>, Error> {
+    context.views.get(view).cloned().ok_or(Error::Stale)
 }
 
-fn texel_state(context: &ContextState, view: &BufferView) -> Result<Arc<BufferViewState>, Error> {
-    context
-        .buffer_views
-        .get(view.key)
-        .cloned()
-        .ok_or(Error::Stale)
+fn texel_state<B: Backend>(
+    context: &ContextState<B>,
+    view: BufferViewKey,
+) -> Result<Arc<BufferViewState<B>>, Error> {
+    context.buffer_views.get(view).cloned().ok_or(Error::Stale)
 }
 
 /// Refuse a view a sampled binding of `shape` cannot read: of an image not
 /// made for sampling, of more than one plane, of a format the device does not
 /// sample, or of another shape.
-fn sampled(info: &DeviceInfo, view: &ViewState, shape: ImageShape) -> Result<(), Error> {
+fn sampled<B: Backend>(
+    info: &DeviceInfo,
+    view: &ViewState<B>,
+    shape: ImageShape,
+) -> Result<(), Error> {
     if !view.image.desc.usage.contains(ImageUsage::SAMPLED) {
         return Err(Error::Usage);
     }
@@ -741,7 +992,11 @@ fn sampled(info: &DeviceInfo, view: &ViewState, shape: ImageShape) -> Result<(),
 /// Refuse a view a storage binding of `shape` cannot read and write: of an
 /// image not made for storage, of more than one level, of a format the device
 /// does not store, or of another shape or format.
-fn storage(info: &DeviceInfo, view: &ViewState, shape: ImageShape) -> Result<(), Error> {
+fn storage<B: Backend>(
+    info: &DeviceInfo,
+    view: &ViewState<B>,
+    shape: ImageShape,
+) -> Result<(), Error> {
     if !view.image.desc.usage.contains(ImageUsage::STORAGE) {
         return Err(Error::Usage);
     }
@@ -765,7 +1020,11 @@ fn storage(info: &DeviceInfo, view: &ViewState, shape: ImageShape) -> Result<(),
 /// Refuse a sampler the view cannot be sampled with: filtering a format the
 /// device does not filter, comparing what is not depth, or unnormalised
 /// coordinates over anything but one level and layer of a row or rectangle.
-fn combined(info: &DeviceInfo, view: &ViewState, sampler: &SamplerState) -> Result<(), Error> {
+fn combined<B: Backend>(
+    info: &DeviceInfo,
+    view: &ViewState<B>,
+    sampler: &SamplerState,
+) -> Result<(), Error> {
     let desc = &sampler.desc;
     let filtered = [desc.mag_filter, desc.min_filter, desc.mipmap_filter].contains(&Filter::Linear);
     if filtered
@@ -791,9 +1050,9 @@ fn combined(info: &DeviceInfo, view: &ViewState, sampler: &SamplerState) -> Resu
 /// Refuse a texel buffer a binding of `shape` cannot read, or with `storage`
 /// read and write: over a buffer not made for that use, of a format the
 /// device does not offer for it, or of another shape or format.
-fn texel(
+fn texel<B: Backend>(
     info: &DeviceInfo,
-    view: &BufferViewState,
+    view: &BufferViewState<B>,
     shape: ImageShape,
     storage: bool,
 ) -> Result<(), Error> {
@@ -830,7 +1089,12 @@ struct Span {
 }
 
 impl Span {
-    fn check(&self, buffer: &BufferState, offset: u64, size: u64) -> Result<(), Error> {
+    fn check<B: Backend>(
+        &self,
+        buffer: &BufferState<B>,
+        offset: u64,
+        size: u64,
+    ) -> Result<(), Error> {
         if !buffer.usage.contains(self.usage) {
             return Err(Error::Usage);
         }
@@ -903,14 +1167,28 @@ impl Context {
         entries: &[BindSetEntry<'_>],
     ) -> Result<BindSet, Error> {
         owned(&layout.shared, layout.context, &self.shared, self.key)?;
+        let count = entries.iter().map(|entry| entry.resources.len()).sum();
+        let mut resources = Vec::new();
+        resources.try_reserve_exact(count).map_err(exhausted)?;
         for resource in entries.iter().flat_map(|entry| entry.resources) {
             self.owns(resource)?;
+            resources.push(Named::of(resource));
         }
-        let key = self
-            .shared
-            .model
-            .lock()
-            .create_bind_set(self.key, layout.key, entries)?;
+        let shape = fallible::collected(
+            entries.len(),
+            entries
+                .iter()
+                .map(|entry| (entry.binding, entry.resources.len())),
+        )
+        .ok_or(Error::OutOfMemory)?;
+        let key = self.shared.create_bind_set(
+            self.key,
+            &SetRequest {
+                layout: layout.key,
+                entries: &shape,
+                resources: &resources,
+            },
+        )?;
         Ok(BindSet {
             shared: Arc::clone(&self.shared),
             context: self.key,
@@ -919,7 +1197,7 @@ impl Context {
     }
 
     fn owns(&self, resource: &Resource<'_>) -> Result<(), Error> {
-        let mine = |shared: &Arc<Shared>, context: ContextKey| {
+        let mine = |shared: &Arc<SoftwareShared>, context: ContextKey| {
             owned(shared, context, &self.shared, self.key)
         };
         match *resource {
@@ -952,14 +1230,17 @@ impl Context {
         sets: &[&BindSetLayout],
         push_constants: PushConstants,
     ) -> Result<PipelineLayout, Error> {
+        let mut keys = Vec::new();
+        keys.try_reserve_exact(sets.len()).map_err(exhausted)?;
         for set in sets {
             owned(&set.shared, set.context, &self.shared, self.key)?;
+            keys.push(set.key);
         }
         let key =
             self.shared
                 .model
                 .lock()
-                .create_pipeline_layout(self.key, sets, push_constants)?;
+                .create_pipeline_layout(self.key, &keys, push_constants)?;
         Ok(PipelineLayout {
             shared: Arc::clone(&self.shared),
             context: self.key,
@@ -991,6 +1272,52 @@ impl Context {
     }
 }
 
+impl<B: Backend> Shared<B> {
+    /// A bind set of the context as `request` names it: its resources looked
+    /// up under the device's lock, what they reach and their descriptors as
+    /// the backend reads them made with it let go, and the set filed under
+    /// it.
+    pub(crate) fn create_bind_set(
+        &self,
+        context: ContextKey,
+        request: &SetRequest<'_>,
+    ) -> Result<BindSetKey, Error> {
+        let (layout, resources) = self.model.lock().bind_set_resources(context, request)?;
+        #[cfg(test)]
+        crate::fair::held::note_making();
+        let reach = Reach::of(&layout, &resources)?;
+        let (form, form_bytes) = self.backend.set(&resources)?;
+        let bytes = [
+            shared_bytes::<BindSetState<B>>(),
+            fallible::held(&resources),
+            form_bytes,
+            reach.held_bytes(),
+        ]
+        .into_iter()
+        .fold(0, u64::saturating_add);
+        let mut parts = Some((layout, resources, form, reach));
+        let filed = self.model.lock().file_charged(
+            context,
+            |context| &mut context.bind_sets,
+            bytes,
+            |charge| {
+                let (layout, resources, form, reach) = parts.take().ok_or(Error::Malformed)?;
+                crate::shared(BindSetState {
+                    layout,
+                    resources,
+                    form,
+                    reach,
+                    _charge: charge,
+                })
+            },
+        );
+        // A refusal before the set was made leaves its parts here, to go with
+        // the lock let go: they may hold the last of a memory.
+        drop(parts);
+        filed
+    }
+}
+
 handle!(
     /// The bindings a bind set holds.
     BindSetLayout,
@@ -1015,7 +1342,7 @@ handle!(
 
 /// An admitted shader module, made a device's.
 pub struct ShaderModule {
-    pub(crate) shared: Arc<Shared>,
+    pub(crate) shared: Arc<SoftwareShared>,
     pub(crate) context: ContextKey,
     pub(crate) key: ShaderModuleKey,
     module: Arc<Admitted>,

@@ -54,7 +54,7 @@ use tairix_abi::reply::encode_status_reply;
 use tairix_abi::seat::DisplayLease;
 use tairix_abi::sound_cue::from_cue_authority;
 use tairix_abi::time::{MonotonicClock, Time64};
-use tairix_abi::{CapabilityId, Errno};
+use tairix_abi::{CapabilityId, Errno, ProcId};
 use tairix_audio::route::{
     self, Admission, Principal, Roles, Room, Routing, SinkState, StreamRequest,
 };
@@ -104,6 +104,9 @@ pub struct AudioService<H: RegionHost, N: Notifier, C: MonotonicClock> {
     changes: u64,
     /// Whose room the seat's devices serve.
     room: Room,
+    /// The instance whose stream the last request opened, for the process
+    /// half to watch: its streams end with it.
+    watch: Option<ProcId>,
 }
 
 impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
@@ -122,6 +125,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             controls: Controls::new(),
             changes: 0,
             room: Room::Withheld,
+            watch: None,
         }
     }
 
@@ -1439,7 +1443,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         if capture && !caller.capabilities().holds_cap(CapabilityId::AUDIO_CAPTURE) {
             Self::audit_capture(
                 sink,
-                caller,
+                (caller.uid(), caller.pid()),
                 events::CAPTURE_REFUSED,
                 "no capture capability",
             );
@@ -1450,7 +1454,12 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             Ok(target) => target,
             Err(err) => {
                 if capture {
-                    Self::audit_capture(sink, caller, events::CAPTURE_REFUSED, "no such source");
+                    Self::audit_capture(
+                        sink,
+                        (caller.uid(), caller.pid()),
+                        events::CAPTURE_REFUSED,
+                        "no such source",
+                    );
                 }
                 Self::audit_refusal(sink, params, "no endpoint to route to", err);
                 return Err(err);
@@ -1467,7 +1476,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                 if capture {
                     Self::audit_capture(
                         sink,
-                        caller,
+                        (caller.uid(), caller.pid()),
                         events::CAPTURE_OPENED,
                         "capture stream open",
                     );
@@ -1478,7 +1487,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
                 if capture {
                     Self::audit_capture(
                         sink,
-                        caller,
+                        (caller.uid(), caller.pid()),
                         events::CAPTURE_REFUSED,
                         "source unavailable",
                     );
@@ -1504,7 +1513,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         if !caller.capabilities().holds_cap(CapabilityId::AUDIO_CAPTURE) {
             Self::audit_capture(
                 sink,
-                caller,
+                (caller.uid(), caller.pid()),
                 events::MONITOR_REFUSED,
                 "no capture capability",
             );
@@ -1513,7 +1522,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         if monitor_admission(principal, self.room) != Admission::Mix {
             Self::audit_capture(
                 sink,
-                caller,
+                (caller.uid(), caller.pid()),
                 events::MONITOR_REFUSED,
                 "the room is not the caller's",
             );
@@ -1529,11 +1538,21 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         });
         match opened {
             Ok(grant) => {
-                Self::audit_capture(sink, caller, events::MONITOR_OPENED, "monitor stream open");
+                Self::audit_capture(
+                    sink,
+                    (caller.uid(), caller.pid()),
+                    events::MONITOR_OPENED,
+                    "monitor stream open",
+                );
                 Ok(grant)
             }
             Err(err) => {
-                Self::audit_capture(sink, caller, events::MONITOR_REFUSED, "sink unavailable");
+                Self::audit_capture(
+                    sink,
+                    (caller.uid(), caller.pid()),
+                    events::MONITOR_REFUSED,
+                    "sink unavailable",
+                );
                 Self::audit_refusal(sink, params, "the sink could not be monitored", err);
                 Err(err)
             }
@@ -1957,6 +1976,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             active,
             &StreamOpen {
                 id: stream_id,
+                owner_proc: caller.proc_id(),
                 owner_pid: pid,
                 owner_uid: caller.uid(),
                 owner_app: caller
@@ -1974,6 +1994,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             },
         )?;
         self.streams.push(stream);
+        self.watch = Some(caller.proc_id());
         self.next_stream_id = self.next_stream_id.saturating_add(1);
         self.resolve_gains(landing.device, landing.slot);
         Ok(grant)
@@ -2007,13 +2028,32 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         })
     }
 
-    /// The index of a stream the caller genuinely owns.
+    /// The index of a stream the caller genuinely owns: opened by the same
+    /// process instance, which a later process given its pid is not.
     fn owned(&self, caller: &Origin, stream_id: u64) -> Result<usize, Errno> {
         self.streams
             .iter()
             .position(|stream| stream.id == stream_id)
-            .filter(|index| self.streams[*index].owner_pid == caller.pid())
+            .filter(|index| self.streams[*index].owner_proc == caller.proc_id())
             .ok_or(Errno::NotFound)
+    }
+
+    /// The instance whose stream the last request opened, for the process
+    /// half to watch the exit of, answered once.
+    pub fn take_watch(&mut self) -> Option<ProcId> {
+        self.watch.take()
+    }
+
+    /// End every stream `owner` held: it has exited, or cannot be watched
+    /// to, so nothing it opened outlives it.
+    pub fn client_exited(&mut self, owner: ProcId, sink: &dyn Sink) {
+        while let Some(index) = self
+            .streams
+            .iter()
+            .rposition(|stream| stream.owner_proc == owner)
+        {
+            self.retire(index, sink);
+        }
     }
 
     /// Adopt the caller's granted ring for its stream.
@@ -2319,11 +2359,19 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         })
     }
 
-    /// Close the stream and release its region; the endpoint follows when it
-    /// was the last one on it, and a sink's tap with its last monitor.
+    /// Close the stream the caller owns.
     fn close(&mut self, caller: &Origin, stream_id: u64, sink: &dyn Sink) -> Result<(), Errno> {
         let index = self.owned(caller, stream_id)?;
+        self.retire(index, sink);
+        Ok(())
+    }
+
+    /// End the stream at `index` and release its region; the endpoint
+    /// follows when it was the last one on it, and a sink's tap with its last
+    /// monitor.
+    fn retire(&mut self, index: usize, sink: &dyn Sink) {
         let mut stream = self.streams.remove(index);
+        let opener = (stream.owner_uid, stream.owner_pid);
         self.notifier
             .forget(stream.grant.notify_endpoint, stream.id);
         if let Some(region) = stream.region {
@@ -2336,7 +2384,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         if stream.monitor {
             Self::audit_capture(
                 sink,
-                caller,
+                opener,
                 events::MONITOR_CLOSED,
                 "monitor stream closed",
             );
@@ -2344,7 +2392,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         } else if stream.direction == StreamDirection::Capture {
             Self::audit_capture(
                 sink,
-                caller,
+                opener,
                 events::CAPTURE_CLOSED,
                 "capture stream closed",
             );
@@ -2353,7 +2401,6 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
         self.release_idle_endpoint(device_index, slot);
         self.forget_tenancies();
         self.reap(device_index);
-        Ok(())
     }
 
     /// Re-resolve every stream's one multiply on the endpoint, because the
@@ -2460,7 +2507,7 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
     /// it.
     fn audit_capture(
         sink: &dyn Sink,
-        caller: &Origin,
+        (uid, pid): (u32, u64),
         id: tairix_log::EventId,
         message: &'static str,
     ) {
@@ -2477,11 +2524,11 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
             &[
                 Field {
                     key: "uid",
-                    value: FieldValue::UnsignedInt(u64::from(caller.uid())),
+                    value: FieldValue::UnsignedInt(u64::from(uid)),
                 },
                 Field {
                     key: "pid",
-                    value: FieldValue::UnsignedInt(caller.pid()),
+                    value: FieldValue::UnsignedInt(pid),
                 },
             ],
         );

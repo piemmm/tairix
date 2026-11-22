@@ -144,7 +144,7 @@ impl Planner {
                     .find_run(drawn, &counts, meter)
                     .ok_or(Outcome::Overran)?,
             };
-            let made = primitives(drawn.render.topology, length);
+            let made = primitives(drawn.render.fixed.topology, length);
             if self.next >= made {
                 // The run's end, and past the restart that ended it.
                 let after = self.run.saturating_add(length).saturating_add(1);
@@ -280,7 +280,7 @@ impl Drawn<'_> {
 
     /// Whether an index of all ones restarts its strips or fans.
     fn restarts(&self) -> bool {
-        self.render.restart && self.index.is_some()
+        self.render.fixed.restart && self.index.is_some()
     }
 
     /// The raw index at `position` of `counts`' indices: zero past their
@@ -320,7 +320,7 @@ impl Drawn<'_> {
 
     /// The attribute `fetch` names of `element`, its channels decoded: zero
     /// past its buffer, with a missing alpha one.
-    fn attribute(&self, fetch: &crate::render::Fetch, element: u32) -> [u32; 4] {
+    fn attribute(&self, fetch: &crate::software::pipeline::Fetch, element: u32) -> [u32; 4] {
         let format = fetch.format;
         let raw = self
             .buffers
@@ -328,7 +328,7 @@ impl Drawn<'_> {
             .copied()
             .flatten()
             .and_then(|(words, start, size): (&[AtomicU32], u64, u64)| {
-                let (stride, _) = self.render.buffers.get(fetch.buffer as usize)?;
+                let (stride, _) = self.render.fixed.buffers.get(fetch.buffer as usize)?;
                 let bytes = u64::from(format.texel_bytes());
                 let at = u64::from(element)
                     .checked_mul(u64::from(*stride))?
@@ -342,7 +342,7 @@ impl Drawn<'_> {
 
 /// Word `word` of the port `fetch` feeds, from its attribute's `decoded`
 /// channels: narrowed to 16 bits where the port is.
-fn port_word(fetch: &crate::render::Fetch, decoded: &[u32; 4], word: u32) -> u32 {
+fn port_word(fetch: &crate::software::pipeline::Fetch, decoded: &[u32; 4], word: u32) -> u32 {
     let value = decoded
         .get((fetch.channel + word) as usize)
         .copied()
@@ -432,10 +432,10 @@ fn gather(drawn: &Drawn<'_>, planned: &Planned) -> Option<Gathered> {
         vertices: ArrayVec::new(),
         slots: ArrayVec::new(),
     };
-    let (start, end) = positions_read(drawn.render.topology, planned);
+    let (start, end) = positions_read(drawn.render.fixed.topology, planned);
     let mut table = [u8::MAX; TABLE];
     let bits = TABLE.trailing_zeros();
-    for position in (start..end).chain(fan_origin(drawn.render.topology)) {
+    for position in (start..end).chain(fan_origin(drawn.render.fixed.topology)) {
         let vertex = drawn.vertex(&planned.counts, planned.run + position);
         // A multiplicative hash's high bits, which every bit of the key moves.
         let mut at = (vertex.wrapping_mul(0x9e37_79b1) >> (32 - bits)) as usize;
@@ -518,7 +518,7 @@ pub(super) fn run_batch(
     ) {
         return false;
     }
-    let topology = drawn.render.topology;
+    let topology = drawn.render.fixed.topology;
     for i in planned.first..planned.first + planned.count {
         let mut records = [0u32; 3];
         let (taken, used) = corners(topology, i);
@@ -526,7 +526,7 @@ pub(super) fn run_batch(
             let Some(slot) = slot_of(topology, planned, &gathered, position) else {
                 return false;
             };
-            *record = slot * drawn.render.record;
+            *record = slot * drawn.render.form.record;
         }
         let made = match used {
             1 => set_up_point(drawn, batch, records[0]),
@@ -551,8 +551,8 @@ fn shade_vertices(
     meter: &mut Meter<'_>,
 ) -> bool {
     let render = drawn.render;
-    let record = render.record as usize;
-    let program = &render.vertex;
+    let record = render.form.record as usize;
+    let program = &render.form.vertex;
     if batch
         .records
         .try_reserve(vertices.len().saturating_mul(record))
@@ -584,15 +584,16 @@ fn shade_vertices(
                 }
                 Carries::Located { .. } => {
                     let Some(fetch) = render
+                        .form
                         .fetches
                         .binary_search_by_key(&port, |fetch| fetch.port as usize)
                         .ok()
-                        .and_then(|at| render.fetches.get(at))
+                        .and_then(|at| render.form.fetches.get(at))
                     else {
                         return;
                     };
                     let per_instance = matches!(
-                        render.buffers.get(fetch.buffer as usize),
+                        render.fixed.buffers.get(fetch.buffer as usize),
                         Some((_, VertexStep::Instance))
                     );
                     for ((value, &vertex), texel) in lanes.zip(&mut decoded) {
@@ -606,7 +607,7 @@ fn shade_vertices(
                 Carries::Fixed(_) => {}
             }
         };
-        let starts = &render.starts;
+        let starts = &render.form.starts;
         let records = &mut batch.records;
         let take = |port: usize, word: u32, values: &Lanes| {
             let Some(&start) = starts.get(port) else {
@@ -628,7 +629,7 @@ fn shade_vertices(
 
 /// The clip-space position of the shaded vertex at `record`.
 fn position(drawn: &Drawn<'_>, records: &[u32], record: u32) -> [f64; 4] {
-    let Some(at) = drawn.render.position else {
+    let Some(at) = drawn.render.form.position else {
         return [0.0; 4];
     };
     core::array::from_fn(|axis| {
@@ -693,7 +694,7 @@ fn file(
 /// Whether `primitive` faces the front under the draw's front face.
 fn faces_front(drawn: &Drawn<'_>, primitive: &Primitive) -> bool {
     let clockwise = primitive.footprint().clockwise();
-    match drawn.render.rasterization.front_face {
+    match drawn.render.fixed.rasterization.front_face {
         FrontFace::Clockwise => clockwise,
         FrontFace::CounterClockwise => !clockwise,
     }
@@ -725,7 +726,7 @@ fn set_up_triangle(drawn: &Drawn<'_>, batch: &mut Batch, records: [u32; 3]) -> b
     let Some(piece) = first_piece() else {
         return true;
     };
-    let raster = &drawn.render.rasterization;
+    let raster = &drawn.render.fixed.rasterization;
     let front = faces_front(drawn, &piece);
     if culled(raster.cull, front) {
         return true;
@@ -766,7 +767,7 @@ fn set_up_point(drawn: &Drawn<'_>, batch: &mut Batch, record: u32) -> bool {
     let Some([centre, _]) = drawn.viewport.clip_line(at, at) else {
         return true;
     };
-    let size = drawn.render.point_size.map_or(1.0, |offset| {
+    let size = drawn.render.form.point_size.map_or(1.0, |offset| {
         let word = batch
             .records
             .get((record + offset) as usize)
@@ -774,7 +775,7 @@ fn set_up_point(drawn: &Drawn<'_>, batch: &mut Batch, record: u32) -> bool {
             .unwrap_or(0);
         f64::from(f32::from_bits(word))
     });
-    let largest = drawn.render.largest_point;
+    let largest = drawn.render.form.largest_point;
     let size = if size.is_nan() || size < 1.0 {
         1.0
     } else if size > largest {
@@ -823,7 +824,8 @@ fn set_up_line(drawn: &Drawn<'_>, batch: &mut Batch, records: [u32; 2]) -> bool 
     if length.is_nan() || length <= 0.0 {
         return true;
     }
-    let half = f64::from(drawn.render.rasterization.line_width) * f64::from(MESH_SUB_UNITS) / 2.0;
+    let half =
+        f64::from(drawn.render.fixed.rasterization.line_width) * f64::from(MESH_SUB_UNITS) / 2.0;
     let normal = (-along.1 / length * half, along.0 / length * half);
     let flip = (-normal.0, -normal.1);
     let Some(polygon) = square(&[

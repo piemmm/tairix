@@ -176,6 +176,7 @@ pub(crate) mod held {
         static HELD: Cell<usize> = const { Cell::new(0) };
         static UNDER: Cell<usize> = const { Cell::new(0) };
         static TAKEN: Cell<usize> = const { Cell::new(0) };
+        static MADE_UNDER: Cell<usize> = const { Cell::new(0) };
     }
 
     pub(super) fn taken() {
@@ -202,6 +203,19 @@ pub(crate) mod held {
     /// How many noted drops this thread made under one.
     pub(crate) fn drops_under() -> usize {
         UNDER.with(Cell::get)
+    }
+
+    /// Note a backend's making something, which should come with no fair
+    /// lock held.
+    pub(crate) fn note_making() {
+        if HELD.with(Cell::get) > 0 {
+            MADE_UNDER.with(|under| under.set(under.get() + 1));
+        }
+    }
+
+    /// How many noted makings this thread made under one.
+    pub(crate) fn makings_under() -> usize {
+        MADE_UNDER.with(Cell::get)
     }
 }
 

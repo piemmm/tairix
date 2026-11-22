@@ -275,8 +275,13 @@ first announcement always reaches its subscribers.
 * **Listing every stream demands `CAP_SYSINFO_INTROSPECT`**, held by the
   System Information service, which scopes the streams to their owners.
 
-A stream id is a service-issued token checked against the attested pid, so a
-guessed id reaches nothing. Every capture or monitor grant **and refusal**,
+A stream id is a service-issued token checked against the process instance
+that opened it, as the kernel attests it, so a guessed id reaches nothing and
+a later process given the same pid reaches nothing of its predecessor's. A
+stream ends with that instance: the service watches its exit before it answers
+the open — one already gone, or that cannot be watched, has the stream taken
+back — and closes every stream it held when it ends. Every capture or monitor
+grant **and refusal**,
 every device bound or lost, every default-device change, every device control
 changed **or refused**, and every baseline adopted lands on the hash-chained
 audit log with a stable event id — "who tried" is the question an incident

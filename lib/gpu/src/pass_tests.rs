@@ -801,6 +801,158 @@ fn a_binding_reaching_what_its_pass_renders_to_is_refused_only_where_its_stages_
     }
 }
 
+/// A set of one sampled image, `view`, seen by the fragment stage, and a
+/// pipeline layout of it.
+fn sampled_set(
+    context: &Context,
+    view: &crate::ImageView,
+) -> (crate::BindSet, BindSetLayout, PipelineLayout) {
+    let set_layout = context
+        .create_bind_set_layout(&[crate::LayoutBinding {
+            binding: 0,
+            kind: BindingKind::SampledImage(ImageShape {
+                dim: tairix_spirv::enumerant::Dim::DIM_2D,
+                arrayed: false,
+                multisampled: false,
+                component: Component::Float,
+                format: tairix_spirv::enumerant::ImageFormat::UNKNOWN,
+            }),
+            count: 1,
+            access: Access::READ,
+            stages: Stages::FRAGMENT,
+        }])
+        .expect("a set layout");
+    let layout = context
+        .create_pipeline_layout(&[&set_layout], crate::PushConstants::NONE)
+        .expect("a layout");
+    let set = context
+        .create_bind_set(
+            &set_layout,
+            &[crate::BindSetEntry {
+                binding: 0,
+                resources: &[crate::Resource::Image(view)],
+            }],
+        )
+        .expect("a set");
+    (set, set_layout, layout)
+}
+
+#[test]
+fn a_sampled_view_meets_an_attachment_by_subresource_of_its_image_and_placement_of_another() {
+    let device = rendering();
+    let context = context(&device);
+    let desc = crate::ImageDesc {
+        dimension: crate::ImageDimension::D2,
+        format: Format::Rgba8Unorm,
+        extent: crate::Extent3d {
+            width: 8,
+            height: 8,
+            depth: 1,
+        },
+        mip_levels: 2,
+        array_layers: 2,
+        samples: 1,
+        usage: crate::ImageUsage::SAMPLED.with(crate::ImageUsage::COLOR_ATTACHMENT),
+    };
+    let needs = context.image_requirements(&desc).expect("requirements");
+    let past = needs.size.next_multiple_of(needs.alignment);
+    let memory = crate::device_tests::memory(&context, past + needs.size);
+    let rendered = context.create_image(&memory, 0, &desc).expect("an image");
+    let aliasing = context.create_image(&memory, 0, &desc).expect("its alias");
+    let apart = context
+        .create_image(&memory, past, &desc)
+        .expect("one past it");
+    let view = |image: &crate::Image, level, layer| {
+        context
+            .create_image_view(
+                image,
+                &crate::ImageViewDesc {
+                    format: Format::Rgba8Unorm,
+                    dimension: crate::ViewDimension::D2,
+                    range: crate::ImageRange {
+                        aspects: crate::Aspects::COLOR,
+                        base_level: level,
+                        levels: 1,
+                        base_layer: layer,
+                        layers: 1,
+                    },
+                },
+            )
+            .expect("a view")
+    };
+    let target = view(&rendered, 0, 1);
+    let targets = [plain(Format::Rgba8Unorm)];
+    let (_held, buffer) = three(&context);
+    let (viewport, scissor) = whole((8, 8));
+    for (what, sampled, refused) in [
+        ("its own level and layer", view(&rendered, 0, 1), true),
+        ("another level of its image", view(&rendered, 1, 1), false),
+        ("another layer of its image", view(&rendered, 0, 0), false),
+        // Texels the software device's layout puts apart from the target's:
+        // no backend says where an image's texels lie in its placement.
+        ("an image placed over it", view(&aliasing, 1, 0), true),
+        ("an image placed past it", view(&apart, 0, 1), false),
+    ] {
+        let (set, _set_layout, layout) = sampled_set(&context, &sampled);
+        let pipeline = plain_pipeline(&context, &layout, &targets, None);
+        let mut commands = context.command_buffer();
+        commands
+            .render_pass(
+                &Pass {
+                    colour: &[attachment(&target)],
+                    depth_stencil: None,
+                    area: scissor,
+                },
+                |drawer| {
+                    drawer.draw(
+                        &Draw {
+                            pipeline: &pipeline,
+                            sets: &[&set],
+                            push_constants: &[],
+                            vertex_buffers: &[(&buffer, 0)],
+                            viewport,
+                            scissor,
+                            stencil_reference: 0,
+                            blend_constant: [0.0; 4],
+                        },
+                        0..3,
+                        0..1,
+                    )
+                },
+            )
+            .expect("recorded");
+        let expected = if refused {
+            Err((Some(1), Error::Overlap))
+        } else {
+            Ok(())
+        };
+        assert_eq!(refusal(&context, &commands), expected, "sampling {what}");
+    }
+}
+
+#[test]
+fn nothing_is_made_under_the_devices_lock() {
+    use crate::fair::held::makings_under;
+    let device = rendering();
+    let context = context(&device);
+    let before = makings_under();
+    // Memory, an image's layout, a set's descriptors and reach, and both
+    // kinds of pipeline with the working memory they reserve.
+    let rendered = target(&context, Format::Rgba8Unorm, (8, 8), 1);
+    let (_set, _set_layout, layout) = sampled_set(&context, &rendered.view);
+    let _render = plain_pipeline(&context, &layout, &[plain(Format::Rgba8Unorm)], None);
+    let _compute =
+        crate::pipeline::tests::rig(&context, &crate::pipeline::tests::doubles(64), 256, &[])
+            .expect("a compute pipeline");
+    assert_eq!(makings_under(), before, "each made with the lock let go");
+    // The note counts what is made under the lock.
+    let held = context.shared.model.lock();
+    let made = context.shared.image_form(rendered.image.desc());
+    drop(held);
+    assert!(made.is_ok());
+    assert_eq!(makings_under(), before + 1, "and so would catch one");
+}
+
 #[test]
 fn a_draw_writing_a_depth_attachment_it_only_tests_is_refused() {
     let device = rendering();
@@ -961,7 +1113,7 @@ fn a_queued_pass_is_charged_for_its_own_bytes() {
     charged(true);
     charged(false);
     let (with_fill, with_pass) = (charged(false), charged(true));
-    let own = core::mem::size_of::<crate::pass::PassWork>() as u64;
+    let own = core::mem::size_of::<crate::software::PassWork>() as u64;
     assert!(
         with_pass.saturating_sub(with_fill) >= own,
         "a queued pass is charged for its own {own} bytes: {with_pass} against {with_fill}"

@@ -1,21 +1,23 @@
 //! Render pipelines: a vertex entry point and an optional fragment one, each
-//! lowered once when made, and the fixed-function state a draw runs them
-//! through — every part checked against what the device states, and the
-//! tables a draw reads made here, once.
+//! made once, and the fixed-function state a draw runs them through — every
+//! part checked against what the device states, and each stage's interface
+//! matched with the next's.
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_spirv::{Access, EntryPoint, Interpolation, SpecValue, Stage, Varying};
+use tairix_spirv::{Access, EntryPoint, SpecValue, Stage, Varying};
 
+use crate::backend::Backend;
 use crate::binding::{PipelineLayout, ShaderModule};
-use crate::device::{owned, Context};
+use crate::device::{owned, Context, Shared};
 use crate::format::{Aspects, Format, FormatFeatures};
 use crate::info::{DeviceInfo, Features};
-use crate::model::{shared_bytes, ContextKey, ContextState, Model, Pipelines, RenderPipelineKey};
-use crate::pipeline::{lower_stage, PipelineState, Released};
-use crate::software::dispatch::{self, Need};
-use crate::software::shader::ir::{Carries, Fixed, Program, Term};
+use crate::model::{
+    shared_bytes, ContextKey, ContextState, Model, PipelineLayoutKey, Pipelines, RenderPipelineKey,
+    ShaderModuleKey,
+};
+use crate::pipeline::{plan_stage, PipelineState, Released, StagePlan};
 use crate::{CompareOp, Error, MAX_PASS_ATTACHMENTS};
 
 pub use tairix_raster::{Blend, BlendFactor, BlendOp, DepthBias, LogicOp, StencilOp};
@@ -238,80 +240,12 @@ pub struct RenderPipelineDesc<'a> {
     pub logic_op: Option<LogicOp>,
 }
 
-/// Where a vertex input port's words come from: an attribute of a vertex
-/// buffer, read from its `channel`, narrowed to 16 bits where the port is.
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct Fetch {
-    pub(crate) port: u32,
-    pub(crate) buffer: u32,
-    pub(crate) format: Format,
-    pub(crate) offset: u32,
-    pub(crate) channel: u32,
-    pub(crate) narrow: bool,
-}
-
-/// Where a word of a fragment input comes from — a word of the shaded
-/// vertex, or nothing the vertex stage wrote — and how it varies across its
-/// primitive.
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct Link {
-    pub(crate) word: Option<u32>,
-    pub(crate) interpolation: Interpolation,
-    pub(crate) centroid: bool,
-    /// Whether it is 16 bits wide.
-    pub(crate) narrow: bool,
-}
-
-tairix_util::flags! {
-    /// What a fragment stage does that decides when its tests may run.
-    pub(crate) struct Effects(u8) {
-        /// Its fragments are tested before it runs, whatever it does.
-        const EARLY = 1;
-        /// It may discard.
-        const DISCARDS = 1 << 1;
-        /// It writes storage, images or atomics.
-        const WRITES_MEMORY = 1 << 2;
-        /// It writes its own depth.
-        const WRITES_DEPTH = 1 << 3;
-        /// It writes its own coverage.
-        const WRITES_MASK = 1 << 4;
-    }
-}
-
-/// A render pipeline's fragment stage: its program, where each word of its
-/// located inputs comes from, the channels it writes of each target and of
-/// the second colour a dual-source blend reads, and what decides when its
-/// tests may run.
+/// A render pipeline's fixed-function state, as its description gave it:
+/// what a draw is checked against and runs through.
 #[derive(Debug)]
-pub(crate) struct Shading {
-    pub(crate) program: Program,
-    /// One per word of its located input ports, in their order, and the
-    /// first of each input port's: none for a built-in's.
-    pub(crate) links: Vec<Link>,
-    pub(crate) starts: Vec<u32>,
-    /// Which of its output ports, by place, are 16 bits wide.
-    pub(crate) narrow_outputs: u64,
-    /// The channels, red at bit 0, each target is written in; a target of
-    /// none is left as it was.
-    pub(crate) channels: [u8; MAX_PASS_ATTACHMENTS],
-    pub(crate) second_channels: u8,
-    pub(crate) effects: Effects,
-}
-
-/// A render pipeline as a draw runs it.
-#[derive(Debug)]
-pub(crate) struct Render {
-    pub(crate) vertex: Program,
-    pub(crate) fragment: Option<Shading>,
+pub(crate) struct FixedFunction {
     /// Each vertex buffer's stride and step.
     pub(crate) buffers: Vec<(u32, VertexStep)>,
-    pub(crate) fetches: Vec<Fetch>,
-    /// The words a shaded vertex holds — each output port's in turn, from
-    /// its start — and where its position and point size lie among them.
-    pub(crate) record: u32,
-    pub(crate) starts: Vec<u32>,
-    pub(crate) position: Option<u32>,
-    pub(crate) point_size: Option<u32>,
     pub(crate) topology: Topology,
     pub(crate) restart: bool,
     pub(crate) rasterization: Rasterization,
@@ -319,48 +253,119 @@ pub(crate) struct Render {
     pub(crate) multisample: Multisample,
     pub(crate) targets: Vec<ColourTarget>,
     pub(crate) logic_op: Option<LogicOp>,
-    /// The largest side a point takes.
-    pub(crate) largest_point: f64,
 }
 
-/// A render pipeline.
-pub(crate) type RenderPipelineState = PipelineState<Render>;
-
-impl Render {
-    /// The workspace a draw of it shades in: either stage's tile.
-    fn need(&self) -> Need {
-        let vertex = dispatch::need(&self.vertex);
-        self.fragment.as_ref().map_or(vertex, |shading| {
-            vertex.max(dispatch::need(&shading.program))
+impl FixedFunction {
+    fn of(state: &FixedState<'_>) -> Result<Self, Error> {
+        let buffers = tairix_util::fallible::collected(
+            state.vertex_buffers.len(),
+            state.vertex_buffers.iter().map(|b| (b.stride, b.step)),
+        )
+        .ok_or(Error::OutOfMemory)?;
+        let targets =
+            tairix_util::fallible::collected(state.targets.len(), state.targets.iter().copied())
+                .ok_or(Error::OutOfMemory)?;
+        Ok(Self {
+            buffers,
+            topology: state.topology,
+            restart: state.primitive_restart,
+            rasterization: state.rasterization,
+            depth_stencil: state.depth_stencil,
+            multisample: state.multisample,
+            targets,
+            logic_op: state.logic_op,
         })
     }
 
-    /// The host memory it keeps beside its working memory.
+    /// The host bytes it keeps beside itself.
     fn held_bytes(&self) -> u64 {
         use tairix_util::fallible::held;
-        [
-            shared_bytes::<RenderPipelineState>(),
-            self.vertex.held_bytes(),
-            self.fragment.as_ref().map_or(0, |shading| {
-                shading
-                    .program
-                    .held_bytes()
-                    .saturating_add(held(&shading.links))
-                    .saturating_add(held(&shading.starts))
-            }),
-            held(&self.buffers),
-            held(&self.fetches),
-            held(&self.targets),
-            held(&self.starts),
-        ]
-        .into_iter()
-        .fold(0, u64::saturating_add)
+        held(&self.buffers).saturating_add(held(&self.targets))
     }
+}
+
+/// A render pipeline's stages: its fixed-function state, and its programs
+/// as its backend made them.
+#[derive(Debug)]
+pub(crate) struct Rendered<B: Backend> {
+    pub(crate) fixed: FixedFunction,
+    pub(crate) form: B::Render,
+}
+
+/// A render pipeline.
+pub(crate) type RenderPipelineState<B> = PipelineState<B, Rendered<B>>;
+
+/// A render pipeline's state as a request describes it.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct FixedState<'a> {
+    pub(crate) vertex_buffers: &'a [VertexBuffer<'a>],
+    pub(crate) topology: Topology,
+    pub(crate) primitive_restart: bool,
+    pub(crate) rasterization: Rasterization,
+    pub(crate) depth_stencil: Option<DepthStencilState>,
+    pub(crate) multisample: Multisample,
+    pub(crate) targets: &'a [ColourTarget],
+    pub(crate) logic_op: Option<LogicOp>,
+}
+
+/// One stage of a render pipeline as a request names it.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct StageRequest<'a> {
+    pub(crate) module: ShaderModuleKey,
+    pub(crate) entry_point: &'a str,
+    pub(crate) specialization: &'a [SpecValue],
+}
+
+/// A render pipeline as a request names it: its modules and layout by key,
+/// and its state as described.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct RenderRequest<'a> {
+    pub(crate) layout: PipelineLayoutKey,
+    pub(crate) vertex: StageRequest<'a>,
+    pub(crate) fragment: Option<StageRequest<'a>>,
+    pub(crate) state: FixedState<'a>,
+}
+
+impl<'a> RenderRequest<'a> {
+    fn of(desc: &RenderPipelineDesc<'a>) -> Self {
+        let stage = |stage: &StageDesc<'a>| StageRequest {
+            module: stage.module.key,
+            entry_point: stage.entry_point,
+            specialization: stage.specialization,
+        };
+        Self {
+            layout: desc.layout.key,
+            vertex: stage(&desc.vertex),
+            fragment: desc.fragment.as_ref().map(stage),
+            state: FixedState {
+                vertex_buffers: desc.vertex_buffers,
+                topology: desc.topology,
+                primitive_restart: desc.primitive_restart,
+                rasterization: desc.rasterization,
+                depth_stencil: desc.depth_stencil,
+                multisample: desc.multisample,
+                targets: desc.targets,
+                logic_op: desc.logic_op,
+            },
+        }
+    }
+}
+
+/// A render pipeline's checked stages and what the model found of them:
+/// what a backend makes its programs from.
+pub(crate) struct RenderPlan<'m> {
+    pub(crate) vertex_buffers: &'m [VertexBuffer<'m>],
+    pub(crate) vertex: StagePlan<'m>,
+    pub(crate) fragment: Option<StagePlan<'m>>,
+    /// The channels, red at bit 0, the fragment stage writes of each target
+    /// and of the second colour a dual-source blend reads.
+    pub(crate) channels: [u8; MAX_PASS_ATTACHMENTS],
+    pub(crate) second_channels: u8,
 }
 
 impl Context {
     /// A render pipeline: its stages agreed with its layout, specialized and
-    /// lowered, each stage's interface matched with the next's, and its
+    /// made, each stage's interface matched with the next's, and its
     /// fixed-function state checked against what the device states.
     ///
     /// # Errors
@@ -401,66 +406,92 @@ impl Context {
             &self.shared,
             self.key,
         )?;
-        let info = &self.shared.info;
-        check_fixed(info, desc)?;
-        let (vertex_module, fragment_module, layout) = {
-            let model = self.shared.model.lock();
-            let context = model.live(self.key)?;
-            let module = |stage: &StageDesc<'_>| {
-                context
-                    .shader_modules
-                    .get(stage.module.key)
-                    .cloned()
-                    .ok_or(Error::Stale)
-            };
-            let fragment = desc.fragment.as_ref().map(module).transpose()?;
-            let layout = context
-                .pipeline_layouts
-                .get(desc.layout.key)
-                .cloned()
-                .ok_or(Error::Stale)?;
-            (module(&desc.vertex)?, fragment, layout)
-        };
-        let limits = &info.limits;
-        let vertex = lower_stage(
-            limits,
-            &vertex_module.admitted,
-            (
-                Stage::Vertex,
-                desc.vertex.entry_point,
-                desc.vertex.specialization,
-            ),
-            &layout,
-        )?;
-        let fragment = match (&desc.fragment, &fragment_module) {
-            (Some(stage), Some(module)) => Some(lower_stage(
-                limits,
-                &module.admitted,
-                (Stage::Fragment, stage.entry_point, stage.specialization),
-                &layout,
-            )?),
-            _ => None,
-        };
-        let render = Render::of(info, desc, vertex, fragment)?;
-        let (need, held) = (render.need(), render.held_bytes());
+        let key = self
+            .shared
+            .create_render_pipeline(self.key, &RenderRequest::of(desc))?;
         Ok(RenderPipeline {
             shared: Arc::clone(&self.shared),
             context: self.key,
-            key: self.file_pipeline(renders, (render, layout), (need, held))?,
+            key,
         })
+    }
+}
+
+impl<B: Backend> Shared<B> {
+    /// A render pipeline of the context as `request` names it.
+    pub(crate) fn create_render_pipeline(
+        &self,
+        context: ContextKey,
+        request: &RenderRequest<'_>,
+    ) -> Result<RenderPipelineKey, Error> {
+        let info = &self.info;
+        check_fixed(info, &request.state)?;
+        let (vertex_module, fragment_module, layout) = self.modules_and_layout(
+            context,
+            (
+                request.vertex.module,
+                request.fragment.as_ref().map(|fragment| fragment.module),
+            ),
+            request.layout,
+        )?;
+        let plan_of = |module, stage: Stage, request: &StageRequest<'_>| {
+            plan_stage(
+                &info.limits,
+                module,
+                (stage, request.entry_point, request.specialization),
+                &layout,
+            )
+        };
+        let vertex = plan_of(&vertex_module.admitted, Stage::Vertex, &request.vertex)?;
+        let fragment = request
+            .fragment
+            .as_ref()
+            .zip(fragment_module.as_ref())
+            .map(|(wanted, module)| plan_of(&module.admitted, Stage::Fragment, wanted))
+            .transpose()?;
+        let (channels, second_channels) = check_interface(
+            info,
+            &request.state,
+            vertex.entry,
+            fragment.as_ref().map(|stage| stage.entry),
+        )?;
+        let plan = RenderPlan {
+            vertex_buffers: request.state.vertex_buffers,
+            vertex,
+            fragment,
+            channels,
+            second_channels,
+        };
+        #[cfg(test)]
+        crate::fair::held::note_making();
+        let prepared = self.backend.render(info, &plan)?;
+        drop(plan);
+        let fixed = FixedFunction::of(&request.state)?;
+        let held = [
+            shared_bytes::<RenderPipelineState<B>>(),
+            prepared.held,
+            fixed.held_bytes(),
+        ]
+        .into_iter()
+        .fold(0, u64::saturating_add);
+        let stages = Rendered {
+            fixed,
+            form: prepared.form,
+        };
+        self.file_pipeline(context, renders, (stages, layout), (prepared.need, held))
     }
 }
 
 /// Refuse vertex buffers and attributes the device has not stated, or past
 /// its limits, or two attributes feeding one location.
-fn check_vertex_input(info: &DeviceInfo, desc: &RenderPipelineDesc<'_>) -> Result<(), Error> {
+fn check_vertex_input(info: &DeviceInfo, state: &FixedState<'_>) -> Result<(), Error> {
     let limits = &info.limits;
     let stated = |format: Format, wanted: FormatFeatures| info.formats.get(format).contains(wanted);
-    if desc.vertex_buffers.len() > limits.max_vertex_input_bindings as usize {
+    if state.vertex_buffers.len() > limits.max_vertex_input_bindings as usize {
         return Err(Error::TooMany);
     }
     let (mut attributes, mut fed) = (0u32, 0u64);
-    for buffer in desc.vertex_buffers {
+    for buffer in state.vertex_buffers {
         if buffer.stride > limits.max_vertex_input_binding_stride {
             return Err(Error::TooLarge);
         }
@@ -492,7 +523,7 @@ fn check_vertex_input(info: &DeviceInfo, desc: &RenderPipelineDesc<'_>) -> Resul
 
 /// Refuse fixed-function state the device has not stated, malformed, or past
 /// its limits.
-fn check_fixed(info: &DeviceInfo, desc: &RenderPipelineDesc<'_>) -> Result<(), Error> {
+fn check_fixed(info: &DeviceInfo, state: &FixedState<'_>) -> Result<(), Error> {
     let limits = &info.limits;
     let stated = |format: Format, wanted: FormatFeatures| info.formats.get(format).contains(wanted);
     let feature = |wanted: Features| {
@@ -502,11 +533,11 @@ fn check_fixed(info: &DeviceInfo, desc: &RenderPipelineDesc<'_>) -> Result<(), E
             Err(Error::Unsupported)
         }
     };
-    check_vertex_input(info, desc)?;
-    if desc.primitive_restart && !desc.topology.restarts() {
+    check_vertex_input(info, state)?;
+    if state.primitive_restart && !state.topology.restarts() {
         return Err(Error::Unsupported);
     }
-    let raster = &desc.rasterization;
+    let raster = &state.rasterization;
     if !raster.line_width.is_finite() || raster.line_width < 1.0 {
         return Err(Error::Shape);
     }
@@ -525,7 +556,7 @@ fn check_fixed(info: &DeviceInfo, desc: &RenderPipelineDesc<'_>) -> Result<(), E
             return Err(Error::Shape);
         }
     }
-    let multisampled = match desc.multisample.samples {
+    let multisampled = match state.multisample.samples {
         1 => false,
         4 => true,
         _ => return Err(Error::Samples),
@@ -538,10 +569,10 @@ fn check_fixed(info: &DeviceInfo, desc: &RenderPipelineDesc<'_>) -> Result<(), E
         };
         stated(format, wanted.with(samples))
     };
-    if desc.targets.len() > limits.max_color_attachments as usize {
+    if state.targets.len() > limits.max_color_attachments as usize {
         return Err(Error::TooMany);
     }
-    for target in desc.targets {
+    for target in state.targets {
         if !renders(target.format, FormatFeatures::COLOR_ATTACHMENT) {
             return Err(Error::Unsupported);
         }
@@ -557,10 +588,10 @@ fn check_fixed(info: &DeviceInfo, desc: &RenderPipelineDesc<'_>) -> Result<(), E
             return Err(Error::Shape);
         }
     }
-    if desc.logic_op.is_some() {
+    if state.logic_op.is_some() {
         feature(Features::LOGIC_OP)?;
     }
-    if let Some(depth_stencil) = &desc.depth_stencil {
+    if let Some(depth_stencil) = &state.depth_stencil {
         if !renders(depth_stencil.format, FormatFeatures::DEPTH_STENCIL) {
             return Err(Error::Unsupported);
         }
@@ -577,7 +608,7 @@ fn check_fixed(info: &DeviceInfo, desc: &RenderPipelineDesc<'_>) -> Result<(), E
 }
 
 /// Whether `entry` writes storage, images or atomics.
-fn writes_memory(entry: &EntryPoint) -> bool {
+pub(crate) fn writes_memory(entry: &EntryPoint) -> bool {
     entry
         .bindings()
         .iter()
@@ -592,147 +623,20 @@ fn components(varyings: &[Varying]) -> u32 {
 }
 
 /// The varying of `varyings` holding component `component` of `location`.
-fn holding(varyings: &[Varying], location: u32, component: u32) -> Option<&Varying> {
+pub(crate) fn holding(varyings: &[Varying], location: u32, component: u32) -> Option<&Varying> {
     varyings.iter().find(|v| {
         v.location == location
             && (v.component..v.component.saturating_add(v.components)).contains(&component)
     })
 }
 
-impl Render {
-    /// The tables a draw reads, made from the lowered stages and `desc`, and
-    /// each stage's interface matched with the next's.
-    fn of(
-        info: &DeviceInfo,
-        desc: &RenderPipelineDesc<'_>,
-        (vertex, vertex_entry): (Program, &EntryPoint),
-        fragment: Option<(Program, &EntryPoint)>,
-    ) -> Result<Self, Error> {
-        let limits = &info.limits;
-        if writes_memory(vertex_entry) && !info.features.contains(Features::VERTEX_STORES) {
-            return Err(Error::Unsupported);
-        }
-        let fetches = fetches(desc, (&vertex, vertex_entry))?;
-        if components(vertex_entry.outputs()) > limits.max_vertex_output_components {
-            return Err(Error::TooLarge);
-        }
-        let mut record = 0u32;
-        let (mut position, mut point_size) = (None, None);
-        let mut starts = Vec::new();
-        starts
-            .try_reserve_exact(vertex.outputs.len())
-            .map_err(|_| Error::OutOfMemory)?;
-        for port in &vertex.outputs {
-            match port.carries {
-                Carries::Fixed(Fixed::Position) => position = Some(record),
-                Carries::Fixed(Fixed::PointSize) => point_size = Some(record),
-                _ => {}
-            }
-            starts.push(record);
-            record = record.checked_add(port.words).ok_or(Error::TooLarge)?;
-        }
-        let fragment = fragment
-            .map(|(program, entry)| {
-                shading(
-                    info,
-                    desc,
-                    (&vertex, vertex_entry, &starts),
-                    (program, entry),
-                )
-            })
-            .transpose()?;
-        let mut buffers = Vec::new();
-        buffers
-            .try_reserve_exact(desc.vertex_buffers.len())
-            .map_err(|_| Error::OutOfMemory)?;
-        buffers.extend(desc.vertex_buffers.iter().map(|b| (b.stride, b.step)));
-        let targets =
-            tairix_util::fallible::collected(desc.targets.len(), desc.targets.iter().copied())
-                .ok_or(Error::OutOfMemory)?;
-        let largest_point = if info.features.contains(Features::LARGE_POINTS) {
-            f64::from(limits.max_point_size)
-        } else {
-            1.0
-        };
-        Ok(Self {
-            vertex,
-            fragment,
-            buffers,
-            fetches,
-            record,
-            starts,
-            position,
-            point_size,
-            topology: desc.topology,
-            restart: desc.primitive_restart,
-            rasterization: desc.rasterization,
-            depth_stencil: desc.depth_stencil,
-            multisample: desc.multisample,
-            targets,
-            logic_op: desc.logic_op,
-            largest_point,
-        })
-    }
-}
-
-/// Where each of `vertex`'s located input ports is fed from: an attribute
-/// of one of `desc`'s vertex buffers at its location, of its component type.
-fn fetches(
-    desc: &RenderPipelineDesc<'_>,
-    (vertex, entry): (&Program, &EntryPoint),
-) -> Result<Vec<Fetch>, Error> {
-    let attribute_at = |location: u32| {
-        desc.vertex_buffers
-            .iter()
-            .zip(0u32..)
-            .find_map(|(buffer, index)| {
-                buffer
-                    .attributes
-                    .iter()
-                    .find(|attribute| attribute.location == location)
-                    .map(|attribute| (index, attribute))
-            })
-    };
-    for input in entry.inputs() {
-        let (_, attribute) = attribute_at(input.location).ok_or(Error::Interface)?;
-        if attribute.format.component() != input.scalar || input.width > 32 {
-            return Err(Error::Interface);
-        }
-    }
-    let mut fetches = Vec::new();
-    fetches
-        .try_reserve_exact(vertex.inputs.len())
-        .map_err(|_| Error::OutOfMemory)?;
-    for (port, index) in vertex.inputs.iter().zip(0u32..) {
-        let Carries::Located {
-            location,
-            component,
-            ..
-        } = port.carries
-        else {
-            continue;
-        };
-        let (buffer, attribute) = attribute_at(location).ok_or(Error::Interface)?;
-        let input = holding(entry.inputs(), location, component).ok_or(Error::Malformed)?;
-        fetches.push(Fetch {
-            port: index,
-            buffer,
-            format: attribute.format,
-            offset: attribute.offset,
-            channel: component,
-            narrow: input.width == 16,
-        });
-    }
-    Ok(fetches)
-}
-
-/// The channels, red at bit 0, `entry`'s outputs write of each of `desc`'s
+/// The channels, red at bit 0, `entry`'s outputs write of each of `state`'s
 /// targets and of the second colour: each output a target's of its
 /// component type, the second colour's at location 0 and read only by the
 /// first target's blend.
 fn written_channels(
     info: &DeviceInfo,
-    desc: &RenderPipelineDesc<'_>,
+    state: &FixedState<'_>,
     entry: &EntryPoint,
 ) -> Result<([u8; MAX_PASS_ATTACHMENTS], u8), Error> {
     let mut channels = [0u8; MAX_PASS_ATTACHMENTS];
@@ -746,7 +650,7 @@ fn written_channels(
                 return Err(Error::Unsupported);
             }
         }
-        let target = desc
+        let target = state
             .targets
             .get(output.location as usize)
             .ok_or(Error::Interface)?;
@@ -766,7 +670,7 @@ fn written_channels(
     }
     // Only the first target's blend may read the second colour, and only
     // where the stage writes one.
-    for (index, target) in desc.targets.iter().enumerate() {
+    for (index, target) in state.targets.iter().enumerate() {
         let second = target
             .blend
             .is_some_and(|blend| blend.reads_second_source());
@@ -777,166 +681,72 @@ fn written_channels(
     Ok((channels, second_channels))
 }
 
-/// The fragment stage of a pipeline whose vertex stage is `vertex`: each of
-/// its inputs provided by a vertex output, each of its outputs a target's.
-fn shading(
+/// Each stage's interface matched with its neighbours': every vertex input
+/// fed by an attribute of its component type, every fragment input by a
+/// vertex output of its type, every fragment output a target's, within the
+/// device's limits and features; and the channels the fragment stage writes
+/// of each target and of the second colour.
+fn check_interface(
     info: &DeviceInfo,
-    desc: &RenderPipelineDesc<'_>,
-    (vertex, vertex_entry, starts): (&Program, &EntryPoint, &[u32]),
-    (program, entry): (Program, &EntryPoint),
-) -> Result<Shading, Error> {
-    if components(entry.inputs()) > info.limits.max_fragment_input_components {
+    state: &FixedState<'_>,
+    vertex: &EntryPoint,
+    fragment: Option<&EntryPoint>,
+) -> Result<([u8; MAX_PASS_ATTACHMENTS], u8), Error> {
+    let limits = &info.limits;
+    if writes_memory(vertex) && !info.features.contains(Features::VERTEX_STORES) {
+        return Err(Error::Unsupported);
+    }
+    let fed = |location: u32| {
+        state.vertex_buffers.iter().find_map(|buffer| {
+            buffer
+                .attributes
+                .iter()
+                .find(|attribute| attribute.location == location)
+        })
+    };
+    for input in vertex.inputs() {
+        let attribute = fed(input.location).ok_or(Error::Interface)?;
+        if attribute.format.component() != input.scalar || input.width > 32 {
+            return Err(Error::Interface);
+        }
+    }
+    if components(vertex.outputs()) > limits.max_vertex_output_components {
         return Err(Error::TooLarge);
     }
-    let stores = writes_memory(entry);
-    if stores && !info.features.contains(Features::FRAGMENT_STORES) {
+    let Some(entry) = fragment else {
+        return Ok(([0; MAX_PASS_ATTACHMENTS], 0));
+    };
+    if components(entry.inputs()) > limits.max_fragment_input_components {
+        return Err(Error::TooLarge);
+    }
+    if writes_memory(entry) && !info.features.contains(Features::FRAGMENT_STORES) {
         return Err(Error::Unsupported);
     }
     for input in entry.inputs() {
         for component in input.component..input.component.saturating_add(input.components) {
-            let provided = holding(vertex_entry.outputs(), input.location, component)
+            let provided = holding(vertex.outputs(), input.location, component)
                 .is_some_and(|output| output.scalar == input.scalar && output.width == input.width);
             if !provided {
                 return Err(Error::Interface);
             }
         }
     }
-    let (channels, second_channels) = written_channels(info, desc, entry)?;
-    let source = |location: u32, component: u32| {
-        vertex
-            .outputs
-            .iter()
-            .zip(starts)
-            .find_map(|(port, &start)| match port.carries {
-                Carries::Located {
-                    location: held,
-                    component: first,
-                    ..
-                } if held == location
-                    && (first..first.saturating_add(port.words)).contains(&component) =>
-                {
-                    Some(start + (component - first))
-                }
-                _ => None,
-            })
-    };
-    let (links, firsts) = links_of(&program, entry, source)?;
-    let narrow_outputs = narrow_outputs(&program, entry)?;
-    let writes = |which: Fixed| {
-        program
-            .outputs
-            .iter()
-            .any(|port| port.carries == Carries::Fixed(which))
-    };
-    let effects = [
-        (entry.early_fragment_tests(), Effects::EARLY),
-        (
-            program.blocks.iter().any(|block| block.term == Term::Kill),
-            Effects::DISCARDS,
-        ),
-        (stores, Effects::WRITES_MEMORY),
-        (writes(Fixed::FragDepth), Effects::WRITES_DEPTH),
-        (writes(Fixed::SampleMask), Effects::WRITES_MASK),
-    ]
-    .into_iter()
-    .filter(|&(holds, _)| holds)
-    .fold(Effects::NONE, |all, (_, effect)| all.with(effect));
-    Ok(Shading {
-        effects,
-        links,
-        starts: firsts,
-        narrow_outputs,
-        channels,
-        second_channels,
-        program,
-    })
-}
-
-/// Where each word of `program`'s located inputs comes from — `source`
-/// finding the vertex output word at a location's component — and the first
-/// link of each input port: none for a built-in's.
-fn links_of(
-    program: &Program,
-    entry: &EntryPoint,
-    source: impl Fn(u32, u32) -> Option<u32>,
-) -> Result<(Vec<Link>, Vec<u32>), Error> {
-    let words = program
-        .inputs
-        .iter()
-        .fold(0usize, |total, port| match port.carries {
-            Carries::Located { .. } => total.saturating_add(port.words as usize),
-            Carries::Fixed(_) => total,
-        });
-    let mut links = Vec::new();
-    links
-        .try_reserve_exact(words)
-        .map_err(|_| Error::OutOfMemory)?;
-    let mut firsts = Vec::new();
-    firsts
-        .try_reserve_exact(program.inputs.len())
-        .map_err(|_| Error::OutOfMemory)?;
-    for port in &program.inputs {
-        let Carries::Located {
-            location,
-            component,
-            ..
-        } = port.carries
-        else {
-            firsts.push(u32::MAX);
-            continue;
-        };
-        firsts.push(u32::try_from(links.len()).map_err(|_| Error::TooLarge)?);
-        for word in 0..port.words {
-            let component = component + word;
-            let input = holding(entry.inputs(), location, component).ok_or(Error::Malformed)?;
-            links.push(Link {
-                word: source(location, component),
-                interpolation: input.interpolation,
-                centroid: input.centroid,
-                narrow: input.width == 16,
-            });
-        }
-    }
-    Ok((links, firsts))
-}
-
-/// Which of `program`'s output ports, by place, are 16 bits wide.
-fn narrow_outputs(program: &Program, entry: &EntryPoint) -> Result<u64, Error> {
-    let mut narrow_outputs = 0u64;
-    for (port, place) in program.outputs.iter().zip(0u32..) {
-        if let Carries::Located {
-            location,
-            component,
-            index,
-        } = port.carries
-        {
-            let narrow = entry.outputs().iter().any(|v| {
-                v.location == location
-                    && v.component == component
-                    && v.index == index
-                    && v.width == 16
-            });
-            if narrow {
-                narrow_outputs |= 1u64.checked_shl(place).ok_or(Error::TooLarge)?;
-            }
-        }
-    }
-    Ok(narrow_outputs)
+    written_channels(info, state, entry)
 }
 
 /// The context's render pipelines.
-fn renders(
-    context: &mut ContextState,
-) -> &mut Pipelines<RenderPipelineKey, Arc<RenderPipelineState>> {
+fn renders<B: Backend>(
+    context: &mut ContextState<B>,
+) -> &mut Pipelines<RenderPipelineKey, Arc<RenderPipelineState<B>>> {
     &mut context.render_pipelines
 }
 
-impl Model {
+impl<B: Backend> Model<B> {
     pub(crate) fn destroy_render_pipeline(
         &mut self,
         key: ContextKey,
         pipeline: RenderPipelineKey,
-    ) -> Released<Render> {
+    ) -> Released<B, Rendered<B>> {
         self.destroy_pipeline((key, renders), pipeline)
     }
 }

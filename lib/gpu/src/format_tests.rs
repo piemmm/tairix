@@ -91,3 +91,19 @@ fn a_copy_moves_one_aspect_at_a_time() {
         assert!(format.texel_bytes().is_power_of_two(), "{format:?}");
     }
 }
+
+#[test]
+fn aspects_come_apart_plane_by_plane() {
+    let planes = |aspects: Aspects| aspects.planes().collect::<Vec<_>>();
+    assert!(planes(Aspects::NONE).is_empty());
+    assert_eq!(planes(Aspects::COLOR), [Aspects::COLOR]);
+    assert_eq!(
+        planes(Aspects::DEPTH_STENCIL),
+        [Aspects::DEPTH, Aspects::STENCIL]
+    );
+    let every = Aspects::COLOR.with(Aspects::DEPTH_STENCIL);
+    assert_eq!(
+        planes(every),
+        [Aspects::COLOR, Aspects::DEPTH, Aspects::STENCIL]
+    );
+}

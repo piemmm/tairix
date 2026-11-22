@@ -48,6 +48,16 @@ tairix_util::flags! {
 impl Aspects {
     /// Depth and stencil.
     pub const DEPTH_STENCIL: Self = Self::DEPTH.with(Self::STENCIL);
+
+    /// Each plane it holds, alone.
+    pub(crate) fn planes(self) -> impl Iterator<Item = Self> {
+        let mut rest = self.bits();
+        core::iter::from_fn(move || {
+            let plane = rest & rest.wrapping_neg();
+            rest ^= plane;
+            (plane != 0).then_some(Self::from_bits(plane))
+        })
+    }
 }
 
 /// How a format's texels are encoded, as the software backend reads them.

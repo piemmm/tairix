@@ -3,7 +3,9 @@ use alloc::vec::Vec;
 use tairix_abi::Duration64;
 use tairix_inline::ArrayVec;
 
-use super::{BufferKey, ContextKey, Dispatch, JobId, Model, Point, Request, TimelineKey};
+use super::{BufferKey, ContextKey, JobId, Point, Request, TimelineKey};
+use crate::backend::tests::{NoPool, Test};
+use crate::backend::Backend;
 use crate::command::Command;
 use crate::info::{
     BufferUsage, DeviceInfo, Features, FormatTable, Limits, MemoryHeap, MemoryProperties,
@@ -12,12 +14,15 @@ use crate::info::{
 use crate::room::Room;
 use crate::{Error, Loss};
 
+type Model = super::Model<Test>;
+type Dispatch = super::Dispatch<Test>;
+
 const HOST: u32 = 0;
 const DEVICE_ONLY: u32 = 1;
 
 /// One heap, a host-visible and a device-only memory type, and one transfer
 /// family of `queues` queues on an engine holding `depth` jobs.
-fn model(queues: u32, depth: usize) -> Model {
+fn info(queues: u32) -> DeviceInfo {
     let mut heaps = ArrayVec::new();
     let _ = heaps.try_push(MemoryHeap {
         size: 1 << 20,
@@ -37,7 +42,7 @@ fn model(queues: u32, depth: usize) -> Model {
         capabilities: QueueCapabilities::TRANSFER,
         queues,
     });
-    let info = DeviceInfo {
+    DeviceInfo {
         heaps,
         memory_types,
         queue_families,
@@ -49,8 +54,18 @@ fn model(queues: u32, depth: usize) -> Model {
         capabilities: ArrayVec::new(),
         features: Features::NONE,
         formats: FormatTable::from_fn(|_| crate::FormatFeatures::NONE),
-    };
-    Model::new(info, &[depth]).expect("a well-formed device")
+    }
+}
+
+/// [`info`]'s device over the test backend.
+fn model(queues: u32, depth: usize) -> Model {
+    Model::new(info(queues), &[depth], NoPool).expect("a well-formed device")
+}
+
+/// [`info`]'s device over the software backend's pool.
+fn software(queues: u32, depth: usize) -> super::Model<crate::software::Software> {
+    let pool = crate::software::dispatch::Workspaces::new().expect("a pool");
+    super::Model::new(info(queues), &[depth], pool).expect("a well-formed device")
 }
 
 /// `size` bytes of `memory_type` made and filed, as a context allocates.
@@ -61,7 +76,9 @@ fn allocate(
     memory_type: u32,
 ) -> Result<super::AllocationKey, Error> {
     let (charge, overhead) = model.charge_allocation(context, size, memory_type)?;
-    let made = crate::memory::Memory::zeroed(size, charge, overhead).and_then(crate::shared);
+    let made = Test
+        .allocate(size, [charge, overhead])
+        .and_then(crate::shared);
     let memory = match made {
         Ok(memory) => memory,
         Err(error) => {
@@ -276,12 +293,12 @@ fn a_value_is_reached_only_once_every_signal_up_to_it_has_landed() {
 
 #[test]
 fn memory_made_for_a_context_released_meanwhile_is_refused_and_given_back() {
-    use crate::memory::{Budget, Memory};
+    use crate::memory::Budget;
     let mut model = model(1, 1);
     let context = model.create_context(None).expect("a context");
     let (charge, overhead) = model.charge_allocation(context, 64, HOST).expect("charged");
     let memory =
-        crate::shared(Memory::zeroed(64, charge, overhead).expect("made")).expect("shared");
+        crate::shared(Test.allocate(64, [charge, overhead]).expect("made")).expect("shared");
     // Released while its memory is made, without the device's lock.
     drop(model.destroy_context(context));
     let held = model.work_heap_taken();
@@ -298,7 +315,7 @@ fn memory_made_for_a_context_released_meanwhile_is_refused_and_given_back() {
     drop(refused);
     assert_eq!(
         held - model.work_heap_taken(),
-        64 + Memory::overhead(64) + super::shared_bytes::<Budget>(),
+        64 + Test::overhead(64) + super::shared_bytes::<Budget>(),
         "the memory, and the budget it alone still held"
     );
 }
@@ -501,10 +518,19 @@ fn a_description_no_context_could_be_served_by_is_refused() {
         bounds,
         no_records,
     ] {
-        assert!(matches!(Model::new(info, &[1]), Err(Error::Malformed)));
+        assert!(matches!(
+            Model::new(info, &[1], NoPool),
+            Err(Error::Malformed)
+        ));
     }
-    assert!(matches!(Model::new(valid(), &[]), Err(Error::Malformed)));
-    assert!(matches!(Model::new(valid(), &[0]), Err(Error::Malformed)));
+    assert!(matches!(
+        Model::new(valid(), &[], NoPool),
+        Err(Error::Malformed)
+    ));
+    assert!(matches!(
+        Model::new(valid(), &[0], NoPool),
+        Err(Error::Malformed)
+    ));
 }
 
 #[test]
@@ -541,7 +567,7 @@ fn work_a_queue_s_family_does_not_run_is_refused() {
         queue_families: families,
         ..model.info().clone()
     };
-    model = Model::new(info, &[1]).expect("a well-formed device");
+    model = Model::new(info, &[1], NoPool).expect("a well-formed device");
     let context = model.create_context(None).expect("a context");
     let target = buffer(&mut model, context);
     let fill = [Command::Fill {
@@ -690,7 +716,7 @@ fn the_room_a_burst_of_contexts_made_stays_charged_to_the_heap_and_small() {
 
 #[test]
 fn a_pipeline_refused_at_its_limit_still_looks_at_the_working_memory() {
-    let mut model = model(1, 1);
+    let mut model = software(1, 1);
     let rich = model.create_context(Some(u64::MAX)).expect("a context");
     let own = {
         let probe = model.create_context(Some(u64::MAX)).expect("a probe");
@@ -704,10 +730,10 @@ fn a_pipeline_refused_at_its_limit_still_looks_at_the_working_memory() {
         words: 1 << 12,
         masks: 1,
     };
-    let (plan, released) = model.plan_workspaces(rich, need, 0);
+    let (plan, released) = model.plan_pool(rich, need, 0);
     drop(released);
-    let (hold, released) = model.install_workspaces(plan.expect("planned").make().expect("made"));
-    drop(released);
+    let (hold, grown) = plan.expect("planned").make().expect("made");
+    drop(model.install_pool(grown));
     let taken = model.work_heap_taken();
     // Its pipeline's last holder gone where nothing looks at the pool.
     drop(hold);
@@ -722,21 +748,29 @@ fn a_pipeline_refused_at_its_limit_still_looks_at_the_working_memory() {
 
 #[test]
 fn a_context_is_made_from_working_memory_no_pipeline_holds_before_the_heap_refuses() {
-    let mut model = model(1, 1);
+    let mut model = software(1, 1);
     let context = model.create_context(Some(u64::MAX)).expect("a context");
     let need = crate::software::dispatch::Need {
         words: 1 << 17,
         masks: 1,
     };
-    let (plan, released) = model.plan_workspaces(context, need, 0);
+    let (plan, released) = model.plan_pool(context, need, 0);
     drop(released);
-    let (hold, released) = model.install_workspaces(plan.expect("planned").make().expect("made"));
-    drop(released);
-    let hold = hold.expect("held");
+    let (hold, grown) = plan.expect("planned").make().expect("made");
+    drop(model.install_pool(grown));
     // All the heap but what the filler's own entry takes and a little, less
     // than a context's state.
     let free = (1 << 20) - model.work_heap_taken();
-    let _filler = allocate(&mut model, context, free - 512, HOST).expect("the heap but a little");
+    let (charge, overhead) = model
+        .charge_allocation(context, free - 512, HOST)
+        .expect("charged");
+    let memory = crate::software::memory::Memory::zeroed(free - 512, charge, overhead)
+        .and_then(crate::shared)
+        .expect("made");
+    let _filler = model
+        .file_allocation(context, memory, HOST, free - 512)
+        .map_err(|(error, _)| error)
+        .expect("the heap but a little");
     assert!((1 << 20) - model.work_heap_taken() < 512);
     // The hold goes with nothing looking at the pool after it.
     drop(hold);

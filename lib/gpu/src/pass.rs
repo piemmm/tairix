@@ -7,16 +7,16 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use crate::binding::{BindSet, BindSetState};
+use crate::backend::Backend;
+use crate::binding::{identity, BindSet, BindSetState, Touched};
 use crate::command::{buffer, push_words, set_keys, Command, Op, Refused};
 use crate::device::{owned, Buffer, CommandBuffer};
 use crate::format::{Aspects, Format, FormatFeatures};
 use crate::image::{ClearValue, ImageUsage, ViewDimension};
 use crate::info::{BufferUsage, DeviceInfo};
-use crate::memory::{overlaps, Memory};
 use crate::model::{BindSetKey, BufferKey, ContextState, RenderPipelineKey, ViewKey};
 use crate::objects::ImageView;
-use crate::render::{Render, RenderPipeline, RenderPipelineState};
+use crate::render::{FixedFunction, RenderPipeline, RenderPipelineState};
 use crate::resource::ViewState;
 use crate::{Error, MAX_DISPATCH_SETS, MAX_PUSH_BYTES, MAX_SUBMISSION_COMMANDS};
 
@@ -260,8 +260,8 @@ impl Counts {
 /// Where an indirect draw's records lie in their memory, proved within it:
 /// `count` from byte `start`, `stride` apart, the `span` bytes from `start`
 /// they reach.
-pub(crate) struct Records {
-    pub(crate) memory: Arc<Memory>,
+pub(crate) struct Records<B: Backend> {
+    pub(crate) memory: Arc<B::Memory>,
     pub(crate) start: u64,
     pub(crate) span: u64,
     pub(crate) count: u32,
@@ -270,9 +270,9 @@ pub(crate) struct Records {
 
 /// How many vertices and instances a checked draw makes: once, as recorded,
 /// or once for each of its records, read as the draw runs.
-pub(crate) enum Counted {
+pub(crate) enum Counted<B: Backend> {
     Direct(Counts),
-    Indirect(Records),
+    Indirect(Records<B>),
 }
 
 /// A draw as recorded, its objects named by key.
@@ -532,45 +532,45 @@ impl Drawer<'_> {
 }
 
 /// A pass's colour attachment, checked, and its load.
-pub(crate) struct Target {
-    pub(crate) view: Arc<ViewState>,
-    pub(crate) resolve: Option<Arc<ViewState>>,
+pub(crate) struct Target<B: Backend> {
+    pub(crate) view: Arc<ViewState<B>>,
+    pub(crate) resolve: Option<Arc<ViewState<B>>>,
     pub(crate) load: Load,
 }
 
 /// A pass's depth-stencil attachment, checked, and its aspects' loads.
-pub(crate) struct DepthTarget {
-    pub(crate) view: Arc<ViewState>,
+pub(crate) struct DepthTarget<B: Backend> {
+    pub(crate) view: Arc<ViewState<B>>,
     pub(crate) depth: Load,
     pub(crate) stencil: Load,
 }
 
 /// Where a draw's vertex attributes or indices are read from: `size` bytes
 /// of a memory from byte `start`.
-pub(crate) struct Source {
-    pub(crate) memory: Arc<Memory>,
+pub(crate) struct Source<B: Backend> {
+    pub(crate) memory: Arc<B::Memory>,
     pub(crate) start: u64,
     pub(crate) size: u64,
 }
 
 /// A draw, checked.
-pub(crate) struct DrawWork {
-    pub(crate) pipeline: Arc<RenderPipelineState>,
-    pub(crate) sets: Vec<Arc<BindSetState>>,
+pub(crate) struct DrawWork<B: Backend> {
+    pub(crate) pipeline: Arc<RenderPipelineState<B>>,
+    pub(crate) sets: Vec<Arc<BindSetState<B>>>,
     pub(crate) push: Option<Arc<Vec<u32>>>,
-    pub(crate) vertex_buffers: Vec<Source>,
-    pub(crate) index: Option<(Source, IndexFormat)>,
+    pub(crate) vertex_buffers: Vec<Source<B>>,
+    pub(crate) index: Option<(Source<B>, IndexFormat)>,
     pub(crate) viewport: Viewport,
     pub(crate) scissor: Rect,
     pub(crate) stencil_reference: u8,
     pub(crate) blend_constant: [f32; 4],
-    pub(crate) count: Counted,
+    pub(crate) count: Counted<B>,
 }
 
-impl DrawWork {
+impl<B: Backend> DrawWork<B> {
     /// Each span of memory it reads as vertices, indices or records.
-    fn sources(&self) -> impl Iterator<Item = (&Arc<Memory>, Range<u64>)> {
-        fn read(source: &Source) -> (&Arc<Memory>, Range<u64>) {
+    fn sources(&self) -> impl Iterator<Item = (&Arc<B::Memory>, Range<u64>)> {
+        fn read<B: Backend>(source: &Source<B>) -> (&Arc<B::Memory>, Range<u64>) {
             (
                 &source.memory,
                 source.start..source.start.saturating_add(source.size),
@@ -593,21 +593,21 @@ impl DrawWork {
 
 /// A pass checked whole: its attachments of one extent and sample count, its
 /// area within them, and each draw's pipeline rendering to them.
-pub(crate) struct PassWork {
-    pub(crate) colour: Vec<Target>,
-    pub(crate) depth_stencil: Option<DepthTarget>,
+pub(crate) struct PassWork<B: Backend> {
+    pub(crate) colour: Vec<Target<B>>,
+    pub(crate) depth_stencil: Option<DepthTarget<B>>,
     pub(crate) area: Rect,
     pub(crate) samples: u32,
-    pub(crate) draws: Vec<DrawWork>,
+    pub(crate) draws: Vec<DrawWork<B>>,
 }
 
-impl core::fmt::Debug for PassWork {
+impl<B: Backend> core::fmt::Debug for PassWork<B> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PassWork").finish_non_exhaustive()
     }
 }
 
-impl PassWork {
+impl<B: Backend> PassWork<B> {
     /// The host bytes it holds while queued, its own included.
     pub(crate) fn held_bytes(&self) -> u64 {
         use tairix_util::fallible::held;
@@ -636,11 +636,11 @@ impl PassWork {
 /// An attachment's image and the one level and layer it renders to, of a
 /// two-dimensional view made for `usage`, in a format the device states the
 /// use and its sample count of.
-fn attachment<'c>(
-    (info, context): (&DeviceInfo, &'c ContextState),
+fn attachment<'c, B: Backend>(
+    (info, context): (&DeviceInfo, &'c ContextState<B>),
     key: ViewKey,
     (usage, feature): (ImageUsage, FormatFeatures),
-) -> Result<&'c Arc<ViewState>, Error> {
+) -> Result<&'c Arc<ViewState<B>>, Error> {
     let view = context.views.get(key).ok_or(Error::Stale)?;
     if !view.image.desc.usage.contains(usage) {
         return Err(Error::Usage);
@@ -665,7 +665,7 @@ fn attachment<'c>(
 }
 
 /// The extent and sample count of an attachment.
-fn framed(view: &ViewState) -> (u32, u32, u32) {
+fn framed<B: Backend>(view: &ViewState<B>) -> (u32, u32, u32) {
     let extent = view.image.desc.level_extent(view.desc.range.base_level);
     (extent.width, extent.height, view.image.desc.samples)
 }
@@ -678,31 +678,34 @@ fn check_load(load: Load, format: Format) -> Result<(), Error> {
     }
 }
 
-/// The bytes of its memory an attachment's one level and layer takes.
-fn span_of(view: &ViewState) -> Range<u64> {
-    let mut span = 0..0;
-    view.spans(|taken| span = taken);
-    span
+/// What an attachment's one level and layer holds of its image.
+pub(crate) fn touched<B: Backend>(view: &ViewState<B>) -> Touched {
+    let image = &view.image;
+    let range = &view.desc.range;
+    Touched {
+        memory: identity(&image.memory),
+        placement: image.offset..image.offset.saturating_add(image.size),
+        image: identity(image),
+        aspects: range.aspects,
+        level: range.base_level,
+        layer: range.base_layer,
+    }
 }
 
 /// A pass's attachments checked: its colour targets, its depth-stencil, and
 /// their one extent and sample count.
-type Attachments = (Vec<Target>, Option<DepthTarget>, (u32, u32, u32));
-
-/// Byte spans of memories: what a pass's attachments' levels and layers
-/// take.
-type Spans = Vec<(Arc<Memory>, Range<u64>)>;
+type Attachments<B> = (Vec<Target<B>>, Option<DepthTarget<B>>, (u32, u32, u32));
 
 /// The colour and depth-stencil attachments `record` names, each made for
 /// its use and of one extent and sample count with the rest, and that extent
 /// and sample count.
-fn attachments(
+fn attachments<B: Backend>(
     info: &DeviceInfo,
-    context: &ContextState,
+    context: &ContextState<B>,
     record: &PassRecord,
-) -> Result<Attachments, Error> {
+) -> Result<Attachments<B>, Error> {
     let mut frame = None;
-    let mut agree = |view: &ViewState| -> Result<(), Error> {
+    let mut agree = |view: &ViewState<B>| -> Result<(), Error> {
         let framed = framed(view);
         match frame.replace(framed) {
             Some(held) if held != framed => Err(if held.2 == framed.2 {
@@ -768,7 +771,11 @@ fn attachments(
 
 /// Refuse a resolve of `view` into `destination` but from four samples to
 /// one, of one extent and format, in a format the device resolves.
-fn resolvable(info: &DeviceInfo, view: &ViewState, destination: &ViewState) -> Result<(), Error> {
+fn resolvable<B: Backend>(
+    info: &DeviceInfo,
+    view: &ViewState<B>,
+    destination: &ViewState<B>,
+) -> Result<(), Error> {
     let (width, height, samples) = framed(view);
     let (into_width, into_height, into_samples) = framed(destination);
     if samples != 4 || into_samples != 1 {
@@ -787,68 +794,64 @@ fn resolvable(info: &DeviceInfo, view: &ViewState, destination: &ViewState) -> R
     Ok(())
 }
 
-/// The memory each attachment's level and layer lies in, colour targets'
-/// and their resolves' first and the depth-stencil's last, refusing any that
-/// overlaps another.
-fn written_spans(colour: &[Target], depth_stencil: Option<&DepthTarget>) -> Result<Spans, Error> {
-    let mut spans: Spans = Vec::new();
-    spans
+/// What each attachment holds of its image, colour targets' and their
+/// resolves' first and the depth-stencil's last, refusing any that meets
+/// another.
+fn written<B: Backend>(
+    colour: &[Target<B>],
+    depth_stencil: Option<&DepthTarget<B>>,
+) -> Result<Vec<Touched>, Error> {
+    let mut written: Vec<Touched> = Vec::new();
+    written
         .try_reserve_exact(colour.len() * 2 + 1)
         .map_err(|_| Error::OutOfMemory)?;
     for target in colour {
-        spans.push((Arc::clone(&target.view.image.memory), span_of(&target.view)));
+        written.push(touched(&target.view));
         if let Some(destination) = &target.resolve {
-            spans.push((Arc::clone(&destination.image.memory), span_of(destination)));
+            written.push(touched(destination));
         }
     }
     if let Some(depth) = depth_stencil {
-        spans.push((Arc::clone(&depth.view.image.memory), span_of(&depth.view)));
+        written.push(touched(&depth.view));
     }
-    for (at, (memory, span)) in spans.iter().enumerate() {
-        let twice = spans
+    for (at, attachment) in written.iter().enumerate() {
+        let twice = written
             .get(..at)
             .unwrap_or(&[])
             .iter()
-            .any(|(other, held)| Arc::ptr_eq(other, memory) && overlaps(held, span));
+            .any(|other| other.meets(attachment));
         if twice {
             return Err(Error::Overlap);
         }
     }
-    Ok(spans)
+    Ok(written)
 }
-
-/// A span of a memory a pass writes.
-type Written = (Arc<Memory>, Range<u64>);
 
 /// Refuse the first of `draws` reaching what its pass writes: a descriptor
 /// its stages see, or the vertices, indices or records it reads, reaching an
-/// attachment's level and layer in `written` — and a descriptor its stages may
-/// write reaching the depth-stencil attachment's, where only `tested`.
-fn refuse_reaches(
-    draws: &[DrawWork],
-    (written, tested): (&[Written], Option<&Written>),
+/// attachment in `written` — and a descriptor its stages may write reaching
+/// the depth-stencil attachment, where only `tested`.
+fn refuse_reaches<B: Backend>(
+    draws: &[DrawWork<B>],
+    (written, tested): (&[Touched], Option<&Touched>),
 ) -> Result<(), Refused> {
-    let mut before: &[Arc<BindSetState>] = &[];
+    let mut before: &[Arc<BindSetState<B>>] = &[];
     for (at, draw) in draws.iter().enumerate() {
         let sets_reach = draw.sets.iter().enumerate().any(|(index, set)| {
             // Checked for the draw before, which bound it in the same place.
             if before.get(index).is_some_and(|held| Arc::ptr_eq(held, set)) {
                 return false;
             }
-            let meets = |(memory, span): &Written, writes: bool| {
-                set.memories
-                    .binary_search_by_key(&Arc::as_ptr(memory), Arc::as_ptr)
-                    .ok()
-                    .and_then(|place| u32::try_from(place).ok())
-                    .is_some_and(|place| set.reach.meets(place, span, writes))
-            };
-            written.iter().any(|span| meets(span, false))
-                || tested.is_some_and(|span| meets(span, true))
-        });
-        let buffers_reach = draw.sources().any(|(source, read)| {
             written
                 .iter()
-                .any(|(memory, span)| Arc::ptr_eq(memory, source) && overlaps(&read, span))
+                .any(|attachment| set.reach.meets(attachment, false))
+                || tested.is_some_and(|attachment| set.reach.meets(attachment, true))
+        });
+        let buffers_reach = draw.sources().any(|(source, read)| {
+            let source = identity(source);
+            written
+                .iter()
+                .any(|attachment| attachment.meets_bytes(source, &read))
         });
         if sets_reach || buffers_reach {
             return Err(Refused {
@@ -864,11 +867,11 @@ fn refuse_reaches(
 /// Check a recorded pass against the objects of `context` and the device
 /// `info` describes: a refusal names the pass, at nought, or its draw, from
 /// one.
-pub(crate) fn resolve(
+pub(crate) fn resolve<B: Backend>(
     info: &DeviceInfo,
-    context: &ContextState,
+    context: &ContextState<B>,
     record: &PassRecord,
-) -> Result<Op, Refused> {
+) -> Result<Op<B>, Refused> {
     if record.colour.len() > info.limits.max_color_attachments as usize {
         return Err(Error::TooMany.into());
     }
@@ -884,7 +887,7 @@ pub(crate) fn resolve(
     if !within(area.x, area.width, width) || !within(area.y, area.height, height) {
         return Err(Error::OutOfRange.into());
     }
-    let spans = written_spans(&colour, depth_stencil.as_ref())?;
+    let spans = written(&colour, depth_stencil.as_ref())?;
     let mut draws = Vec::new();
     draws
         .try_reserve_exact(record.draws.len())
@@ -910,7 +913,7 @@ pub(crate) fn resolve(
             && !cleared(depth.stencil, Aspects::STENCIL)
             && !draws
                 .iter()
-                .any(|draw| writes_depth_stencil(&draw.pipeline.stages))
+                .any(|draw| writes_depth_stencil(&draw.pipeline.stages.fixed))
     });
     let reached = match spans.split_last() {
         Some((depth, colour)) if tested_only => (colour, Some(depth)),
@@ -929,7 +932,7 @@ pub(crate) fn resolve(
 }
 
 /// Whether a draw of `render` writes depth or stencil.
-fn writes_depth_stencil(render: &Render) -> bool {
+fn writes_depth_stencil(render: &FixedFunction) -> bool {
     render.depth_stencil.is_some_and(|state| {
         state.depth_write
             || state.stencil.is_some_and(|faces| {
@@ -946,12 +949,12 @@ fn writes_depth_stencil(render: &Render) -> bool {
 /// A draw checked against its pass's attachments: its pipeline renders to
 /// them, its bind sets and push constants are its layout's, its buffers are
 /// made for their use, and its viewport and scissor are within the device's.
-fn check_draw(
+fn check_draw<B: Backend>(
     info: &DeviceInfo,
-    context: &ContextState,
-    (colour, depth_stencil, samples): (&[Target], Option<&DepthTarget>, u32),
+    context: &ContextState<B>,
+    (colour, depth_stencil, samples): (&[Target<B>], Option<&DepthTarget<B>>, u32),
     recorded: &DrawRecord,
-) -> Result<DrawWork, Error> {
+) -> Result<DrawWork<B>, Error> {
     let pipeline = Arc::clone(
         context
             .render_pipelines
@@ -959,7 +962,7 @@ fn check_draw(
             .get(recorded.pipeline)
             .ok_or(Error::Stale)?,
     );
-    let render = &pipeline.stages;
+    let render = &pipeline.stages.fixed;
     let formats_agree = render.targets.len() == colour.len()
         && render
             .targets
@@ -993,7 +996,7 @@ fn check_draw(
     if recorded.push_bytes != layout.push_constants.bytes as usize {
         return Err(Error::Shape);
     }
-    let source = |key: BufferKey, offset: u64, usage: BufferUsage| -> Result<Source, Error> {
+    let source = |key: BufferKey, offset: u64, usage: BufferUsage| -> Result<Source<B>, Error> {
         let held = buffer(context, key, usage)?;
         if offset > held.size {
             return Err(Error::OutOfRange);
@@ -1049,12 +1052,12 @@ fn check_draw(
 /// words into a buffer made for them, whole words apart, a record or more
 /// apart where there are several, within the buffer, and no more of them than
 /// the device reads.
-fn counted(
+fn counted<B: Backend>(
     info: &DeviceInfo,
-    context: &ContextState,
+    context: &ContextState<B>,
     count: &Count,
     indexed: bool,
-) -> Result<Counted, Error> {
+) -> Result<Counted<B>, Error> {
     let (key, offset, count, stride) = match count {
         Count::Direct {
             positions,

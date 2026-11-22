@@ -42,8 +42,17 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GP4 | The pinned first-party chrome past the desktop's passes (GD6): the compositor's per-frame chrome and the furniture painter's draws as build-time SPIR-V, each with its conformance case | done |
 | GP4.1 | The compositor's per-frame chrome as pinned passes: a window's body cut to its shape and laid with the dithered over, its drop shadow at either level and easing between them, and the scaled desktop's resample — the body's rule and the shadow defined once in `lib/raster` for the compositor and the passes | done |
 | GP4.2 | The furniture painter's draws as pinned passes: plates and rounded rectangles, gradients, rings, polygons and strokes, glyph runs and icons, each `lib/raster`'s own primitive | done |
-| GP11 | The device channel: `gpu-v1`, a driver hosting GP2's model for every client process, the context-creation capability, per-context bounds on queued work, the watchdog's one-shot timer, and the IOMMU requirement — landing with the first hardware backend | planned |
+| GP11 | The device channel: `gpu-v1`, a driver hosting GP2's model for every client process, the context-creation capability, per-context bounds on queued work, the watchdog's one-shot timer, and the IOMMU requirement — landing with the first hardware backend | in progress |
+| GP11.1 | The backend seam: `lib/gpu`'s model over a backend, the software device the first; overlap decided by the model, independent of any backend's texel layout | done |
 | GP5 | The Venus backend: a guest Vulkan ICD over virtio-gpu's Venus capset — arbitrary shaders on real host hardware | planned |
+| GP5.1 | virtio shared memory: the capability decoded, its region granted to the node's driver, and mapped and unmapped there a part at a time | planned |
+| GP5.2 | virtio-gpu 3D in `gpu_virtio`: a control queue of many requests in flight, capsets, Venus contexts and their fence rings, blob resources, `SUBMIT_3D`; QEMU built with virglrenderer, its Venus over lavapipe | planned |
+| GP11.2 | The served device, with GP5.3: `gpu-v1`, the runtime hosting the model for every client, `Device::connect`, `GPU_DEVICES`, `CAP_GPU` and `gpucheck`, per-client bounds, and the watchdog | planned |
+| GP5.3 | The Venus backend's core, with GP11.2: the protocol and its replies, bring-up, the device it states, memory, buffers, transfers and job submission | planned |
+| GP11.3 | The IOMMU requirement | blocked: §11 decision 4 |
+| GP5.4 | Compute through Venus: modules, layouts, bind sets, compute pipelines, dispatches; the pinned set held to the software device, in `gpucheck` | planned |
+| GP5.5 | Images, views, samplers, image copies, clears and bindings through Venus | planned |
+| GP5.6 | Render pipelines, passes and draws through Venus | planned |
 | GP6 | Presentation: the swapchain, the accelerated layer path, fullscreen promotion, and the vsync flip | planned |
 | GP7 | `plans/WINTERSUN.md` WS19: the game's 3D view (WS32) — its terrain, entity, particle and light passes — as pinned SPIR-V, offloaded | planned |
 | GP8 | Untrusted-shader admission: `plans/SHADER.md`'s runtime path wired into pipeline creation | planned |
@@ -346,10 +355,12 @@ device has not stated.
   are unordered. **Within a pass** a draw sees an earlier draw's attachment
   writes only through depth, stencil and blending, and the storage writes of a
   pass's draws are unordered within it and seen by every command after it; a
-  draw whose stages see a view or buffer overlapping an attachment the pass
+  draw whose stages see a view or buffer meeting an attachment the pass
   writes, or that reads a byte of one as vertices, indices or records, is
   refused (a depth-stencil attachment the pass only tests may be read, not
-  written). That
+  written). Two views of one image meet where they share a plane, level and
+  layer; an image meets anything else where its placement does, as no backend
+  says where in it its texels lie. That
   is what lets a backend batch a pass's draws and keep its attachments on chip.
   A hardware backend derives the dependencies it needs from each command's
   resources and each entry point's static `Access`, which the validator states.
@@ -646,30 +657,81 @@ process. The design is `docs/src/lib/gpu.md`'s.
   discovered memory and the tables grow on demand; the submission bounds are
   security bounds and do not move (§24.4).
 
-**What GP11 adds**, landing with the first hardware backend (GP5 or GP9),
-since without one there is no device for it to serve:
+**What GP11 adds** lands with the first hardware backend (GP5), since without
+one there is no device for it to serve: the backend seam first (GP11.1), the
+served device with GP5.3 (GP11.2), the IOMMU requirement last (GP11.3).
 
-- **`gpu-v1`**, the device channel: the wire form of GP2's requests, decoded and
-  checked by the driver, which hosts GP2's model for every client process with
-  each client's contexts out of every other's reach.
-- **The context-creation capability** (§9 decision 2, signed off): the driver
-  binds its channel endpoint restricted-sender on it, so the kernel refuses a
-  caller without it at dispatch; it is granted to the first principal that
-  renders on hardware, and lands with that holder.
-- **Per-context bounds on queued work**, so a client cannot fill the driver's
-  memory with submissions waiting on a value nobody signals (§24.3, §26.2).
-- **Lowering charged to its client.** A pipeline's lowering holds up to its
-  fixed budgets' worth of transient memory, outside the device's lock and
-  charged to no context: in one process that is the caller's own memory, but a
-  driver lowering for every client charges it to the requesting context, or
-  bounds a client's concurrent lowerings, so no client spends the driver's
-  memory for every other (§26.2).
-- **The watchdog**: a one-shot timer at the earliest running deadline, tickless
-  (§17.1), whose expiry resets the engine through GP2's reset.
-- **Device address spaces and the IOMMU requirement** (decision 8): a context's
-  resident memory mapped into its own device address space, and a device that
-  is not behind an IOMMU where the platform has one serves no context; where a
-  platform has none, the driver's `README.md` states the limitation.
+**GP11.1 — the backend seam.** The model — contexts, tables, charges, the
+checks, order, timelines, deadlines and loss — is generic over a *backend*:
+what memory is to the device, what each object the model files is to it, and
+how a ready job runs on an engine. The software device is the first backend;
+a hardware backend is its driver's own (§2.22).
+
+- A backend states its `DeviceInfo` and its engines' depths; makes memory,
+  zeroed, and reads and writes the host-visible kinds; states an image's
+  requirements; makes the device's form of each object the model files that
+  it needs one of, from the model's checked description — images, bind sets
+  and pipelines for the software device, and views, texel buffers, samplers,
+  layouts and modules as a hardware backend needs them (GP5.4, GP5.5); runs a
+  ready job and answers its outcome; and resets an engine.
+- **No backend's work is done under the device's lock** — a lowering, a host
+  round trip. What the model checks and charges is had under it, what the
+  backend makes is made with it let go and filed under it; memory and working
+  memory are charged before they are made, as GP2 already makes memory, so
+  neither is made only to be refused after.
+- **Overlap is the model's, whatever a backend's texel layout.** Two views of
+  one image meet where their aspects, levels and layers do; an image meets
+  anything else where its placement — its offset and the size its requirements
+  state — meets the other's bytes. Every backend therefore refuses the same
+  submissions, and no refusal depends on the software device's layout.
+- What only the software device has — word memory and its locks, its texel
+  layout, lowering and its programs, working memory and its pool, its worker —
+  is the software backend's own, behind the seam. No public surface changes.
+
+**GP11.2 — the served device**, landing with GP5.3:
+
+- **`gpu-v1`** (`lib/abi/src/gpu.rs`): one request for each method of the
+  seam, framed as every channel is — a magic, `GPU_VERSION_V1` and an op, a
+  status word answering — its bulk bytes (a module's words, an update's bytes,
+  a command stream, what a host-visible memory is read or written) in one
+  region the client creates and grants at `Open`, of a size the channel
+  bounds. Its decoders are total and fuzzed.
+- **The runtime** (`lib/gpu`'s `serve`) hosts one device for every client
+  process. A client names its contexts by the ids the runtime answered it and
+  its objects by their keys within them; the runtime finds the context among
+  the caller's own, the caller its kernel-attested `proc_id`, before anything
+  else, and the model's tables check every key, so no forged name reaches
+  another client's context. A module is admitted again where it arrives
+  (§1.2). A client's exit, watched from its `Open`, destroys every context it
+  held.
+- **A wait is a deferred reply**: the runtime keeps the ticket and answers when
+  the value lands, the context is lost or destroyed, or the timeout passes.
+- **`Device::connect`** is the client: the same `Device`, its handles
+  forwarding to the served device, so a consumer tells a served device from the
+  software one only by what it states (§0 decision 5). **`GPU_DEVICES`**, a
+  System Information query, lists each served device's channel, ungated as
+  `AUDIO_DEVICES` is: which GPUs a machine has is no principal's secret, and the
+  channel refuses a caller without `CAP_GPU`.
+- **`CAP_GPU`** (§9 decision 2): the driver binds its device channel
+  restricted-sender on it, so the kernel refuses a caller without it at
+  dispatch. Its first holder is `gpucheck` (`userland/apps/gpucheck`), run from
+  a text session as `blendcheck` is, which runs the same work on each served
+  device and on the software device and answers where they differ.
+- **Per-client bounds**: at most `MAX_CLIENT_CONTEXTS` contexts a client, a
+  fixed containment bound; each context's limit set by the runtime, derived
+  from the device's heaps; everything a context queues charged to that limit
+  (§2); and a client's requests in flight bounded by the kernel's per-sender
+  lane (§24.3, §26.2).
+- **Checking charged to its client.** A module's admission and whatever a
+  backend makes of it before a pipeline is filed are charged to the requesting
+  context, so no client spends the driver's memory for every other (§26.2).
+- **The watchdog** is the serve loop's own deadline: its wait is bounded by the
+  earliest running job's, tickless (§17.1), and a deadline passed resets that
+  job's engine through GP2's reset.
+
+**GP11.3 — the IOMMU requirement** (decision 8): a device that no IOMMU
+confines, on a platform with one, serves no context; where a platform has
+none, the driver's `README.md` states the limitation.
 
 ## 3. GP1 / GP5 / GP9 — the backends
 
@@ -687,6 +749,48 @@ on the host's real driver. The guest side is therefore a Vulkan ICD — large bu
 what makes "arbitrary shaders on real hardware" reachable on QEMU without years
 of per-chip work, and it is why decision 3 chose Vulkan's object model: the
 backend is a serialisation of the seam, not a translation of it.
+
+GP5's pieces, in the order they land:
+
+- **GP5.1 — virtio shared memory.** virtio's shared-memory capability
+  (`cfg_type` 8: an id, a BAR, a 64-bit offset and length) is decoded where the
+  others are and its region granted to the node's driver, mapped write-back
+  since a virtio shared-memory region is memory. The driver maps and unmaps
+  parts of it as it needs them, so a region larger than its device window is
+  used a part at a time, and a part is reused only once its unmap is done.
+  virtio-gpu's host-visible region (id 1) is where a host-visible blob lies.
+- **GP5.2 — virtio-gpu 3D.** The control queue carries many requests at once,
+  each answered in its own time, so a long fence never holds the display path
+  back. The driver reads the capsets; creates contexts initialised with
+  Venus's, each with fence rings of its own; makes blob resources, host-made
+  and mappable, and maps them into the host-visible region; and submits
+  command streams (`SUBMIT_3D`), a fenced one answered when its work is done.
+  QEMU's device is `virtio-gpu-gl-pci` with Venus, blobs and a host-visible
+  region; its host Vulkan driver is lavapipe, so a vertical needs no GPU and
+  draws the same on every host. `tools/ci/install-qemu.sh` builds QEMU with
+  virglrenderer and OpenGL.
+- **GP5.3 — the Venus backend's core**, with GP11.2: the protocol's encoder and its
+  reply stream, at the versions the capset states; bring-up — an instance, the
+  host's physical device, and for each context a device and its queues in a
+  virtio-gpu context of its own, so the host keeps contexts apart as GP2 does
+  and a lost context is let go by destroying its virtio-gpu context; the
+  `DeviceInfo` it states, the host's statement narrowed to what the seam names
+  and held to its fixed bounds; memory, device-local and host-visible, the
+  latter a blob in the host-visible region; buffers; copies, fills and
+  updates; and each job one command buffer, each command after a barrier
+  making everything before it visible to it, submitted with the fence that
+  answers its completion.
+- **GP5.4 — compute**: modules, set and pipeline layouts, bind sets, compute
+  pipelines specialised as the seam says, and dispatches; an indirect
+  dispatch's counts checked on the device by a pinned first-party pass before
+  the dispatch reads them, one past the device's losing the context as on the
+  software device (§1.2). The host's second robustness level is required: a
+  host without it serves no context. The pinned set runs through Venus and is
+  held to the software device to the bit, in `gpucheck`.
+- **GP5.5 — images, views and samplers**, their copies, clears and bindings.
+- **GP5.6 — render pipelines, passes and draws**, direct and indirect, through
+  dynamic rendering, an indirect draw's records checked on the device as a
+  dispatch's counts are.
 
 The alternatives are named and refused for this role. **virgl** carries a
 Gallium/TGSI-flavoured stream and would make the guest speak a GL-shaped
@@ -1215,6 +1319,19 @@ Each needs sign-off before the item that depends on it; none is assumed.
   capability is refused at dispatch; queued work per context is bounded; the
   watchdog's timer resets an engine while every other context survives; a
   device not behind an IOMMU where the platform has one serves no context.
+  - **GP11.1**: the software device's tests pass through the seam unchanged
+    but where an overlap is now decided by placement and subresource, a view
+    of another level or layer of an attachment's image admitted and an image
+    placed over it refused; over the software backend and a test backend of
+    another texel layout, what a binding reaches decides the same and an image
+    is placed by each backend's own requirements; no object's making holds the
+    device's lock.
+  - **GP11.2**: a client names no context or object of another client however
+    it forges an id; a refused request changes nothing; a waiting client wakes
+    when its value lands, its context is lost or destroyed, or its timeout
+    passes; a client's exit releases everything it held; every decoder is
+    fuzzed and total; `Device::connect` runs the seam's tests against a
+    served device and agrees with the software device on every one.
 - **GP3**: every seam method has a software implementation and a host test; a
   program compiled against the seam runs unchanged with no device present.
   - **GP3.1**: every format round-trips its texels; images, views and copies
@@ -1267,6 +1384,16 @@ Each needs sign-off before the item that depends on it; none is assumed.
   reference within its stated tolerance; a 2D-only device degrades to software
   rendering with accelerated transfer and flip, and *that* path is tested, not
   assumed.
+  - **GP5.1**: a shared-memory region is granted only to its node's driver, a
+    part past it is refused, a part is reused only once unmapped, and what one
+    mapping writes another reads; on QEMU's host-visible region.
+  - **GP5.2**: requests answered out of order each reach their own waiter; a
+    long fence holds no display request back; contexts, blobs and their
+    mappings are made and let go against QEMU's Venus device.
+  - **GP5.3**: the encoder's output matches the protocol byte for byte for
+    every command it writes; a served device's copies, fills and updates
+    through Venus equal the software device's; a lost context's virtio-gpu
+    context is destroyed and every other context goes on.
 - **GP8**: a hostile module is refused or contained; a compromised compiler
   sandbox can reach nothing; the fuzz corpus is clean (`plans/SHADER.md`).
 - **Differential**: a frame through the seam matches the direct software path
@@ -1311,3 +1438,12 @@ Each needs sign-off before the item that depends on it; none is assumed.
    use.** Compute is in the seam from GP3 because the renderer needs it;
    publishing it to third parties widens the attack surface and is a separate
    decision.
+4. **How a GPU driver learns its device is confined (GP11.3).** The kernel
+   hands no driver a function an IOMMU present for it cannot confine, but
+   admits as untranslated one that no unit covers, which a platform with units
+   may still have. Decision 8 needs the driver to tell those apart from a
+   platform with no unit at all, while `plans/IOMMU.md` decision 5 holds that a
+   driver cannot tell a translated node from an untranslated one and must not
+   care. Either the kernel states a confinement fact a GPU driver reads, or it
+   refuses a GPU's untranslated function on a platform with units itself; the
+   choice is the user's.

@@ -15,18 +15,18 @@ use tairix_inline::ArrayVec;
 use tairix_rt::sync::Condvar;
 use tairix_util::fallible;
 
+use crate::backend::{Backend, Grown, Lease, Need, Plan, Pool};
 use crate::binding::{BindSetLayoutState, BindSetState, PipelineLayoutState};
 use crate::command::{resolve, Command, Op};
 use crate::info::{
     BufferUsage, DeviceInfo, MemoryProperties, QueueCapabilities, MAX_MEMORY_HEAPS,
     MAX_QUEUE_FAMILIES,
 };
-use crate::memory::{Budget, Charge, Held, Memory, MemoryUse};
+use crate::memory::{Budget, Charge, Held, MemoryUse};
 use crate::pipeline::ComputePipelineState;
 use crate::render::RenderPipelineState;
 use crate::resource::{BufferViewState, ImageState, SamplerState, ViewState};
 use crate::room::{Charged, Table};
-use crate::software::dispatch::{Grown, Hold, Need, Plan, Workspace, Workspaces};
 use crate::{
     Error, Loss, SubmitError, MAX_SUBMISSION_BUFFERS, MAX_SUBMISSION_COMMANDS,
     MAX_SUBMISSION_POINTS,
@@ -104,15 +104,15 @@ pub(crate) const fn shared_bytes<T>() -> u64 {
     (size_of::<T>() + 2 * size_of::<usize>()) as u64
 }
 
-pub(crate) struct AllocationState {
-    pub(crate) memory: Arc<Memory>,
+pub(crate) struct AllocationState<B: Backend> {
+    pub(crate) memory: Arc<B::Memory>,
     pub(crate) memory_type: u32,
     pub(crate) size: u64,
 }
 
 #[derive(Debug)]
-pub(crate) struct BufferState {
-    pub(crate) memory: Arc<Memory>,
+pub(crate) struct BufferState<B: Backend> {
+    pub(crate) memory: Arc<B::Memory>,
     pub(crate) offset: u64,
     pub(crate) size: u64,
     pub(crate) usage: BufferUsage,
@@ -206,26 +206,26 @@ pub(crate) struct QueueState {
 
 /// A context: its memory budget, whether it was lost, a table for each kind
 /// of object it makes, its queued and running jobs, and its queues.
-pub(crate) struct ContextState {
+pub(crate) struct ContextState<B: Backend> {
     pub(crate) budget: Arc<Budget>,
     lost: Option<Loss>,
-    pub(crate) allocations: Table<AllocationKey, AllocationState>,
+    pub(crate) allocations: Table<AllocationKey, AllocationState<B>>,
     /// Allocations charged and not yet filed, whose entries `allocations`
     /// keeps room for.
     allocating: usize,
-    pub(crate) buffers: Table<BufferKey, Arc<BufferState>>,
-    pub(crate) images: Table<ImageKey, Arc<ImageState>>,
-    pub(crate) views: Table<ViewKey, Arc<ViewState>>,
-    pub(crate) buffer_views: Table<BufferViewKey, Arc<BufferViewState>>,
+    pub(crate) buffers: Table<BufferKey, Arc<BufferState<B>>>,
+    pub(crate) images: Table<ImageKey, Arc<ImageState<B>>>,
+    pub(crate) views: Table<ViewKey, Arc<ViewState<B>>>,
+    pub(crate) buffer_views: Table<BufferViewKey, Arc<BufferViewState<B>>>,
     pub(crate) samplers: Table<SamplerKey, Arc<SamplerState>>,
     pub(crate) bind_set_layouts: Table<BindSetLayoutKey, Arc<BindSetLayoutState>>,
-    pub(crate) bind_sets: Table<BindSetKey, Arc<BindSetState>>,
+    pub(crate) bind_sets: Table<BindSetKey, Arc<BindSetState<B>>>,
     pub(crate) pipeline_layouts: Table<PipelineLayoutKey, Arc<PipelineLayoutState>>,
     pub(crate) shader_modules: Table<ShaderModuleKey, Arc<crate::binding::ShaderModuleState>>,
-    pub(crate) compute_pipelines: Pipelines<ComputePipelineKey, Arc<ComputePipelineState>>,
-    pub(crate) render_pipelines: Pipelines<RenderPipelineKey, Arc<RenderPipelineState>>,
+    pub(crate) compute_pipelines: Pipelines<ComputePipelineKey, Arc<ComputePipelineState<B>>>,
+    pub(crate) render_pipelines: Pipelines<RenderPipelineKey, Arc<RenderPipelineState<B>>>,
     timelines: Table<TimelineKey, TimelineState>,
-    jobs: Table<JobKey, Job>,
+    jobs: Table<JobKey, Job<B>>,
     queues: Vec<QueueState>,
     /// Itself and its queues' list.
     _state: Charge,
@@ -234,7 +234,7 @@ pub(crate) struct ContextState {
 }
 
 /// Which of a context's tables a request files its object in.
-pub(crate) type Pick<K, V> = fn(&mut ContextState) -> &mut Table<K, V>;
+pub(crate) type Pick<B, K, V> = fn(&mut ContextState<B>) -> &mut Table<K, V>;
 
 /// A context's pipelines of one kind, and how many it has planned and not
 /// yet filed, which the table keeps room for.
@@ -244,9 +244,13 @@ pub(crate) struct Pipelines<K, V> {
 }
 
 /// Which kind of pipeline a request makes.
-pub(crate) type PickPipelines<K, V> = fn(&mut ContextState) -> &mut Pipelines<K, V>;
+pub(crate) type PickPipelines<B, K, V> = fn(&mut ContextState<B>) -> &mut Pipelines<K, V>;
 
-impl ContextState {
+/// What the first phase of making a pipeline answers: what the pool lacks
+/// of it and its charge, or why it has none; and what the pool let go.
+pub(crate) type PipelinePlan<B> = (Result<(Plan<B>, Charge), Error>, Grown<B>);
+
+impl<B: Backend> ContextState<B> {
     fn live(&self) -> Result<(), Error> {
         self.lost.map_or(Ok(()), |loss| Err(Error::Lost(loss)))
     }
@@ -272,8 +276,8 @@ fn release(timelines: &mut Table<TimelineKey, TimelineState>, points: &[(Timelin
 
 /// A submission's work, and the charge for the host memory it and its
 /// dispatches' tables keep while it is queued and running.
-pub(crate) struct Work {
-    pub(crate) ops: Vec<Op>,
+pub(crate) struct Work<B: Backend> {
+    pub(crate) ops: Vec<Op<B>>,
     _charge: Charge,
 }
 
@@ -282,36 +286,32 @@ type Points = Vec<(TimelineKey, u64)>;
 
 /// Work queued on one of a context's queues, with what it waits for and
 /// signals.
-pub(crate) struct Job {
+pub(crate) struct Job<B: Backend> {
     queue: usize,
-    ops: Arc<Work>,
+    ops: Arc<Work<B>>,
     waits: Points,
     /// Its own signals, then its queue's fence.
     signals: Points,
     span: u64,
     deadline: Option<u64>,
-    /// The working memory its dispatches need of each participant.
-    need: Need,
+    /// What its pipelines need of the device's pool.
+    need: Need<B>,
 }
 
 /// The host bytes a job keeps queued, its `points` waited for and signalled
-/// among them, the tables of whichever of its commands makes the most as it
-/// runs on a device of `participants`, as one runs at a time, and the most
-/// placements any of its dispatches takes, as they share them. Its own entry
-/// and its signals' are the room of the tables and queues they join.
-fn job_bytes(ops: &Vec<Op>, (waits, signals): (&Points, &Points), participants: usize) -> u64 {
-    let most = |bytes: fn(&Op, usize) -> u64| {
-        ops.iter()
-            .map(|op| bytes(op, participants))
-            .max()
-            .unwrap_or(0)
-    };
+/// among them, and what its run makes on a device whose pool is `pool`. Its
+/// own entry and its signals' are the room of the tables and queues they
+/// join.
+fn job_bytes<B: Backend>(
+    pool: &B::Pool,
+    ops: &Vec<Op<B>>,
+    (waits, signals): (&Points, &Points),
+) -> u64 {
     ops.iter()
         .map(Op::held_bytes)
         .chain([
-            most(Op::run_bytes),
-            most(Op::place_bytes),
-            shared_bytes::<Work>(),
+            B::run_bytes(pool, ops),
+            shared_bytes::<Work<B>>(),
             fallible::held(ops),
             fallible::held(waits),
             fallible::held(signals),
@@ -340,13 +340,13 @@ struct Engine {
 }
 
 /// A job handed to an engine to run.
-pub(crate) struct Dispatch {
+pub(crate) struct Dispatch<B: Backend> {
     pub(crate) engine: usize,
     pub(crate) job: JobId,
-    pub(crate) ops: Arc<Work>,
+    pub(crate) ops: Arc<Work<B>>,
     pub(crate) deadline: u64,
-    /// The workspaces its dispatches run in, given back when it is done.
-    pub(crate) workspaces: Vec<Workspace>,
+    /// What it borrows of the pool, given back when it is done.
+    pub(crate) lease: Lease<B>,
 }
 
 /// What a submission asks for, by key.
@@ -364,17 +364,17 @@ pub(crate) enum Point {
     Pending(Arc<Condvar>),
 }
 
-pub(crate) struct Model {
+pub(crate) struct Model<B: Backend> {
     info: DeviceInfo,
     heaps: ArrayVec<Arc<Budget>, MAX_MEMORY_HEAPS>,
     engines: ArrayVec<Engine, MAX_QUEUE_FAMILIES>,
     /// Each context's state, apart, so a slot a released one leaves keeps
     /// little: the table's room is the device's, charged to the heap.
-    contexts: Table<ContextKey, Box<ContextState>>,
-    workspaces: Workspaces,
+    contexts: Table<ContextKey, Box<ContextState<B>>>,
+    pool: B::Pool,
     /// The queued jobs of contexts lost meanwhile, to be let go once the
     /// device's lock is: a job may hold the last of a memory.
-    discarded: Vec<Job>,
+    discarded: Vec<Job<B>>,
 }
 
 /// A table or queue a job joins, as the room it needs is made.
@@ -385,10 +385,10 @@ enum Joins {
     Pending(TimelineKey),
 }
 
-impl Model {
+impl<B: Backend> Model<B> {
     /// A model of the device `info` describes, whose family `i` runs on an
-    /// engine holding `depths[i]` jobs at once.
-    pub(crate) fn new(info: DeviceInfo, depths: &[usize]) -> Result<Self, Error> {
+    /// engine holding `depths[i]` jobs at once, its work kept in `pool`.
+    pub(crate) fn new(info: DeviceInfo, depths: &[usize], pool: B::Pool) -> Result<Self, Error> {
         info.check()?;
         if depths.len() != info.queue_families.len() || depths.contains(&0) {
             return Err(Error::Malformed);
@@ -422,14 +422,14 @@ impl Model {
             heaps,
             engines,
             contexts: Charged::new(SlotMap::new(), none()?)?,
-            workspaces: Workspaces::new()?,
+            pool,
             discarded: Vec::new(),
         })
     }
 
     /// The queued jobs losses discarded, for the caller to let go without
     /// the device's lock.
-    pub(crate) fn take_discarded(&mut self) -> Vec<Job> {
+    pub(crate) fn take_discarded(&mut self) -> Vec<Job<B>> {
         core::mem::take(&mut self.discarded)
     }
 
@@ -446,19 +446,14 @@ impl Model {
         &self.info
     }
 
-    /// Size the workspaces for a runner `width` participants wide.
-    pub(crate) fn set_width(&mut self, width: usize) {
-        self.workspaces.set_width(width);
-    }
-
     /// The heap working memory is charged to: the device's first.
     fn work_heap(&self) -> Result<Arc<Budget>, Error> {
         self.heaps.first().cloned().ok_or(Error::Malformed)
     }
 
-    /// `bytes` for `held` charged to the context and `heap`: working memory
-    /// no live pipeline holds goes back before the heap the workspaces
-    /// come from refuses.
+    /// `bytes` for `held` charged to the context and `heap`: what the pool
+    /// keeps for no live pipeline goes back before the heap it comes from
+    /// refuses.
     pub(crate) fn charge(
         &mut self,
         key: ContextKey,
@@ -476,8 +471,9 @@ impl Model {
         self.after_a_look(budgets, || Charge::take(budgets, bytes, held))
     }
 
-    /// `attempt` at what `budgets` admit, tried again once working memory no
-    /// live pipeline holds has gone back where the heap it comes from refused.
+    /// `attempt` at what `budgets` admit, tried again once what the pool
+    /// keeps for no live pipeline has gone back where the heap it comes from
+    /// refused.
     fn after_a_look<T>(
         &mut self,
         budgets: &[&Arc<Budget>],
@@ -490,7 +486,7 @@ impl Model {
                     return Err(Error::HeapFull);
                 }
                 // Let go here, under the lock: the heap was about to refuse.
-                drop(self.workspaces.prune());
+                drop(self.pool.prune());
                 attempt()
             }
             done => done,
@@ -538,7 +534,7 @@ impl Model {
     fn grow<K: Key, V>(
         &mut self,
         key: ContextKey,
-        pick: impl FnOnce(&mut ContextState) -> &mut Table<K, V>,
+        pick: impl FnOnce(&mut ContextState<B>) -> &mut Table<K, V>,
         growth: Option<(usize, u64)>,
     ) -> Result<(), Error> {
         let Some((more, bytes)) = growth else {
@@ -566,7 +562,7 @@ impl Model {
     pub(crate) fn file_charged<K: Key, V>(
         &mut self,
         key: ContextKey,
-        pick: Pick<K, V>,
+        pick: Pick<B, K, V>,
         bytes: u64,
         make: impl FnOnce(Charge) -> Result<V, Error>,
     ) -> Result<K, Error> {
@@ -579,39 +575,39 @@ impl Model {
         pick(self.live_mut(key)?).try_insert(value)
     }
 
-    /// Holding room in the workspaces for a pipeline of the context needing
-    /// `need`, which charges the context and the heap `besides` beside: what
-    /// the set lacks of it, charged, to be made without the device's lock;
-    /// and what the pool let go meanwhile, to be dropped without it.
-    pub(crate) fn plan_workspaces(
+    /// Room in the pool for a pipeline of the context needing `need`, which
+    /// charges the context and the heap `besides` beside: what the pool lacks
+    /// of it, charged, to be made without the device's lock; and what the
+    /// pool let go meanwhile, to be dropped without it.
+    pub(crate) fn plan_pool(
         &mut self,
         key: ContextKey,
-        need: Need,
+        need: Need<B>,
         besides: u64,
-    ) -> (Result<Plan, Error>, Grown) {
+    ) -> (Result<Plan<B>, Error>, Grown<B>) {
         let budgets = self
             .live(key)
             .map(|context| Arc::clone(&context.budget))
             .and_then(|budget| Ok((budget, self.work_heap()?)));
         match budgets {
-            Ok((budget, heap)) => self.workspaces.plan(need, (&budget, besides), &heap),
-            Err(error) => (Err(error), Grown::default()),
+            Ok((budget, heap)) => self.pool.plan(need, (&budget, besides), &heap),
+            Err(error) => (Err(error), Default::default()),
         }
     }
 
     /// The first phase of making a pipeline of the kind `pick` names, of the
     /// context, needing `need` and keeping `held` bytes beside: its room kept
-    /// in the context's table, `held` charged, and the workspaces planned, all
+    /// in the context's table, `held` charged, and the pool planned, all
     /// admitted before any is taken, so what the plan makes is not made only
     /// to be refused after; and what the pool let go meanwhile, to be dropped
     /// without the device's lock. Filed with the kind's own creation, or its
     /// room given back with [`Self::unreserve_pipeline`].
     pub(crate) fn plan_pipeline<K: Key, V>(
         &mut self,
-        (key, pick): (ContextKey, PickPipelines<K, V>),
-        need: Need,
+        (key, pick): (ContextKey, PickPipelines<B, K, V>),
+        need: Need<B>,
         held: u64,
-    ) -> (Result<(Plan, Charge), Error>, Grown) {
+    ) -> PipelinePlan<B> {
         let growth = self.live_mut(key).map(|context| {
             let pipelines = pick(context);
             let room = pipelines
@@ -623,10 +619,9 @@ impl Model {
         });
         let growth = match growth {
             Ok(growth) => growth,
-            Err(error) => return (Err(error), Grown::default()),
+            Err(error) => return (Err(error), Default::default()),
         };
-        let (plan, shrunk) =
-            self.plan_workspaces(key, need, held.saturating_add(grown_bytes(growth)));
+        let (plan, shrunk) = self.plan_pool(key, need, held.saturating_add(grown_bytes(growth)));
         let plan = match plan {
             Ok(plan) => plan,
             Err(error) => return (Err(error), shrunk),
@@ -650,7 +645,7 @@ impl Model {
     /// [`Self::plan_pipeline`] planned and that is not to be filed.
     pub(crate) fn unreserve_pipeline<K, V>(
         &mut self,
-        (key, pick): (ContextKey, PickPipelines<K, V>),
+        (key, pick): (ContextKey, PickPipelines<B, K, V>),
     ) {
         if let Ok(context) = self.existing_mut(key) {
             let pipelines = pick(context);
@@ -658,17 +653,17 @@ impl Model {
         }
     }
 
-    /// The last phase of holding room in the workspaces: what `grown` made
-    /// installed, answering its hold and what the pool let go.
-    pub(crate) fn install_workspaces(&mut self, grown: Grown) -> (Option<Hold>, Grown) {
-        self.workspaces.install(grown)
+    /// The last phase of holding room in the pool: what `grown` made
+    /// installed, answering what the pool let go.
+    pub(crate) fn install_pool(&mut self, grown: Grown<B>) -> Grown<B> {
+        self.pool.install(grown)
     }
 
-    /// Give back the workspaces a job ran in, the pool fitted to the
-    /// pipelines still alive: answering what it let go, to be dropped without
-    /// the device's lock.
-    pub(crate) fn give_back(&mut self, workspaces: Vec<Workspace>) -> [Grown; 2] {
-        self.workspaces.give(workspaces)
+    /// Take back what a job borrowed of the pool, the pool fitted to the
+    /// pipelines still alive: answering what it let go, to be dropped
+    /// without the device's lock.
+    pub(crate) fn give_back(&mut self, lease: Lease<B>) -> [Grown<B>; 2] {
+        self.pool.give(lease)
     }
 
     /// What the heap working memory is drawn from has given.
@@ -677,10 +672,10 @@ impl Model {
         self.heaps.first().map_or(0, |heap| heap.taken())
     }
 
-    /// Fit the workspaces to the pipelines still alive, answering what they
-    /// let go, to be dropped without the device's lock.
-    pub(crate) fn prune_workspaces(&mut self) -> Grown {
-        self.workspaces.prune()
+    /// Fit the pool to the pipelines still alive, answering what it let go,
+    /// to be dropped without the device's lock.
+    pub(crate) fn prune_pool(&mut self) -> Grown<B> {
+        self.pool.prune()
     }
 
     /// The growth the device's room for one more context takes: a slot, and
@@ -745,7 +740,7 @@ impl Model {
         queues.try_reserve_exact(count).map_err(exhausted)?;
         let own = (fences.held_bytes() as u64)
             .saturating_add(fallible::held(&queues))
-            .saturating_add(size_of::<ContextState>() as u64);
+            .saturating_add(size_of::<ContextState<B>>() as u64);
         let wakes = (count as u64).saturating_mul(shared_bytes::<Condvar>());
         let state_bytes = shared_bytes::<Budget>()
             .saturating_add(wakes)
@@ -821,10 +816,10 @@ impl Model {
     }
 
     /// Release the context, answering everything it held for the caller to
-    /// let go without the device's lock, and then to fit the workspaces to
-    /// the pipelines still alive. Its queued work goes with it; work already
+    /// let go without the device's lock, and then to fit the pool to the
+    /// pipelines still alive. Its queued work goes with it; work already
     /// on an engine is let finish and then discarded.
-    pub(crate) fn destroy_context(&mut self, key: ContextKey) -> Option<Box<ContextState>> {
+    pub(crate) fn destroy_context(&mut self, key: ContextKey) -> Option<Box<ContextState<B>>> {
         let context = self.contexts.remove(key)?;
         for engine in &mut self.engines {
             engine.runnable.retain(|&(owner, _)| owner != key);
@@ -844,27 +839,27 @@ impl Model {
         Some(context)
     }
 
-    pub(crate) fn existing(&self, key: ContextKey) -> Result<&ContextState, Error> {
+    pub(crate) fn existing(&self, key: ContextKey) -> Result<&ContextState<B>, Error> {
         self.contexts
             .get(key)
             .map(Box::as_ref)
             .ok_or(Error::Destroyed)
     }
 
-    pub(crate) fn existing_mut(&mut self, key: ContextKey) -> Result<&mut ContextState, Error> {
+    pub(crate) fn existing_mut(&mut self, key: ContextKey) -> Result<&mut ContextState<B>, Error> {
         self.contexts
             .get_mut(key)
             .map(Box::as_mut)
             .ok_or(Error::Destroyed)
     }
 
-    pub(crate) fn live(&self, key: ContextKey) -> Result<&ContextState, Error> {
+    pub(crate) fn live(&self, key: ContextKey) -> Result<&ContextState<B>, Error> {
         let context = self.existing(key)?;
         context.live()?;
         Ok(context)
     }
 
-    pub(crate) fn live_mut(&mut self, key: ContextKey) -> Result<&mut ContextState, Error> {
+    pub(crate) fn live_mut(&mut self, key: ContextKey) -> Result<&mut ContextState<B>, Error> {
         let context = self.existing_mut(key)?;
         context.live()?;
         Ok(context)
@@ -909,7 +904,7 @@ impl Model {
             .and_then(|heap| self.heaps.get(heap))
             .cloned()
             .ok_or(Error::Malformed)?;
-        let overhead = Memory::overhead(size);
+        let overhead = B::overhead(size);
         let growth = self.allocation_growth(key)?;
         let host = overhead.saturating_add(grown_bytes(growth));
         let work = self.work_heap()?;
@@ -941,10 +936,10 @@ impl Model {
     pub(crate) fn file_allocation(
         &mut self,
         key: ContextKey,
-        memory: Arc<Memory>,
+        memory: Arc<B::Memory>,
         memory_type: u32,
         size: u64,
-    ) -> Result<AllocationKey, (Error, Arc<Memory>)> {
+    ) -> Result<AllocationKey, (Error, Arc<B::Memory>)> {
         self.unreserve_allocation(key);
         self.file_memory(key, memory, memory_type, size)
     }
@@ -954,7 +949,7 @@ impl Model {
     pub(crate) fn release<K: Key, V>(
         &mut self,
         key: ContextKey,
-        pick: Pick<K, V>,
+        pick: Pick<B, K, V>,
         item: K,
     ) -> Option<V> {
         self.existing_mut(key)
@@ -968,7 +963,7 @@ impl Model {
         &self,
         key: ContextKey,
         allocation: AllocationKey,
-    ) -> Result<(Arc<Memory>, u32, u64), Error> {
+    ) -> Result<(Arc<B::Memory>, u32, u64), Error> {
         let held = self
             .live(key)?
             .allocations
@@ -985,10 +980,10 @@ impl Model {
     pub(crate) fn file_memory(
         &mut self,
         key: ContextKey,
-        memory: Arc<Memory>,
+        memory: Arc<B::Memory>,
         memory_type: u32,
         size: u64,
-    ) -> Result<AllocationKey, (Error, Arc<Memory>)> {
+    ) -> Result<AllocationKey, (Error, Arc<B::Memory>)> {
         let kept = Arc::clone(&memory);
         let state = AllocationState {
             memory,
@@ -1006,7 +1001,7 @@ impl Model {
         &self,
         key: ContextKey,
         allocation: AllocationKey,
-    ) -> Result<(Arc<Memory>, u64), Error> {
+    ) -> Result<(Arc<B::Memory>, u64), Error> {
         let held = self
             .live(key)?
             .allocations
@@ -1049,7 +1044,7 @@ impl Model {
             }
             Arc::clone(&held.memory)
         };
-        let bytes = shared_bytes::<BufferState>();
+        let bytes = shared_bytes::<BufferState<B>>();
         self.file_charged(
             key,
             |context| &mut context.buffers,
@@ -1156,7 +1151,7 @@ impl Model {
         &mut self,
         key: ContextKey,
         request: &Request<'_>,
-        resolved: &mut Vec<Op>,
+        resolved: &mut Vec<Op<B>>,
     ) -> Result<(TimelineKey, u64), SubmitError> {
         let longest = self.info.limits.max_job_time.saturating_total_nanos();
         if request.span == 0 || request.span > longest {
@@ -1198,14 +1193,17 @@ impl Model {
             .get(queue.engine)
             .map_or(QueueCapabilities::NONE, |family| family.capabilities);
         resolve_all(&self.info, (context, runs), request.buffers, resolved)?;
-        let need = resolved.iter().fold(Need::default(), |need, op| match op {
-            Op::Dispatch(dispatch) => need.max(dispatch.pipeline.need),
-            Op::Pass(pass) => pass
-                .draws
-                .iter()
-                .fold(need, |need, draw| need.max(draw.pipeline.need)),
-            _ => need,
-        });
+        let wider = <B::Pool as Pool>::wider;
+        let need = resolved
+            .iter()
+            .fold(Need::<B>::default(), |need, op| match op {
+                Op::Dispatch(dispatch) => wider(need, dispatch.pipeline.need),
+                Op::Pass(pass) => pass
+                    .draws
+                    .iter()
+                    .fold(need, |need, draw| wider(need, draw.pipeline.need)),
+                _ => need,
+            });
         let fence = (queue.fence, queue.next_fence);
         let mut waits = Vec::new();
         waits
@@ -1218,7 +1216,7 @@ impl Model {
             .map_err(exhausted)?;
         signals.extend_from_slice(request.signals);
         signals.push(fence);
-        let bytes = job_bytes(resolved, (&waits, &signals), self.workspaces.width());
+        let bytes = job_bytes(&self.pool, resolved, (&waits, &signals));
         // Before its work leaves `resolved`, so placing it is never refused.
         self.make_job_room(key, request.queue, &signals, bytes)?;
         let charge = self.host_charge(key, bytes)?;
@@ -1315,23 +1313,23 @@ impl Model {
     }
 
     /// The next job any engine with room should run, the queues ready for
-    /// each served in turn, its deadline counted from `clock` once the
-    /// workspaces it runs in are had. The workspaces are looked at first, as
-    /// a job just ended may have let go the last of a pipeline, and fitted
-    /// again as they are lent: answers too what the look let go, to be
-    /// dropped without the device's lock.
-    pub(crate) fn dispatch(&mut self, clock: &dyn Fn() -> u64) -> (Option<Dispatch>, Grown) {
-        let pruned = self.workspaces.prune();
+    /// each served in turn, its deadline counted from `clock` once what it
+    /// borrows of the pool is had. The pool is looked at first, as a job just
+    /// ended may have let go the last of a pipeline, and fitted again as it
+    /// lends: answers too what the look let go, to be dropped without the
+    /// device's lock.
+    pub(crate) fn dispatch(&mut self, clock: &dyn Fn() -> u64) -> (Option<Dispatch<B>>, Grown<B>) {
+        let pruned = self.pool.prune();
         let next = (0..self.engines.len()).find_map(|engine| self.dispatch_on(engine, clock));
         (next, pruned)
     }
 
-    fn dispatch_on(&mut self, engine_index: usize, clock: &dyn Fn() -> u64) -> Option<Dispatch> {
+    fn dispatch_on(&mut self, engine_index: usize, clock: &dyn Fn() -> u64) -> Option<Dispatch<B>> {
         loop {
             let Self {
                 contexts,
                 engines,
-                workspaces,
+                pool,
                 ..
             } = self;
             let engine = engines.get_mut(engine_index)?;
@@ -1367,7 +1365,7 @@ impl Model {
                 continue;
             }
             queue.dispatched += 1;
-            let workspaces = workspaces.take(job.need);
+            let lease = pool.take(job.need);
             let deadline = clock().saturating_add(job.span);
             job.deadline = Some(deadline);
             let id = JobId {
@@ -1380,7 +1378,7 @@ impl Model {
                 job: id,
                 ops: Arc::clone(&job.ops),
                 deadline,
-                workspaces,
+                lease,
             };
             self.list_ready(key);
             return Some(dispatch);
@@ -1493,12 +1491,12 @@ impl Model {
 
 /// The context of a job `started` says had begun, and whether the job is
 /// past its deadline at `now`: work that had not begun overran nothing.
-fn begun<'c>(
-    contexts: &'c mut Table<ContextKey, Box<ContextState>>,
+fn begun<'c, B: Backend>(
+    contexts: &'c mut Table<ContextKey, Box<ContextState<B>>>,
     id: JobId,
     now: u64,
     started: &dyn Fn(JobId) -> bool,
-) -> Option<(&'c mut ContextState, bool)> {
+) -> Option<(&'c mut ContextState<B>, bool)> {
     if !started(id) {
         return None;
     }
@@ -1523,8 +1521,8 @@ fn reached(timelines: &SlotMap<TimelineKey, TimelineState>, waits: &[(TimelineKe
 /// File, with its engine, every queue of the context whose next job is not
 /// yet running and has every wait met. An engine has room for every queue
 /// it serves, and a queue is filed once, so filing allocates nothing.
-fn list_ready(
-    contexts: &mut Table<ContextKey, Box<ContextState>>,
+fn list_ready<B: Backend>(
+    contexts: &mut Table<ContextKey, Box<ContextState<B>>>,
     engines: &mut ArrayVec<Engine, MAX_QUEUE_FAMILIES>,
     key: ContextKey,
 ) {
@@ -1562,7 +1560,7 @@ fn list_ready(
 
 /// Queue `job` in the room its tables and queues have made: refused, with
 /// nothing changed, where one of them has none.
-fn place(context: &mut ContextState, job: Job) -> Result<(), Error> {
+fn place<B: Backend>(context: &mut ContextState<B>, job: Job<B>) -> Result<(), Error> {
     let ContextState {
         timelines,
         jobs,
@@ -1599,7 +1597,7 @@ fn place(context: &mut ContextState, job: Job) -> Result<(), Error> {
 }
 
 /// Take a job that was on its engine out of its queue.
-fn leave_queue(context: &mut ContextState, job: &Job, key: JobKey) {
+fn leave_queue<B: Backend>(context: &mut ContextState<B>, job: &Job<B>, key: JobKey) {
     let Some(queue) = context.queues.get_mut(job.queue) else {
         return;
     };
@@ -1619,11 +1617,11 @@ fn leave_queue(context: &mut ContextState, job: &Job, key: JobKey) {
 /// Lose the context for `loss`, unless it is already lost: its queued work is
 /// put in `discarded`, its holds on the timelines given back, and every
 /// thread waiting on one of its timelines is woken to find it so.
-fn lose(
-    (context, key): (&mut ContextState, ContextKey),
+fn lose<B: Backend>(
+    (context, key): (&mut ContextState<B>, ContextKey),
     loss: Loss,
     engines: &mut ArrayVec<Engine, MAX_QUEUE_FAMILIES>,
-    discarded: &mut Vec<Job>,
+    discarded: &mut Vec<Job<B>>,
 ) {
     if context.lost.is_some() {
         return;
@@ -1662,11 +1660,11 @@ fn lose(
 /// Resolve every command of `buffers` against `context`, each run by a
 /// family running `runs`, into `resolved`: a refusal names the command, a
 /// pass's draws counted after it.
-fn resolve_all(
+fn resolve_all<B: Backend>(
     info: &DeviceInfo,
-    (context, runs): (&ContextState, QueueCapabilities),
+    (context, runs): (&ContextState<B>, QueueCapabilities),
     buffers: &[&[Command]],
-    resolved: &mut Vec<Op>,
+    resolved: &mut Vec<Op<B>>,
 ) -> Result<(), SubmitError> {
     let listed: usize = buffers.iter().map(|buffer| buffer.len()).sum();
     resolved.try_reserve_exact(listed).map_err(exhausted)?;

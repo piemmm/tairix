@@ -12,7 +12,6 @@ use tairix_spirv::{Access, BindingKind, Component, Disagreement, ImageShape, Sta
 use super::{BindSetEntry, LayoutBinding, PushConstants, Resource};
 use crate::device_tests::{context, device, memory, over, Clock, RAM};
 use crate::image_device_tests::image;
-use crate::model::Model;
 use crate::{
     Aspects, BufferUsage, BufferViewDesc, CompareOp, Context, Device, DeviceInfo, Error, Extent3d,
     Filter, Format, ImageDesc, ImageDimension, ImageRange, ImageUsage, ImageViewDesc, NoThreads,
@@ -171,13 +170,7 @@ pub(crate) fn device_stating(edit: impl FnOnce(&mut DeviceInfo)) -> Device {
     let mut info = crate::software::info(RAM).expect("the software device");
     edit(&mut info);
     let clock: Arc<dyn MonotonicClock + Send + Sync> = Arc::new(Clock::default());
-    Device::from_model(
-        Model::new(info, &[1]).expect("a model"),
-        clock,
-        Arc::new(Serial),
-        &NoThreads,
-    )
-    .expect("a device")
+    Device::software_stating(info, clock, Arc::new(Serial), &NoThreads).expect("a device")
 }
 
 /// The one binding a layout is made of, refused for what is wrong with it.
@@ -1020,43 +1013,165 @@ fn a_set_past_its_contexts_limit_is_refused_before_its_descriptors_are_looked_up
     );
 }
 
-#[test]
-fn a_sets_reach_merges_its_spans_and_meets_only_the_bytes_they_take() {
-    use super::{merged, Reach};
-    // Two memories: in the first, spans that overlap, touch, and stand apart,
-    // one of them written; in the second, a span written.
-    let spans = [
-        (0u32, 0u64..16, false),
-        (0, 8..24, true),
-        (0, 24..32, false),
-        (0, 64..80, false),
-        (1, 100..200, true),
-    ];
-    let reach = Reach {
-        any: merged(&spans, |_| true).expect("merged"),
-        written: merged(&spans, |(_, _, writes)| *writes).expect("merged"),
+/// A reach of hand-placed parts, merged as a set's are: buffer spans in
+/// memories 1 and 2, image 10's placement in memory 1 seen at two levels,
+/// images 11 and 12 placed over each other, and image 20 alone in memory 2.
+fn a_reach() -> super::Reached {
+    use super::{Reached, Run, Seen};
+    let run = |memory, span, image| Run {
+        memory,
+        span,
+        lone: Some(image),
     };
-    assert_eq!(reach.any, [(0, 0..32), (0, 64..80), (1, 100..200)]);
-    assert_eq!(reach.written, [(0, 8..24), (1, 100..200)]);
-    for (place, span, written, meets) in [
-        (0, 0..1, false, true),
-        (0, 31..40, false, true),
-        (0, 32..64, false, false),
-        (0, 79..80, false, true),
-        (0, 80..90, false, false),
-        (1, 0..100, false, false),
-        (1, 199..300, false, true),
-        (2, 0..u64::MAX, false, false),
-        (0, 0..8, true, false),
-        (0, 23..24, true, true),
-        (0, 24..80, true, false),
-        (1, 150..151, true, true),
+    let seen = |image, aspect: crate::format::Aspects, level, layers| Seen {
+        image,
+        aspect: aspect.bits(),
+        level,
+        layers,
+    };
+    let colour = crate::format::Aspects::COLOR;
+    Reached::folded(
+        alloc::vec![
+            (1, 8..24),
+            (1, 0..16),
+            (1, 24..32),
+            (1, 64..80),
+            (2, 60..68)
+        ],
+        alloc::vec![
+            run(1, 100..200, 10),
+            run(1, 120..140, 10),
+            run(1, 300..400, 11),
+            run(1, 350..450, 12),
+            run(2, 0..50, 20),
+            run(4, 0..64, 13),
+        ],
+        alloc::vec![
+            seen(10, colour, 0, 0..1),
+            seen(10, colour, 0, 1..2),
+            seen(10, colour, 2, 1..3),
+            seen(13, crate::format::Aspects::STENCIL, 0, 0..1),
+        ],
+    )
+    .expect("merged")
+}
+
+#[test]
+fn a_reach_merges_what_meets_and_keeps_what_stands_apart() {
+    let reached = a_reach();
+    assert_eq!(reached.bytes, [(1, 0..32), (1, 64..80), (2, 60..68)]);
+    let runs: alloc::vec::Vec<_> = reached
+        .runs
+        .iter()
+        .map(|run| (run.memory, run.span.clone(), run.lone))
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            (1, 100..200, Some(10)),
+            (1, 300..450, None),
+            (2, 0..50, Some(20)),
+            (4, 0..64, Some(13))
+        ],
+        "one image's views share its run; two images' make one of neither"
+    );
+    let seen: alloc::vec::Vec<_> = reached
+        .seen
+        .iter()
+        .map(|seen| (seen.image, seen.level, seen.layers.clone()))
+        .collect();
+    assert_eq!(
+        seen,
+        [(10, 0, 0..2), (10, 2, 1..3), (13, 0, 0..1)],
+        "touching layers merge"
+    );
+}
+
+#[test]
+fn a_reach_meets_only_what_it_takes() {
+    use super::Touched;
+    let reached = a_reach();
+    let touched = |memory, placement, image, (level, layer)| Touched {
+        memory,
+        placement,
+        image,
+        aspects: crate::format::Aspects::COLOR,
+        level,
+        layer,
+    };
+    let planed = |aspects| Touched {
+        aspects,
+        ..touched(4, 0..64, 13, (0, 0))
+    };
+    for (attachment, meets, why) in [
+        (
+            touched(1, 100..200, 10, (1, 0)),
+            false,
+            "another level of a seen image",
+        ),
+        (
+            touched(1, 100..200, 10, (0, 1)),
+            true,
+            "a layer a view sees",
+        ),
+        (
+            touched(1, 100..200, 10, (2, 0)),
+            false,
+            "a layer no view sees",
+        ),
+        (
+            touched(1, 100..200, 10, (2, 2)),
+            true,
+            "the last layer a view sees",
+        ),
+        (
+            touched(1, 20..40, 30, (0, 0)),
+            true,
+            "an image a buffer aliases",
+        ),
+        (
+            touched(1, 32..64, 30, (0, 0)),
+            false,
+            "an image between spans",
+        ),
+        (
+            touched(1, 150..160, 30, (0, 0)),
+            true,
+            "an image another aliases",
+        ),
+        (
+            touched(1, 360..370, 11, (0, 0)),
+            true,
+            "an image of a run of two",
+        ),
+        (
+            touched(2, 0..50, 20, (0, 0)),
+            false,
+            "an image no view sees",
+        ),
+        (
+            touched(2, 40..61, 21, (0, 0)),
+            true,
+            "a buffer's and an image's alias",
+        ),
+        (
+            touched(3, 0..u64::MAX, 40, (0, 0)),
+            false,
+            "a memory nothing reaches",
+        ),
+        (
+            planed(crate::format::Aspects::DEPTH_STENCIL),
+            true,
+            "a depth-stencil attachment whose stencil a view sees",
+        ),
+        (
+            planed(crate::format::Aspects::DEPTH),
+            false,
+            "a plane no view sees",
+        ),
     ] {
-        assert_eq!(
-            reach.meets(place, &span, written),
-            meets,
-            "{span:?} of memory {place}, written {written}"
-        );
+        assert_eq!(reached.meets(&attachment), meets, "{why}");
     }
-    assert!(!Reach::default().meets(0, &(0..u64::MAX), false));
+    let nothing = super::Reached::default();
+    assert!(!nothing.meets(&touched(1, 0..u64::MAX, 1, (0, 0))));
 }

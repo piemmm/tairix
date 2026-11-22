@@ -5,7 +5,7 @@ use alloc::sync::Arc;
 use core::fmt;
 
 use crate::command::Command;
-use crate::device::{owned, Allocation, Buffer, CommandBuffer, Context, Shared};
+use crate::device::{owned, Allocation, Buffer, CommandBuffer, Context, SoftwareShared};
 use crate::image::{
     BufferImageCopy, BufferViewDesc, ClearValue, ImageCopy, ImageDesc, ImageRange, ImageViewDesc,
 };
@@ -132,7 +132,9 @@ impl Context {
     /// [`Error::TooLarge`], [`Error::Samples`], [`Error::Usage`] or
     /// [`Error::Unsupported`].
     pub fn image_requirements(&self, desc: &ImageDesc) -> Result<MemoryRequirements, Error> {
-        crate::resource::image_requirements(&self.shared.info, desc)
+        self.shared
+            .image_form(desc)
+            .map(|(_, requirements)| requirements)
     }
 
     /// An image placed `offset` bytes into one of this context's allocations.
@@ -140,9 +142,10 @@ impl Context {
     /// # Errors
     ///
     /// [`Error::Foreign`] for another context's allocation, what
-    /// [`Self::image_requirements`] refuses, [`Error::Misaligned`] for an
-    /// offset off the image's alignment and [`Error::OutOfRange`] for an image
-    /// the allocation does not hold there.
+    /// [`Self::image_requirements`] refuses, [`Error::Usage`] for an
+    /// allocation of a memory type the requirements do not name,
+    /// [`Error::Misaligned`] for an offset off the image's alignment and
+    /// [`Error::OutOfRange`] for an image the allocation does not hold there.
     ///
     /// And those of every request that makes memory ([`Context#memory`]).
     pub fn create_image(
@@ -159,9 +162,7 @@ impl Context {
         )?;
         let key = self
             .shared
-            .model
-            .lock()
-            .create_image(self.key, allocation.key, offset, desc)?;
+            .create_image(self.key, (allocation.key, offset), desc)?;
         Ok(Image {
             shared: Arc::clone(&self.shared),
             context: self.key,
@@ -250,7 +251,7 @@ impl Context {
 
 /// An image: typed, sized texels in memory laid out as the device lays them.
 pub struct Image {
-    pub(crate) shared: Arc<Shared>,
+    pub(crate) shared: Arc<SoftwareShared>,
     pub(crate) context: ContextKey,
     pub(crate) key: ImageKey,
     desc: ImageDesc,
@@ -282,7 +283,7 @@ impl fmt::Debug for Image {
 /// A view of an image: some of its levels, layers and planes, seen in one
 /// dimension and format.
 pub struct ImageView {
-    pub(crate) shared: Arc<Shared>,
+    pub(crate) shared: Arc<SoftwareShared>,
     pub(crate) context: ContextKey,
     pub(crate) key: ViewKey,
     desc: ImageViewDesc,
@@ -314,7 +315,7 @@ impl fmt::Debug for ImageView {
 /// A texel buffer: a buffer's range read, or read and written, as texels of a
 /// format.
 pub struct BufferView {
-    pub(crate) shared: Arc<Shared>,
+    pub(crate) shared: Arc<SoftwareShared>,
     pub(crate) context: ContextKey,
     pub(crate) key: BufferViewKey,
     desc: BufferViewDesc,
@@ -345,7 +346,7 @@ impl fmt::Debug for BufferView {
 
 /// How an image is sampled.
 pub struct Sampler {
-    pub(crate) shared: Arc<Shared>,
+    pub(crate) shared: Arc<SoftwareShared>,
     pub(crate) context: ContextKey,
     pub(crate) key: SamplerKey,
     desc: SamplerDesc,

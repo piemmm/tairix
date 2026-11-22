@@ -3,7 +3,7 @@
 //! made the work ready.
 
 use alloc::boxed::Box;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::ops::Range;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -12,26 +12,47 @@ use tairix_abi::time::MonotonicClock;
 use tairix_abi::Duration64;
 use tairix_inline::ArrayVec;
 use tairix_parallel::JobRunner;
+use tairix_rt::sync::{Condvar, Mutex};
 
+use crate::backend::{Backend, Prepared};
+use crate::binding::Bound;
 use crate::command::Op;
-use crate::device::Shared;
+use crate::device::{notify, Shared};
+use crate::fair::{Fair, FairGuard};
 use crate::format::Format;
+use crate::image::ImageDesc;
 use crate::info::{
     DeviceInfo, Features, FormatTable, Limits, MemoryHeap, MemoryProperties, MemoryType,
     QueueCapabilities, QueueFamily,
 };
-use crate::memory::Memory;
-use crate::model::Model;
-use crate::{Device, Error};
+use crate::memory::Charge;
+use crate::model::{Model, Woken};
+use crate::pipeline::StagePlan;
+use crate::render::RenderPlan;
+use crate::resource::MemoryRequirements;
+use crate::{Device, Error, Loss};
 
 pub(crate) mod dispatch;
 pub(crate) mod layout;
+pub(crate) mod memory;
+pub(crate) mod pipeline;
 pub(crate) mod render;
 pub(crate) mod shader;
 pub(crate) mod texel;
 mod transfer;
 
+use layout::ImageLayout;
+use memory::Memory;
+use texel::Srgb;
 use transfer::Moved;
+
+/// The model's checked work and states, as the software device holds them.
+pub(crate) type PassWork = crate::pass::PassWork<Software>;
+pub(crate) type DrawWork = crate::pass::DrawWork<Software>;
+pub(crate) type ViewState = crate::resource::ViewState<Software>;
+pub(crate) type ImageState = crate::resource::ImageState<Software>;
+pub(crate) type BufferState = crate::model::BufferState<Software>;
+pub(crate) type BindSetState = crate::binding::BindSetState<Software>;
 
 /// What a buffer's offset, or a buffer binding's, must be a multiple of: the
 /// widest vector the CPU's copies move.
@@ -140,12 +161,261 @@ impl Device {
     pub fn software(desc: &SoftwareDesc<'_>) -> Result<Self, Error> {
         let mut info = info(desc.memory_bytes)?;
         info.limits.subgroup_size = desc.subgroup_size;
-        Self::from_model(
-            Model::new(info, &[1])?,
+        Self::software_stating(
+            info,
             Arc::clone(&desc.clock),
             Arc::clone(&desc.runner),
             desc.threads,
         )
+    }
+
+    /// The software device stating `info`, its work run on a thread `threads`
+    /// starts or, where none can be started, on the thread whose act made it
+    /// ready.
+    pub(crate) fn software_stating(
+        info: DeviceInfo,
+        clock: Arc<dyn MonotonicClock + Send + Sync>,
+        runner: Arc<dyn JobRunner + Send>,
+        threads: &dyn Spawn,
+    ) -> Result<Self, Error> {
+        let mut pool = dispatch::Workspaces::new()?;
+        pool.set_width(runner.width());
+        let model = Model::new(info, &[1], pool)?;
+        let wake = crate::shared(Wake::new())?;
+        let shared = crate::shared(Shared {
+            info: model.info().clone(),
+            model: Fair::new(model),
+            clock,
+            backend: Software {
+                runner,
+                srgb: Srgb::new(),
+                wake: Arc::clone(&wake),
+            },
+        })?;
+        let device = Arc::downgrade(&shared);
+        let parked = Arc::clone(&wake);
+        let body = Box::try_new(move || work(&device, &parked)).map_err(|_| Error::OutOfMemory)?;
+        if threads.spawn(body) {
+            wake.running.store(true, Ordering::Release);
+        }
+        Ok(Self { shared })
+    }
+}
+
+/// The software backend: the CPU running every engine's work, on a worker of
+/// the device's own or on the thread whose act made the work ready.
+pub(crate) struct Software {
+    /// The process's runner, whose cores a command's work is shared across.
+    pub(crate) runner: Arc<dyn JobRunner + Send>,
+    pub(crate) srgb: Srgb,
+    wake: Arc<Wake>,
+}
+
+impl Drop for Software {
+    fn drop(&mut self) {
+        self.wake.poke(true);
+    }
+}
+
+impl Backend for Software {
+    type Memory = Memory;
+    type Image = ImageLayout;
+    type Set = dispatch::SetMemories;
+    type Compute = shader::ir::Program;
+    type Render = pipeline::Render;
+    type Pool = dispatch::Workspaces;
+
+    fn overhead(size: u64) -> u64 {
+        Memory::overhead(size)
+    }
+
+    fn allocate(&self, size: u64, [bytes, besides]: [Charge; 2]) -> Result<Memory, Error> {
+        Memory::zeroed(size, bytes, besides)
+    }
+
+    fn write(&self, memory: &Memory, offset: u64, data: &[u8]) -> Result<(), Error> {
+        let start = usize::try_from(offset).map_err(|_| Error::OutOfRange)?;
+        let mut words = memory.lock();
+        memory::write_bytes(&mut words, start, data).ok_or(Error::OutOfRange)
+    }
+
+    fn read(&self, memory: &Memory, offset: u64, out: &mut [u8]) -> Result<(), Error> {
+        let start = usize::try_from(offset).map_err(|_| Error::OutOfRange)?;
+        let words = memory.lock();
+        memory::read_bytes(&words, start, out).ok_or(Error::OutOfRange)
+    }
+
+    fn image(
+        &self,
+        info: &DeviceInfo,
+        desc: &ImageDesc,
+    ) -> Result<(ImageLayout, MemoryRequirements), Error> {
+        let layout = ImageLayout::of(desc)?;
+        let types = info.memory_types.len();
+        let memory_types = u32::try_from((1u64 << types) - 1).map_err(|_| Error::Malformed)?;
+        let requirements = MemoryRequirements {
+            size: layout.size,
+            alignment: ImageLayout::alignment(),
+            memory_types,
+        };
+        Ok((layout, requirements))
+    }
+
+    fn set(&self, resources: &[Bound<Self>]) -> Result<(dispatch::SetMemories, u64), Error> {
+        let set = dispatch::SetMemories::of(resources)?;
+        let bytes = set.held_bytes();
+        Ok((set, bytes))
+    }
+
+    fn compute(
+        &self,
+        info: &DeviceInfo,
+        stage: &StagePlan<'_>,
+    ) -> Result<Prepared<Self, shader::ir::Program>, Error> {
+        Self::compute_form(info, stage)
+    }
+
+    fn render(
+        &self,
+        info: &DeviceInfo,
+        plan: &RenderPlan<'_>,
+    ) -> Result<Prepared<Self, pipeline::Render>, Error> {
+        Self::render_form(info, plan)
+    }
+
+    fn run_bytes(pool: &dispatch::Workspaces, ops: &[Op<Self>]) -> u64 {
+        let participants = pool.width();
+        let most = |bytes: &dyn Fn(&Op<Self>) -> u64| ops.iter().map(bytes).max().unwrap_or(0);
+        let run = most(&|op| match op {
+            Op::Dispatch(work) => dispatch::run_bytes(work, participants),
+            Op::Pass(pass) => render::run_bytes(pass, participants),
+            _ => 0,
+        });
+        let placed = most(&|op| match op {
+            Op::Dispatch(work) => dispatch::place_bytes(work, participants),
+            _ => 0,
+        });
+        run.saturating_add(placed)
+    }
+
+    /// On the device's worker, or on this thread where it has none, or,
+    /// where its engine is already running work, on the thread running it,
+    /// which takes it next.
+    fn drive(shared: &Shared<Self>, model: FairGuard<'_, Model<Self>>) {
+        if shared.backend.wake.running.load(Ordering::Acquire) {
+            drop(model);
+            shared.backend.wake.poke(false);
+        } else {
+            run_ready(shared, model);
+        }
+    }
+}
+
+/// How work reaches the device's own worker: a pending flag it parks on,
+/// whether the device is gone, and whether there is a worker at all.
+pub(crate) struct Wake {
+    state: Mutex<WakeState>,
+    ready: Condvar,
+    /// Set once the worker's thread is started; until then, and for good where
+    /// none can be, work runs on the thread whose act made it ready.
+    running: AtomicBool,
+}
+
+#[derive(Default)]
+struct WakeState {
+    pending: bool,
+    closed: bool,
+    /// Whether the worker waits to be poked, so a poke must wake it.
+    parked: bool,
+}
+
+impl Wake {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(WakeState::default()),
+            ready: Condvar::new(),
+            running: AtomicBool::new(false),
+        }
+    }
+
+    fn poke(&self, close: bool) {
+        let mut state = self.state.lock();
+        state.pending = true;
+        state.closed |= close;
+        let parked = state.parked;
+        drop(state);
+        if parked {
+            self.ready.notify_one();
+        }
+    }
+
+    /// Park until poked, answering whether the device is still there.
+    fn park(&self) -> bool {
+        let mut state = self.state.lock();
+        while !state.pending && !state.closed {
+            state.parked = true;
+            #[cfg(test)]
+            waits::note(state.parked);
+            state = self.ready.wait(state);
+        }
+        state.parked = false;
+        state.pending = false;
+        !state.closed
+    }
+}
+
+/// The device's worker: it runs every job that is ready, then parks holding
+/// only a weak reference, so an idle device it serves is never kept alive by
+/// it; a job it runs keeps the device until that job ends.
+fn work(device: &Weak<Shared<Software>>, wake: &Wake) {
+    loop {
+        let Some(shared) = device.upgrade() else {
+            return;
+        };
+        run_ready(&shared, shared.model.lock());
+        drop(shared);
+        if !wake.park() {
+            return;
+        }
+    }
+}
+
+/// Run every job the device has room for and that is ready, until none is.
+fn run_ready<'a>(shared: &'a Shared<Software>, mut model: FairGuard<'a, Model<Software>>) {
+    let mut woken = Woken::new();
+    let now = || shared.clock.now_ns();
+    loop {
+        let (next, pruned) = model.dispatch(&now);
+        drop(model);
+        drop(pruned);
+        notify(&mut woken);
+        let Some(mut dispatch) = next else {
+            return;
+        };
+        let outcome = run(
+            &dispatch.ops.ops,
+            dispatch.deadline,
+            shared,
+            &mut dispatch.lease,
+        );
+        model = shared.model.lock();
+        let (engine, job) = (dispatch.engine, dispatch.job);
+        match outcome {
+            Outcome::Done => woken = model.complete(engine, job, None),
+            Outcome::Fault => woken = model.complete(engine, job, Some(Loss::Fault)),
+            Outcome::OutOfMemory => {
+                woken = model.complete(engine, job, Some(Loss::OutOfMemory));
+            }
+            Outcome::Overran => model.reset(engine, now(), &|_| true),
+        }
+        let lease = core::mem::take(&mut dispatch.lease);
+        let given = model.give_back(lease);
+        let discarded = model.take_discarded();
+        drop(model);
+        // The job may have held the last of a memory, so it goes with the
+        // lock let go; the next dispatch fits the pool after it.
+        drop((dispatch, given, discarded));
+        model = shared.model.lock();
     }
 }
 
@@ -310,9 +580,9 @@ impl Meter<'_> {
 /// work, so one with none, a dispatch of no workgroups over nothing, does
 /// not.
 pub(crate) fn run(
-    ops: &[Op],
+    ops: &[Op<Software>],
     deadline: u64,
-    device: &Shared,
+    device: &Shared<Software>,
     workspaces: &mut [dispatch::Workspace],
 ) -> Outcome {
     let stop = AtomicBool::new(false);
@@ -341,7 +611,7 @@ pub(crate) fn run(
             Some(stopped) => return stopped,
             None => {}
         }
-        let moved = transfer::apply(op, &device.srgb, &mut meter)
+        let moved = transfer::apply(op, &device.backend.srgb, &mut meter)
             .unwrap_or_else(|| apply(op, &mut meter).unwrap_or(Moved::Fault));
         match moved {
             Moved::Done => {}
@@ -388,7 +658,7 @@ fn span(offset: u64, len: u64) -> Option<Range<usize>> {
 
 /// Run a buffer `op` a piece at a time, counting the bytes each moves;
 /// `None` where it reaches past its memory, which its checks proved it cannot.
-fn apply(op: &Op, meter: &mut Meter<'_>) -> Option<Moved> {
+fn apply(op: &Op<Software>, meter: &mut Meter<'_>) -> Option<Moved> {
     match op {
         Op::Copy { src, dst, spans } if Arc::ptr_eq(src, dst) => {
             let mut words = src.lock();
@@ -463,3 +733,28 @@ fn apply(op: &Op, meter: &mut Meter<'_>) -> Option<Moved> {
     }
     Some(Moved::Done)
 }
+
+/// How many of this thread's waits it made unflagged as parked, so a test
+/// can see that a poke during any of them would have woken it.
+#[cfg(test)]
+mod waits {
+    use core::cell::Cell;
+
+    std::thread_local! {
+        static UNFLAGGED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn note(parked: bool) {
+        if !parked {
+            UNFLAGGED.with(|unflagged| unflagged.set(unflagged.get() + 1));
+        }
+    }
+
+    pub(super) fn unflagged() -> usize {
+        UNFLAGGED.with(Cell::get)
+    }
+}
+
+#[cfg(test)]
+#[path = "software/wake_tests.rs"]
+mod wake_tests;

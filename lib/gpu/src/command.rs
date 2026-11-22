@@ -4,18 +4,19 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use crate::binding::BindSet;
+use crate::backend::Backend;
+use crate::binding::{BindSet, BindSetState};
 use crate::device::{owned, CommandBuffer};
 use crate::image::{BufferImageCopy, ClearValue, ImageCopy, ImageRange};
 use crate::info::{BufferUsage, DeviceInfo, QueueCapabilities};
-use crate::memory::{Charge, Memory};
+use crate::memory::Charge;
 use crate::model::{
     exhausted, shared_bytes, BindSetKey, BufferKey, BufferState, ComputePipelineKey, ContextState,
     ImageKey,
 };
 use crate::pass::{PassRecord, PassWork};
+use crate::pipeline::ComputePipelineState;
 use crate::resource::ImageState;
-use crate::software::dispatch::{Dispatch, Groups};
 use crate::transfer::{self, Direction};
 use crate::{Error, MAX_COPY_REGIONS, MAX_UPDATE_BYTES};
 
@@ -206,50 +207,83 @@ pub(crate) struct Span {
 /// A command whose buffers resolved and whose every range was proved within
 /// them: offsets are into the memories, not the buffers.
 #[derive(Debug)]
-pub(crate) enum Op {
+pub(crate) enum Op<B: Backend> {
     Copy {
-        src: Arc<Memory>,
-        dst: Arc<Memory>,
+        src: Arc<B::Memory>,
+        dst: Arc<B::Memory>,
         spans: Vec<Span>,
     },
     Fill {
-        dst: Arc<Memory>,
+        dst: Arc<B::Memory>,
         offset: u64,
         len: u64,
         word: u32,
     },
     Update {
-        dst: Arc<Memory>,
+        dst: Arc<B::Memory>,
         offset: u64,
         data: Arc<Recorded>,
     },
     BufferImage {
-        buffer: Arc<BufferState>,
-        image: Arc<ImageState>,
+        buffer: Arc<BufferState<B>>,
+        image: Arc<ImageState<B>>,
         regions: Vec<BufferImageCopy>,
         direction: Direction,
     },
     CopyImage {
-        src: Arc<ImageState>,
-        dst: Arc<ImageState>,
+        src: Arc<ImageState<B>>,
+        dst: Arc<ImageState<B>>,
         regions: Vec<ImageCopy>,
     },
     ClearImage {
-        image: Arc<ImageState>,
+        image: Arc<ImageState<B>>,
         value: ClearValue,
         ranges: Vec<ImageRange>,
     },
-    Dispatch(alloc::boxed::Box<Dispatch>),
-    Pass(alloc::boxed::Box<PassWork>),
+    Dispatch(alloc::boxed::Box<DispatchWork<B>>),
+    Pass(alloc::boxed::Box<PassWork<B>>),
 }
 
-impl core::fmt::Debug for Dispatch {
+/// A checked dispatch: its pipeline, its bind sets, its push constants as
+/// words, and its workgroup counts.
+pub(crate) struct DispatchWork<B: Backend> {
+    pub(crate) pipeline: Arc<ComputePipelineState<B>>,
+    pub(crate) sets: Vec<Arc<BindSetState<B>>>,
+    /// Shared with the command buffer it was recorded in.
+    pub(crate) push: Option<Arc<Vec<u32>>>,
+    pub(crate) groups: Groups<B>,
+}
+
+impl<B: Backend> core::fmt::Debug for DispatchWork<B> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Dispatch").finish_non_exhaustive()
+        f.debug_struct("DispatchWork").finish_non_exhaustive()
     }
 }
 
-impl Op {
+impl<B: Backend> DispatchWork<B> {
+    /// The host bytes it holds queued, its push constants and their sharing
+    /// counted as though no other held them.
+    fn held_bytes(&self) -> u64 {
+        [
+            core::mem::size_of::<Self>() as u64,
+            self.push.as_deref().map_or(0, |words| {
+                shared_bytes::<Vec<u32>>().saturating_add(tairix_util::fallible::held(words))
+            }),
+            tairix_util::fallible::held(&self.sets),
+        ]
+        .into_iter()
+        .fold(0, u64::saturating_add)
+    }
+}
+
+/// How many workgroups a dispatch makes: given, or read from a buffer when
+/// the dispatch runs.
+pub(crate) enum Groups<B: Backend> {
+    Direct([u32; 3]),
+    Indirect { memory: Arc<B::Memory>, offset: u64 },
+}
+
+impl<B: Backend> Op<B> {
     /// The host bytes it holds past its own size while queued.
     pub(crate) fn held_bytes(&self) -> u64 {
         use tairix_util::fallible::held;
@@ -264,33 +298,14 @@ impl Op {
             Self::Pass(pass) => pass.held_bytes(),
         }
     }
-
-    /// The host bytes the tables of its run take on a device of
-    /// `participants`, made as it starts and let go as it ends.
-    pub(crate) fn run_bytes(&self, participants: usize) -> u64 {
-        match self {
-            Self::Dispatch(dispatch) => dispatch.run_bytes(participants),
-            Self::Pass(pass) => crate::software::render::run_bytes(pass, participants),
-            _ => 0,
-        }
-    }
-
-    /// The host bytes its run's placements keep for its job on a device of
-    /// `participants`.
-    pub(crate) fn place_bytes(&self, participants: usize) -> u64 {
-        match self {
-            Self::Dispatch(dispatch) => dispatch.place_bytes(participants),
-            _ => 0,
-        }
-    }
 }
 
 /// The buffer `key` names, made for `usage`.
-pub(crate) fn buffer(
-    context: &ContextState,
+pub(crate) fn buffer<B: Backend>(
+    context: &ContextState<B>,
     key: BufferKey,
     usage: BufferUsage,
-) -> Result<&Arc<BufferState>, Error> {
+) -> Result<&Arc<BufferState<B>>, Error> {
     let buffer = context.buffers.get(key).ok_or(Error::Stale)?;
     if buffer.usage.contains(usage) {
         Ok(buffer)
@@ -301,7 +316,7 @@ pub(crate) fn buffer(
 
 /// Where `len` bytes at `offset` into `buffer` lie in its memory, once proved
 /// within it.
-fn within(buffer: &BufferState, offset: u64, len: u64) -> Result<u64, Error> {
+fn within<B: Backend>(buffer: &BufferState<B>, offset: u64, len: u64) -> Result<u64, Error> {
     if len == 0 {
         return Err(Error::Empty);
     }
@@ -322,11 +337,11 @@ fn words(offset: u64, len: u64) -> Result<(), Error> {
 
 /// Check `command` against the objects of `context` it names and the
 /// device `info` describes, resolving it to the operation a device runs.
-pub(crate) fn resolve(
+pub(crate) fn resolve<B: Backend>(
     info: &DeviceInfo,
-    context: &ContextState,
+    context: &ContextState<B>,
     command: &Command,
-) -> Result<Op, Refused> {
+) -> Result<Op<B>, Refused> {
     match command {
         Command::Pass(pass) => crate::pass::resolve(info, context, pass),
         other => resolve_one(info, context, other).map_err(Refused::from),
@@ -334,7 +349,11 @@ pub(crate) fn resolve(
 }
 
 /// [`resolve`] for a command that counts as one.
-fn resolve_one(info: &DeviceInfo, context: &ContextState, command: &Command) -> Result<Op, Error> {
+fn resolve_one<B: Backend>(
+    info: &DeviceInfo,
+    context: &ContextState<B>,
+    command: &Command,
+) -> Result<Op<B>, Error> {
     match command {
         Command::Copy { src, dst, regions } => {
             let src = buffer(context, *src, BufferUsage::TRANSFER_SRC)?;
@@ -438,11 +457,11 @@ fn resolve_one(info: &DeviceInfo, context: &ContextState, command: &Command) -> 
 /// the layout's set's bindings, its push constants exactly the layout's, and
 /// its workgroup counts within the device's or its indirect arguments within
 /// a buffer made for them.
-fn dispatch(
+fn dispatch<B: Backend>(
     info: &DeviceInfo,
-    context: &ContextState,
+    context: &ContextState<B>,
     recorded: &DispatchRecord,
-) -> Result<Op, Error> {
+) -> Result<Op<B>, Error> {
     let DispatchRecord {
         pipeline,
         sets,
@@ -500,7 +519,7 @@ fn dispatch(
             }
         }
     };
-    let work = alloc::boxed::Box::try_new(Dispatch {
+    let work = alloc::boxed::Box::try_new(DispatchWork {
         pipeline,
         sets: held,
         push: push.clone(),

@@ -22,17 +22,15 @@ use tairix_util::mathf;
 use self::back::{Room, Shaded};
 use self::front::{Batch, Planned, Planner, FLUSH_BATCHES};
 use super::dispatch::{counted_on, place_sets, resolve, rows_of, with_locked, Locked, Workspace};
+use super::memory::Memory;
 use super::shader::exec::{Env, Resolved};
 use super::texel::{encode, plane_bits, put_raw, raw_at, Plane, Srgb};
-use super::{Meter, Outcome};
-use crate::binding::BindSetState;
+use super::{BindSetState, DrawWork, Meter, Outcome, PassWork, Software, ViewState};
 use crate::device::Shared;
 use crate::format::Format;
 use crate::image::ClearValue;
-use crate::memory::Memory;
-use crate::pass::{Counted, DrawWork, IndexFormat, Load, PassWork};
-use crate::render::Render;
-use crate::resource::ViewState;
+use crate::pass::{Counted, IndexFormat, Load};
+use crate::render::Rendered;
 use crate::{Features, MAX_PASS_ATTACHMENTS};
 
 /// The most bytes a bin's samples take, every attachment's together, unless
@@ -386,17 +384,14 @@ fn held<'v>(
     (clear, resolve): (Option<Clear>, Option<Into<'v>>),
 ) -> Option<Held<'v>> {
     let image = &view.image;
-    let level = image
-        .layout
-        .levels
-        .get(view.desc.range.base_level as usize)?;
+    let level = image.form.levels.get(view.desc.range.base_level as usize)?;
     let format = view.desc.format;
     Some(Held {
         words: locked.view(&image.memory)?,
         base: image.offset + level.base + u64::from(view.desc.range.base_layer) * level.layer,
         row: level.row,
-        texel: image.layout.texel,
-        samples: image.layout.samples,
+        texel: image.form.texel,
+        samples: image.form.samples,
         format,
         depth_bits: plane_bits(format, Plane::Depth),
         stencil_bits: plane_bits(format, Plane::Stencil),
@@ -408,15 +403,12 @@ fn held<'v>(
 /// The one-sample view `view` as a resolve writes it.
 fn into<'v>(view: &ViewState, locked: &'v Locked<'_>) -> Option<Into<'v>> {
     let image = &view.image;
-    let level = image
-        .layout
-        .levels
-        .get(view.desc.range.base_level as usize)?;
+    let level = image.form.levels.get(view.desc.range.base_level as usize)?;
     Some(Into {
         words: locked.view(&image.memory)?,
         base: image.offset + level.base + u64::from(view.desc.range.base_layer) * level.layer,
         row: level.row,
-        texel: image.layout.texel,
+        texel: image.form.texel,
     })
 }
 
@@ -428,7 +420,7 @@ fn into<'v>(view: &ViewState, locked: &'v Locked<'_>) -> Option<Into<'v>> {
 /// together, and its depth's format and range.
 pub(super) struct Drawn<'d> {
     pub(super) work: &'d DrawWork,
-    pub(super) render: &'d Render,
+    pub(super) render: &'d Rendered<Software>,
     pub(super) vertex: Env<'d>,
     pub(super) fragment: Option<Env<'d>>,
     pub(super) buffers: Vec<Option<(&'d [AtomicU32], u64, u64)>>,
@@ -463,7 +455,7 @@ struct Slot<'w> {
 pub(crate) fn run(
     pass: &PassWork,
     meter: &mut Meter<'_>,
-    device: &Shared,
+    device: &Shared<Software>,
     workspaces: &mut [Workspace],
 ) -> Outcome {
     let memories = match pass_memories(pass, meter) {
@@ -472,7 +464,7 @@ pub(crate) fn run(
     };
     let mut lists = [memories.as_slice()];
     let ran = with_locked(&mut lists, meter, |locked, meter| {
-        let frame = Frame::of(pass, locked, &device.srgb).ok_or(Outcome::Fault)?;
+        let frame = Frame::of(pass, locked, &device.backend.srgb).ok_or(Outcome::Fault)?;
         // The descriptors of each run of draws binding alike, resolved through
         // their sets once, and the run each draw is of.
         let starts = (0..pass.draws.len())
@@ -491,8 +483,8 @@ pub(crate) fn run(
                 let mapping = place_sets(&draw.sets, locked.memories, meter)?;
                 let mut resolved =
                     |program| resolve(program, &draw.sets, (locked.views, &mapping), meter);
-                let vertex = resolved(&render.vertex)?;
-                let fragment = match &render.fragment {
+                let vertex = resolved(&render.form.vertex)?;
+                let fragment = match &render.form.fragment {
                     Some(shading) => Some(resolved(&shading.program)?),
                     None => None,
                 };
@@ -510,11 +502,11 @@ pub(crate) fn run(
                 .ok_or(Outcome::Fault)?
                 .pipeline
                 .stages;
-            let fragment = match (&render.fragment, fragment) {
+            let fragment = match (&render.form.fragment, fragment) {
                 (Some(shading), Some(table)) => Some(rows_of(&shading.program, table)?),
                 _ => None,
             };
-            rows.push((rows_of(&render.vertex, vertex)?, fragment));
+            rows.push((rows_of(&render.form.vertex, vertex)?, fragment));
         }
         let mut draws = Vec::new();
         draws
@@ -574,7 +566,7 @@ fn pass_memories(pass: &PassWork, meter: &mut Meter<'_>) -> Result<Vec<Arc<Memor
             .map(|draw| draw.vertex_buffers.len() + SOURCES_PAST_VERTICES)
             .sum::<usize>();
     let count = sets.iter().fold(others, |total, set| {
-        total.saturating_add(set.memories.len())
+        total.saturating_add(set.form.memories.len())
     });
     let mut memories: Vec<Arc<Memory>> = Vec::new();
     memories.try_reserve_exact(count).map_err(exhausted)?;
@@ -601,10 +593,10 @@ fn pass_memories(pass: &PassWork, meter: &mut Meter<'_>) -> Result<Vec<Arc<Memor
         }
     }
     for set in &sets {
-        if !meter.proceed(set.memories.len() as u64) {
+        if !meter.proceed(set.form.memories.len() as u64) {
             return Err(Outcome::Overran);
         }
-        memories.extend(set.memories.iter().cloned());
+        memories.extend(set.form.memories.iter().cloned());
     }
     memories.sort_unstable_by_key(Arc::as_ptr);
     memories.dedup_by(|a, b| Arc::ptr_eq(a, b));
@@ -613,7 +605,7 @@ fn pass_memories(pass: &PassWork, meter: &mut Meter<'_>) -> Result<Vec<Arc<Memor
 
 /// `work` as its pass runs it, its stages' bindings `rows`.
 fn drawn<'d>(
-    device: &'d Shared,
+    device: &'d Shared<Software>,
     frame: &Frame<'_>,
     (work, locked): (&'d DrawWork, &'d Locked<'_>),
     (vertex, fragment): (&'d [&'d [Resolved<'d>]], Option<&'d [&'d [Resolved<'d>]]>),
@@ -625,7 +617,7 @@ fn drawn<'d>(
         program,
         bindings,
         push,
-        srgb: &device.srgb,
+        srgb: &device.backend.srgb,
         subgroup_size: limits.subgroup_size,
         groups: [1, 1, 1],
     };
@@ -653,7 +645,7 @@ fn drawn<'d>(
         Counted::Direct(_) => None,
     };
     let port = work.viewport;
-    let raster = &render.rasterization;
+    let raster = &render.fixed.rasterization;
     let viewport = Viewport::new(
         (f64::from(port.x), f64::from(port.y)),
         (f64::from(port.width), f64::from(port.height)),
@@ -663,6 +655,7 @@ fn drawn<'d>(
     .ok_or(Outcome::Fault)?;
     let (inside, rect) = sample_areas(frame, &port, &work.scissor);
     let depth_format = render
+        .fixed
         .depth_stencil
         .map(|state| depth_format_of(state.format));
     let (near, far) = (f64::from(port.min_depth), f64::from(port.max_depth));
@@ -676,8 +669,9 @@ fn drawn<'d>(
     Ok(Drawn {
         work,
         render,
-        vertex: env(&render.vertex, vertex),
+        vertex: env(&render.form.vertex, vertex),
         fragment: render
+            .form
             .fragment
             .as_ref()
             .zip(fragment)
@@ -694,7 +688,7 @@ fn drawn<'d>(
         rect,
         depth_format,
         depth_range,
-        srgb: &device.srgb,
+        srgb: &device.backend.srgb,
     })
 }
 
@@ -761,12 +755,12 @@ fn draw_pass(
     frame: &Frame<'_>,
     draws: &[Drawn<'_>],
     meter: &mut Meter<'_>,
-    device: &Shared,
+    device: &Shared<Software>,
     workspaces: &mut [Workspace],
 ) -> Result<Outcome, Outcome> {
     let record = draws
         .iter()
-        .map(|drawn| drawn.render.record as usize)
+        .map(|drawn| drawn.render.form.record as usize)
         .max()
         .unwrap_or(0);
     let mut batches: Vec<Batch> = Vec::new();
@@ -778,7 +772,7 @@ fn draw_pass(
     }
     // A pass of no draws shades nothing, so its job is lent no workspace:
     // its participants only clear and resolve.
-    let width = device.runner.width().max(1);
+    let width = device.backend.runner.width().max(1);
     let width = if draws.is_empty() {
         width
     } else {
@@ -839,7 +833,7 @@ fn draw_pass(
 /// claiming units of `total` from a shared cursor, its meter counting on
 /// from the job's and stopped with it.
 fn spread<'w>(
-    device: &Shared,
+    device: &Shared<Software>,
     meter: &mut Meter<'_>,
     slots: &[Mutex<Slot<'w>>],
     total: usize,
@@ -853,7 +847,7 @@ fn spread<'w>(
     let counted = meter.unchecked;
     let cursor = AtomicUsize::new(0);
     let pieces = slots.len().min(total);
-    device.runner.run(pieces, &|piece| {
+    device.backend.runner.run(pieces, &|piece| {
         let Some(slot) = slots.get(piece) else {
             fault.store(true, Ordering::Relaxed);
             stop.store(true, Ordering::Relaxed);
@@ -900,7 +894,7 @@ fn spread<'w>(
 /// Set up each batch of `planned` into the batch of `made` at its place,
 /// across the runner.
 fn set_up(
-    device: &Shared,
+    device: &Shared<Software>,
     meter: &mut Meter<'_>,
     slots: &[Mutex<Slot<'_>>],
     (bound, planned, made): (&[Drawn<'_>], &[Planned], &mut [Batch]),
@@ -931,7 +925,7 @@ fn set_up(
 /// Draw each of `frame`'s bins a batch of `made` reaches — or every one,
 /// where `everything` — across the runner.
 fn draw_bins(
-    device: &Shared,
+    device: &Shared<Software>,
     meter: &mut Meter<'_>,
     slots: &[Mutex<Slot<'_>>],
     (frame, draws, made): (&Frame<'_>, &[Drawn<'_>], &[Batch]),
@@ -971,7 +965,7 @@ pub(crate) fn run_bytes(pass: &PassWork, participants: usize) -> u64 {
         .iter()
         .fold(wide(pass.colour.len() * 2 + 1), |total, draw| {
             let sets = draw.sets.iter().fold(0u64, |sum, set| {
-                sum.saturating_add(wide(set.memories.len()))
+                sum.saturating_add(wide(set.form.memories.len()))
             });
             total
                 .saturating_add(sets)
@@ -981,7 +975,7 @@ pub(crate) fn run_bytes(pass: &PassWork, participants: usize) -> u64 {
         memories,
         size_of::<Arc<Memory>>()
             + size_of::<&Arc<Memory>>()
-            + size_of::<crate::memory::Words<'_>>()
+            + size_of::<super::memory::Words<'_>>()
             + size_of::<&[AtomicU32]>(),
     ));
     let tables = (0..pass.draws.len())
@@ -990,10 +984,15 @@ pub(crate) fn run_bytes(pass: &PassWork, participants: usize) -> u64 {
         .fold(0u64, |total, draw| {
             let render = &draw.pipeline.stages;
             let places = draw.sets.iter().fold(0u64, |sum, set| {
-                sum.saturating_add(wide(set.memories.len()))
+                sum.saturating_add(wide(set.form.memories.len()))
             });
-            let programs = core::iter::once(&render.vertex)
-                .chain(render.fragment.as_ref().map(|shading| &shading.program));
+            let programs = core::iter::once(&render.form.vertex).chain(
+                render
+                    .form
+                    .fragment
+                    .as_ref()
+                    .map(|shading| &shading.program),
+            );
             programs
                 .fold(
                     total.saturating_add(times(places, size_of::<u32>())),
@@ -1026,7 +1025,7 @@ pub(crate) fn run_bytes(pass: &PassWork, participants: usize) -> u64 {
     let record = pass
         .draws
         .iter()
-        .map(|draw| draw.pipeline.stages.record as usize)
+        .map(|draw| draw.pipeline.stages.form.record as usize)
         .max()
         .unwrap_or(0);
     let batches = times(

@@ -83,7 +83,7 @@ fn a_worker_poked_while_it_is_not_parked_is_not_woken() {
         commands.fill_buffer(&target, 0, 16, 1).expect("recorded");
         seam::arm(0);
         let _fence = submit(&queue(&context), &commands).expect("admitted");
-        assert!(device.shared.wake.state.lock().pending, "poked");
+        assert!(device.shared.backend.wake.state.lock().pending, "poked");
         assert_eq!(wakes(&seam::calls(), 1), 0, "with no call, as none waits");
     })
     .join()
@@ -108,12 +108,12 @@ fn work_that_is_not_ready_pokes_no_worker() {
         })
         .expect("admitted");
     assert!(
-        !device.shared.wake.state.lock().pending,
+        !device.shared.backend.wake.state.lock().pending,
         "nothing to run, so nothing poked"
     );
     gate.signal(1).expect("advances");
     assert!(
-        device.shared.wake.state.lock().pending,
+        device.shared.backend.wake.state.lock().pending,
         "poked once it is ready"
     );
 }

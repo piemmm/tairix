@@ -17,8 +17,9 @@ use tairix_util::mathf;
 use super::front::{Batch, Setup};
 use super::{merge, Area, Drawn, Frame};
 use crate::format::Format;
-use crate::render::{ColourMask, Effects, Shading};
+use crate::render::ColourMask;
 use crate::software::dispatch::Workspace;
+use crate::software::pipeline::{Effects, Shading};
 use crate::software::shader::exec::{shade, Lanes, Placement};
 use crate::software::shader::ir::{Carries, Fixed, LANES};
 use crate::software::shader::ops::{low32, single_bits};
@@ -102,11 +103,11 @@ impl Drawn<'_> {
     /// cover.
     fn sample_mask(&self, samples: u32) -> u8 {
         let all = (1u32 << samples.min(8)) - 1;
-        u8::try_from(self.render.multisample.mask & all).unwrap_or(u8::MAX)
+        u8::try_from(self.render.fixed.multisample.mask & all).unwrap_or(u8::MAX)
     }
 
     fn tests(&self) -> Tests {
-        let Some(shading) = &self.render.fragment else {
+        let Some(shading) = &self.render.form.fragment else {
             return Tests::Early;
         };
         let effects = shading.effects;
@@ -118,9 +119,10 @@ impl Drawn<'_> {
         }
         let changes_coverage = effects.contains(Effects::DISCARDS)
             || effects.contains(Effects::WRITES_MASK)
-            || self.render.multisample.alpha_to_coverage;
+            || self.render.fixed.multisample.alpha_to_coverage;
         let keeps_on_failure = self
             .render
+            .fixed
             .depth_stencil
             .and_then(|state| state.stencil)
             .is_none_or(|faces| {
@@ -338,7 +340,7 @@ impl Drawing<'_, '_, '_> {
         {
             return false;
         }
-        if tests != Tests::Late && drawn.render.depth_stencil.is_some() {
+        if tests != Tests::Late && drawn.render.fixed.depth_stencil.is_some() {
             let writes = if tests == Tests::Early {
                 Writes::Every
             } else {
@@ -353,7 +355,7 @@ impl Drawing<'_, '_, '_> {
                 return true;
             }
         }
-        if drawn.render.fragment.is_none() {
+        if drawn.render.form.fragment.is_none() {
             // Nothing to shade: its tests were its whole work.
             return true;
         }
@@ -416,7 +418,8 @@ impl Drawing<'_, '_, '_> {
         (cover, written): (u8, Option<f32>),
         writes: Writes,
     ) -> u8 {
-        let (Some(state), Some(held)) = (drawn.render.depth_stencil, self.frame.depth.as_ref())
+        let (Some(state), Some(held)) =
+            (drawn.render.fixed.depth_stencil, self.frame.depth.as_ref())
         else {
             return cover;
         };
@@ -512,7 +515,7 @@ impl Drawing<'_, '_, '_> {
         let Some(drawn) = self.draws.get(self.draw) else {
             return false;
         };
-        let (Some(shading), Some(env)) = (&drawn.render.fragment, &drawn.fragment) else {
+        let (Some(shading), Some(env)) = (&drawn.render.form.fragment, &drawn.fragment) else {
             return false;
         };
         let (mut live, mut helpers) = (0u64, 0u64);
@@ -605,7 +608,7 @@ impl Drawing<'_, '_, '_> {
                 let written = self.room.shaded.mask.get(at).copied().unwrap_or(0);
                 cover &= u8::try_from(written & 0xff).unwrap_or(0);
             }
-            if drawn.render.multisample.alpha_to_coverage {
+            if drawn.render.fixed.multisample.alpha_to_coverage {
                 let first = shading.channels.first().copied().unwrap_or(0);
                 let alpha = self.room.shaded.colour[0].get(at).map_or(0.0, |&colour| {
                     f32::from_bits(written_only(colour, first)[3])
@@ -613,7 +616,7 @@ impl Drawing<'_, '_, '_> {
                 cover &= alpha_coverage(alpha, samples);
             }
             let pixel = lane_pixel((quad.x, quad.y), lane);
-            if tests != Tests::Early && drawn.render.depth_stencil.is_some() {
+            if tests != Tests::Early && drawn.render.fixed.depth_stencil.is_some() {
                 let written = shading
                     .effects
                     .contains(Effects::WRITES_DEPTH)
@@ -645,6 +648,7 @@ impl Drawing<'_, '_, '_> {
         );
         for (index, (target, held)) in drawn
             .render
+            .fixed
             .targets
             .iter()
             .zip(&self.frame.targets)
@@ -665,9 +669,13 @@ impl Drawing<'_, '_, '_> {
                 return false;
             };
             let format = held.format;
-            let logic = drawn.render.logic_op.filter(|_| combines_logically(format));
+            let logic = drawn
+                .render
+                .fixed
+                .logic_op
+                .filter(|_| combines_logically(format));
             let blend = target.blend.filter(|_| {
-                drawn.render.logic_op.is_none() && format.component() == Component::Float
+                drawn.render.fixed.logic_op.is_none() && format.component() == Component::Float
             });
             // Neither blended nor combined, every sample takes one value.
             let plain = (logic.is_none() && blend.is_none())

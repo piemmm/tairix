@@ -3256,5 +3256,102 @@ fn a_closed_streams_held_wakes_go_with_it() {
     );
 }
 
+/// A stream is the instance that opened it, not its pid: a later process the
+/// kernel gives the same pid names it in vain, and its owner keeps it.
+/// Regression: ownership was the pid, which the kernel reuses.
+#[test]
+fn a_stream_is_refused_to_a_later_process_of_its_owners_pid() {
+    let mut fixture = Fixture::new();
+    let owner = caller(7, &[]);
+    let music = queued(&mut fixture, &owner);
+    let reused = Origin::new(
+        TrustDomain::User,
+        1_000,
+        1_000,
+        7,
+        ProcId::from_raw([0xA5; tairix_abi::origin::PROC_ID_LEN]),
+        CapabilitySummary::EMPTY,
+        0,
+    );
+    let stream_id = music.stream_id;
+    for request in [
+        AudioRequest::Start {
+            stream_id,
+            at: Frames::ZERO,
+        },
+        AudioRequest::Flush { stream_id },
+        AudioRequest::Close { stream_id },
+    ] {
+        assert_eq!(
+            fixture.control(&reused, &request),
+            Err(Errno::NotFound),
+            "{request:?} from another instance of pid 7"
+        );
+    }
+    start(&mut fixture, &owner, &music);
+    fixture.grant(&owner, &AudioRequest::Close { stream_id });
+}
+
+/// A stream ends with the instance that opened it, and with that instance's
+/// exit alone. Regression: nothing took back a stream whose owner exited.
+#[test]
+fn an_instances_exit_ends_its_streams_and_no_other() {
+    let mut fixture = Fixture::new();
+    let (owner, other) = (caller(7, &[]), caller(8, &[]));
+    let music = queued(&mut fixture, &owner);
+    let speech = fixture.open_playback(&owner, DEVICE_HZ, 4_096);
+    let theirs = fixture.open_playback(&other, DEVICE_HZ, 4_096);
+    start(&mut fixture, &owner, &music);
+    fixture.service.client_exited(owner.proc_id(), &DiscardSink);
+    for grant in [&music, &speech] {
+        assert_eq!(
+            fixture.control(
+                &owner,
+                &AudioRequest::Close {
+                    stream_id: grant.stream_id,
+                },
+            ),
+            Err(Errno::NotFound),
+            "ended with its owner"
+        );
+    }
+    fixture.grant(
+        &other,
+        &AudioRequest::Close {
+            stream_id: theirs.stream_id,
+        },
+    );
+}
+
+/// Each stream an open makes names its owner for the process half to watch,
+/// once; a refused open names none.
+#[test]
+fn an_open_names_its_owner_to_watch_once() {
+    let mut fixture = Fixture::new();
+    fixture.bind();
+    let owner = caller(7, &[]);
+    assert_eq!(
+        fixture
+            .open_for(
+                &owner,
+                Tenancy::Machine,
+                StreamRole::Media,
+                DEVICE_HZ,
+                4_096
+            )
+            .err(),
+        Some(Errno::PermissionDenied),
+        "the machine's tenancy is not a program's to take"
+    );
+    assert_eq!(
+        fixture.service.take_watch(),
+        None,
+        "a refused open names none"
+    );
+    let _music = fixture.open_playback(&owner, DEVICE_HZ, 4_096);
+    assert_eq!(fixture.service.take_watch(), Some(owner.proc_id()));
+    assert_eq!(fixture.service.take_watch(), None, "answered once");
+}
+
 #[path = "capture_tests.rs"]
 mod capture;

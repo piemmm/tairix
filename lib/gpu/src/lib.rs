@@ -83,7 +83,7 @@ macro_rules! handle {
     (@shape $(#[$meta:meta])* $name:ident, $key:ident) => {
         $(#[$meta])*
         pub struct $name {
-            pub(crate) shared: alloc::sync::Arc<crate::device::Shared>,
+            pub(crate) shared: alloc::sync::Arc<crate::device::SoftwareShared>,
             pub(crate) context: crate::model::ContextKey,
             pub(crate) key: crate::model::$key,
         }
@@ -96,6 +96,7 @@ macro_rules! handle {
     };
 }
 
+mod backend;
 mod binding;
 mod command;
 mod device;

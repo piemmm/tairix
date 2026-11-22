@@ -2,10 +2,10 @@
 
 Stability tier: **experimental**
 
-The device-neutral GPU seam (`plans/GPU.md`): the memory and submission model
-every backend implements, and the software device that implements it on the CPU
-on every target, a SPIR-V interpreter running its compute and render pipelines
-and `lib/raster`'s stages rasterising its passes.
+The device-neutral GPU seam (`plans/GPU.md`): the memory and submission model,
+generic over the backend a device's work runs on, and the software backend that
+runs it on the CPU on every target, a SPIR-V interpreter running its compute
+and render pipelines and `lib/raster`'s stages rasterising its passes.
 
 ## What it provides
 
@@ -52,6 +52,12 @@ and `lib/raster`'s stages rasterising its passes.
 
 ## Design notes
 
+- The model — contexts, tables, charges, every check, order, timelines,
+  deadlines and loss — is generic over a backend: what memory is to the
+  device, the form each object it files takes there, and how a ready job runs.
+  What the model checks and charges is had under the device's lock, what the
+  backend makes is made with it let go and filed under it, so no backend's
+  latency is paid under the lock.
 - The software device runs its work on a worker thread of its own, so
   submitting and signalling return at once; where no thread can be started,
   a job runs on the thread whose act made it ready. Its memory is words under
@@ -86,9 +92,10 @@ and `lib/raster`'s stages rasterising its passes.
   where every attachment's texels start on a word, so they never share one and
   a pass leaves the same bytes on any number of cores. A pass
   refuses a draw that binds, or reads as vertices or indices, what it renders
-  to, through a table of the byte spans each bind set's descriptors reach made
-  when the set is made, so the check costs a draw a set's logarithm, not its
-  descriptors.
+  to, through a table made when each bind set is made of what its descriptors
+  reach — buffers' bytes, images' placements and the planes, levels and layers
+  their views see, whatever a backend's layout — so the check costs a draw a set's
+  logarithm, not its descriptors.
 - No `unsafe`. The crate is enrolled in `cargo xtask miri` for the contention
   its threads put `lib/rt`'s lock and condition variable to; the tests it
   leaves out, and why, are listed in `docs/src/lib/gpu.md`.
@@ -96,7 +103,9 @@ and `lib/raster`'s stages rasterising its passes.
 ## Tests
 
 The model's own tests drive engines of any depth through dispatch, completion
-and reset; the device's tests run the seam on the software device, threads and
+and reset over a test backend; the backend tests hold an image's placement to
+each backend's requirements and what a binding reaches to the same answer over
+the software backend and a test backend of another layout; the device's tests run the seam on the software device, threads and
 its worker included; the format, texel, image and sampler tests hold every
 encoding, refusal, copy and clear to what it should land; the binding tests
 hold every bind set check and a pipeline layout's agreement; the interpreter's

@@ -52,7 +52,7 @@ use tairix_abi::driver::audio::{
 use tairix_abi::driver::audio_channel::{AttachParams, ConfigureGrant, ConfigureParams};
 use tairix_abi::driver::audio_ring::{PcmGeometry, PcmRing};
 use tairix_abi::time::Time64;
-use tairix_abi::Errno;
+use tairix_abi::{Errno, ProcId};
 use tairix_audio::channel::ChannelMatrix;
 use tairix_audio::clock::ClockModel;
 use tairix_audio::convert;
@@ -300,8 +300,11 @@ impl Tap {
 pub(crate) struct Stream {
     /// The service-issued token every later request names.
     pub(crate) id: u64,
-    /// The caller's kernel-attested pid; a request naming this stream from
-    /// any other process is refused.
+    /// The process instance that opened it, as the kernel attests it: a
+    /// request naming this stream from any other is refused, and it ends
+    /// with the instance.
+    pub(crate) owner_proc: ProcId,
+    /// The opener's kernel-attested pid, which its notify port is named by.
     pub(crate) owner_pid: u64,
     /// The user it runs as.
     pub(crate) owner_uid: u32,
@@ -364,6 +367,8 @@ pub(crate) struct Stream {
 pub(crate) struct StreamOpen {
     /// The service-issued token.
     pub(crate) id: u64,
+    /// The caller's kernel-attested process instance.
+    pub(crate) owner_proc: ProcId,
     /// The caller's kernel-attested pid.
     pub(crate) owner_pid: u64,
     /// The user it runs as.
@@ -536,6 +541,7 @@ impl Stream {
     pub(crate) fn open(active: &mut Active, params: &StreamOpen) -> Result<Self, Errno> {
         Ok(Self {
             id: params.id,
+            owner_proc: params.owner_proc,
             owner_pid: params.owner_pid,
             owner_uid: params.owner_uid,
             owner_app: params.owner_app,

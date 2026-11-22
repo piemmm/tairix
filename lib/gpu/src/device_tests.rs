@@ -334,7 +334,7 @@ fn a_released_context_s_budget_stays_charged_to_the_heap_while_its_memory_is_hel
     drop(imported);
     assert_eq!(
         pinned - heap(),
-        64 + crate::memory::Memory::overhead(64)
+        64 + crate::software::memory::Memory::overhead(64)
             + crate::model::shared_bytes::<crate::memory::Budget>(),
         "the memory, and the budget it is charged to"
     );
@@ -1248,7 +1248,7 @@ fn an_allocation_is_charged_for_what_it_keeps_besides_its_bytes() {
     assert_eq!(after.allocations - before.allocations, 1);
     assert_eq!(
         after.objects - before.objects,
-        crate::memory::Memory::overhead(1),
+        crate::software::memory::Memory::overhead(1),
         "its words rounded up and the memory itself"
     );
     drop(second);

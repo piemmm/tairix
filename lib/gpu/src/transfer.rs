@@ -10,6 +10,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use crate::backend::Backend;
 use crate::command::{buffer, Op};
 use crate::format::Aspects;
 use crate::image::ImageUsage;
@@ -28,11 +29,11 @@ pub(crate) enum Direction {
 }
 
 /// The image `key` names, made for `usage`.
-pub(crate) fn image(
-    context: &ContextState,
+pub(crate) fn image<B: Backend>(
+    context: &ContextState<B>,
     key: ImageKey,
     usage: ImageUsage,
-) -> Result<&Arc<ImageState>, Error> {
+) -> Result<&Arc<ImageState<B>>, Error> {
     let image = context.images.get(key).ok_or(Error::Stale)?;
     if image.desc.usage.contains(usage) {
         Ok(image)
@@ -56,13 +57,13 @@ fn copied<T: Copy>(regions: &[T]) -> Result<Vec<T>, Error> {
     tairix_util::fallible::copied(regions).ok_or(Error::OutOfMemory)
 }
 
-/// The bytes of its memory an image takes.
-const fn bytes_of(image: &ImageState) -> Range<u64> {
-    image.offset..image.offset.saturating_add(image.layout.size)
+/// The bytes of its memory an image's texels may lie in.
+const fn bytes_of<B: Backend>(image: &ImageState<B>) -> Range<u64> {
+    image.offset..image.offset.saturating_add(image.size)
 }
 
 /// Whether a buffer's range and an image share a byte of one memory.
-fn aliases(buffer: &BufferState, image: &ImageState) -> bool {
+fn aliases<B: Backend>(buffer: &BufferState<B>, image: &ImageState<B>) -> bool {
     Arc::ptr_eq(&buffer.memory, &image.memory)
         && overlaps(
             &(buffer.offset..buffer.offset.saturating_add(buffer.size)),
@@ -213,12 +214,12 @@ const fn of_copy(copy: &BufferImageCopy) -> Region {
 /// A copy between `buffer` and `image` checked whole: every region within
 /// both, none overlapping another where it writes, which was decided as it
 /// was recorded, and the two not sharing memory.
-pub(crate) fn buffer_image(
-    context: &ContextState,
+pub(crate) fn buffer_image<B: Backend>(
+    context: &ContextState<B>,
     (buffer_key, image_key): (BufferKey, ImageKey),
     (copies, overlapping): (&[BufferImageCopy], bool),
     direction: Direction,
-) -> Result<Op, Error> {
+) -> Result<Op<B>, Error> {
     let (buffer_use, image_use) = match direction {
         Direction::ToImage => (BufferUsage::TRANSFER_SRC, ImageUsage::TRANSFER_DST),
         Direction::ToBuffer => (BufferUsage::TRANSFER_DST, ImageUsage::TRANSFER_SRC),
@@ -251,11 +252,11 @@ pub(crate) fn buffer_image(
 /// plane each holds and texels of one size, of one sample count, and none
 /// written twice or read where written, which was decided as it was
 /// recorded.
-pub(crate) fn image_image(
-    context: &ContextState,
+pub(crate) fn image_image<B: Backend>(
+    context: &ContextState<B>,
     (src_key, dst_key): (ImageKey, ImageKey),
     (copies, overlapping): (&[ImageCopy], bool),
-) -> Result<Op, Error> {
+) -> Result<Op<B>, Error> {
     let src = image(context, src_key, ImageUsage::TRANSFER_SRC)?;
     let dst = image(context, dst_key, ImageUsage::TRANSFER_DST)?;
     bounded(copies)?;
@@ -286,12 +287,12 @@ pub(crate) fn image_image(
 
 /// A clear checked whole: a value of the kind the format holds, every range
 /// within the image.
-pub(crate) fn clear(
-    context: &ContextState,
+pub(crate) fn clear<B: Backend>(
+    context: &ContextState<B>,
     image_key: ImageKey,
     value: ClearValue,
     ranges: &[ImageRange],
-) -> Result<Op, Error> {
+) -> Result<Op<B>, Error> {
     let image = image(context, image_key, ImageUsage::TRANSFER_DST)?;
     bounded(ranges)?;
     value.check(image.desc.format)?;

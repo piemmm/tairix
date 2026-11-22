@@ -53,8 +53,9 @@ pub enum Error {
     /// A range running past the end of what it names, or a number or setting
     /// past what the device takes.
     OutOfRange,
-    /// The buffer or image was not made for that use, or the usage is not
-    /// one it may declare.
+    /// The buffer or image was not made for that use, the usage is not one
+    /// it may declare, or the memory is of a type the image may not be
+    /// placed in.
     Usage,
     /// The memory is not one the CPU can reach.
     NotHostVisible,

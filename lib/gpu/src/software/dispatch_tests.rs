@@ -5,6 +5,7 @@ use alloc::string::String;
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::backend::Pool;
 use crate::device_tests::{context, device, Clock};
 use crate::pipeline::tests::{rig, run, words, Rig};
 use crate::software::WORK_PER_CHECK;
@@ -1019,10 +1020,9 @@ fn hold(
 ) -> Result<super::Hold, Error> {
     let (plan, released) = pool.plan(need, (budget, 0), heap);
     drop(released);
-    let grown = plan?.make()?;
-    let (held, released) = pool.install(grown);
-    drop(released);
-    held.ok_or(Error::Malformed)
+    let (held, grown) = plan?.make()?;
+    drop(pool.install(grown));
+    Ok(held)
 }
 
 #[test]
@@ -1324,21 +1324,21 @@ fn a_dispatch_lends_the_set_fitted_to_what_is_still_held() {
         words: 1 << 16,
         masks: 64,
     };
-    let (plan, released) = model.plan_workspaces(context.key, large, 0);
+    let (plan, released) = model.plan_pool(context.key, large, 0);
     drop(released);
-    let (held, released) = model.install_workspaces(plan.expect("planned").make().expect("made"));
-    drop(released);
+    let (held, grown) = plan.expect("planned").make().expect("made");
+    drop(model.install_pool(grown));
     drop(held);
     let (next, pruned) = model.dispatch(&|| 0);
     drop(pruned);
     let mut dispatch = next.expect("the small pipeline's job");
-    assert!(!dispatch.workspaces.is_empty());
+    assert!(!dispatch.lease.is_empty());
     assert!(
-        dispatch.workspaces.iter().all(|w| w.size() == fitted),
+        dispatch.lease.iter().all(|w| w.size() == fitted),
         "fitted to the small pipeline alone"
     );
     let woken = model.complete(dispatch.engine, dispatch.job, None);
-    let given = model.give_back(core::mem::take(&mut dispatch.workspaces));
+    let given = model.give_back(core::mem::take(&mut dispatch.lease));
     drop(model);
     drop((dispatch, woken, given));
 }
@@ -1442,7 +1442,7 @@ fn a_set_lent_while_a_larger_growth_is_planned_is_paid_for_by_the_last_pipeline_
     // two holds of the device's lock.
     let (plan, released) = pool.plan(need(1 << 17), (&other, 0), &heap);
     drop(released);
-    let grown = plan.expect("planned").make().expect("made");
+    let (larger, grown) = plan.expect("planned").make().expect("made");
     drop(sizing);
     drop(pool.prune());
     let running = pool.take(need(1024));
@@ -1450,8 +1450,7 @@ fn a_set_lent_while_a_larger_growth_is_planned_is_paid_for_by_the_last_pipeline_
         running.iter().all(|w| w.size() == need(1 << 16)),
         "not shrunk below the need planned"
     );
-    let (larger, released) = pool.install(grown);
-    drop(released);
+    drop(pool.install(grown));
     drop(larger);
     assert_eq!(
         other.taken(),
@@ -1610,10 +1609,9 @@ fn growths_planned_together_each_cover_their_own_pipeline_whichever_installs_fir
             [smaller, larger]
         };
         let mut holds = alloc::vec::Vec::new();
-        for grown in order {
-            let (hold, released) = pool.install(grown);
-            drop(released);
-            holds.push(hold.expect("held"));
+        for (hold, grown) in order {
+            drop(pool.install(grown));
+            holds.push(hold);
             assert!(
                 pool.free.iter().all(|w| w.size().words >= 1024),
                 "the first installed covered, larger first {larger_first}"
@@ -1644,11 +1642,9 @@ fn a_growth_planned_before_a_job_takes_the_set_is_kept_until_it_comes_back() {
         .plan(need(4096), (&context, 0), &heap)
         .0
         .expect("planned");
-    let grown = plan.make().expect("made");
+    let (_held, grown) = plan.make().expect("made");
     let running = pool.take(need(64));
-    let (held, released) = pool.install(grown);
-    drop(released);
-    assert!(held.is_some());
+    drop(pool.install(grown));
     assert!(
         running.iter().all(|w| w.size() == need(64)),
         "the job's set untouched"
@@ -1678,15 +1674,13 @@ fn a_set_made_whole_before_a_job_takes_the_set_outlasts_growths_kept_meanwhile()
         .plan(need(64), (&context, 0), &heap)
         .0
         .expect("planned");
-    let (largest, first) = (largest.make().expect("made"), first.make().expect("made"));
-    let (_first, released) = pool.install(first);
-    drop(released);
+    let ((_largest, largest), (_first, first)) =
+        (largest.make().expect("made"), first.make().expect("made"));
+    drop(pool.install(first));
     let running = pool.take(need(64));
     // Kept for the set first, growing it part by part.
     let _middle = hold(&mut pool, need(1024), &context, &heap).expect("held");
-    let (held, released) = pool.install(largest);
-    drop(released);
-    assert!(held.is_some());
+    drop(pool.install(largest));
     drop(pool.prune());
     drop(pool.give(running));
     assert!(
@@ -1774,12 +1768,11 @@ fn a_pipeline_made_while_a_job_holds_the_set_counts_a_set_kept_whole_for_it() {
         .plan(need(64), (&context, 0), &heap)
         .0
         .expect("planned");
-    let (largest, first) = (largest.make().expect("made"), first.make().expect("made"));
-    let (_first, released) = pool.install(first);
-    drop(released);
+    let ((_largest, largest), (_first, first)) =
+        (largest.make().expect("made"), first.make().expect("made"));
+    drop(pool.install(first));
     let running = pool.take(need(64));
-    let (_largest, released) = pool.install(largest);
-    drop(released);
+    drop(pool.install(largest));
     let taken = heap.taken();
     let _covered = hold(&mut pool, need(2048), &context, &heap).expect("held");
     assert_eq!(heap.taken(), taken, "what is kept whole covers it");
@@ -1904,10 +1897,9 @@ fn growths_planned_together_in_different_kinds_each_cover_their_own() {
         } else {
             [branchy, wide]
         };
-        let _holds = order.map(|grown| {
-            let (hold, released) = pool.install(grown);
-            drop(released);
-            hold.expect("held")
+        let _holds = order.map(|(hold, grown)| {
+            drop(pool.install(grown));
+            hold
         });
         assert!(
             pool.free.iter().all(|w| w.size() == both),
@@ -2263,7 +2255,7 @@ fn a_queued_dispatch_holds_its_sets_and_nothing_for_each_memory_they_reach() {
         let live = model.live(context.key).expect("live");
         let set = live.bind_sets.get(wide.set.key).expect("filed");
         assert_eq!(
-            set.memories.len(),
+            set.form.memories.len(),
             1,
             "one memory however often it is bound"
         );
@@ -2346,11 +2338,11 @@ fn a_run_s_tables_are_counted_past_any_word_without_wrapping() {
 fn memories_are_merged_from_the_sets_lists_in_order_once_each() {
     use super::merge;
     let budget = alloc::sync::Arc::new(crate::memory::Budget::new(u64::MAX, Error::OverLimit));
-    let mut held: alloc::vec::Vec<alloc::sync::Arc<crate::memory::Memory>> = (0..6)
+    let mut held: alloc::vec::Vec<alloc::sync::Arc<crate::software::memory::Memory>> = (0..6)
         .map(|_| {
             let charge = |held| crate::memory::Charge::take(&[&budget], 4, held).expect("charged");
             alloc::sync::Arc::new(
-                crate::memory::Memory::zeroed(
+                crate::software::memory::Memory::zeroed(
                     4,
                     charge(crate::memory::Held::Allocation),
                     charge(crate::memory::Held::Host),
@@ -2360,13 +2352,14 @@ fn memories_are_merged_from_the_sets_lists_in_order_once_each() {
         })
         .collect();
     held.sort_unstable_by_key(alloc::sync::Arc::as_ptr);
-    let pick = |at: &[usize]| -> alloc::vec::Vec<alloc::sync::Arc<crate::memory::Memory>> {
-        at.iter()
-            .map(|&k| alloc::sync::Arc::clone(&held[k]))
-            .collect()
-    };
+    let pick =
+        |at: &[usize]| -> alloc::vec::Vec<alloc::sync::Arc<crate::software::memory::Memory>> {
+            at.iter()
+                .map(|&k| alloc::sync::Arc::clone(&held[k]))
+                .collect()
+        };
     let (a, b, c) = (pick(&[0, 2, 4]), pick(&[1, 2, 5]), pick(&[3]));
-    let mut lists: alloc::vec::Vec<&[alloc::sync::Arc<crate::memory::Memory>]> =
+    let mut lists: alloc::vec::Vec<&[alloc::sync::Arc<crate::software::memory::Memory>]> =
         alloc::vec![&a, &b, &a, &c];
     let mut merged = alloc::vec::Vec::new();
     let stop = core::sync::atomic::AtomicBool::new(false);
@@ -2714,11 +2707,11 @@ fn bindings_of_two_sets_over_shared_and_interleaved_memories_reach_their_own() {
 fn a_memory_is_placed_among_merged_ones_from_where_the_last_was() {
     use super::place_from;
     let budget = alloc::sync::Arc::new(crate::memory::Budget::new(u64::MAX, Error::OverLimit));
-    let mut held: alloc::vec::Vec<alloc::sync::Arc<crate::memory::Memory>> = (0..100)
+    let mut held: alloc::vec::Vec<alloc::sync::Arc<crate::software::memory::Memory>> = (0..100)
         .map(|_| {
             let charge = |held| crate::memory::Charge::take(&[&budget], 4, held).expect("charged");
             alloc::sync::Arc::new(
-                crate::memory::Memory::zeroed(
+                crate::software::memory::Memory::zeroed(
                     4,
                     charge(crate::memory::Held::Allocation),
                     charge(crate::memory::Held::Host),
@@ -2729,7 +2722,8 @@ fn a_memory_is_placed_among_merged_ones_from_where_the_last_was() {
         .collect();
     held.sort_unstable_by_key(alloc::sync::Arc::as_ptr);
     let stranger = held.pop().expect("a memory");
-    let merged: alloc::vec::Vec<&alloc::sync::Arc<crate::memory::Memory>> = held.iter().collect();
+    let merged: alloc::vec::Vec<&alloc::sync::Arc<crate::software::memory::Memory>> =
+        held.iter().collect();
     for stride in [1, 2, 7, 33, 98] {
         let mut from = 0;
         for at in (0..merged.len()).step_by(stride) {
@@ -2925,7 +2919,7 @@ fn a_descriptor_reaching_no_memory_has_no_place_among_a_dispatch_s() {
 
 #[test]
 fn a_queued_dispatch_is_charged_for_its_push_constants_and_their_sharing() {
-    use super::{Dispatch, Groups};
+    use crate::command::{DispatchWork, Groups, Op};
     let (device, _) = device();
     let context = context(&device);
     let wide = wide(&context).expect("a pipeline over a wide set");
@@ -2943,11 +2937,13 @@ fn a_queued_dispatch_is_charged_for_its_push_constants_and_their_sharing() {
         )
     };
     let words: alloc::vec::Vec<u32> = alloc::vec![1, 2, 3, 4];
-    let dispatch = |push| Dispatch {
-        pipeline: alloc::sync::Arc::clone(&pipeline),
-        sets: alloc::vec![alloc::sync::Arc::clone(&set)],
-        push,
-        groups: Groups::Direct([1, 1, 1]),
+    let dispatch = |push| {
+        Op::Dispatch(alloc::boxed::Box::new(DispatchWork {
+            pipeline: alloc::sync::Arc::clone(&pipeline),
+            sets: alloc::vec![alloc::sync::Arc::clone(&set)],
+            push,
+            groups: Groups::Direct([1, 1, 1]),
+        }))
     };
     let none = dispatch(None).held_bytes();
     let some = dispatch(Some(alloc::sync::Arc::new(words))).held_bytes();

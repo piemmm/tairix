@@ -423,23 +423,38 @@ fn a_pipeline_is_charged_all_it_keeps_before_its_working_memory_is_made() {
         let state = live.pipeline_layouts.get(layout.key).cloned();
         (admitted.expect("the module"), state.expect("the layout"))
     };
-    let program = super::lower_compute(&device.info().limits, &admitted.admitted, &desc, &state)
-        .expect("lowered");
-    let need = crate::software::dispatch::need(&program);
-    let (planned, released) = context.shared.model.lock().plan_pipeline(
-        (context.key, super::computes),
-        need,
-        super::held_bytes(&program),
-    );
+    let plan = super::plan_stage(
+        &device.info().limits,
+        &admitted.admitted,
+        (
+            tairix_spirv::Stage::Compute,
+            desc.entry_point,
+            desc.specialization,
+        ),
+        &state,
+    )
+    .expect("planned");
+    let prepared = crate::software::Software::compute_form(device.info(), &plan).expect("lowered");
+    drop(plan);
+    let (program, need) = (prepared.form, prepared.need);
+    let held =
+        crate::model::shared_bytes::<super::ComputePipelineState<crate::software::Software>>()
+            .saturating_add(prepared.held);
+    let (planned, released) =
+        context
+            .shared
+            .model
+            .lock()
+            .plan_pipeline((context.key, super::computes), need, held);
     drop(released);
     let (plan, charge) = planned.expect("planned");
-    let grown = plan.make().expect("made");
+    let made = plan.make().expect("made");
     // The heap filled between the two phases, as another context's work may.
     let _full = crate::device_tests::fill_heap(&device);
     let (filed, released) = context.shared.model.lock().create_pipeline(
         (context.key, super::computes),
         (program, state, need),
-        (grown, charge),
+        (made, charge),
     );
     drop(released);
     assert!(
