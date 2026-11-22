@@ -363,8 +363,7 @@ impl Machine<'_, '_> {
         let mut text = Vec::new();
         text.try_reserve_exact(room as usize + 1)
             .map_err(|_| Error::NoRoom)?;
-        text.resize(room as usize, 0);
-        self.os.read_bytes(from, &mut text)?;
+        self.os.read_onto(&mut text, from, room as usize)?;
         match text.iter().position(|&b| b == b'\r') {
             Some(cr) => text.truncate(cr + 1),
             None => text.push(b'\r'),

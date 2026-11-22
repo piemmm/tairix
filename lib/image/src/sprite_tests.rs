@@ -1316,29 +1316,96 @@ fn a_new_paletted_sprite_takes_a_numbered_mode_every_risc_os_reads() {
 
 #[test]
 fn the_least_a_sprite_stores_is_its_control_block_and_its_word_aligned_rows() {
-    let one_bit = SpriteLayout::Indexed(IndexDepth::One);
+    let one_bit = SpriteMode::from_value(MODE_2).expect("mode 0");
     // Thirty-three one-bit pixels need two words a row.
     assert_eq!(one_bit.least_stored_bytes(33, 3), Some(44 + 3 * 8));
     assert_eq!(one_bit.least_stored_bytes(32, 1), Some(44 + 4));
-    let direct = SpriteLayout::Direct {
-        bits_per_pixel: 24,
-        alpha_channel: false,
-    };
-    assert_eq!(direct.bits_per_pixel(), 24);
+    let packed = SpriteMode::from_value(ro35(8, false)).expect("a packed word");
     // Three twenty-four-bit pixels are seventy-two bits: three words.
-    assert_eq!(direct.least_stored_bytes(3, 2), Some(44 + 2 * 12));
+    assert_eq!(packed.least_stored_bytes(3, 2), Some(44 + 2 * 12));
     assert_eq!(
-        SpriteLayout::Indexed(IndexDepth::Eight).least_stored_bytes(u32::MAX, u32::MAX),
+        SpriteMode::from_value(MODE_256)
+            .expect("mode 15")
+            .least_stored_bytes(u32::MAX, u32::MAX),
         Some(44 + u64::from(u32::MAX).div_ceil(4) * 4 * u64::from(u32::MAX)),
     );
-    let widest = SpriteLayout::Direct {
-        bits_per_pixel: 32,
-        alpha_channel: true,
-    };
+    let widest = SpriteMode::truecolour((1, 1), true);
     assert_eq!(
         widest.least_stored_bytes(u32::MAX, u32::MAX),
         None,
         "overflows"
+    );
+    // Mode 2 doubles its sixteen colours into eight-bit fields.
+    let doubled = SpriteMode::from_value(2).expect("mode 2");
+    assert_eq!(doubled.layout(), SpriteLayout::Indexed(IndexDepth::Four));
+    assert_eq!(doubled.least_stored_bytes(5, 1), Some(44 + 8));
+}
+
+/// The regression: a numbered mode that doubles its pixels on the screen —
+/// modes 2, 4, 5 and 10 — was read at its colours' depth, where RISC OS 5
+/// holds each pixel in the wider field its screen memory gives it, the
+/// colour repeated across, so a five-pixel mode 2 sprite read as ten.
+#[test]
+fn a_mode_that_doubles_its_pixels_holds_each_in_its_screen_memory_field() {
+    let bytes = one(Sprite::new(2, 8, 5, 1).pixels(&[0x55, 0xFF, 0x33, 0xBB, 0x00]));
+    let image = decode_as(ImageFormat::Sprite, &bytes, &limits()).expect("the fixture decodes");
+    assert_eq!((image.width(), image.height()), (5, 1));
+    assert_eq!(
+        quads(&image),
+        vec![WIMP[5], WIMP[15], WIMP[3], WIMP[11], WIMP[0]]
+    );
+    for (mode, field) in [(4, 2u32), (5, 4), (10, 16)] {
+        let doubled = SpriteMode::from_value(mode).expect("a doubling mode");
+        assert_eq!(
+            doubled.least_stored_bytes(32, 1),
+            Some(44 + 4 * u64::from(field)),
+            "mode {mode}"
+        );
+    }
+    assert!(
+        !SpriteMode::indexed(IndexDepth::Four, (3, 2), false).is_numbered(),
+        "a new sprite never takes a doubling mode's number"
+    );
+}
+
+#[test]
+fn a_mode_words_fields_are_read_by_the_form_its_bits_announce() {
+    use crate::SpriteModeWord as Word;
+    assert_eq!(Word::of(28), Word::Number(28));
+    assert_eq!(Word::of(0x8000), Word::Selector);
+    assert_eq!(
+        Word::of(ro35(6, true)),
+        Word::Dpi {
+            sprite_type: 6,
+            dpi: (90, 90),
+            wide_mask: true
+        }
+    );
+    assert_eq!(
+        Word::of(0x7860_C0A1),
+        Word::Eig {
+            sprite_type: 6,
+            flags: 0xC0,
+            eig: (2, 2),
+            wide_mask: false,
+            well_formed: true
+        }
+    );
+    assert!(matches!(
+        Word::of(0x7861_0001),
+        Word::Eig {
+            well_formed: false,
+            ..
+        }
+    ));
+    // A RISC OS 3.5 word of type 0 names no type, and is the reader's to refuse.
+    assert_eq!(
+        Word::of(0x0016_80B5),
+        Word::Dpi {
+            sprite_type: 0,
+            dpi: (90, 90),
+            wide_mask: false
+        }
     );
 }
 

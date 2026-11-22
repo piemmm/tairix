@@ -227,17 +227,12 @@ fn read_all(os: &mut Os<'_>, handle: u32) -> Result<Vec<u8>, Fail> {
     extent.r[..2].copy_from_slice(&[swi::args::READ_EXTENT, handle]);
     os.perform(X | swi::ARGS, &mut extent)?;
     let length = extent.r[2];
-    let mut file = Vec::new();
-    if file.try_reserve_exact(length as usize).is_err() {
-        return Err(os.no_memory());
-    }
-    file.resize(length as usize, 0);
     let buffer = os.rma_claim(length.max(4))?;
     let mut read = Regs::default();
     read.r[..5].copy_from_slice(&[swi::gbpb::READ_AT, handle, buffer, length, 0]);
     let got = os
         .perform(X | swi::GBPB, &mut read)
-        .and_then(|()| os.read_bytes(buffer, &mut file));
+        .and_then(|()| os.read_vec(buffer, length as usize));
     os.rma_free(buffer)?;
-    got.map(|()| file)
+    got
 }

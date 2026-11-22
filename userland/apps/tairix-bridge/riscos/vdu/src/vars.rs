@@ -8,7 +8,8 @@ use tairix_riscos_kernel::os::{Fail, Os, Regs};
 use tairix_riscos_kernel::output::workspace;
 use tairix_vdu::mode::vdu_var;
 
-use crate::mode::Format;
+use crate::mode::{var, Format};
+use crate::output::Output;
 use crate::select::{self, Outcome, Spec};
 use crate::state::{with, Vdu};
 
@@ -16,24 +17,47 @@ use crate::state::{with, Vdu};
 const MAX_MODE: u32 = 53;
 
 impl Vdu {
+    /// Mode variable `number` of the destination drawn: a sprite's as it is
+    /// made, its screen size the screen's.
+    pub(crate) fn mode_var(&self, number: u32) -> Option<u32> {
+        match self.output {
+            Output::Screen => self.screen.format.current_var(number),
+            Output::Sprite { format, .. } => match number {
+                var::SCREEN_SIZE => self.screen.format.current_var(number),
+                _ => format.var(number),
+            },
+        }
+    }
+
     /// VDU variable `number`, if it is one: the mode's, then those from 128,
     /// then the window's size from 256.
     pub(crate) fn vdu_var(&self, os: &mut Os<'_>, number: u32) -> Option<u32> {
         if number < crate::mode::VARIABLES {
-            return self.screen.format.current_var(number);
+            return self.mode_var(number);
         }
         let g = &self.graphics;
         let t = &self.text;
-        let format = &self.screen.format;
+        let format = self.format();
         let unsigned = |v: i32| v.cast_unsigned();
+        // A window no VDU 28 set reads as none along an axis a sprite smaller
+        // than a cell has no cell on.
+        let none_or = |cells: u32, edge: u32| {
+            if cells == 0 && !t.windowed {
+                u32::MAX
+            } else {
+                edge
+            }
+        };
+        let right = none_or(format.columns(), t.window.right);
+        let bottom = none_or(format.rows(), t.window.bottom);
         Some(match number {
             128 => unsigned(g.window.left),
             129 => unsigned(g.window.bottom),
             130 => unsigned(g.window.right),
             131 => unsigned(g.window.top),
             132 => t.window.left,
-            133 => t.window.bottom,
-            134 => t.window.right,
+            133 => bottom,
+            134 => right,
             135 => t.window.top,
             136 => unsigned(g.origin.0),
             137 => unsigned(g.origin.1),
@@ -47,7 +71,7 @@ impl Vdu {
             145 => unsigned(g.cursor_pixels.1),
             146 => unsigned(g.new_point.0),
             147 => unsigned(g.new_point.1),
-            148 => self.screen.screen_start(),
+            148 => self.canvas().start,
             149 => self.screen.display_start_address(),
             150 => self.screen.size,
             151 => self.colours.fore.action,
@@ -71,8 +95,8 @@ impl Vdu {
             170 => format.cell().space_y,
             171 => os.vector_base() + workspace::FOREGROUND,
             172 => 0,
-            vdu_var::WINDOW_WIDTH => t.window.right - t.window.left,
-            vdu_var::WINDOW_HEIGHT => t.window.bottom - t.window.top,
+            vdu_var::WINDOW_WIDTH => right.wrapping_sub(t.window.left),
+            vdu_var::WINDOW_HEIGHT => bottom.wrapping_sub(t.window.top),
             _ => return None,
         })
     }
@@ -101,9 +125,9 @@ pub(crate) fn read_vdu_variables(os: &mut Os<'_>, regs: &mut Regs) -> Result<(),
 pub(crate) fn read_mode_variable(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let (mode, number) = (regs.r[0], regs.r[1]);
     let value = if mode == u32::MAX {
-        with(os, |vdu, _| Ok(vdu.screen.format.current_var(number)))?
+        with(os, |vdu, _| Ok(vdu.mode_var(number)))?
     } else if mode & 1 != 0 && mode >= 0x100 && mode >> 27 != 0 {
-        Format::sprite_word(mode).and_then(|sprite| sprite.var(number))
+        crate::sprite::mode_variable(mode, number)
     } else {
         match select::read_spec(os, mode)? {
             Some(spec) => named_var(os, &spec, number)?,

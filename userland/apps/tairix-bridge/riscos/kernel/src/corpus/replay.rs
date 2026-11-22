@@ -212,8 +212,7 @@ fn shown(
         }
         Item::Bytes { at, length } => {
             let address = address(at, regs, kept)?;
-            let mut bytes = alloc::vec![0; *length as usize];
-            os.read_bytes(address, &mut bytes).map_err(faulted)?;
+            let bytes = os.read_vec(address, *length as usize).map_err(faulted)?;
             let mut text = format!(" {key}=");
             for byte in bytes {
                 let _ = write!(text, "{byte:02X}");

@@ -1,3 +1,20 @@
 # ScreenModes' messages, in TAIRiX Bridge's own words.
 BadModeFile:Line %0 of %1 cannot be read as part of a monitor definition
 ModeFileTooLarge:%0 is too large to be a monitor definition
+NoMonitorFile:No monitor definition file is loaded
+BadInfoReason:ScreenModes_ReadInfo has no such reason
+BadAudioReason:ScreenModes_EnumerateAudioFormats has no such reason
+ModeSizeDisagrees:The mode ending on line %0 of %1 is not the size its timings show
+ModeFileEnds:%1 ends inside a mode
+ModeNumberLarge:The number on line %0 of %1 is too large
+ModeLineTrails:Line %0 of %1 has more on it than it can take
+ModeNumberExpected:Line %0 of %1 needs a number
+ModeKeyRepeated:Line %0 of %1 gives its mode something it already has
+ModeUnnamed:The mode ending on line %0 of %1 has no name
+ModeIncomplete:The mode ending on line %0 of %1 lacks its pixel rate, a timing or its syncs
+ModeKeyUnknown:Line %0 of %1 gives a mode something no mode has
+ModeKeyMisplaced:Line %0 of %1 cannot be inside a mode
+ModeFileFormat:%1 is a monitor definition in a format that cannot be read
+MonitorTitleBlank:The monitor title on line %0 of %1 is blank
+ModeFileEmpty:%1 defines no modes
+ModeNoSize:The mode ending on line %0 of %1 has no size or no pixel rate

@@ -22,6 +22,9 @@ tairix-colour = { path = "../../../../../lib/colour", version = "=0.0.0" }
 # RISC OS 5's numbered modes, the control codes, the system font and the
 # palettes' arithmetic.
 tairix-vdu = { path = "../../../../../lib/vdu", version = "=0.0.0" }
+# Sprite areas, control blocks, mode words and names: the format's one
+# definition.
+tairix-image = { path = "../../../../../lib/image", version = "=0.0.0" }
 # Mode 7's character generator.
 tairix-teletext = { path = "../../../../../lib/teletext", version = "=0.0.0" }
 # Fallible containers for the flood fill's spans and loaded mode files.

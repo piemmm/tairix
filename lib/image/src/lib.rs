@@ -192,9 +192,12 @@ pub use picture::{
 };
 pub use png::defilter_row as defilter_png_row;
 pub use sprite::{
-    decode_named, decode_sprite, desktop_palette, find_named, opaque_sprite_writes_back,
-    LoneSprite, NamedSprite, OpaqueSprite, Sprite, SpriteAreaReader, SpriteEntry, SpriteLayout,
-    SpriteMode, SpriteName, SpritePalette, MAX_EIG as MAX_SPRITE_EIG, SPRITE_HEADER_LEN,
+    area as sprite_area, control as sprite_control, decode_named, decode_sprite, desktop_palette,
+    dpi_of_eig as sprite_dpi_of_eig, eig_of_dpi as sprite_eig_of_dpi, find_named,
+    mask_stride as sprite_mask_stride, opaque_sprite_writes_back, sprite_type, LoneSprite,
+    ModeWord as SpriteModeWord, NamedSprite, OpaqueSprite, Sprite, SpriteAreaReader, SpriteEntry,
+    SpriteLayout, SpriteMode, SpriteName, SpritePalette, MAX_EIG as MAX_SPRITE_EIG,
+    PALETTE_ENTRY_LEN as SPRITE_PALETTE_ENTRY_LEN, SPRITE_HEADER_LEN,
 };
 pub use sprite_encode::SpriteInput;
 pub use tiff::undo_horizontal_big_endian as undo_tiff_horizontal_big_endian;
@@ -1492,13 +1495,53 @@ pub struct JpegFrame {
     pub stored: (u32, u32),
     /// Its colour components: one for grey, three for colour.
     pub components: u8,
-    /// Whether the frame is progressive.
-    pub progressive: bool,
+    /// How the frame is coded.
+    pub process: JpegProcess,
     /// How the stored raster is turned into the picture.
     pub orientation: Orientation,
     /// The density its JFIF header states, where it states one, across and
     /// down the raster as stored.
     pub density: Option<Density>,
+}
+
+/// How a JPEG frame is coded, as its frame header's marker says.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum JpegProcess {
+    /// Baseline sequential (`SOF0`).
+    Baseline,
+    /// Extended sequential (`SOF1`).
+    Extended,
+    /// Progressive (`SOF2`).
+    Progressive,
+}
+
+impl JpegProcess {
+    /// Whether the frame is progressive.
+    #[must_use]
+    pub const fn progressive(self) -> bool {
+        matches!(self, Self::Progressive)
+    }
+
+    /// The frame header marker's distance past `SOF0`: 0, 1 or 2.
+    #[must_use]
+    pub const fn number(self) -> u8 {
+        match self {
+            Self::Baseline => 0,
+            Self::Extended => 1,
+            Self::Progressive => 2,
+        }
+    }
+
+    /// The process [`number`](Self::number) names; none past the three.
+    #[must_use]
+    pub const fn of_number(number: u8) -> Option<Self> {
+        match number {
+            0 => Some(Self::Baseline),
+            1 => Some(Self::Extended),
+            2 => Some(Self::Progressive),
+            _ => None,
+        }
+    }
 }
 
 /// What `bytes`, a JPEG, states of its frame, from the segments up to and
@@ -1509,6 +1552,17 @@ pub struct JpegFrame {
 /// Whichever header refusal a decode raises.
 pub fn jpeg_frame(bytes: &[u8]) -> Result<JpegFrame, DecodeError> {
     jpeg::frame(bytes)
+}
+
+/// Decode `bytes`, a JPEG, into its raster at natural size as it is stored,
+/// the orientation its EXIF segment states not applied, for a reader that
+/// predates the tag.
+///
+/// # Errors
+///
+/// See [`DecodeError`] for every fail-closed refusal reason.
+pub fn jpeg_decode_stored(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
+    jpeg::decode_stored(bytes, limits)
 }
 
 /// Decode `bytes` into a [`RasterImage`] at its natural (full) size,

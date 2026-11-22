@@ -56,35 +56,94 @@ use crate::pages::{PageSource, Pages};
 use crate::picture::{IndexDepth, Picture, Rgba8};
 use crate::{DecodeError, DecodeLimits, FitBox, RasterImage, RGBA_BYTES};
 
-/// A file holds the sprite area control block without its first word — the
-/// area's total size, which the file's own length already gives — so every
-/// offset the file states is four greater than the position it names.
-pub(crate) const AREA_HEADER_LEN: u32 = 12;
-pub(crate) const AREA_OFFSET_BIAS: u32 = 4;
+/// A sprite area's control block as memory holds it: each word's offset from
+/// the area's start, every offset the block states being from there too.
+pub mod area {
+    /// The area's size in bytes, this block included.
+    pub const SIZE: u32 = 0;
+    /// How many sprites it holds.
+    pub const COUNT: u32 = 4;
+    /// Where its first sprite starts.
+    pub const FIRST: u32 = 8;
+    /// Where its free space starts, after its last sprite.
+    pub const FREE: u32 = 12;
+    /// The block's bytes: where the first sprite of an area with no extension
+    /// words starts.
+    pub const LEN: u32 = 16;
+}
+
+/// A file holds the area control block without its size word, which the
+/// file's own length already gives, so every offset the file states is the
+/// size word's four bytes greater than the position it names.
+pub(crate) const AREA_OFFSET_BIAS: u32 = area::COUNT;
+pub(crate) const AREA_HEADER_LEN: u32 = area::LEN - AREA_OFFSET_BIAS;
 
 /// Bytes one sprite's control block occupies: the least a sprite can be.
 pub const SPRITE_HEADER_LEN: u32 = 44;
-const NEXT_AT: u32 = 0;
-const NAME_AT: u32 = 4;
-const WIDTH_WORDS_AT: u32 = 16;
-const HEIGHT_AT: u32 = 20;
-const FIRST_BIT_AT: u32 = 24;
-const LAST_BIT_AT: u32 = 28;
-const IMAGE_AT: u32 = 32;
-const MASK_AT: u32 = 36;
-const MODE_AT: u32 = 40;
+
+/// A sprite's control block: each field's offset from the sprite's start,
+/// every offset the block states being from there too.
+pub mod control {
+    /// The bytes to the next sprite: this sprite's whole length.
+    pub const NEXT: u32 = 0;
+    /// Its name, twelve bytes padded with zeros.
+    pub const NAME: u32 = 4;
+    /// Its rows' length in words, less one.
+    pub const WIDTH_WORDS: u32 = 16;
+    /// Its height in rows, less one.
+    pub const HEIGHT: u32 = 20;
+    /// The first bit of each row's first word that holds a pixel.
+    pub const FIRST_BIT: u32 = 24;
+    /// The last bit of each row's last word that holds a pixel.
+    pub const LAST_BIT: u32 = 28;
+    /// Where its image starts.
+    pub const IMAGE: u32 = 32;
+    /// Where its mask starts, or the image's offset where it has none.
+    pub const MASK: u32 = 36;
+    /// Its mode word.
+    pub const MODE: u32 = 40;
+}
+
+/// The sprite types RISC OS defines, by the number a mode word holds.
+pub mod sprite_type {
+    /// One bit a pixel, through a palette.
+    pub const PALETTED_1: u8 = 1;
+    /// Two bits a pixel, through a palette.
+    pub const PALETTED_2: u8 = 2;
+    /// Four bits a pixel, through a palette.
+    pub const PALETTED_4: u8 = 3;
+    /// Eight bits a pixel, through a palette.
+    pub const PALETTED_8: u8 = 4;
+    /// Sixteen bits: five each of red, green and blue, then one spare.
+    pub const DIRECT_15: u8 = 5;
+    /// Thirty-two bits: eight each of red, green and blue, then eight spare.
+    pub const DIRECT_24: u8 = 6;
+    /// Thirty-two bits of cyan, magenta, yellow and key.
+    pub const CMYK: u8 = 7;
+    /// Twenty-four bits packed, reserved for Computer Concepts' format.
+    pub const PACKED_24: u8 = 8;
+    /// JPEG data.
+    pub const JPEG: u8 = 9;
+    /// Sixteen bits: five of red, six of green, five of blue.
+    pub const DIRECT_16: u8 = 10;
+    /// RISC OS 5's own: sixteen bits, four each of red, green, blue and alpha.
+    pub const DIRECT_12: u8 = 16;
+    /// RISC OS 5's own: YCbCr, sampled 4:2:0.
+    pub const YCBCR_420: u8 = 17;
+    /// RISC OS 5's own: YCbCr, sampled 4:2:2.
+    pub const YCBCR_422: u8 = 18;
+}
 
 /// Bytes one palette entry occupies: the pair of words `OS_ReadPalette`
 /// returns, which differ only for a flashing colour.
-pub(crate) const PALETTE_ENTRY_LEN: u32 = 8;
+pub const PALETTE_ENTRY_LEN: u32 = 8;
 
 /// Palette entries VIDC itself holds, which is what a sprite carrying fewer
 /// than its depth needs is supplying.
 const VIDC_ENTRIES: u32 = 16;
 
-/// The sprite type of 32-bit pixels, the truecolour a new sprite is written
-/// in, and the channel widths and bytes of one of its pixels.
-const TRUECOLOUR_TYPE: u32 = 6;
+/// The channel widths and bytes of one pixel of the sprite type a new
+/// truecolour sprite is written in.
 const TRUECOLOUR_PIXEL: ([u32; RGBA_BYTES], u32) = ([8, 8, 8, 8], 4);
 
 /// The finest resolution an eigen factor can state: OS units per inch.
@@ -92,12 +151,17 @@ const OS_UNITS_PER_INCH: u32 = 180;
 
 /// The dots to the inch an eigen factor of `eig` states: a pixel `2^eig` OS
 /// units across.
-const fn dpi_of_eig(eig: u8) -> u32 {
+#[must_use]
+pub const fn dpi_of_eig(eig: u8) -> u32 {
     OS_UNITS_PER_INCH >> eig
 }
 
 /// The largest eigen factor a RISC OS 5 mode word's two-bit fields hold.
 const RO5_MAX_EIG: u8 = 3;
+
+/// A RISC OS 5 mode word's fixed pattern: bits 27 to 30, which announce the
+/// form, and bit 0.
+const RO5_FORM: u32 = 0x7800_0001;
 
 /// The coarsest eigen factor a pixel's shape is read from: a pixel sixteen OS
 /// units across.
@@ -199,9 +263,11 @@ const VIDC_ORDER: Order = Order {
 /// How one pixel's bits sit in a row.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Layout {
-    /// A palette index of 1, 2, 4, or 8 bits, least significant pixel
-    /// leftmost.
-    Indexed { bits: u32 },
+    /// A palette index of `bits` bits, 1, 2, 4, or 8, in a field of `field`
+    /// bits, least significant pixel leftmost. The field is wider only in a
+    /// numbered mode that doubles its pixels on the screen, whose sprites hold
+    /// screen memory's form: each index repeated across its field.
+    Indexed { bits: u32, field: u32 },
     /// A little-endian value of 2, 3, or 4 bytes, its channels cut out by
     /// fields the sprite type fixes.
     Packed {
@@ -211,9 +277,10 @@ pub(crate) enum Layout {
 }
 
 impl Layout {
+    /// The bits each pixel takes of a row.
     pub(crate) const fn bits(self) -> u32 {
         match self {
-            Self::Indexed { bits } => bits,
+            Self::Indexed { field, .. } => field,
             Self::Packed { bytes, .. } => bytes * 8,
         }
     }
@@ -266,18 +333,23 @@ fn packed_layout(widths: [u32; RGBA_BYTES], bytes: u32, order: Order) -> Layout 
     }
 }
 
+/// A palette index of `bits` bits, filling its field.
+const fn indexed(bits: u32) -> Layout {
+    Layout::Indexed { bits, field: bits }
+}
+
 /// The pixel format a sprite type names.
-fn layout_for(sprite_type: u32, order: Order) -> Result<Layout, DecodeError> {
+fn layout_for(sprite_type: u8, order: Order) -> Result<Layout, DecodeError> {
     let (widths, bytes) = match sprite_type {
-        1 => return Ok(Layout::Indexed { bits: 1 }),
-        2 => return Ok(Layout::Indexed { bits: 2 }),
-        3 => return Ok(Layout::Indexed { bits: 4 }),
-        4 => return Ok(Layout::Indexed { bits: 8 }),
-        5 => ([5, 5, 5, 1], 2),
-        TRUECOLOUR_TYPE => TRUECOLOUR_PIXEL,
-        8 => ([8, 8, 8, 0], 3),
-        10 => ([5, 6, 5, 0], 2),
-        16 => ([4, 4, 4, 4], 2),
+        sprite_type::PALETTED_1 => return Ok(indexed(1)),
+        sprite_type::PALETTED_2 => return Ok(indexed(2)),
+        sprite_type::PALETTED_4 => return Ok(indexed(4)),
+        sprite_type::PALETTED_8 => return Ok(indexed(8)),
+        sprite_type::DIRECT_15 => ([5, 5, 5, 1], 2),
+        sprite_type::DIRECT_24 => TRUECOLOUR_PIXEL,
+        sprite_type::PACKED_24 => ([8, 8, 8, 0], 3),
+        sprite_type::DIRECT_16 => ([5, 6, 5, 0], 2),
+        sprite_type::DIRECT_12 => ([4, 4, 4, 4], 2),
         _ => return Err(DecodeError::SpriteUnsupportedType),
     };
     // Asking for alpha where the format has no fourth field is a mode word
@@ -291,7 +363,7 @@ fn layout_for(sprite_type: u32, order: Order) -> Result<Layout, DecodeError> {
 /// The channel order mode-flags bits 12 to 15 name. Only the RGB family is a
 /// depth this decoder claims; the CMYK and YCbCr families are colour spaces
 /// of their own.
-fn data_format(flags: u32) -> Result<Order, DecodeError> {
+fn data_format(flags: u8) -> Result<Order, DecodeError> {
     if flags >> 4 & 0x3 != 0 {
         return Err(DecodeError::SpriteUnsupportedType);
     }
@@ -303,19 +375,119 @@ fn data_format(flags: u32) -> Result<Order, DecodeError> {
 
 /// What a numbered screen mode says about its pixels. A text mode has none,
 /// and RISC OS refuses a sprite in one; a number past RISC OS 5's own names
-/// a mode only the module that defined it knows.
-fn numbered_mode(number: u32) -> Result<Mode, DecodeError> {
-    let mode = vdu::mode::numbered(number)
+/// a mode only the module that defined it knows. A pixel takes the bits a
+/// pixel of the mode's screen memory takes, which in a mode doubling its
+/// pixels is more than its colours need.
+fn numbered_mode(number: u8) -> Result<Mode, DecodeError> {
+    let mode = vdu::mode::numbered(u32::from(number))
         .filter(|mode| mode.graphic())
         .ok_or(DecodeError::SpriteUnknownMode)?;
     Ok(Mode {
         layout: Layout::Indexed {
             bits: 1 << mode.log2_bpp,
+            field: 1 << mode.log2_bpc,
         },
         mask: MaskDepth::Image,
         numbered: true,
         eig: (mode.x_eig, mode.y_eig),
     })
+}
+
+/// A sprite mode word's fields, read by its form and judged no further: what
+/// a reader accepts of them is that reader's own rule.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ModeWord {
+    /// Below 256: a screen mode's number.
+    Number(u8),
+    /// Bit 0 clear: a mode selector's address, which no sprite can hold.
+    Selector,
+    /// RISC OS 3.5's form.
+    Dpi {
+        /// Bits 27 to 30.
+        sprite_type: u8,
+        /// Bits 1 to 13 and 14 to 26: the dots to the inch across and down.
+        dpi: (u16, u16),
+        /// Bit 31: a mask of eight bits a pixel, read as alpha.
+        wide_mask: bool,
+    },
+    /// RISC OS 5's form, bits 27 to 30 all set.
+    Eig {
+        /// Bits 20 to 26.
+        sprite_type: u8,
+        /// Bits 8 to 15: the mode flags' bits 8 to 15.
+        flags: u8,
+        /// Bits 4 and 5, then 6 and 7: the eigen factors across and down.
+        eig: (u8, u8),
+        /// Bit 31.
+        wide_mask: bool,
+        /// Whether bits 16 to 19 and 0 to 3 hold the form's fixed pattern.
+        well_formed: bool,
+    },
+}
+
+impl ModeWord {
+    /// `value`'s fields, by the form its bits announce.
+    #[must_use]
+    pub const fn of(value: u32) -> Self {
+        let [low, flags, ..] = value.to_le_bytes();
+        if value < 0x100 {
+            return Self::Number(low);
+        }
+        if value & 1 == 0 {
+            return Self::Selector;
+        }
+        if value >> 27 & 0xF == 0xF {
+            return Self::Eig {
+                sprite_type: (value >> 20 & 0x7F).to_le_bytes()[0],
+                flags,
+                eig: (low >> 4 & 3, low >> 6),
+                wide_mask: value >> 31 != 0,
+                well_formed: value & 0x000F_000F == 1,
+            };
+        }
+        Self::dpi_form(value)
+    }
+
+    /// RISC OS 3.5's word for `sprite_type` at `dpi` dots to the inch across
+    /// and down, its mask eight bits a pixel where `wide_mask`.
+    #[must_use]
+    pub fn dpi_word(sprite_type: u8, (across, down): (u32, u32), wide_mask: bool) -> u32 {
+        u32::from(wide_mask) << 31
+            | u32::from(sprite_type & 0xF) << 27
+            | (down & 0x1FFF) << 14
+            | (across & 0x1FFF) << 1
+            | 1
+    }
+
+    /// RISC OS 5's word, its fixed pattern set: `sprite_type`, the mode
+    /// flags' bits 8 to 15 `flags`, and eigen factors `eig` across and down,
+    /// each no coarser than the form's two bits hold.
+    #[must_use]
+    pub fn eig_word(sprite_type: u8, flags: u8, eig: (u8, u8), wide_mask: bool) -> u32 {
+        u32::from(wide_mask) << 31
+            | RO5_FORM
+            | u32::from(sprite_type & 0x7F) << 20
+            | u32::from(flags) << 8
+            | u32::from(eig.1.min(RO5_MAX_EIG)) << 6
+            | u32::from(eig.0.min(RO5_MAX_EIG)) << 4
+    }
+
+    /// `value` read in RISC OS 3.5's form whatever bits 27 to 30 hold: how
+    /// RISC OS 5 reads a word whose RISC OS 5 form lacks its fixed pattern.
+    #[must_use]
+    pub const fn dpi_form(value: u32) -> Self {
+        Self::Dpi {
+            sprite_type: (value >> 27 & 0xF).to_le_bytes()[0],
+            dpi: (dpi_field(value, 1), dpi_field(value, 14)),
+            wide_mask: value >> 31 != 0,
+        }
+    }
+}
+
+/// The thirteen-bit resolution field at bit `shift` of a RISC OS 3.5 word.
+const fn dpi_field(value: u32, shift: u32) -> u16 {
+    let [low, high, ..] = (value >> shift & 0x1FFF).to_le_bytes();
+    u16::from_le_bytes([low, high])
 }
 
 /// The shape of a pixel of eigen factors `eig`, width to height, in lowest
@@ -327,7 +499,8 @@ fn pixel_shape((x, y): (u8, u8)) -> (u32, u32) {
 
 /// The eigen factor a resolution of `dpi` states: the finest whose OS-unit
 /// pitch it does not exceed.
-fn eig_of_dpi(dpi: u32) -> u8 {
+#[must_use]
+pub fn eig_of_dpi(dpi: u32) -> u8 {
     let mut eig = 0u8;
     while eig < MAX_EIG && dpi_of_eig(eig) > dpi {
         eig += 1;
@@ -335,49 +508,42 @@ fn eig_of_dpi(dpi: u32) -> u8 {
     eig
 }
 
-/// Decode a sprite mode word.
-///
-/// A word under 256 is a screen mode number; one with bit 0 clear is a
-/// pointer to a mode selector block, which no file can hold; the rest are
-/// the two sprite mode word formats, told apart by whether bits 27 to 30 are
-/// all set.
+/// Decode a sprite mode word: a mode selector's address, which no file can
+/// hold, a RISC OS 5 word missing its fixed pattern and a RISC OS 3.5 word
+/// leaving either resolution zero are refused.
 pub(crate) fn read_mode(value: u32) -> Result<Mode, DecodeError> {
-    if value < 256 {
-        return numbered_mode(value);
-    }
-    if value & 1 == 0 {
-        return Err(DecodeError::SpriteInvalidModeWord);
-    }
-    let (sprite_type, order, eig) = if value >> 27 & 0xF == 0xF {
-        // A RISC OS 5 word: a fixed pattern in bits 27-30, 16-19, and 0-3,
-        // the eigen factors in bits 4-7, a seven-bit type, and mode-flags
-        // bits 8-15.
-        if value & 0x000F_000F != 1 {
-            return Err(DecodeError::SpriteInvalidModeWord);
+    let (sprite_type, order, eig, wide_mask) = match ModeWord::of(value) {
+        ModeWord::Number(number) => return numbered_mode(number),
+        ModeWord::Selector
+        | ModeWord::Eig {
+            well_formed: false, ..
+        } => return Err(DecodeError::SpriteInvalidModeWord),
+        ModeWord::Eig {
+            sprite_type,
+            flags,
+            eig,
+            wide_mask,
+            well_formed: true,
+        } => (sprite_type, data_format(flags)?, eig, wide_mask),
+        ModeWord::Dpi {
+            sprite_type,
+            dpi: (x, y),
+            wide_mask,
+        } => {
+            if x == 0 || y == 0 {
+                return Err(DecodeError::SpriteInvalidModeWord);
+            }
+            (
+                sprite_type,
+                VIDC_ORDER,
+                (eig_of_dpi(u32::from(x)), eig_of_dpi(u32::from(y))),
+                wide_mask,
+            )
         }
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "each eigen factor is a two-bit field"
-        )]
-        let eig = ((value >> 4 & 0x3) as u8, (value >> 6 & 0x3) as u8);
-        (value >> 20 & 0x7F, data_format(value >> 8 & 0xFF)?, eig)
-    } else {
-        // A RISC OS 3.5 word: a four-bit type over two 13-bit DPI fields,
-        // neither of which a valid word leaves zero.
-        let (xdpi, ydpi) = (value >> 1 & 0x1FFF, value >> 14 & 0x1FFF);
-        if xdpi == 0 || ydpi == 0 {
-            return Err(DecodeError::SpriteInvalidModeWord);
-        }
-        (
-            value >> 27 & 0xF,
-            VIDC_ORDER,
-            (eig_of_dpi(xdpi), eig_of_dpi(ydpi)),
-        )
     };
     Ok(Mode {
         layout: layout_for(sprite_type, order)?,
-        // Bit 31 widens the mask from one bit per pixel to eight.
-        mask: if value >> 31 & 1 == 1 {
+        mask: if wide_mask {
             MaskDepth::Alpha
         } else {
             MaskDepth::Bit
@@ -425,11 +591,14 @@ impl SpriteName {
         if raw.len() > Self::MAX_LEN || raw.iter().any(|&byte| byte <= b' ') {
             return None;
         }
-        Some(Self::from_control_block(raw))
+        Some(Self::spelt_by(raw))
     }
 
-    /// The name a control block's twelve name bytes spell.
-    pub(crate) fn from_control_block(raw: &[u8]) -> Self {
+    /// The name `raw` spells as RISC OS reads a control block's name bytes
+    /// and a name it is given alike: its first twelve bytes, ending at the
+    /// first control character or space.
+    #[must_use]
+    pub fn spelt_by(raw: &[u8]) -> Self {
         let mut bytes = [0u8; Self::MAX_LEN];
         let mut len = 0u8;
         for (slot, &byte) in bytes.iter_mut().zip(raw) {
@@ -440,6 +609,15 @@ impl SpriteName {
             len += 1;
         }
         Self { bytes, len }
+    }
+
+    /// The name as RISC OS stores a sprite's: its ASCII letters in lower case.
+    #[must_use]
+    pub fn lowered(&self) -> Self {
+        Self {
+            bytes: self.bytes.map(|byte| byte.to_ascii_lowercase()),
+            len: self.len,
+        }
     }
 
     /// The name's bytes, as written to a control block before its padding.
@@ -492,31 +670,6 @@ pub enum SpriteLayout {
     },
 }
 
-impl SpriteLayout {
-    /// Bits one pixel occupies.
-    #[must_use]
-    pub const fn bits_per_pixel(self) -> u32 {
-        match self {
-            Self::Indexed(depth) => depth.bits(),
-            Self::Direct { bits_per_pixel, .. } => bits_per_pixel,
-        }
-    }
-
-    /// The least a `width` by `height` sprite of this layout occupies in its
-    /// file: its control block and its rows, each a whole number of words.
-    /// A mask, a palette and left-hand wastage only add to it; `None` where
-    /// the size overflows.
-    #[must_use]
-    pub fn least_stored_bytes(self, width: u32, height: u32) -> Option<u64> {
-        let row_bits = u64::from(width).checked_mul(u64::from(self.bits_per_pixel()))?;
-        row_bits
-            .div_ceil(32)
-            .checked_mul(4)?
-            .checked_mul(u64::from(height))?
-            .checked_add(u64::from(SPRITE_HEADER_LEN))
-    }
-}
-
 /// A sprite's mode: a numbered screen mode or a sprite mode word this crate
 /// reads.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -535,7 +688,8 @@ impl SpriteMode {
 
     /// A mode for a new paletted sprite of `depth` whose pixels have the
     /// eigen factors `eig`: the numbered mode every RISC OS reads when one
-    /// matches and no alpha mask is asked for, else a RISC OS 3.5 mode word.
+    /// matches, holds its pixels in no wider a field than they need, and no
+    /// alpha mask is asked for; else a RISC OS 3.5 mode word.
     #[must_use]
     pub fn indexed(depth: IndexDepth, eig: (u8, u8), alpha_mask: bool) -> Self {
         if !alpha_mask {
@@ -543,6 +697,7 @@ impl SpriteMode {
                 .zip(&vdu::mode::MODES)
                 .find(|(_, mode)| {
                     mode.graphic()
+                        && mode.log2_bpc == mode.log2_bpp
                         && 1 << mode.log2_bpp == depth.bits()
                         && (mode.x_eig, mode.y_eig) == eig
                 })
@@ -552,13 +707,12 @@ impl SpriteMode {
             }
         }
         let sprite_type = match depth {
-            IndexDepth::One => 1,
-            IndexDepth::Two => 2,
-            IndexDepth::Four => 3,
-            IndexDepth::Eight => 4,
+            IndexDepth::One => sprite_type::PALETTED_1,
+            IndexDepth::Two => sprite_type::PALETTED_2,
+            IndexDepth::Four => sprite_type::PALETTED_4,
+            IndexDepth::Eight => sprite_type::PALETTED_8,
         };
-        let layout = Layout::Indexed { bits: depth.bits() };
-        Self::word_for(sprite_type, layout, eig, alpha_mask)
+        Self::word_for(sprite_type, indexed(depth.bits()), eig, alpha_mask)
     }
 
     /// A mode for a new truecolour sprite: 32-bit pixels in a RISC OS 3.5
@@ -567,18 +721,18 @@ impl SpriteMode {
     pub fn truecolour(eig: (u8, u8), alpha_mask: bool) -> Self {
         let (widths, bytes) = TRUECOLOUR_PIXEL;
         let layout = packed_layout(widths, bytes, VIDC_ORDER);
-        Self::word_for(TRUECOLOUR_TYPE, layout, eig, alpha_mask)
+        Self::word_for(sprite_type::DIRECT_24, layout, eig, alpha_mask)
     }
 
     /// A RISC OS 3.5 mode word of `sprite_type`, whose pixels are `layout`,
     /// at the resolutions `eig` states.
-    fn word_for(sprite_type: u32, layout: Layout, eig: (u8, u8), alpha_mask: bool) -> Self {
+    fn word_for(sprite_type: u8, layout: Layout, eig: (u8, u8), alpha_mask: bool) -> Self {
         let eig = (eig.0.min(MAX_EIG), eig.1.min(MAX_EIG));
-        let value = u32::from(alpha_mask) << 31
-            | sprite_type << 27
-            | dpi_of_eig(eig.1) << 14
-            | dpi_of_eig(eig.0) << 1
-            | 1;
+        let value = ModeWord::dpi_word(
+            sprite_type,
+            (dpi_of_eig(eig.0), dpi_of_eig(eig.1)),
+            alpha_mask,
+        );
         let mask = if alpha_mask {
             MaskDepth::Alpha
         } else {
@@ -599,6 +753,20 @@ impl SpriteMode {
         self.value
     }
 
+    /// The least a `width` by `height` sprite of this mode occupies in its
+    /// file: its control block and its rows, each a whole number of words.
+    /// A mask, a palette and left-hand wastage only add to it; `None` where
+    /// the size overflows.
+    #[must_use]
+    pub fn least_stored_bytes(&self, width: u32, height: u32) -> Option<u64> {
+        let row_bits = u64::from(width).checked_mul(u64::from(self.mode.layout.bits()))?;
+        row_bits
+            .div_ceil(32)
+            .checked_mul(4)?
+            .checked_mul(u64::from(height))?
+            .checked_add(u64::from(SPRITE_HEADER_LEN))
+    }
+
     /// Whether this is a numbered screen mode, which every RISC OS reads.
     #[must_use]
     pub const fn is_numbered(&self) -> bool {
@@ -609,7 +777,7 @@ impl SpriteMode {
     #[must_use]
     pub fn layout(&self) -> SpriteLayout {
         match self.mode.layout {
-            Layout::Indexed { bits } => {
+            Layout::Indexed { bits, .. } => {
                 SpriteLayout::Indexed(IndexDepth::from_bits(bits).unwrap_or(IndexDepth::Eight))
             }
             Layout::Packed { bytes, channels } => SpriteLayout::Direct {
@@ -828,25 +996,30 @@ fn read_header(bytes: &[u8], at: u32) -> Result<Header, DecodeError> {
             .ok_or(DecodeError::SpriteTruncated)
             .and_then(|at| word(bytes, at))
     };
-    let length = field(NEXT_AT)?;
+    let length = field(control::NEXT)?;
     if length < SPRITE_HEADER_LEN {
         return Err(DecodeError::SpriteBadArea);
     }
-    let mode = read_mode(field(MODE_AT)?)?;
+    let mode = read_mode(field(control::MODE)?)?;
     let bits = mode.layout.bits();
-    let words_less_one = field(WIDTH_WORDS_AT)?;
-    let height = field(HEIGHT_AT)?
+    let words_less_one = field(control::WIDTH_WORDS)?;
+    let height = field(control::HEIGHT)?
         .checked_add(1)
         .ok_or(DecodeError::DimensionsOverflow)?;
-    let left_wastage = field(FIRST_BIT_AT)?;
+    let left_wastage = field(control::FIRST_BIT)?;
     // Only a numbered mode's rows may begin part way into their first word;
     // every sprite mode word requires the first pixel at bit zero.
     if !mode.numbered && left_wastage != 0 {
         return Err(DecodeError::SpriteInvalidWastage);
     }
-    let width = pixel_width(words_less_one, left_wastage, field(LAST_BIT_AT)?, bits)?;
-    let image_at = field(IMAGE_AT)?;
-    let mask_field = field(MASK_AT)?;
+    let width = pixel_width(
+        words_less_one,
+        left_wastage,
+        field(control::LAST_BIT)?,
+        bits,
+    )?;
+    let image_at = field(control::IMAGE)?;
+    let mask_field = field(control::MASK)?;
     let palette_bytes = image_at
         .min(mask_field)
         .checked_sub(SPRITE_HEADER_LEN)
@@ -874,7 +1047,11 @@ fn read_header(bytes: &[u8], at: u32) -> Result<Header, DecodeError> {
 }
 
 /// Bytes one row of a mask occupies at `bits` per pixel, word-aligned.
-pub(crate) fn mask_stride(width: u32, bits: u32) -> Result<u32, DecodeError> {
+///
+/// # Errors
+///
+/// [`DecodeError::DimensionsOverflow`] where the row would not fit a word.
+pub fn mask_stride(width: u32, bits: u32) -> Result<u32, DecodeError> {
     let bytes = u64::from(width)
         .checked_mul(u64::from(bits))
         .and_then(|total| total.checked_add(31))
@@ -949,12 +1126,13 @@ fn field_at(src: &[u8], bit: u64, bits: u32) -> u32 {
     (u32::from(byte) >> (bit % 8)) & mask
 }
 
-/// Extract one row of indexed pixels, least significant pixel leftmost.
-fn indices_row(bits: u32, left: u32, src: &[u8], dst: &mut [u8]) {
+/// Extract one row of `bits`-deep indexed pixels, each starting its own
+/// `field`, least significant pixel leftmost.
+fn indices_row(bits: u32, field: u32, left: u32, src: &[u8], dst: &mut [u8]) {
     let mut bit = u64::from(left);
     for index in dst {
         *index = u8::try_from(field_at(src, bit, bits)).unwrap_or(0);
-        bit += u64::from(bits);
+        bit += u64::from(field);
     }
 }
 
@@ -1045,6 +1223,7 @@ struct Located<'a> {
 enum Expand {
     Indexed {
         bits: u32,
+        field: u32,
         palette: IndexedPalette,
     },
     Packed {
@@ -1122,8 +1301,9 @@ impl Located<'_> {
         let mut line = fallible::filled(row_bytes, 0u8).ok_or(DecodeError::OutOfMemory)?;
         let mut scratch = fallible::filled(width, 0u8).ok_or(DecodeError::OutOfMemory)?;
         let expand = match self.header.mode.layout {
-            Layout::Indexed { bits } => Expand::Indexed {
+            Layout::Indexed { bits, field } => Expand::Indexed {
                 bits,
+                field,
                 palette: IndexedPalette::new(
                     bits,
                     self.palette_bytes()?,
@@ -1137,8 +1317,12 @@ impl Located<'_> {
         };
         for (y, src) in self.rows().enumerate() {
             match &expand {
-                Expand::Indexed { bits, palette } => {
-                    indices_row(*bits, self.header.left_wastage, src, &mut scratch);
+                Expand::Indexed {
+                    bits,
+                    field,
+                    palette,
+                } => {
+                    indices_row(*bits, *field, self.header.left_wastage, src, &mut scratch);
                     for (pixel, &index) in line
                         .as_chunks_mut::<RGBA_BYTES>()
                         .0
@@ -1210,7 +1394,7 @@ impl Located<'_> {
     fn native(&self, name: SpriteName, value: u32) -> Result<Sprite, DecodeError> {
         let (width, height) = (self.header.width, self.header.height);
         let (picture, palette) = match self.header.mode.layout {
-            Layout::Indexed { bits } => self.indexed(bits)?,
+            Layout::Indexed { bits, field } => self.indexed(bits, field)?,
             Layout::Packed { .. } => (
                 Picture::rgba(width, height, self.rgba()?.into_pixels())
                     .map_err(|_| DecodeError::DimensionsOverflow)?,
@@ -1230,7 +1414,7 @@ impl Located<'_> {
     }
 
     /// A paletted sprite's indices, mask plane and palette.
-    fn indexed(&self, bits: u32) -> Result<(Picture, SpritePalette), DecodeError> {
+    fn indexed(&self, bits: u32, field: u32) -> Result<(Picture, SpritePalette), DecodeError> {
         let depth = IndexDepth::from_bits(bits).ok_or(DecodeError::SpriteUnsupportedType)?;
         let raw = self.palette_bytes()?;
         let resolved = IndexedPalette::new(bits, raw, self.header.palette_entries);
@@ -1243,7 +1427,7 @@ impl Located<'_> {
         let row = self.header.width as usize;
         let mut indices = fallible::filled(count, 0u8).ok_or(DecodeError::OutOfMemory)?;
         for (dst, src) in indices.chunks_exact_mut(row).zip(self.rows()) {
-            indices_row(bits, self.header.left_wastage, src, dst);
+            indices_row(bits, field, self.header.left_wastage, src, dst);
         }
         let plane = match &self.mask {
             Some(mask) => {
@@ -1356,7 +1540,8 @@ fn read_area(bytes: &[u8]) -> Result<AreaHeader, DecodeError> {
 fn next_sprite(bytes: &[u8], area: &AreaHeader, at: u32) -> Result<u32, DecodeError> {
     let length = word(
         bytes,
-        at.checked_add(NEXT_AT).ok_or(DecodeError::SpriteBadArea)?,
+        at.checked_add(control::NEXT)
+            .ok_or(DecodeError::SpriteBadArea)?,
     )?;
     if length < SPRITE_HEADER_LEN {
         return Err(DecodeError::SpriteBadArea);
@@ -1573,10 +1758,10 @@ pub fn find_named(bytes: &[u8], name: &SpriteName) -> Result<Option<NamedSprite>
     let area = Area::chain(bytes)?;
     let mut at = area.header.first;
     for _ in 0..area.header.count {
-        let named = SpriteName::from_control_block(slice_at(
+        let named = SpriteName::spelt_by(slice_at(
             bytes,
             at,
-            NAME_AT,
+            control::NAME,
             u32::try_from(SpriteName::MAX_LEN).unwrap_or(0),
         )?);
         if named.matches(name) {
@@ -1683,13 +1868,13 @@ impl<B: AsRef<[u8]>> SpriteAreaReader<B> {
         let bytes = self.bytes.as_ref();
         let at = self.area.locate(bytes, index)?;
         let length = word(bytes, at)?;
-        let name = SpriteName::from_control_block(slice_at(
+        let name = SpriteName::spelt_by(slice_at(
             bytes,
             at,
-            NAME_AT,
+            control::NAME,
             u32::try_from(SpriteName::MAX_LEN).unwrap_or(0),
         )?);
-        let read = word(bytes, at.saturating_add(MODE_AT)).and_then(|value| {
+        let read = word(bytes, at.saturating_add(control::MODE)).and_then(|value| {
             locate(bytes, at, &self.limits).and_then(|located| located.native(name, value))
         });
         match read {

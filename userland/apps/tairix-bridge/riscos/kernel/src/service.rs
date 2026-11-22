@@ -55,6 +55,9 @@ pub const TERRITORY_MANAGER_LOADED: u32 = 0x64;
 pub const VALIDATE_ADDRESS: u32 = 0x6D;
 /// `Service_CloseFile`: an object and everything beneath it to be closed.
 pub const CLOSE_FILE: u32 = 0x68;
+/// `Service_SwitchingOutputToSprite`: output switched to or from a sprite,
+/// R2 to R5 the call's R0 to R3.
+pub const SWITCHING_OUTPUT_TO_SPRITE: u32 = 0x72;
 /// `Service_PostInit`, once every ROM module has started.
 pub const POST_INIT: u32 = 0x73;
 /// `Service_TerritoryStarted`: the upper-case table may have changed.

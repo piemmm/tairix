@@ -33,7 +33,7 @@ pub(crate) fn perform(os: &mut Os<'_>, number: u32, regs: &mut Regs) -> Result<(
         number::SET_ECF_ORIGIN => with(os, |vdu, os| {
             let (x, y) = (regs.r[0].cast_signed(), regs.r[1].cast_signed());
             vdu.colours.ecf_origin = vdu.pixels_of(x, y);
-            let format = vdu.screen.format;
+            let format = *vdu.format();
             vdu.colours.publish(os, &format)
         }),
         number::CHANGED_BOX => crate::changed::swi(os, regs),
@@ -69,7 +69,7 @@ impl crate::state::Vdu {
         y: i32,
     ) -> Result<Option<(u32, u32)>, Fail> {
         let (px, py) = self.pixels_of(x, y);
-        let format = self.screen.format;
+        let format = *self.format();
         let inside = px >= 0
             && py >= 0
             && px < format.width().cast_signed()
@@ -77,7 +77,7 @@ impl crate::state::Vdu {
         if !inside || !format.graphic() {
             return Ok(None);
         }
-        let canvas = self.screen.canvas();
+        let canvas = self.canvas();
         let pixel = canvas.pixel(os, canvas.row_of(py), px.cast_unsigned())?;
         let pixel = pixel & format.pixel_mask();
         Ok(Some(crate::vars::number_of(&format, pixel)))
@@ -120,7 +120,7 @@ fn set_colour(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let text = flags & set_colour::TEXT != 0;
     if flags & set_colour::READ != 0 {
         let words = with(os, |vdu, _| {
-            let format = vdu.screen.format;
+            let format = *vdu.format();
             if text {
                 let (fore, back) = vdu.colours.text_words(&format);
                 return Ok(Err(if background { back } else { fore }));
@@ -157,7 +157,7 @@ fn set_colour(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         None
     };
     with(os, |vdu, os| {
-        let format = vdu.screen.format;
+        let format = *vdu.format();
         if text {
             let target = if background {
                 &mut vdu.colours.text_back

@@ -1131,28 +1131,30 @@ const BOOKKEEPING_BYTES: u64 = (2 * 4 + 1) * MAX_HUFFMAN_SYMBOLS as u64;
 /// Walk `bytes` to its frame header, answering the frame and the orientation
 /// its EXIF segment states.
 fn header(bytes: &[u8]) -> Result<(Frame, Orientation), DecodeError> {
-    stated(bytes).map(|(frame, orientation, _)| (frame, orientation))
+    stated(bytes).map(|(frame, _, orientation, _)| (frame, orientation))
 }
 
 /// What a JPEG's frame states that a format embedding its bytes unchanged
 /// must say of them, its frame header and the segments before it read and
 /// nothing else.
 pub(crate) fn frame(bytes: &[u8]) -> Result<crate::JpegFrame, DecodeError> {
-    let (frame, orientation, density) = stated(bytes)?;
+    let (frame, process, orientation, density) = stated(bytes)?;
     Ok(crate::JpegFrame {
         stored: (frame.width, frame.height),
         components: u8::try_from(frame.components.len())
             .map_err(|_| DecodeError::JpegUnsupportedComponentCount)?,
-        progressive: frame.progressive,
+        process,
         orientation,
         density,
     })
 }
 
-/// Walk `bytes` to its frame header, answering the frame, the orientation its
-/// EXIF segment states and the density its JFIF header states, as a decode
-/// takes each.
-fn stated(bytes: &[u8]) -> Result<(Frame, Orientation, Option<Density>), DecodeError> {
+/// Walk `bytes` to its frame header, answering the frame, the process its
+/// marker names, the orientation its EXIF segment states and the density its
+/// JFIF header states, as a decode takes each.
+fn stated(
+    bytes: &[u8],
+) -> Result<(Frame, crate::JpegProcess, Orientation, Option<Density>), DecodeError> {
     if !bytes.starts_with(&crate::JPEG_SIGNATURE[..2]) {
         return Err(DecodeError::JpegBadSignature);
     }
@@ -1167,7 +1169,17 @@ fn stated(bytes: &[u8]) -> Result<(Frame, Orientation, Option<Density>), DecodeE
             SOF0 | SOF1 | SOF2 => {
                 let (payload, _after) = read_segment(bytes, pos)?;
                 let frame = parse_sof(payload, marker == SOF2)?;
-                return Ok((frame, orientation.unwrap_or(Orientation::IDENTITY), density));
+                let process = match marker {
+                    SOF0 => crate::JpegProcess::Baseline,
+                    SOF1 => crate::JpegProcess::Extended,
+                    _ => crate::JpegProcess::Progressive,
+                };
+                return Ok((
+                    frame,
+                    process,
+                    orientation.unwrap_or(Orientation::IDENTITY),
+                    density,
+                ));
             }
             SOF3 | SOF5 | SOF6 | SOF7 | DHP | EXP => {
                 return Err(DecodeError::JpegLosslessOrHierarchicalUnsupported);
@@ -1204,7 +1216,7 @@ fn stated(bytes: &[u8]) -> Result<(Frame, Orientation, Option<Density>), DecodeE
 
 /// Decode `bytes` at natural size.
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
-    decode_inner(bytes, limits, None).map(|(image, _)| image)
+    decode_inner(bytes, limits, None, Turn::Applied).map(|(image, _)| image)
 }
 
 /// What a decode found beside the picture.
@@ -1219,7 +1231,7 @@ pub(crate) fn decode_native(
     bytes: &[u8],
     limits: &DecodeLimits,
 ) -> Result<(RasterImage, Unkept, Option<Density>), DecodeError> {
-    let (image, held) = decode_inner(bytes, limits, None)?;
+    let (image, held) = decode_inner(bytes, limits, None, Turn::Applied)?;
     Ok((image, held.unkept, held.density))
 }
 
@@ -1231,11 +1243,28 @@ pub(crate) fn decode_fitted(
     limits: &DecodeLimits,
     fit: FitBox,
 ) -> Result<RasterImage, DecodeError> {
-    decode_inner(bytes, limits, Some(fit)).map(|(image, _)| image)
+    decode_inner(bytes, limits, Some(fit), Turn::Applied).map(|(image, _)| image)
+}
+
+/// Decode `bytes`' raster at natural size as it is stored, its EXIF
+/// orientation not applied.
+pub(crate) fn decode_stored(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+) -> Result<RasterImage, DecodeError> {
+    decode_inner(bytes, limits, None, Turn::Ignored).map(|(image, _)| image)
+}
+
+/// Whether a decode turns the raster as its EXIF orientation says.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Turn {
+    Applied,
+    Ignored,
 }
 
 /// Decoder state accumulated while scanning markers.
 struct Decoder<'a> {
+    turn: Turn,
     limits: &'a DecodeLimits,
     fit: Option<FitBox>,
     quant_tables: [Option<QuantTable>; 4],
@@ -1289,11 +1318,13 @@ fn decode_inner(
     bytes: &[u8],
     limits: &DecodeLimits,
     fit: Option<FitBox>,
+    turn: Turn,
 ) -> Result<(RasterImage, Held), DecodeError> {
     if !bytes.starts_with(&crate::JPEG_SIGNATURE[..2]) {
         return Err(DecodeError::JpegBadSignature);
     }
     let mut decoder = Decoder {
+        turn,
         limits,
         fit,
         quant_tables: [None, None, None, None],
@@ -1312,7 +1343,7 @@ fn decode_inner(
         eobrun: 0,
     };
     let image = decoder.run(bytes)?;
-    let orientation = decoder.orientation.unwrap_or(Orientation::IDENTITY);
+    let orientation = decoder.orientation();
     Ok((
         image,
         Held {
@@ -1461,11 +1492,12 @@ impl Decoder<'_> {
         Scale::choose(frame.width, frame.height, orientation, fit, self.limits)
     }
 
-    /// The orientation the file states, or the identity when it states none.
+    /// The orientation the decode applies: the file's, or the identity when
+    /// it states none or the turn is ignored.
     const fn orientation(&self) -> Orientation {
-        match self.orientation {
-            Some(orientation) => orientation,
-            None => Orientation::IDENTITY,
+        match (self.turn, self.orientation) {
+            (Turn::Applied, Some(orientation)) => orientation,
+            _ => Orientation::IDENTITY,
         }
     }
 

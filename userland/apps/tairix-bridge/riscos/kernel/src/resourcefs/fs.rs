@@ -126,8 +126,7 @@ impl Os<'_> {
             .map_err(|_| self.no_memory())?;
         for (folded, _, entry) in under {
             let part = child_of(&folded, prefix.len());
-            let mut name = alloc::vec![0; part.len()];
-            self.read_bytes(entry.name.wrapping_add(len32(prefix.len())), &mut name)?;
+            let name = self.read_vec(entry.name.wrapping_add(len32(prefix.len())), part.len())?;
             let file = folded.len() == prefix.len() + part.len();
             children.push(Child { name, entry, file });
         }

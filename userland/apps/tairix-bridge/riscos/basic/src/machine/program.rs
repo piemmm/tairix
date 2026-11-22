@@ -223,11 +223,7 @@ impl Machine<'_, '_> {
     /// The text at `at` of `length` bytes tokenised line by line at `PAGE`:
     /// a line without a number numbered ten on from the last.
     fn tokenise_text(&mut self, at: u32, length: u32) -> Step {
-        let mut text = Vec::new();
-        text.try_reserve_exact(length as usize)
-            .map_err(|_| Error::NoRoom)?;
-        text.resize(length as usize, 0);
-        self.os.read_bytes(at, &mut text)?;
+        let text = self.os.read_vec(at, length as usize)?;
         self.os.write_bytes(self.page, &[b'\r', END])?;
         self.set_top(self.page + 2)?;
         let mut last: u32 = 0;
@@ -633,11 +629,9 @@ impl Machine<'_, '_> {
             if self.byte_at(line)? != b'\r' || length < len32(HEADER) {
                 return Err(Error::BadProgram.into());
             }
-            let mut text = Vec::new();
-            text.try_reserve_exact((length - len32(HEADER)) as usize)
-                .map_err(|_| Error::NoRoom)?;
-            text.resize((length - len32(HEADER)) as usize, 0);
-            self.os.read_bytes(line + len32(HEADER), &mut text)?;
+            let text = self
+                .os
+                .read_vec(line + len32(HEADER), (length - len32(HEADER)) as usize)?;
             self.output(&spelt(&text)?)?;
             self.newline()?;
             block = self.os.read_word(block)?;

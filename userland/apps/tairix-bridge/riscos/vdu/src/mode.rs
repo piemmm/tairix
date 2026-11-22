@@ -11,6 +11,21 @@ const MOST_PIXELS: u32 = 0x4000;
 
 pub(crate) use tairix_vdu::mode::{var, VARIABLES};
 
+/// What a sprite output is switched to is drawn as: its mode's flags,
+/// colours, eigen factors and Y shift, its pixels and its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Drawn {
+    pub(crate) flags: u32,
+    pub(crate) ncolour: u32,
+    pub(crate) eig: (u32, u32),
+    pub(crate) y_shift: u32,
+    pub(crate) log2_bpp: u32,
+    pub(crate) log2_bpc: u32,
+    pub(crate) line_length: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
 /// A mode's variables, as `OS_ReadModeVariable` reads them for a mode named
 /// by number, selector or sprite mode word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,16 +71,11 @@ impl Format {
             return None;
         }
         let ncolour = default_ncolour(log2_bpp);
-        let flags = if log2_bpp == 3 {
-            Flags::FULL_PALETTE.bits()
-        } else {
-            0
-        };
         let y_eig = if height >= width / 2 { 1 } else { 2 };
         let line_length = (width << log2_bpp).div_ceil(8);
         let mut format = Self {
             vars: [
-                flags,
+                0,
                 0,
                 0,
                 ncolour,
@@ -98,6 +108,34 @@ impl Format {
             format.vars[var::SCR_B_ROW as usize] = fitted(format.height_limit()?, cell.space_y);
         }
         format.drawable().then_some(format)
+    }
+
+    /// A sprite's, as output switched to it draws on it: `width` by `height`
+    /// pixels in rows of `line_length` bytes, its text as many whole cells as
+    /// fit, none where not one does; its screen size is the screen's, read
+    /// from the screen.
+    pub(crate) fn sprite(drawn: &Drawn) -> Self {
+        let mut format = Self {
+            vars: [
+                drawn.flags,
+                0,
+                0,
+                drawn.ncolour,
+                drawn.eig.0,
+                drawn.eig.1,
+                drawn.line_length,
+                drawn.line_length.saturating_mul(drawn.height),
+                drawn.y_shift,
+                drawn.log2_bpp,
+                drawn.log2_bpc,
+                drawn.width.wrapping_sub(1),
+                drawn.height.wrapping_sub(1),
+            ],
+        };
+        let cell = format.cell();
+        format.vars[var::SCR_R_COL as usize] = (drawn.width / cell.size_x).wrapping_sub(1);
+        format.vars[var::SCR_B_ROW as usize] = (drawn.height / cell.space_y).wrapping_sub(1);
+        format
     }
 
     /// The pixels across and down its window limits give, if within
@@ -143,29 +181,6 @@ impl Format {
         self.x_eig() <= 3 && self.y_eig() <= 3 && lines_fit && colours && text_fits
     }
 
-    /// A sprite mode word's: only the variables a sprite's type and
-    /// resolutions decide; `None` for a word naming no type there is.
-    pub(crate) fn sprite_word(word: u32) -> Option<SpriteFormat> {
-        let kind = word >> 27;
-        let log2_bpp = match kind {
-            1..=6 => kind - 1,
-            _ => return None,
-        };
-        let eig = |dpi: u32| match dpi {
-            180 => Some(0),
-            90 => Some(1),
-            45 => Some(2),
-            22 | 23 => Some(3),
-            _ => None,
-        };
-        Some(SpriteFormat {
-            log2_bpp,
-            ncolour: default_ncolour(log2_bpp),
-            x_eig: eig((word >> 1) & 0x1FFF)?,
-            y_eig: eig((word >> 14) & 0x1FFF)?,
-        })
-    }
-
     /// Variable `number`, as a mode named rather than the current one reads
     /// it.
     pub(crate) fn var(&self, number: u32) -> Option<u32> {
@@ -179,12 +194,29 @@ impl Format {
         self.vars[var::MODE_FLAGS as usize]
     }
 
+    /// Text columns and rows: none for a sprite output is switched to that
+    /// is narrower or shorter than a cell.
     pub(crate) const fn columns(&self) -> u32 {
-        self.vars[var::SCR_R_COL as usize] + 1
+        self.vars[var::SCR_R_COL as usize].wrapping_add(1)
     }
 
     pub(crate) const fn rows(&self) -> u32 {
-        self.vars[var::SCR_B_ROW as usize] + 1
+        self.vars[var::SCR_B_ROW as usize].wrapping_add(1)
+    }
+
+    /// The columns and rows the text window may span: one of each where it
+    /// holds no whole cell, a cell drawn nowhere.
+    pub(crate) const fn cells(&self) -> (u32, u32) {
+        let (columns, rows) = (self.columns(), self.rows());
+        (
+            if columns == 0 { 1 } else { columns },
+            if rows == 0 { 1 } else { rows },
+        )
+    }
+
+    /// Whether it holds a whole text cell, so text is drawn.
+    pub(crate) const fn has_cells(&self) -> bool {
+        self.columns() != 0 && self.rows() != 0
     }
 
     pub(crate) const fn ncolour(&self) -> u32 {
@@ -324,36 +356,13 @@ pub(crate) struct Cell {
     pub(crate) space_y: u32,
 }
 
-/// What a sprite mode word decides.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct SpriteFormat {
-    pub(crate) log2_bpp: u32,
-    pub(crate) ncolour: u32,
-    pub(crate) x_eig: u32,
-    pub(crate) y_eig: u32,
-}
-
-impl SpriteFormat {
-    /// Variable `number`, of those a sprite mode word decides.
-    pub(crate) const fn var(&self, number: u32) -> Option<u32> {
-        match number {
-            var::MODE_FLAGS | var::Y_SHIFT => Some(0),
-            var::N_COLOUR => Some(self.ncolour),
-            var::X_EIG => Some(self.x_eig),
-            var::Y_EIG => Some(self.y_eig),
-            var::LOG2_BPP | var::LOG2_BPC => Some(self.log2_bpp),
-            _ => None,
-        }
-    }
-}
-
 /// The highest colour number a depth gives a mode by default.
 const fn default_ncolour(log2_bpp: u32) -> u32 {
     match log2_bpp {
         0 => 1,
         1 => 3,
         2 => 15,
-        3 => 255,
+        3 => 63,
         4 => 0xFFFF,
         _ => 0xFFFF_FFFF,
     }

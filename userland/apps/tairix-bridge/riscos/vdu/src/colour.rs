@@ -13,7 +13,7 @@
 use tairix_riscos_kernel::memory::layout::HIGH_ZERO_PAGE;
 use tairix_riscos_kernel::os::{Fail, Os};
 use tairix_riscos_kernel::output::workspace;
-use tairix_vdu::mode::Flags;
+use tairix_vdu::mode::{repeated, Flags};
 
 use crate::mode::Format;
 
@@ -99,12 +99,11 @@ impl Colours {
     /// The colours a mode change leaves: white on black, the mode's default
     /// patterns, the default dot pattern.
     pub(crate) fn for_mode(format: &Format) -> Self {
-        let white = default_white(format);
         Self {
-            fore: Gcol::plain(white, 0xFF),
+            fore: Gcol::plain(default_white(format), 0xFF),
             back: Gcol::plain(0, 0),
             text_fore: TextColour {
-                colour: if format.log2_bpp() >= 3 { 0xFF } else { white },
+                colour: default_text_white(format),
                 tint: 0xFF,
                 literal: false,
             },
@@ -124,11 +123,10 @@ impl Colours {
 
     /// `VDU 20`'s colours: white on black, the actions storing.
     pub(crate) fn defaults(&mut self, format: &Format) {
-        let white = default_white(format);
-        self.fore = Gcol::plain(white, 0xFF);
+        self.fore = Gcol::plain(default_white(format), 0xFF);
         self.back = Gcol::plain(0, 0);
         self.text_fore = TextColour {
-            colour: if format.log2_bpp() >= 3 { 0xFF } else { white },
+            colour: default_text_white(format),
             tint: 0xFF,
             literal: false,
         };
@@ -334,15 +332,41 @@ fn colour_var(format: &Format, c: u8, number: u8) -> u32 {
     u32::from(number) & colours
 }
 
-/// The default foreground's colour number: white, which in sixteen colours
-/// is 7, the colours above it flashing, and in eight bits and more the colour
-/// numbers' six-bit white.
+/// The default graphics foreground's colour number: white, which in sixteen
+/// colours is 7, the colours above it flashing, and in eight bits and more
+/// the mode's highest colour.
 fn default_white(format: &Format) -> u32 {
     if format.log2_bpp() >= 3 {
-        63
+        format.ncolour()
     } else {
         format.ncolour().min(7)
     }
+}
+
+/// The default text foreground: the graphics one's below eight bits, the
+/// colour byte's highest in eight, and in more the pixel of full red, green
+/// and blue, no other bit set.
+fn default_text_white(format: &Format) -> u32 {
+    match format.log2_bpp() {
+        0..=2 => default_white(format),
+        3 => 0xFF,
+        _ => Direct::of(format).pack([0xFF; 3]),
+    }
+}
+
+/// A four-bit channel as five bits, its low bit repeated.
+const fn five_of_four(n: u32) -> u32 {
+    (n << 1) | (n & 1)
+}
+
+/// A five-bit channel as eight, its top bits repeated below it.
+const fn eight_of_five(v: u32) -> u32 {
+    (v << 3) | (v >> 2)
+}
+
+/// A six-bit channel as eight, its top bits repeated below it.
+const fn eight_of_six(v: u32) -> u32 {
+    (v << 2) | (v >> 4)
 }
 
 /// The pixel value colour number `colour` with `tint` is in `format`.
@@ -414,14 +438,21 @@ enum Layout {
 impl Direct {
     /// `format`'s.
     pub(crate) fn of(format: &Format) -> Self {
-        let layout = match (format.log2_bpp(), format.ncolour()) {
+        Self::of_parts(format.log2_bpp(), format.ncolour(), format.flags())
+    }
+
+    /// The pixels of `log2_bpp` bits a mode of `ncolour` colours and mode
+    /// flags `flags` has, a screen's or a sprite's.
+    pub(crate) const fn of_parts(log2_bpp: u32, ncolour: u32, flags: u32) -> Self {
+        let flags = Flags::new(flags);
+        let layout = match (log2_bpp, ncolour) {
             (4, 0xFFF) => Layout::Twelve,
-            (4, _) if format.has(Flags::FULL_PALETTE) => Layout::Sixteen,
+            (4, _) if flags.has(Flags::FULL_PALETTE) => Layout::Sixteen,
             (4, _) => Layout::Fifteen,
             _ => Layout::TwentyFour,
         };
         Self {
-            swapped: format.has(Flags::RGB),
+            swapped: flags.has(Flags::RGB),
             layout,
         }
     }
@@ -435,6 +466,50 @@ impl Direct {
             Layout::Sixteen => (low >> 3) | ((g >> 2) << 5) | ((high >> 3) << 11),
             Layout::Fifteen => (low >> 3) | ((g >> 3) << 5) | ((high >> 3) << 10),
             Layout::TwentyFour => low | (g << 8) | (high << 16),
+        }
+    }
+
+    /// Red, green and blue of four bits each packed into a pixel, each
+    /// widened by repeating its bits, as RISC OS 5 widens a colour number's.
+    pub(crate) const fn pack_nibbles(self, [r, g, b]: [u32; 3]) -> u32 {
+        let (low, high) = if self.swapped { (b, r) } else { (r, b) };
+        match self.layout {
+            Layout::Twelve => low | (g << 4) | (high << 8),
+            Layout::Sixteen => {
+                five_of_four(low) | (((g << 2) | (g >> 2)) << 5) | (five_of_four(high) << 11)
+            }
+            Layout::Fifteen => {
+                five_of_four(low) | (five_of_four(g) << 5) | (five_of_four(high) << 10)
+            }
+            Layout::TwentyFour => (low * 0x11) | ((g * 0x11) << 8) | ((high * 0x11) << 16),
+        }
+    }
+
+    /// A pixel's red, green and blue, each widened to eight bits by repeating
+    /// its top bits below it, as a deep sprite's colours widen.
+    pub(crate) const fn unpack_replicated(self, pixel: u32) -> [u32; 3] {
+        let (low, g, high) = match self.layout {
+            Layout::Twelve => (
+                (pixel & 0xF) * 0x11,
+                ((pixel >> 4) & 0xF) * 0x11,
+                ((pixel >> 8) & 0xF) * 0x11,
+            ),
+            Layout::Sixteen => (
+                eight_of_five(pixel & 0x1F),
+                eight_of_six((pixel >> 5) & 0x3F),
+                eight_of_five((pixel >> 11) & 0x1F),
+            ),
+            Layout::Fifteen => (
+                eight_of_five(pixel & 0x1F),
+                eight_of_five((pixel >> 5) & 0x1F),
+                eight_of_five((pixel >> 10) & 0x1F),
+            ),
+            Layout::TwentyFour => (pixel & 0xFF, (pixel >> 8) & 0xFF, (pixel >> 16) & 0xFF),
+        };
+        if self.swapped {
+            [high, g, low]
+        } else {
+            [low, g, high]
         }
     }
 
@@ -539,30 +614,14 @@ fn expand(format: &Format, byte: u8) -> u32 {
     let mut part = 0u32;
     for p in 0..pixels {
         let value = (u32::from(byte) >> (p << bpp)) & mask;
-        part |= widen(value, bpp, bpc) << (p << bpc);
+        part |= repeated(value, 1 << bpp, 1 << bpc) << (p << bpc);
     }
-    repeat(part, pixels << bpc, 32)
-}
-
-/// A pixel of `1 << bpp` bits widened to `1 << bpc` by repeating it.
-const fn widen(value: u32, bpp: u32, bpc: u32) -> u32 {
-    repeat(value, 1 << bpp, 1 << bpc)
+    repeated(part, pixels << bpc, 32)
 }
 
 /// A pixel value repeated across a word of `format`'s pixels.
 pub(crate) fn replicate(format: &Format, value: u32) -> u32 {
-    repeat(value & format.pixel_mask(), 1 << format.log2_bpp(), 32)
-}
-
-/// The low `width` bits of `part` repeated until `total` bits are filled.
-const fn repeat(part: u32, width: u32, total: u32) -> u32 {
-    let mut out = part;
-    let mut filled = width;
-    while filled < total {
-        out |= out << filled;
-        filled *= 2;
-    }
-    out
+    repeated(value & format.pixel_mask(), 1 << format.log2_bpp(), 32)
 }
 
 /// The OR and exclusive-OR words GCOL action `operation` takes on `word`.

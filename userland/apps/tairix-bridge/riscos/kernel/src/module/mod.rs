@@ -481,7 +481,7 @@ const NO_INCARNATION: crate::error::Error = crate::error::Error {
 
 /// A SWI of a module's chunk past its table, as RISC OS 5's own modules
 /// refuse one, the module's title its parameter.
-pub(crate) const SWI_OUT_OF_RANGE: crate::error::Error = crate::error::Error {
+pub const SWI_OUT_OF_RANGE: crate::error::Error = crate::error::Error {
     number: 0x110,
     token: "SwiOutOfRangeForModule",
 };

@@ -115,7 +115,6 @@ impl Assembly {
         if let Some(sprite) = picture.sprite() {
             let stored = sprite
                 .mode
-                .layout()
                 .least_stored_bytes(picture.width(), picture.height());
             self.claim(stored.ok_or(Refusal::Unbelieved)?)?;
         }

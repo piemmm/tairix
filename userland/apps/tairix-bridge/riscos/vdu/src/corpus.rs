@@ -9,9 +9,13 @@
 //! runs the case, then records. The frame gives a case `PROCmode(n)` and
 //! `PROCscreen(selector)`, which select a mode, define the font again and
 //! turn the cursor off, so no screen holds the cursor's flashing;
-//! `PROCr("NAME",value)`, which records a reading in hexadecimal; and
+//! `PROCr("NAME",value)`, which records a reading in hexadecimal;
 //! `FNm(n)`, `FNv(n)` and `FNs(n)`, a mode variable, a VDU variable, and an
-//! address VDU variable less the screen area's base. At the end, or at an
+//! address VDU variable less the screen area's base; `FNe(e,f)`, the error
+//! number a `SYS ... TO e;f` gave, or -1; and `PROCa("NAME",a)`, which
+//! records the words of sprite area `a` from its start to its free space,
+//! eight a line, as offsets never being addresses, which the two machines
+//! give apart. At the end, or at an
 //! error the case did not trap, whose number alone is recorded, the cursor is
 //! turned off, so its flashing is in no screen, and the screen memory the VDU
 //! drivers write is saved — unless the mode is Teletext, whose glyphs would
@@ -149,6 +153,16 @@ pub fn program(case: &Case, index: usize) -> String {
         text,
         "9130 DEFFNs(v%):LOCAL b%:SYS \"OS_ReadDynamicArea\",2 TO b%:=FNv(v%)-b%"
     );
+    let _ = writeln!(text, "9140 DEFFNe(e%,f%):IF f% AND 1 THEN =!e% ELSE =-1");
+    let _ = writeln!(
+        text,
+        "9150 DEFPROCa(n$,a%):LOCAL i%,j%,S$:FOR i%=0 TO a%!12-4 STEP 32:S$=n$+\" \"+STR$~i%+\":\""
+    );
+    let _ = writeln!(
+        text,
+        "9160 FOR j%=i% TO i%+28 STEP 4:IF j%<a%!12 THEN S$=S$+\" \"+STR$~(a%!j%)"
+    );
+    let _ = writeln!(text, "9170 NEXT:BPUT#R%,S$:NEXT:ENDPROC");
     for (row, chunk) in tairix_vdu::font::RISC_OS
         .chunks(GLYPHS_PER_LINE)
         .enumerate()

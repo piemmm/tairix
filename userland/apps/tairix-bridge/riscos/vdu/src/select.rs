@@ -124,7 +124,7 @@ impl Selector {
     }
 
     /// The mode it describes, if it describes one.
-    fn format(&self) -> Option<Format> {
+    pub(crate) fn format(&self) -> Option<Format> {
         Format::selector(
             self.width,
             self.height,
@@ -582,9 +582,12 @@ fn apply(
     vdu.screen.own_bank = bank;
     vdu.screen.set_bank(true, bank);
     vdu.screen.set_bank(false, bank);
+    vdu.output = crate::output::Output::Screen;
+    vdu.context = crate::output::Context::SCREEN;
     os.set_byte_var(tairix_riscos_kernel::byte::var::VDU_BANK, 0);
     os.set_byte_var(tairix_riscos_kernel::byte::var::DISPLAY_BANK, 0);
-    (vdu.text, vdu.graphics, vdu.colours, vdu.palette) = fresh(&format, vdu.text.flags);
+    (vdu.text, vdu.graphics, vdu.colours) = fresh_state(&format, vdu.text.flags);
+    vdu.palette = Palette::for_mode(&format);
     vdu.teletext = Teletext::new();
     vdu.cursors_removed = 0;
     os.set_byte_var(tairix_riscos_kernel::byte::var::PAGE_LINES, 0);
@@ -595,19 +598,15 @@ fn apply(
     crate::changed::reset(os)
 }
 
-/// What a mode change starts afresh for `format`: the text, its `flags`
-/// kept, the graphics, the colours and the palette.
-fn fresh(format: &Format, flags: u8) -> (Text, Graphics, Colours, Palette) {
+/// What a mode change starts afresh for `format`, as output switched to a
+/// destination with no state of its own does: the text, its `flags` kept,
+/// the graphics and the colours.
+pub(crate) fn fresh_state(format: &Format, flags: u8) -> (Text, Graphics, Colours) {
+    let (columns, rows) = format.cells();
     (
-        Text::for_screen(
-            format.columns(),
-            format.rows(),
-            format.cell().space_y,
-            flags,
-        ),
+        Text::for_screen(columns, rows, format.cell().space_y, flags),
         Graphics::for_screen(format.width(), format.height()),
         Colours::for_mode(format),
-        Palette::for_mode(format),
     )
 }
 
@@ -845,7 +844,8 @@ pub(crate) fn start(os: &mut Os<'_>) -> Result<(), Fail> {
     let selector_copy = os.rma_claim(SELECTOR_BYTES)?;
     let check_copy = os.rma_claim(SELECTOR_BYTES)?;
     let format = resolved.format;
-    let (text, graphics, colours, palette) = fresh(&format, 0);
+    let (text, graphics, colours) = fresh_state(&format, 0);
+    let palette = Palette::for_mode(&format);
     let vdu = Vdu {
         screen: Screen {
             format,
@@ -870,11 +870,19 @@ pub(crate) fn start(os: &mut Os<'_>) -> Result<(), Fail> {
         pointer: Pointer::new(),
         frames: Frames::new(os.now()),
         teletext: Teletext::new(),
+        sprites: crate::sprite::Sprites::new(),
+        output: crate::output::Output::Screen,
+        context: crate::output::Context::SCREEN,
+        kernel_save: None,
         monitor,
         shadow: false,
         cursors_removed: 0,
     };
     os.hold_extension(vdu)?;
+    let sprite_handler = os
+        .vdu_routine(crate::routine::SYSTEM_SPRITES)
+        .ok_or_else(|| os.no_memory())?;
+    crate::sprite::make_system_area(os, sprite_handler)?;
     let named = name(os, &resolved.spec)?;
     with(os, |vdu, os| apply(vdu, os, &resolved, named, false))?;
     bound_mouse(os, &resolved.format);

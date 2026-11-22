@@ -144,6 +144,19 @@ fn banks(os: &mut Os<'_>, regs: &mut Regs, written: bool) -> Result<(), Fail> {
 /// `OS_Byte` 163,242: R2 0 the default dot pattern and its length, 1 to
 /// 64 the length, 65 read the status, 66 the current sprite's size.
 fn dots(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
+    match regs.r[2] {
+        65 => {
+            let dots = with(os, |vdu, _| Ok(vdu.colours.dot_length & 63))?;
+            regs.r[1] = SPRITES_AND_FLOODS | dots;
+            regs.r[2] = crate::sprite::system_size(os);
+            return Ok(());
+        }
+        66 => {
+            (regs.r[1], regs.r[2]) = crate::sprite::selected_size(os)?;
+            return Ok(());
+        }
+        _ => {}
+    }
     with(os, |vdu, _| {
         match regs.r[2] {
             0 => {
@@ -154,14 +167,6 @@ fn dots(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
             n @ 1..=64 => {
                 vdu.colours.dot_length = n;
                 vdu.colours.dot_at = 0;
-            }
-            65 => {
-                regs.r[1] = SPRITES_AND_FLOODS | (vdu.colours.dot_length & 63);
-                regs.r[2] = 0;
-            }
-            66 => {
-                regs.r[1] = 0;
-                regs.r[2] = 0;
             }
             _ => {}
         }

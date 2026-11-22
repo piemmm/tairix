@@ -729,7 +729,7 @@ impl Os<'_> {
     }
 
     /// "SWI &… not known", naming `number`.
-    pub(crate) fn no_such_swi(&mut self, number: u32) -> Fail {
+    pub fn no_such_swi(&mut self, number: u32) -> Fail {
         let name = crate::env::hex(number);
         self.error_with(crate::env::NO_SUCH_SWI, &[&name])
     }

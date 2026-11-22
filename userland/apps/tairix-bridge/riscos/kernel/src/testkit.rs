@@ -225,12 +225,7 @@ impl Session {
 
     /// The `length` bytes at `at`.
     pub(crate) fn read(&mut self, at: u32, length: usize) -> Vec<u8> {
-        let mut bytes = alloc::vec![0; length];
-        self.kernel
-            .os()
-            .read_bytes(at, &mut bytes)
-            .expect("readable");
-        bytes
+        self.kernel.os().read_vec(at, length).expect("readable")
     }
 
     /// The text of the error block at `block`.

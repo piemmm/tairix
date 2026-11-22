@@ -497,7 +497,7 @@ impl Writer<'_> {
             Some(Source {
                 encoding: Encoding::Jpeg(frame),
                 bytes,
-            }) if !frame.progressive => self.jpeg(bytes, frame, to_paper),
+            }) if !frame.process.progressive() => self.jpeg(bytes, frame, to_paper),
             Some(Source {
                 encoding: Encoding::Sprite { eig },
                 bytes,

@@ -68,8 +68,12 @@ an application's own documents folder, the reference harness);
 | RO20.6 | The remaining commands: `AUTO`, `RENUMBER`, `DELETE`, `HELP`, and `EDIT`, which starts the separate ARM BASIC Editor module as RISC OS 5's BASIC does | done |
 | RO21.1 | The VDU drivers, each rule recorded first: modes, the VDU stream, `OS_Plot`, palettes, screen banks, screen memory, Teletext, the pointer, the ScreenModes module | done |
 | RO21.2 | Segments (`PLOT` &A8–&AF): the chord rule as recorded, with the known difference at some chord ends that §8 states | done |
-| RO22 | Sprites and JPEGs: `OS_SpriteOp`, SpriteExtend, output to sprites | planned |
-| RO23 | ColourTrans | planned |
+| RO22.1 | Sprite areas and sprites: `lib/image`'s sprite structures the one definition; the system area as dynamic area 3 with `OS_Byte` 163 and `VDU 23,27`; every non-plotting `OS_SpriteOp` reason, files and taking from the screen | done |
+| RO22.2 | Output to a sprite or its mask (60–62): every drawing path writing the destination's own form, save areas, `Service_SwitchingOutputToSprite` | done |
+| RO22.3 | Plotting: the kernel's plots, SpriteExtend's scaled, tiled and transformed plots with translation tables, alpha and colour mapping, `PLOT` &E8–&EF, pointer shapes, screen save and load, with the known differences §8 states | done |
+| RO22.4 | SpriteExtend's JPEG SWIs through `lib/image`'s decoder, the stored raster unturned | done |
+| RO22.5 | SpriteUtils' commands | done |
+| RO23 | ColourTrans; its colour match then taken by sprite blends, JPEGs and colour mapping onto palettised destinations | planned |
 | RO24 | Draw and DrawFile | planned |
 | RO25 | The Font Manager: TAIRiX faces through the font service, Acorn outline fonts, painting, the cache | planned |
 | RO26 | SharedCLibrary; the FPEmulator, VFPSupport, CallASWI and DDEUtils SWIs | planned |
@@ -1157,9 +1161,9 @@ is fuzzed.
     edges from their places along them, a round's rows as asked for, a ray's
     exit by halving — so a guest's shape far larger than the screen costs
     what the window holds. A point more than 2²⁸ pixels out is held there.
-  - Sprite plots, `PLOT` &E8–&EF, pass to `UKPlotV` with the codes the
-    drivers lack, and sprites' `VDU 23,27` to `UKVDU23V`, until RO22 draws
-    them.
+  - `PLOT` &E8–&EF plot the system area's selected sprite: the foreground
+    by its GCOL action, the background and inverse its shape as
+    `OS_SpriteOp` 48 does.
 - **The cursors** are drawn over the screen by the front end, never EORed
   into its memory as genuine RISC OS does, so a program reading its screen
   never meets them there: the one deliberate departure from RISC OS 5's
@@ -1167,11 +1171,21 @@ is fuzzed.
 - **Sprites** (RO22):
   - `OS_SpriteOp`, every reason, on system and user areas by name or pointer.
     Areas, headers, mode words, palettes and masks are read through `lib/image`'s
-    sprite structures.
+    sprite structures. An area is held to its block before it is walked; one
+    that does not hold together is refused where RISC OS 5 reads on.
   - Plotting is the emulator's own path into the destination's format: masked,
-    scaled and transformed, with translation tables and alpha.
+    scaled and transformed, with translation tables, alpha and colour mapping,
+    each pixel rule pinned by recorded observation. Known differences:
+    a transformed plot stepping unevenly through source rows can take the
+    neighbouring row at an exact tie, about a pixel in a hundred; a blend or a
+    JPEG onto a palettised destination takes the nearest palette colour, until
+    ColourTrans's match (RO23), and is not dithered; a JPEG's pixels are
+    `lib/image`'s; wastage is zeroed where RISC OS 5 copies bytes from beyond
+    a rectangle or row.
   - Output redirection to a sprite or its mask; screen save and load.
-  - SpriteExtend's JPEG SWIs, through `lib/image`'s JPEG decoder.
+  - SpriteExtend's JPEG SWIs, through `lib/image`'s JPEG decoder, which gives
+    the raster as stored as RISC OS 5's SpriteExtend reads it.
+  - SpriteUtils' commands, their listings in the emulator's own words.
 - **ColourTrans** (RO23): every SWI. Colours are matched as ColourTrans
   documents, pinned by observation. Calibration and the font colour calls are
   included.

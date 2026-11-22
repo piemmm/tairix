@@ -3,15 +3,12 @@
 //! topic, or the general text with the program's sizes, as genuine BASIC
 //! chooses among them.
 
-use alloc::vec::Vec;
-
 use tairix_openbasic::list::{pieces, Piece};
 
 use super::functions::decimal;
 use super::next::Next;
 use super::{Machine, Step};
 use crate::help::{self, Topic, KEYWORDS};
-use crate::messages::Error;
 
 /// Whether `topic`'s keyword begins with the letter `byte`, in either case.
 fn begins(topic: &Topic, byte: u8) -> bool {
@@ -28,11 +25,7 @@ impl Machine<'_, '_> {
         self.skip_spaces()?;
         let start = self.ptr;
         self.skip_line()?;
-        let mut rest = Vec::new();
-        let length = (self.ptr - start) as usize;
-        rest.try_reserve_exact(length).map_err(|_| Error::NoRoom)?;
-        rest.resize(length, 0);
-        self.os.read_bytes(start, &mut rest)?;
+        let rest = self.os.read_vec(start, (self.ptr - start) as usize)?;
         match pieces(&rest).next().map(|(_, piece)| piece) {
             Some(Piece::Word(name)) => match KEYWORDS.iter().find(|topic| topic.name == name) {
                 Some(topic) => self.help_lines(topic.text)?,

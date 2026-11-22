@@ -66,12 +66,14 @@ fn the_text_cell_follows_the_gap_double_and_teletext_flags() {
 
 #[test]
 fn a_selector_takes_a_standard_mode_s_variables_then_its_pairs() {
+    // Eight bits without a full palette, as RISC OS 5.30 reads a selector of
+    // 640 by 480 at eight bits naming no variables: ModeFlags 0, NColour 63.
     let plain = Format::selector(640, 480, 3, []).expect("described");
     assert_eq!(
         (0..VARIABLES)
             .map(|n| plain.var(n))
             .collect::<alloc::vec::Vec<_>>(),
-        [0x80, 79, 59, 255, 1, 1, 640, 307_200, 0, 3, 3, 639, 479, 0]
+        [0, 79, 59, 63, 1, 1, 640, 307_200, 0, 3, 3, 639, 479, 0]
             .map(Some)
             .to_vec()
     );
@@ -82,28 +84,4 @@ fn a_selector_takes_a_standard_mode_s_variables_then_its_pairs() {
     assert_eq!(Format::selector(640, 480, 3, [(var::LOG2_BPP, 3)]), None);
     assert_eq!(Format::selector(640, 480, 3, [(13, 0)]), None);
     assert_eq!(Format::selector(640, 480, 6, []), None);
-}
-
-#[test]
-fn a_sprite_mode_word_decides_its_depth_and_eigen_factors() {
-    let word = (4 << 27) | (90 << 14) | (90 << 1) | 1;
-    let sprite = Format::sprite_word(word).expect("a type");
-    assert_eq!(sprite.var(var::N_COLOUR), Some(255));
-    assert_eq!(
-        (sprite.var(var::X_EIG), sprite.var(var::Y_EIG)),
-        (Some(1), Some(1))
-    );
-    assert_eq!(sprite.var(var::LINE_LENGTH), None);
-    let wide = (6 << 27) | (45 << 14) | (180 << 1) | 1;
-    let sprite = Format::sprite_word(wide).expect("a type");
-    assert_eq!(
-        (sprite.var(var::X_EIG), sprite.var(var::Y_EIG)),
-        (Some(0), Some(2))
-    );
-    assert_eq!(sprite.var(var::N_COLOUR), Some(0xFFFF_FFFF));
-    assert_eq!(Format::sprite_word((7 << 27) | 1), None);
-    assert_eq!(
-        Format::sprite_word((1 << 27) | (91 << 1) | (90 << 14) | 1),
-        None
-    );
 }

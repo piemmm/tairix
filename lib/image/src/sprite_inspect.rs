@@ -1,11 +1,10 @@
 //! A RISC OS sprite area's control blocks, as the structure report lists
 //! them.
 
-use super::{read_area, read_header, word, MODE_AT, NAME_AT, NEXT_AT, SPRITE_HEADER_LEN};
+use super::{
+    control, read_area, read_header, word, SpriteName, AREA_HEADER_LEN, SPRITE_HEADER_LEN,
+};
 use tairix_util::report::{clean, Builder};
-
-/// Bytes a sprite's name field holds.
-const NAME_LEN: usize = 12;
 
 /// Report `bytes`, a sprite area.
 pub(crate) fn report(bytes: &[u8], out: &mut Builder) {
@@ -17,7 +16,7 @@ pub(crate) fn report(bytes: &[u8], out: &mut Builder) {
     out.record(
         0,
         "area",
-        12,
+        AREA_HEADER_LEN as usize,
         format_args!(
             "{} sprites, the first at {:#x}, free space at {:#x}",
             area.count, area.first, area.end
@@ -29,7 +28,7 @@ pub(crate) fn report(bytes: &[u8], out: &mut Builder) {
             return;
         }
         let place = usize::try_from(at).unwrap_or(usize::MAX);
-        let Ok(length) = word(bytes, at.saturating_add(NEXT_AT)) else {
+        let Ok(length) = word(bytes, at.saturating_add(control::NEXT)) else {
             out.stop(place, "a control block is cut short");
             return;
         };
@@ -37,12 +36,12 @@ pub(crate) fn report(bytes: &[u8], out: &mut Builder) {
             out.stop(place, "a sprite shorter than its own control block");
             return;
         }
-        let name = usize::try_from(at.saturating_add(NAME_AT))
+        let name = usize::try_from(at.saturating_add(control::NAME))
             .ok()
-            .and_then(|start| bytes.get(start..start + NAME_LEN))
+            .and_then(|start| bytes.get(start..start + SpriteName::MAX_LEN))
             .map(|name| name.split(|byte| *byte == 0).next().unwrap_or_default())
             .unwrap_or_default();
-        let mode = word(bytes, at.saturating_add(MODE_AT)).unwrap_or_default();
+        let mode = word(bytes, at.saturating_add(control::MODE)).unwrap_or_default();
         let detail = match read_header(bytes, at) {
             Ok(header) => alloc::format!(
                 "sprite {}: \u{201c}{}\u{201d}, {} \u{d7} {}, mode word {mode:#010x}{}{}",

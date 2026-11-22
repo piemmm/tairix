@@ -541,3 +541,2139 @@ case vdu_queue_and_unknown_codes
 20 VDU 25,4:SYS "OS_Byte",218,0,255 TO ,q%:PROCr("q",q%):VDU 100,0,100,0:PROCr("x",FNv(138))
 30 VDU 17:SYS "OS_Byte",218,0,0:PRINT "ABANDONED":PROCr("pos",POS)
 40 VDU 23,30,1,2,3,4,5,6,7,8:VDU 0,27:PRINT "AFTER"
+
+case sprite_new_numbered
+10 PROCmode(25)
+20 DIM A% 16384:FOR i%=0 TO 16380 STEP 4:A%!i%=0:NEXT:!A%=16384:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"S0",0,5,3,0 TO r0%;f%:PROCr("make0 0",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+40,A%,"S0" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+60 SYS "XOS_SpriteOp",256+15,A%,"S1",1,5,3,1 TO r0%;f%:PROCr("make1 1",FNe(r0%,f%))
+70 SYS "XOS_SpriteOp",256+40,A%,"S1" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+80 SYS "XOS_SpriteOp",256+15,A%,"S2",1,5,3,2 TO r0%;f%:PROCr("make2 2",FNe(r0%,f%))
+90 SYS "XOS_SpriteOp",256+40,A%,"S2" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+100 SYS "XOS_SpriteOp",256+15,A%,"S3",0,5,3,4 TO r0%;f%:PROCr("make3 4",FNe(r0%,f%))
+110 SYS "XOS_SpriteOp",256+40,A%,"S3" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+120 SYS "XOS_SpriteOp",256+15,A%,"S4",1,5,3,5 TO r0%;f%:PROCr("make4 5",FNe(r0%,f%))
+130 SYS "XOS_SpriteOp",256+40,A%,"S4" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+140 SYS "XOS_SpriteOp",256+15,A%,"S5",0,5,3,8 TO r0%;f%:PROCr("make5 8",FNe(r0%,f%))
+150 SYS "XOS_SpriteOp",256+40,A%,"S5" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+160 SYS "XOS_SpriteOp",256+15,A%,"S6",1,5,3,9 TO r0%;f%:PROCr("make6 9",FNe(r0%,f%))
+170 SYS "XOS_SpriteOp",256+40,A%,"S6" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+180 SYS "XOS_SpriteOp",256+15,A%,"S7",1,5,3,10 TO r0%;f%:PROCr("make7 10",FNe(r0%,f%))
+190 SYS "XOS_SpriteOp",256+40,A%,"S7" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+200 SYS "XOS_SpriteOp",256+15,A%,"S8",1,5,3,12 TO r0%;f%:PROCr("make8 12",FNe(r0%,f%))
+210 SYS "XOS_SpriteOp",256+40,A%,"S8" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+220 SYS "XOS_SpriteOp",256+15,A%,"S9",1,5,3,13 TO r0%;f%:PROCr("make9 13",FNe(r0%,f%))
+230 SYS "XOS_SpriteOp",256+40,A%,"S9" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+240 SYS "XOS_SpriteOp",256+15,A%,"S10",1,5,3,15 TO r0%;f%:PROCr("make10 15",FNe(r0%,f%))
+250 SYS "XOS_SpriteOp",256+40,A%,"S10" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+260 SYS "XOS_SpriteOp",256+15,A%,"S11",0,5,3,18 TO r0%;f%:PROCr("make11 18",FNe(r0%,f%))
+270 SYS "XOS_SpriteOp",256+40,A%,"S11" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+280 SYS "XOS_SpriteOp",256+15,A%,"S12",1,5,3,21 TO r0%;f%:PROCr("make12 21",FNe(r0%,f%))
+290 SYS "XOS_SpriteOp",256+40,A%,"S12" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+300 SYS "XOS_SpriteOp",256+15,A%,"S13",0,5,3,27 TO r0%;f%:PROCr("make13 27",FNe(r0%,f%))
+310 SYS "XOS_SpriteOp",256+40,A%,"S13" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+320 SYS "XOS_SpriteOp",256+15,A%,"S14",1,5,3,28 TO r0%;f%:PROCr("make14 28",FNe(r0%,f%))
+330 SYS "XOS_SpriteOp",256+40,A%,"S14" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+340 SYS "XOS_SpriteOp",256+15,A%,"S15",0,5,3,31 TO r0%;f%:PROCr("make15 31",FNe(r0%,f%))
+350 SYS "XOS_SpriteOp",256+40,A%,"S15" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+360 SYS "XOS_SpriteOp",256+15,A%,"S16",0,5,3,46 TO r0%;f%:PROCr("make16 46",FNe(r0%,f%))
+370 SYS "XOS_SpriteOp",256+40,A%,"S16" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+380 SYS "XOS_SpriteOp",256+15,A%,"S17",0,5,3,49 TO r0%;f%:PROCr("make17 49",FNe(r0%,f%))
+390 SYS "XOS_SpriteOp",256+40,A%,"S17" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+400 SYS "XOS_SpriteOp",256+15,A%,"S18",0,5,3,53 TO r0%;f%:PROCr("make18 53",FNe(r0%,f%))
+410 SYS "XOS_SpriteOp",256+40,A%,"S18" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+420 PROCa("a",A%)
+
+case sprite_new_words
+10 PROCmode(25)
+20 DIM A% 16384:FOR i%=0 TO 16380 STEP 4:A%!i%=0:NEXT:!A%=16384:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"S0",1,5,3,&81680B5 TO r0%;f%:PROCr("make0 &81680B5",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+40,A%,"S0" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+60 SYS "XOS_SpriteOp",256+15,A%,"S1",1,5,3,&101680B5 TO r0%;f%:PROCr("make1 &101680B5",FNe(r0%,f%))
+70 SYS "XOS_SpriteOp",256+40,A%,"S1" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+80 SYS "XOS_SpriteOp",256+15,A%,"S2",1,5,3,&181680B5 TO r0%;f%:PROCr("make2 &181680B5",FNe(r0%,f%))
+90 SYS "XOS_SpriteOp",256+40,A%,"S2" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+100 SYS "XOS_SpriteOp",256+15,A%,"S3",1,5,3,&201680B5 TO r0%;f%:PROCr("make3 &201680B5",FNe(r0%,f%))
+110 SYS "XOS_SpriteOp",256+40,A%,"S3" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+120 SYS "XOS_SpriteOp",256+15,A%,"S4",0,5,3,&281680B5 TO r0%;f%:PROCr("make4 &281680B5",FNe(r0%,f%))
+130 SYS "XOS_SpriteOp",256+40,A%,"S4" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+140 SYS "XOS_SpriteOp",256+15,A%,"S5",0,5,3,&301680B5 TO r0%;f%:PROCr("make5 &301680B5",FNe(r0%,f%))
+150 SYS "XOS_SpriteOp",256+40,A%,"S5" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+160 SYS "XOS_SpriteOp",256+15,A%,"S6",0,5,3,&381680B5 TO r0%;f%:PROCr("make6 &381680B5",FNe(r0%,f%))
+170 SYS "XOS_SpriteOp",256+40,A%,"S6" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+180 SYS "XOS_SpriteOp",256+15,A%,"S7",0,5,3,&401680B5 TO r0%;f%:PROCr("make7 &401680B5",FNe(r0%,f%))
+190 SYS "XOS_SpriteOp",256+40,A%,"S7" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+200 SYS "XOS_SpriteOp",256+15,A%,"S8",0,5,3,&481680B5 TO r0%;f%:PROCr("make8 &481680B5",FNe(r0%,f%))
+210 SYS "XOS_SpriteOp",256+40,A%,"S8" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+220 SYS "XOS_SpriteOp",256+15,A%,"S9",0,5,3,&501680B5 TO r0%;f%:PROCr("make9 &501680B5",FNe(r0%,f%))
+230 SYS "XOS_SpriteOp",256+40,A%,"S9" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+240 SYS "XOS_SpriteOp",256+15,A%,"S10",0,5,3,&581680B5 TO r0%;f%:PROCr("make10 &581680B5",FNe(r0%,f%))
+250 SYS "XOS_SpriteOp",256+40,A%,"S10" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+260 SYS "XOS_SpriteOp",256+15,A%,"S11",0,5,3,&601680B5 TO r0%;f%:PROCr("make11 &601680B5",FNe(r0%,f%))
+270 SYS "XOS_SpriteOp",256+40,A%,"S11" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+280 SYS "XOS_SpriteOp",256+15,A%,"S12",0,5,3,&681680B5 TO r0%;f%:PROCr("make12 &681680B5",FNe(r0%,f%))
+290 SYS "XOS_SpriteOp",256+40,A%,"S12" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+300 SYS "XOS_SpriteOp",256+15,A%,"S13",0,5,3,&701680B5 TO r0%;f%:PROCr("make13 &701680B5",FNe(r0%,f%))
+310 SYS "XOS_SpriteOp",256+40,A%,"S13" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+320 SYS "XOS_SpriteOp",256+15,A%,"S14",0,5,3,&781680B5 TO r0%;f%:PROCr("make14 &781680B5",FNe(r0%,f%))
+330 SYS "XOS_SpriteOp",256+40,A%,"S14" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+340 SYS "XOS_SpriteOp",256+15,A%,"S15",0,5,3,&A01680B5 TO r0%;f%:PROCr("make15 &A01680B5",FNe(r0%,f%))
+350 SYS "XOS_SpriteOp",256+40,A%,"S15" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+360 SYS "XOS_SpriteOp",256+15,A%,"S16",0,5,3,&B01680B5 TO r0%;f%:PROCr("make16 &B01680B5",FNe(r0%,f%))
+370 SYS "XOS_SpriteOp",256+40,A%,"S16" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+380 SYS "XOS_SpriteOp",256+15,A%,"S17",0,5,3,&881680B5 TO r0%;f%:PROCr("make17 &881680B5",FNe(r0%,f%))
+390 SYS "XOS_SpriteOp",256+40,A%,"S17" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+400 SYS "XOS_SpriteOp",256+15,A%,"S18",0,5,3,&30168169 TO r0%;f%:PROCr("make18 &30168169",FNe(r0%,f%))
+410 SYS "XOS_SpriteOp",256+40,A%,"S18" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+420 SYS "XOS_SpriteOp",256+15,A%,"S19",0,5,3,&3005805B TO r0%;f%:PROCr("make19 &3005805B",FNe(r0%,f%))
+430 SYS "XOS_SpriteOp",256+40,A%,"S19" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+440 SYS "XOS_SpriteOp",256+15,A%,"S20",0,5,3,&302D002F TO r0%;f%:PROCr("make20 &302D002F",FNe(r0%,f%))
+450 SYS "XOS_SpriteOp",256+40,A%,"S20" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+460 SYS "XOS_SpriteOp",256+15,A%,"S21",1,5,3,&1805C02D TO r0%;f%:PROCr("make21 &1805C02D",FNe(r0%,f%))
+470 SYS "XOS_SpriteOp",256+40,A%,"S21" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+480 SYS "XOS_SpriteOp",256+15,A%,"S22",1,5,3,&78100051 TO r0%;f%:PROCr("make22 &78100051",FNe(r0%,f%))
+490 SYS "XOS_SpriteOp",256+40,A%,"S22" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+500 SYS "XOS_SpriteOp",256+15,A%,"S23",1,5,3,&78200051 TO r0%;f%:PROCr("make23 &78200051",FNe(r0%,f%))
+510 SYS "XOS_SpriteOp",256+40,A%,"S23" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+520 SYS "XOS_SpriteOp",256+15,A%,"S24",1,5,3,&78300051 TO r0%;f%:PROCr("make24 &78300051",FNe(r0%,f%))
+530 SYS "XOS_SpriteOp",256+40,A%,"S24" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+540 SYS "XOS_SpriteOp",256+15,A%,"S25",1,5,3,&78400051 TO r0%;f%:PROCr("make25 &78400051",FNe(r0%,f%))
+550 SYS "XOS_SpriteOp",256+40,A%,"S25" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+560 SYS "XOS_SpriteOp",256+15,A%,"S26",0,5,3,&78500051 TO r0%;f%:PROCr("make26 &78500051",FNe(r0%,f%))
+570 SYS "XOS_SpriteOp",256+40,A%,"S26" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+580 SYS "XOS_SpriteOp",256+15,A%,"S27",0,5,3,&78600051 TO r0%;f%:PROCr("make27 &78600051",FNe(r0%,f%))
+590 SYS "XOS_SpriteOp",256+40,A%,"S27" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+600 SYS "XOS_SpriteOp",256+15,A%,"S28",0,5,3,&78700051 TO r0%;f%:PROCr("make28 &78700051",FNe(r0%,f%))
+610 SYS "XOS_SpriteOp",256+40,A%,"S28" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+620 SYS "XOS_SpriteOp",256+15,A%,"S29",0,5,3,&78800051 TO r0%;f%:PROCr("make29 &78800051",FNe(r0%,f%))
+630 SYS "XOS_SpriteOp",256+40,A%,"S29" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+640 SYS "XOS_SpriteOp",256+15,A%,"S30",0,5,3,&78900051 TO r0%;f%:PROCr("make30 &78900051",FNe(r0%,f%))
+650 SYS "XOS_SpriteOp",256+40,A%,"S30" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+660 SYS "XOS_SpriteOp",256+15,A%,"S31",0,5,3,&78A00051 TO r0%;f%:PROCr("make31 &78A00051",FNe(r0%,f%))
+670 SYS "XOS_SpriteOp",256+40,A%,"S31" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+680 SYS "XOS_SpriteOp",256+15,A%,"S32",0,5,3,&79000051 TO r0%;f%:PROCr("make32 &79000051",FNe(r0%,f%))
+690 SYS "XOS_SpriteOp",256+40,A%,"S32" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+700 SYS "XOS_SpriteOp",256+15,A%,"S33",0,5,3,&79100051 TO r0%;f%:PROCr("make33 &79100051",FNe(r0%,f%))
+710 SYS "XOS_SpriteOp",256+40,A%,"S33" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+720 SYS "XOS_SpriteOp",256+15,A%,"S34",0,5,3,&79200051 TO r0%;f%:PROCr("make34 &79200051",FNe(r0%,f%))
+730 SYS "XOS_SpriteOp",256+40,A%,"S34" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+740 SYS "XOS_SpriteOp",256+15,A%,"S35",0,5,3,&79300051 TO r0%;f%:PROCr("make35 &79300051",FNe(r0%,f%))
+750 SYS "XOS_SpriteOp",256+40,A%,"S35" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+760 SYS "XOS_SpriteOp",256+15,A%,"S36",0,5,3,&7FF00051 TO r0%;f%:PROCr("make36 &7FF00051",FNe(r0%,f%))
+770 SYS "XOS_SpriteOp",256+40,A%,"S36" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+780 SYS "XOS_SpriteOp",256+15,A%,"S37",0,5,3,&78508051 TO r0%;f%:PROCr("make37 &78508051",FNe(r0%,f%))
+790 SYS "XOS_SpriteOp",256+40,A%,"S37" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+800 SYS "XOS_SpriteOp",256+15,A%,"S38",0,5,3,&78604051 TO r0%;f%:PROCr("make38 &78604051",FNe(r0%,f%))
+810 SYS "XOS_SpriteOp",256+40,A%,"S38" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+820 SYS "XOS_SpriteOp",256+15,A%,"S39",0,5,3,&7860C051 TO r0%;f%:PROCr("make39 &7860C051",FNe(r0%,f%))
+830 SYS "XOS_SpriteOp",256+40,A%,"S39" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+840 SYS "XOS_SpriteOp",256+15,A%,"S40",0,5,3,&78A04051 TO r0%;f%:PROCr("make40 &78A04051",FNe(r0%,f%))
+850 SYS "XOS_SpriteOp",256+40,A%,"S40" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+860 SYS "XOS_SpriteOp",256+15,A%,"S41",0,5,3,&79008051 TO r0%;f%:PROCr("make41 &79008051",FNe(r0%,f%))
+870 SYS "XOS_SpriteOp",256+40,A%,"S41" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+880 SYS "XOS_SpriteOp",256+15,A%,"S42",0,5,3,&78600001 TO r0%;f%:PROCr("make42 &78600001",FNe(r0%,f%))
+890 SYS "XOS_SpriteOp",256+40,A%,"S42" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+900 SYS "XOS_SpriteOp",256+15,A%,"S43",0,5,3,&786000E1 TO r0%;f%:PROCr("make43 &786000E1",FNe(r0%,f%))
+910 SYS "XOS_SpriteOp",256+40,A%,"S43" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+920 SYS "XOS_SpriteOp",256+15,A%,"S44",0,5,3,&78600031 TO r0%;f%:PROCr("make44 &78600031",FNe(r0%,f%))
+930 SYS "XOS_SpriteOp",256+40,A%,"S44" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+940 SYS "XOS_SpriteOp",256+15,A%,"S45",0,5,3,&F8400051 TO r0%;f%:PROCr("make45 &F8400051",FNe(r0%,f%))
+950 SYS "XOS_SpriteOp",256+40,A%,"S45" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" h",c%):PROCr(" k",k%):PROCr(" m",m%)
+960 PROCa("a",A%)
+
+case sprite_new_selectors
+10 PROCmode(25)
+20 DIM A% 8192:FOR i%=0 TO 8188 STEP 4:A%!i%=0:NEXT:!A%=8192:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 DIM S% 64
+50 S%!0=1:S%!4=640:S%!8=480:S%!12=0:S%!16=-1:S%!20=-1
+60 SYS "XOS_SpriteOp",256+15,A%,"T0",0,4,2,S% TO r0%;f%:PROCr("sel0",FNe(r0%,f%))
+70 SYS "XOS_SpriteOp",256+40,A%,"T0" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+80 S%!0=1:S%!4=640:S%!8=480:S%!12=1:S%!16=-1:S%!20=-1
+90 SYS "XOS_SpriteOp",256+15,A%,"T1",0,4,2,S% TO r0%;f%:PROCr("sel1",FNe(r0%,f%))
+100 SYS "XOS_SpriteOp",256+40,A%,"T1" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+110 S%!0=1:S%!4=640:S%!8=480:S%!12=2:S%!16=-1:S%!20=-1
+120 SYS "XOS_SpriteOp",256+15,A%,"T2",0,4,2,S% TO r0%;f%:PROCr("sel2",FNe(r0%,f%))
+130 SYS "XOS_SpriteOp",256+40,A%,"T2" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+140 S%!0=1:S%!4=640:S%!8=480:S%!12=3:S%!16=-1:S%!20=-1
+150 SYS "XOS_SpriteOp",256+15,A%,"T3",0,4,2,S% TO r0%;f%:PROCr("sel3",FNe(r0%,f%))
+160 SYS "XOS_SpriteOp",256+40,A%,"T3" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+170 S%!0=1:S%!4=640:S%!8=480:S%!12=3:S%!16=-1:S%!20=0:S%!24=128:S%!28=3:S%!32=255:S%!36=-1
+180 SYS "XOS_SpriteOp",256+15,A%,"T4",0,4,2,S% TO r0%;f%:PROCr("sel4",FNe(r0%,f%))
+190 SYS "XOS_SpriteOp",256+40,A%,"T4" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+200 S%!0=1:S%!4=640:S%!8=480:S%!12=4:S%!16=-1:S%!20=-1
+210 SYS "XOS_SpriteOp",256+15,A%,"T5",0,4,2,S% TO r0%;f%:PROCr("sel5",FNe(r0%,f%))
+220 SYS "XOS_SpriteOp",256+40,A%,"T5" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+230 S%!0=1:S%!4=640:S%!8=480:S%!12=5:S%!16=-1:S%!20=-1
+240 SYS "XOS_SpriteOp",256+15,A%,"T6",0,4,2,S% TO r0%;f%:PROCr("sel6",FNe(r0%,f%))
+250 SYS "XOS_SpriteOp",256+40,A%,"T6" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+260 S%!0=1:S%!4=640:S%!8=480:S%!12=5:S%!16=-1:S%!20=4:S%!24=2:S%!28=5:S%!32=0:S%!36=-1
+270 SYS "XOS_SpriteOp",256+15,A%,"T7",0,4,2,S% TO r0%;f%:PROCr("sel7",FNe(r0%,f%))
+280 SYS "XOS_SpriteOp",256+40,A%,"T7" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+290 S%!0=1:S%!4=640:S%!8=480:S%!12=3:S%!16=-1:S%!20=4:S%!24=0:S%!28=5:S%!32=2:S%!36=-1
+300 SYS "XOS_SpriteOp",256+15,A%,"T8",0,4,2,S% TO r0%;f%:PROCr("sel8",FNe(r0%,f%))
+310 SYS "XOS_SpriteOp",256+40,A%,"T8" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+320 S%!0=1:S%!4=640:S%!8=480:S%!12=4:S%!16=-1:S%!20=0:S%!24=128:S%!28=-1
+330 SYS "XOS_SpriteOp",256+15,A%,"T9",0,4,2,S% TO r0%;f%:PROCr("sel9",FNe(r0%,f%))
+340 SYS "XOS_SpriteOp",256+40,A%,"T9" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+350 SYS "XOS_SpriteOp",256+15,A%,"T9",1,4,2,S% TO r0%;f%:PROCr("sel palette",FNe(r0%,f%))
+360 PROCa("a",A%)
+
+case sprite_new_refusals
+10 PROCmode(25)
+20 DIM A% 4096:FOR i%=0 TO 4092 STEP 4:A%!i%=0:NEXT:!A%=4096:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"r0",0,4,4,3 TO r0%;f%:PROCr("mode0 3",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+15,A%,"r1",0,4,4,6 TO r0%;f%:PROCr("mode1 6",FNe(r0%,f%))
+60 SYS "XOS_SpriteOp",256+15,A%,"r2",0,4,4,7 TO r0%;f%:PROCr("mode2 7",FNe(r0%,f%))
+70 SYS "XOS_SpriteOp",256+15,A%,"r3",0,4,4,128 TO r0%;f%:PROCr("mode3 128",FNe(r0%,f%))
+80 SYS "XOS_SpriteOp",256+15,A%,"r4",0,4,4,54 TO r0%;f%:PROCr("mode4 54",FNe(r0%,f%))
+90 SYS "XOS_SpriteOp",256+15,A%,"r5",0,4,4,60 TO r0%;f%:PROCr("mode5 60",FNe(r0%,f%))
+100 SYS "XOS_SpriteOp",256+15,A%,"r6",0,4,4,255 TO r0%;f%:PROCr("mode6 255",FNe(r0%,f%))
+110 SYS "XOS_SpriteOp",256+15,A%,"r7",0,4,4,&30168001 TO r0%;f%:PROCr("mode7 &30168001",FNe(r0%,f%))
+120 SYS "XOS_SpriteOp",256+15,A%,"r8",0,4,4,&301680B7 TO r0%;f%:PROCr("mode8 &301680B7",FNe(r0%,f%))
+130 SYS "XOS_SpriteOp",256+15,A%,"r9",0,4,4,&305A00B5 TO r0%;f%:PROCr("mode9 &305A00B5",FNe(r0%,f%))
+140 SYS "XOS_SpriteOp",256+15,A%,"r10",0,4,4,&30168017 TO r0%;f%:PROCr("mode10 &30168017",FNe(r0%,f%))
+150 SYS "XOS_SpriteOp",256+15,A%,"r11",0,4,4,&300000B5 TO r0%;f%:PROCr("mode11 &300000B5",FNe(r0%,f%))
+160 SYS "XOS_SpriteOp",256+15,A%,"r12",0,4,4,&78408051 TO r0%;f%:PROCr("mode12 &78408051",FNe(r0%,f%))
+170 SYS "XOS_SpriteOp",256+15,A%,"r13",0,4,4,&78308051 TO r0%;f%:PROCr("mode13 &78308051",FNe(r0%,f%))
+180 SYS "XOS_SpriteOp",256+15,A%,"r14",0,4,4,&78601051 TO r0%;f%:PROCr("mode14 &78601051",FNe(r0%,f%))
+190 SYS "XOS_SpriteOp",256+15,A%,"r15",0,4,4,&78602051 TO r0%;f%:PROCr("mode15 &78602051",FNe(r0%,f%))
+200 SYS "XOS_SpriteOp",256+15,A%,"r16",0,4,4,&78301051 TO r0%;f%:PROCr("mode16 &78301051",FNe(r0%,f%))
+210 SYS "XOS_SpriteOp",256+15,A%,"r17",0,4,4,&78204051 TO r0%;f%:PROCr("mode17 &78204051",FNe(r0%,f%))
+220 SYS "XOS_SpriteOp",256+15,A%,"r18",0,4,4,&78108051 TO r0%;f%:PROCr("mode18 &78108051",FNe(r0%,f%))
+230 SYS "XOS_SpriteOp",256+15,A%,"dp",1,4,4,&301680B5 TO r0%;f%:PROCr("deep palette 32",FNe(r0%,f%))
+240 SYS "XOS_SpriteOp",256+15,A%,"dp",1,4,4,&78A00051 TO r0%;f%:PROCr("deep palette 16",FNe(r0%,f%))
+250 SYS "XOS_SpriteOp",256+15,A%,"dp",1,4,4,46 TO r0%;f%:PROCr("deep palette numbered",FNe(r0%,f%))
+260 SYS "XOS_SpriteOp",256+15,A%,"w0",0,0,3,28 TO r0%;f%:PROCr("width0",FNe(r0%,f%))
+270 SYS "XOS_SpriteOp",256+15,A%,"h0",0,3,0,28 TO r0%;f%:PROCr("height0",FNe(r0%,f%))
+280 SYS "XOS_SpriteOp",256+15,A%,"b0",0,0,0,12 TO r0%;f%:PROCr("both0",FNe(r0%,f%))
+290 SYS "XOS_SpriteOp",256+15,A%,"hg",0,&10000000,1,28 TO r0%;f%:PROCr("huge",FNe(r0%,f%))
+300 SYS "XOS_SpriteOp",256+15,A%,"hr",0,1,&1000000,28 TO r0%;f%:PROCr("huge rows",FNe(r0%,f%))
+310 SYS "XOS_SpriteOp",256+15,A%,"bg",0,64,64,28 TO r0%;f%:PROCr("big",FNe(r0%,f%))
+320 PROCa("a",A%)
+
+case sprite_names
+10 PROCmode(25)
+20 DIM A% 4096:FOR i%=0 TO 4092 STEP 4:A%!i%=0:NEXT:!A%=4096:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"Abc",0,4,4,12 TO r0%;f%:PROCr("Abc",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+40,A%,"ABC" TO r0%;f%:PROCr("find ABC",FNe(r0%,f%))
+60 SYS "XOS_SpriteOp",256+40,A%,"abc"+CHR$13 TO r0%;f%:PROCr("find cr",FNe(r0%,f%))
+70 SYS "XOS_SpriteOp",256+40,A%,"abc def" TO r0%;f%:PROCr("find space",FNe(r0%,f%))
+80 SYS "XOS_SpriteOp",256+40,A%,"abc"+CHR$9+"x" TO r0%;f%:PROCr("find tab",FNe(r0%,f%))
+90 SYS "XOS_SpriteOp",256+40,A%,"abc"+CHR$127 TO r0%;f%:PROCr("find del",FNe(r0%,f%))
+100 SYS "XOS_SpriteOp",256+40,A%,"abcd" TO r0%;f%:PROCr("find longer",FNe(r0%,f%))
+110 SYS "XOS_SpriteOp",256+40,A%,"ab" TO r0%;f%:PROCr("find shorter",FNe(r0%,f%))
+120 SYS "XOS_SpriteOp",256+15,A%,"ThirteenChars",0,2,2,12 TO r0%;f%:PROCr("long",FNe(r0%,f%))
+130 SYS "XOS_SpriteOp",256+40,A%,"thirteenchar" TO r0%;f%:PROCr("find 12",FNe(r0%,f%))
+140 SYS "XOS_SpriteOp",256+40,A%,"THIRTEENCHARSX" TO r0%;f%:PROCr("find 14",FNe(r0%,f%))
+150 SYS "XOS_SpriteOp",256+15,A%,CHR$&C4+"x",0,2,2,12 TO r0%;f%:PROCr("top bit",FNe(r0%,f%))
+160 SYS "XOS_SpriteOp",256+40,A%,CHR$&C4+"X" TO r0%;f%:PROCr("find top same",FNe(r0%,f%))
+170 SYS "XOS_SpriteOp",256+40,A%,CHR$&E4+"X" TO r0%;f%:PROCr("find top lower",FNe(r0%,f%))
+180 SYS "XOS_SpriteOp",256+40,A%,"" TO r0%;f%:PROCr("find empty none",FNe(r0%,f%))
+190 SYS "XOS_SpriteOp",256+15,A%,"",0,2,2,12 TO r0%;f%:PROCr("empty",FNe(r0%,f%))
+200 SYS "XOS_SpriteOp",256+40,A%,"" TO r0%;f%:PROCr("find empty",FNe(r0%,f%))
+210 SYS "XOS_SpriteOp",256+40,A%," " TO r0%;f%:PROCr("find space only",FNe(r0%,f%))
+220 SYS "XOS_SpriteOp",256+15,A%,"a"+CHR$31+"b",0,2,2,12 TO r0%;f%:PROCr("ctrl",FNe(r0%,f%))
+230 DIM N% 32
+240 FOR i%=0 TO 31:N%?i%=&AA:NEXT:SYS "XOS_SpriteOp",256+13,A%,N%,32,1 TO r0%,,,c%;f%:PROCr("name1 32",FNe(r0%,f%)):PROCr(" len",c%)
+250 PROCr(" w0",N%!0):PROCr(" w1",N%!4):PROCr(" w2",N%!8):PROCr(" w3",N%!12)
+260 FOR i%=0 TO 31:N%?i%=&AA:NEXT:SYS "XOS_SpriteOp",256+13,A%,N%,32,2 TO r0%,,,c%;f%:PROCr("name2 32",FNe(r0%,f%)):PROCr(" len",c%)
+270 PROCr(" w0",N%!0):PROCr(" w1",N%!4):PROCr(" w2",N%!8):PROCr(" w3",N%!12)
+280 FOR i%=0 TO 31:N%?i%=&AA:NEXT:SYS "XOS_SpriteOp",256+13,A%,N%,32,3 TO r0%,,,c%;f%:PROCr("name3 32",FNe(r0%,f%)):PROCr(" len",c%)
+290 PROCr(" w0",N%!0):PROCr(" w1",N%!4):PROCr(" w2",N%!8):PROCr(" w3",N%!12)
+300 FOR i%=0 TO 31:N%?i%=&AA:NEXT:SYS "XOS_SpriteOp",256+13,A%,N%,32,4 TO r0%,,,c%;f%:PROCr("name4 32",FNe(r0%,f%)):PROCr(" len",c%)
+310 PROCr(" w0",N%!0):PROCr(" w1",N%!4):PROCr(" w2",N%!8):PROCr(" w3",N%!12)
+320 FOR i%=0 TO 31:N%?i%=&AA:NEXT:SYS "XOS_SpriteOp",256+13,A%,N%,32,5 TO r0%,,,c%;f%:PROCr("name5 32",FNe(r0%,f%)):PROCr(" len",c%)
+330 PROCr(" w0",N%!0):PROCr(" w1",N%!4):PROCr(" w2",N%!8):PROCr(" w3",N%!12)
+340 FOR i%=0 TO 31:N%?i%=&AA:NEXT:SYS "XOS_SpriteOp",256+13,A%,N%,32,6 TO r0%,,,c%;f%:PROCr("name6 32",FNe(r0%,f%)):PROCr(" len",c%)
+350 PROCr(" w0",N%!0):PROCr(" w1",N%!4):PROCr(" w2",N%!8):PROCr(" w3",N%!12)
+360 FOR i%=0 TO 31:N%?i%=&AA:NEXT:SYS "XOS_SpriteOp",256+13,A%,N%,32,0 TO r0%,,,c%;f%:PROCr("name0 32",FNe(r0%,f%)):PROCr(" len",c%)
+370 PROCr(" w0",N%!0):PROCr(" w1",N%!4):PROCr(" w2",N%!8):PROCr(" w3",N%!12)
+380 FOR i%=0 TO 31:N%?i%=&AA:NEXT:SYS "XOS_SpriteOp",256+13,A%,N%,3,1 TO r0%,,,c%;f%:PROCr("name1 3",FNe(r0%,f%)):PROCr(" len",c%)
+390 PROCr(" w0",N%!0):PROCr(" w1",N%!4):PROCr(" w2",N%!8):PROCr(" w3",N%!12)
+400 FOR i%=0 TO 31:N%?i%=&AA:NEXT:SYS "XOS_SpriteOp",256+13,A%,N%,1,1 TO r0%,,,c%;f%:PROCr("name1 1",FNe(r0%,f%)):PROCr(" len",c%)
+410 PROCr(" w0",N%!0):PROCr(" w1",N%!4):PROCr(" w2",N%!8):PROCr(" w3",N%!12)
+420 FOR i%=0 TO 31:N%?i%=&AA:NEXT:SYS "XOS_SpriteOp",256+13,A%,N%,0,1 TO r0%,,,c%;f%:PROCr("name1 0",FNe(r0%,f%)):PROCr(" len",c%)
+430 PROCr(" w0",N%!0):PROCr(" w1",N%!4):PROCr(" w2",N%!8):PROCr(" w3",N%!12)
+440 FOR i%=0 TO 31:N%?i%=&AA:NEXT:SYS "XOS_SpriteOp",256+13,A%,N%,13,2 TO r0%,,,c%;f%:PROCr("name2 13",FNe(r0%,f%)):PROCr(" len",c%)
+450 PROCr(" w0",N%!0):PROCr(" w1",N%!4):PROCr(" w2",N%!8):PROCr(" w3",N%!12)
+460 FOR i%=0 TO 31:N%?i%=&AA:NEXT:SYS "XOS_SpriteOp",256+13,A%,N%,12,2 TO r0%,,,c%;f%:PROCr("name2 12",FNe(r0%,f%)):PROCr(" len",c%)
+470 PROCr(" w0",N%!0):PROCr(" w1",N%!4):PROCr(" w2",N%!8):PROCr(" w3",N%!12)
+480 SYS "XOS_SpriteOp",256+26,A%,"abc","NewName" TO r0%;f%:PROCr("ren",FNe(r0%,f%))
+490 SYS "XOS_SpriteOp",256+26,A%,"newname","thirteenchar" TO r0%;f%:PROCr("ren onto",FNe(r0%,f%))
+500 SYS "XOS_SpriteOp",256+26,A%,"newname","NEWNAME" TO r0%;f%:PROCr("ren self",FNe(r0%,f%))
+510 SYS "XOS_SpriteOp",256+26,A%,"newname","ab"+CHR$1+"cd" TO r0%;f%:PROCr("ren ctrl",FNe(r0%,f%))
+520 SYS "XOS_SpriteOp",256+26,A%,"ab","FourteenLetter" TO r0%;f%:PROCr("ren long",FNe(r0%,f%))
+530 SYS "XOS_SpriteOp",256+26,A%,"zz","yy" TO r0%;f%:PROCr("ren missing",FNe(r0%,f%))
+540 SYS "XOS_SpriteOp",256+27,A%,"fourteenlett","thirteenchar" TO r0%;f%:PROCr("copy onto",FNe(r0%,f%))
+550 SYS "XOS_SpriteOp",256+27,A%,"fourteenlett","Copied" TO r0%;f%:PROCr("copy",FNe(r0%,f%))
+560 SYS "XOS_SpriteOp",256+27,A%,"zz","yy" TO r0%;f%:PROCr("copy missing",FNe(r0%,f%))
+570 SYS "XOS_SpriteOp",256+25,A%,"zz" TO r0%;f%:PROCr("del missing",FNe(r0%,f%))
+580 SYS "XOS_SpriteOp",256+25,A%,"thirteenchar" TO r0%;f%:PROCr("del",FNe(r0%,f%))
+590 PROCa("a",A%)
+
+case sprite_delete_copy
+10 PROCmode(25)
+20 DIM A% 320:FOR i%=0 TO 316 STEP 4:A%!i%=&5A5A5A5A:NEXT:!A%=320:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"one",0,5,3,12 TO r0%;f%:PROCr("one",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+15,A%,"two",0,7,3,28 TO r0%;f%:PROCr("two",FNe(r0%,f%))
+60 SYS "XOS_SpriteOp",256+15,A%,"tri",0,3,2,28 TO r0%;f%:PROCr("tri",FNe(r0%,f%))
+70 SYS "XOS_SpriteOp",256+42,A%,"two",1,1,9,0
+80 PROCa("a",A%)
+90 SYS "XOS_SpriteOp",256+25,A%,"one" TO r0%;f%:PROCr("del one",FNe(r0%,f%))
+100 PROCa("b",A%)
+110 SYS "XOS_SpriteOp",256+15,A%,"two",0,4,4,12 TO r0%;f%:PROCr("again two",FNe(r0%,f%))
+120 PROCa("c",A%)
+130 SYS "XOS_SpriteOp",256+27,A%,"tri","four" TO r0%;f%:PROCr("copy tri",FNe(r0%,f%))
+140 SYS "XOS_SpriteOp",256+27,A%,"two","five" TO r0%;f%:PROCr("copy two",FNe(r0%,f%))
+150 PROCa("d",A%)
+160 SYS "XOS_SpriteOp",256+27,A%,"tri","six" TO r0%;f%:PROCr("copy room",FNe(r0%,f%))
+170 SYS "XOS_SpriteOp",256+15,A%,"big",0,64,64,28 TO r0%;f%:PROCr("make room",FNe(r0%,f%))
+180 SYS "XOS_SpriteOp",256+15,A%,"tri",0,64,64,28 TO r0%;f%:PROCr("replace room",FNe(r0%,f%))
+190 PROCa("e",A%)
+200 SYS "XOS_SpriteOp",256+15,A%,"four",0,4,2,28 TO r0%;f%:PROCr("replace fits",FNe(r0%,f%))
+210 PROCa("f",A%)
+
+case sprite_pixels
+10 PROCmode(25)
+20 DIM A% 16384:FOR i%=0 TO 16380 STEP 4:A%!i%=0:NEXT:!A%=16384:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"p0",0,4,2,0 TO r0%;f%:PROCr("p0 0",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+42,A%,"p0",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+60 SYS "XOS_SpriteOp",256+42,A%,"p0",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+70 SYS "XOS_SpriteOp",256+42,A%,"p0",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+80 SYS "XOS_SpriteOp",256+42,A%,"p0",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+90 S$="p0":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p0",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+100 SYS "XOS_SpriteOp",256+15,A%,"p1",0,4,2,8 TO r0%;f%:PROCr("p1 8",FNe(r0%,f%))
+110 SYS "XOS_SpriteOp",256+42,A%,"p1",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+120 SYS "XOS_SpriteOp",256+42,A%,"p1",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+130 SYS "XOS_SpriteOp",256+42,A%,"p1",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+140 SYS "XOS_SpriteOp",256+42,A%,"p1",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+150 S$="p1":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p1",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+160 SYS "XOS_SpriteOp",256+15,A%,"p2",0,4,2,12 TO r0%;f%:PROCr("p2 12",FNe(r0%,f%))
+170 SYS "XOS_SpriteOp",256+42,A%,"p2",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+180 SYS "XOS_SpriteOp",256+42,A%,"p2",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+190 SYS "XOS_SpriteOp",256+42,A%,"p2",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+200 SYS "XOS_SpriteOp",256+42,A%,"p2",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+210 S$="p2":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p2",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+220 SYS "XOS_SpriteOp",256+15,A%,"p3",0,4,2,28 TO r0%;f%:PROCr("p3 28",FNe(r0%,f%))
+230 SYS "XOS_SpriteOp",256+42,A%,"p3",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+240 SYS "XOS_SpriteOp",256+42,A%,"p3",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+250 SYS "XOS_SpriteOp",256+42,A%,"p3",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+260 SYS "XOS_SpriteOp",256+42,A%,"p3",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+270 S$="p3":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p3",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+280 SYS "XOS_SpriteOp",256+15,A%,"p4",0,4,2,2 TO r0%;f%:PROCr("p4 2",FNe(r0%,f%))
+290 SYS "XOS_SpriteOp",256+42,A%,"p4",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+300 SYS "XOS_SpriteOp",256+42,A%,"p4",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+310 SYS "XOS_SpriteOp",256+42,A%,"p4",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+320 SYS "XOS_SpriteOp",256+42,A%,"p4",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+330 S$="p4":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p4",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+340 SYS "XOS_SpriteOp",256+15,A%,"p5",0,4,2,4 TO r0%;f%:PROCr("p5 4",FNe(r0%,f%))
+350 SYS "XOS_SpriteOp",256+42,A%,"p5",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+360 SYS "XOS_SpriteOp",256+42,A%,"p5",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+370 SYS "XOS_SpriteOp",256+42,A%,"p5",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+380 SYS "XOS_SpriteOp",256+42,A%,"p5",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+390 S$="p5":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p5",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+400 SYS "XOS_SpriteOp",256+15,A%,"p6",0,4,2,5 TO r0%;f%:PROCr("p6 5",FNe(r0%,f%))
+410 SYS "XOS_SpriteOp",256+42,A%,"p6",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+420 SYS "XOS_SpriteOp",256+42,A%,"p6",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+430 SYS "XOS_SpriteOp",256+42,A%,"p6",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+440 SYS "XOS_SpriteOp",256+42,A%,"p6",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+450 S$="p6":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p6",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+460 SYS "XOS_SpriteOp",256+15,A%,"p7",0,4,2,10 TO r0%;f%:PROCr("p7 10",FNe(r0%,f%))
+470 SYS "XOS_SpriteOp",256+42,A%,"p7",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+480 SYS "XOS_SpriteOp",256+42,A%,"p7",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+490 SYS "XOS_SpriteOp",256+42,A%,"p7",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+500 SYS "XOS_SpriteOp",256+42,A%,"p7",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+510 S$="p7":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p7",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+520 SYS "XOS_SpriteOp",256+15,A%,"p8",0,4,2,1 TO r0%;f%:PROCr("p8 1",FNe(r0%,f%))
+530 SYS "XOS_SpriteOp",256+42,A%,"p8",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+540 SYS "XOS_SpriteOp",256+42,A%,"p8",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+550 SYS "XOS_SpriteOp",256+42,A%,"p8",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+560 SYS "XOS_SpriteOp",256+42,A%,"p8",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+570 S$="p8":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p8",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+580 SYS "XOS_SpriteOp",256+15,A%,"p9",0,4,2,9 TO r0%;f%:PROCr("p9 9",FNe(r0%,f%))
+590 SYS "XOS_SpriteOp",256+42,A%,"p9",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+600 SYS "XOS_SpriteOp",256+42,A%,"p9",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+610 SYS "XOS_SpriteOp",256+42,A%,"p9",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+620 SYS "XOS_SpriteOp",256+42,A%,"p9",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+630 S$="p9":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p9",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+640 SYS "XOS_SpriteOp",256+15,A%,"p10",0,4,2,13 TO r0%;f%:PROCr("p10 13",FNe(r0%,f%))
+650 SYS "XOS_SpriteOp",256+42,A%,"p10",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+660 SYS "XOS_SpriteOp",256+42,A%,"p10",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+670 SYS "XOS_SpriteOp",256+42,A%,"p10",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+680 SYS "XOS_SpriteOp",256+42,A%,"p10",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+690 S$="p10":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p10",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+700 SYS "XOS_SpriteOp",256+15,A%,"p11",0,4,2,&201680B5 TO r0%;f%:PROCr("p11 &201680B5",FNe(r0%,f%))
+710 SYS "XOS_SpriteOp",256+42,A%,"p11",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+720 SYS "XOS_SpriteOp",256+42,A%,"p11",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+730 SYS "XOS_SpriteOp",256+42,A%,"p11",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+740 SYS "XOS_SpriteOp",256+42,A%,"p11",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+750 S$="p11":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p11",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+760 SYS "XOS_SpriteOp",256+15,A%,"p12",0,4,2,&281680B5 TO r0%;f%:PROCr("p12 &281680B5",FNe(r0%,f%))
+770 SYS "XOS_SpriteOp",256+42,A%,"p12",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+780 SYS "XOS_SpriteOp",256+42,A%,"p12",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+790 SYS "XOS_SpriteOp",256+42,A%,"p12",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+800 SYS "XOS_SpriteOp",256+42,A%,"p12",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+810 S$="p12":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p12",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+820 SYS "XOS_SpriteOp",256+15,A%,"p13",0,4,2,&301680B5 TO r0%;f%:PROCr("p13 &301680B5",FNe(r0%,f%))
+830 SYS "XOS_SpriteOp",256+42,A%,"p13",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+840 SYS "XOS_SpriteOp",256+42,A%,"p13",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+850 SYS "XOS_SpriteOp",256+42,A%,"p13",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+860 SYS "XOS_SpriteOp",256+42,A%,"p13",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+870 S$="p13":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p13",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+880 SYS "XOS_SpriteOp",256+15,A%,"p14",0,4,2,&501680B5 TO r0%;f%:PROCr("p14 &501680B5",FNe(r0%,f%))
+890 SYS "XOS_SpriteOp",256+42,A%,"p14",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+900 SYS "XOS_SpriteOp",256+42,A%,"p14",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+910 SYS "XOS_SpriteOp",256+42,A%,"p14",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+920 SYS "XOS_SpriteOp",256+42,A%,"p14",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+930 S$="p14":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p14",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+940 SYS "XOS_SpriteOp",256+15,A%,"p15",0,4,2,&79000051 TO r0%;f%:PROCr("p15 &79000051",FNe(r0%,f%))
+950 SYS "XOS_SpriteOp",256+42,A%,"p15",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+960 SYS "XOS_SpriteOp",256+42,A%,"p15",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+970 SYS "XOS_SpriteOp",256+42,A%,"p15",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+980 SYS "XOS_SpriteOp",256+42,A%,"p15",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+990 S$="p15":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p15",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+1000 SYS "XOS_SpriteOp",256+15,A%,"p16",0,4,2,&78400051 TO r0%;f%:PROCr("p16 &78400051",FNe(r0%,f%))
+1010 SYS "XOS_SpriteOp",256+42,A%,"p16",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+1020 SYS "XOS_SpriteOp",256+42,A%,"p16",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+1030 SYS "XOS_SpriteOp",256+42,A%,"p16",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+1040 SYS "XOS_SpriteOp",256+42,A%,"p16",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+1050 S$="p16":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p16",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+1060 SYS "XOS_SpriteOp",256+15,A%,"p17",0,4,2,&81680B5 TO r0%;f%:PROCr("p17 &81680B5",FNe(r0%,f%))
+1070 SYS "XOS_SpriteOp",256+42,A%,"p17",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+1080 SYS "XOS_SpriteOp",256+42,A%,"p17",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+1090 SYS "XOS_SpriteOp",256+42,A%,"p17",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+1100 SYS "XOS_SpriteOp",256+42,A%,"p17",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+1110 S$="p17":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p17",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+1120 SYS "XOS_SpriteOp",256+15,A%,"p18",0,4,2,&181680B5 TO r0%;f%:PROCr("p18 &181680B5",FNe(r0%,f%))
+1130 SYS "XOS_SpriteOp",256+42,A%,"p18",0,1,&5,192 TO r0%;f%:IF f% AND 1 THEN PROCr(" w0",!r0%)
+1140 SYS "XOS_SpriteOp",256+42,A%,"p18",1,1,&13,64 TO r0%;f%:IF f% AND 1 THEN PROCr(" w1",!r0%)
+1150 SYS "XOS_SpriteOp",256+42,A%,"p18",2,1,&AB,128 TO r0%;f%:IF f% AND 1 THEN PROCr(" w2",!r0%)
+1160 SYS "XOS_SpriteOp",256+42,A%,"p18",3,1,&1FFFF,0 TO r0%;f%:IF f% AND 1 THEN PROCr(" w3",!r0%)
+1170 S$="p18":FOR x%=0 TO 3:SYS "XOS_SpriteOp",256+41,A%,"p18",x%,1 TO ,,,,,c%,t%:S$=S$+" "+STR$~c%+"/"+STR$~t%:NEXT:BPUT#R%,S$
+1180 SYS "XOS_SpriteOp",256+41,A%,"p0",4,0 TO r0%;f%:PROCr("outside x",FNe(r0%,f%))
+1190 SYS "XOS_SpriteOp",256+41,A%,"p0",0,2 TO r0%;f%:PROCr("outside y",FNe(r0%,f%))
+1200 SYS "XOS_SpriteOp",256+42,A%,"p0",-1,0,1,0 TO r0%;f%:PROCr("negative x",FNe(r0%,f%))
+1210 SYS "XOS_SpriteOp",256+41,A%,"p0",0,-1 TO r0%;f%:PROCr("negative y",FNe(r0%,f%))
+1220 SYS "XOS_SpriteOp",256+15,A%,"fp",0,4,2,28 TO r0%;f%:PROCr("full pal",FNe(r0%,f%))
+1230 SYS "XOS_SpriteOp",256+37,A%,"fp",&80000001
+1240 SYS "XOS_SpriteOp",256+42,A%,"fp",0,0,&AB,192:SYS "XOS_SpriteOp",256+41,A%,"fp",0,0 TO ,,,,,c%,t%:PROCr("fp c",c%):PROCr("fp t",t%)
+1250 SYS "XOS_SpriteOp",256+15,A%,"pp",0,4,2,28 TO r0%;f%:PROCr("part pal",FNe(r0%,f%))
+1260 SYS "XOS_SpriteOp",256+37,A%,"pp",1
+1270 SYS "XOS_SpriteOp",256+42,A%,"pp",0,0,&AB,192:SYS "XOS_SpriteOp",256+41,A%,"pp",0,0 TO ,,,,,c%,t%:PROCr("pp c",c%):PROCr("pp t",t%)
+1280 SYS "XOS_SpriteOp",256+15,A%,"q4",0,4,2,12 TO r0%;f%:PROCr("pal 4bpp",FNe(r0%,f%))
+1290 SYS "XOS_SpriteOp",256+37,A%,"q4",1
+1300 SYS "XOS_SpriteOp",256+42,A%,"q4",0,0,&AB,192:SYS "XOS_SpriteOp",256+41,A%,"q4",0,0 TO ,,,,,c%,t%:PROCr("q4 c",c%):PROCr("q4 t",t%)
+1310 PROCa("a",A%)
+
+case sprite_masks
+10 PROCmode(25)
+20 DIM A% 8192:FOR i%=0 TO 8188 STEP 4:A%!i%=0:NEXT:!A%=8192:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"m0",0,5,3,12 TO r0%;f%:PROCr("m0 12",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+43,A%,"m0",1,1 TO r0%,,,,,c%;f%:PROCr(" read none",FNe(r0%,f%)):PROCr(" none",c%)
+60 SYS "XOS_SpriteOp",256+44,A%,"m0",1,1,0 TO r0%;f%:PROCr(" write none",FNe(r0%,f%))
+70 SYS "XOS_SpriteOp",256+29,A%,"m0" TO r0%;f%:PROCr(" create",FNe(r0%,f%))
+80 SYS "XOS_SpriteOp",256+44,A%,"m0",1,1,0:SYS "XOS_SpriteOp",256+44,A%,"m0",2,0,&80:SYS "XOS_SpriteOp",256+44,A%,"m0",4,2,&40:SYS "XOS_SpriteOp",256+44,A%,"m0",3,2,&FF
+90 S$="m0":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m0",x%,1 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+100 S$=" ":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m0",x%,0 TO ,,,,,v%:S$=S$+" "+STR$~v%:SYS "XOS_SpriteOp",256+43,A%,"m0",x%,2 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+110 SYS "XOS_SpriteOp",256+15,A%,"m1",0,5,3,28 TO r0%;f%:PROCr("m1 28",FNe(r0%,f%))
+120 SYS "XOS_SpriteOp",256+43,A%,"m1",1,1 TO r0%,,,,,c%;f%:PROCr(" read none",FNe(r0%,f%)):PROCr(" none",c%)
+130 SYS "XOS_SpriteOp",256+44,A%,"m1",1,1,0 TO r0%;f%:PROCr(" write none",FNe(r0%,f%))
+140 SYS "XOS_SpriteOp",256+29,A%,"m1" TO r0%;f%:PROCr(" create",FNe(r0%,f%))
+150 SYS "XOS_SpriteOp",256+44,A%,"m1",1,1,0:SYS "XOS_SpriteOp",256+44,A%,"m1",2,0,&80:SYS "XOS_SpriteOp",256+44,A%,"m1",4,2,&40:SYS "XOS_SpriteOp",256+44,A%,"m1",3,2,&FF
+160 S$="m1":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m1",x%,1 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+170 S$=" ":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m1",x%,0 TO ,,,,,v%:S$=S$+" "+STR$~v%:SYS "XOS_SpriteOp",256+43,A%,"m1",x%,2 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+180 SYS "XOS_SpriteOp",256+15,A%,"m2",0,5,3,2 TO r0%;f%:PROCr("m2 2",FNe(r0%,f%))
+190 SYS "XOS_SpriteOp",256+43,A%,"m2",1,1 TO r0%,,,,,c%;f%:PROCr(" read none",FNe(r0%,f%)):PROCr(" none",c%)
+200 SYS "XOS_SpriteOp",256+44,A%,"m2",1,1,0 TO r0%;f%:PROCr(" write none",FNe(r0%,f%))
+210 SYS "XOS_SpriteOp",256+29,A%,"m2" TO r0%;f%:PROCr(" create",FNe(r0%,f%))
+220 SYS "XOS_SpriteOp",256+44,A%,"m2",1,1,0:SYS "XOS_SpriteOp",256+44,A%,"m2",2,0,&80:SYS "XOS_SpriteOp",256+44,A%,"m2",4,2,&40:SYS "XOS_SpriteOp",256+44,A%,"m2",3,2,&FF
+230 S$="m2":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m2",x%,1 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+240 S$=" ":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m2",x%,0 TO ,,,,,v%:S$=S$+" "+STR$~v%:SYS "XOS_SpriteOp",256+43,A%,"m2",x%,2 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+250 SYS "XOS_SpriteOp",256+15,A%,"m3",0,5,3,0 TO r0%;f%:PROCr("m3 0",FNe(r0%,f%))
+260 SYS "XOS_SpriteOp",256+43,A%,"m3",1,1 TO r0%,,,,,c%;f%:PROCr(" read none",FNe(r0%,f%)):PROCr(" none",c%)
+270 SYS "XOS_SpriteOp",256+44,A%,"m3",1,1,0 TO r0%;f%:PROCr(" write none",FNe(r0%,f%))
+280 SYS "XOS_SpriteOp",256+29,A%,"m3" TO r0%;f%:PROCr(" create",FNe(r0%,f%))
+290 SYS "XOS_SpriteOp",256+44,A%,"m3",1,1,0:SYS "XOS_SpriteOp",256+44,A%,"m3",2,0,&80:SYS "XOS_SpriteOp",256+44,A%,"m3",4,2,&40:SYS "XOS_SpriteOp",256+44,A%,"m3",3,2,&FF
+300 S$="m3":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m3",x%,1 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+310 S$=" ":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m3",x%,0 TO ,,,,,v%:S$=S$+" "+STR$~v%:SYS "XOS_SpriteOp",256+43,A%,"m3",x%,2 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+320 SYS "XOS_SpriteOp",256+15,A%,"m4",0,5,3,&181680B5 TO r0%;f%:PROCr("m4 &181680B5",FNe(r0%,f%))
+330 SYS "XOS_SpriteOp",256+43,A%,"m4",1,1 TO r0%,,,,,c%;f%:PROCr(" read none",FNe(r0%,f%)):PROCr(" none",c%)
+340 SYS "XOS_SpriteOp",256+44,A%,"m4",1,1,0 TO r0%;f%:PROCr(" write none",FNe(r0%,f%))
+350 SYS "XOS_SpriteOp",256+29,A%,"m4" TO r0%;f%:PROCr(" create",FNe(r0%,f%))
+360 SYS "XOS_SpriteOp",256+44,A%,"m4",1,1,0:SYS "XOS_SpriteOp",256+44,A%,"m4",2,0,&80:SYS "XOS_SpriteOp",256+44,A%,"m4",4,2,&40:SYS "XOS_SpriteOp",256+44,A%,"m4",3,2,&FF
+370 S$="m4":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m4",x%,1 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+380 S$=" ":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m4",x%,0 TO ,,,,,v%:S$=S$+" "+STR$~v%:SYS "XOS_SpriteOp",256+43,A%,"m4",x%,2 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+390 SYS "XOS_SpriteOp",256+15,A%,"m5",0,5,3,&301680B5 TO r0%;f%:PROCr("m5 &301680B5",FNe(r0%,f%))
+400 SYS "XOS_SpriteOp",256+43,A%,"m5",1,1 TO r0%,,,,,c%;f%:PROCr(" read none",FNe(r0%,f%)):PROCr(" none",c%)
+410 SYS "XOS_SpriteOp",256+44,A%,"m5",1,1,0 TO r0%;f%:PROCr(" write none",FNe(r0%,f%))
+420 SYS "XOS_SpriteOp",256+29,A%,"m5" TO r0%;f%:PROCr(" create",FNe(r0%,f%))
+430 SYS "XOS_SpriteOp",256+44,A%,"m5",1,1,0:SYS "XOS_SpriteOp",256+44,A%,"m5",2,0,&80:SYS "XOS_SpriteOp",256+44,A%,"m5",4,2,&40:SYS "XOS_SpriteOp",256+44,A%,"m5",3,2,&FF
+440 S$="m5":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m5",x%,1 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+450 S$=" ":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m5",x%,0 TO ,,,,,v%:S$=S$+" "+STR$~v%:SYS "XOS_SpriteOp",256+43,A%,"m5",x%,2 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+460 SYS "XOS_SpriteOp",256+15,A%,"m6",0,5,3,&B01680B5 TO r0%;f%:PROCr("m6 &B01680B5",FNe(r0%,f%))
+470 SYS "XOS_SpriteOp",256+43,A%,"m6",1,1 TO r0%,,,,,c%;f%:PROCr(" read none",FNe(r0%,f%)):PROCr(" none",c%)
+480 SYS "XOS_SpriteOp",256+44,A%,"m6",1,1,0 TO r0%;f%:PROCr(" write none",FNe(r0%,f%))
+490 SYS "XOS_SpriteOp",256+29,A%,"m6" TO r0%;f%:PROCr(" create",FNe(r0%,f%))
+500 SYS "XOS_SpriteOp",256+44,A%,"m6",1,1,0:SYS "XOS_SpriteOp",256+44,A%,"m6",2,0,&80:SYS "XOS_SpriteOp",256+44,A%,"m6",4,2,&40:SYS "XOS_SpriteOp",256+44,A%,"m6",3,2,&FF
+510 S$="m6":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m6",x%,1 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+520 S$=" ":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m6",x%,0 TO ,,,,,v%:S$=S$+" "+STR$~v%:SYS "XOS_SpriteOp",256+43,A%,"m6",x%,2 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+530 SYS "XOS_SpriteOp",256+15,A%,"m7",0,5,3,&A01680B5 TO r0%;f%:PROCr("m7 &A01680B5",FNe(r0%,f%))
+540 SYS "XOS_SpriteOp",256+43,A%,"m7",1,1 TO r0%,,,,,c%;f%:PROCr(" read none",FNe(r0%,f%)):PROCr(" none",c%)
+550 SYS "XOS_SpriteOp",256+44,A%,"m7",1,1,0 TO r0%;f%:PROCr(" write none",FNe(r0%,f%))
+560 SYS "XOS_SpriteOp",256+29,A%,"m7" TO r0%;f%:PROCr(" create",FNe(r0%,f%))
+570 SYS "XOS_SpriteOp",256+44,A%,"m7",1,1,0:SYS "XOS_SpriteOp",256+44,A%,"m7",2,0,&80:SYS "XOS_SpriteOp",256+44,A%,"m7",4,2,&40:SYS "XOS_SpriteOp",256+44,A%,"m7",3,2,&FF
+580 S$="m7":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m7",x%,1 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+590 S$=" ":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m7",x%,0 TO ,,,,,v%:S$=S$+" "+STR$~v%:SYS "XOS_SpriteOp",256+43,A%,"m7",x%,2 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+600 SYS "XOS_SpriteOp",256+15,A%,"m8",0,5,3,&81680B5 TO r0%;f%:PROCr("m8 &81680B5",FNe(r0%,f%))
+610 SYS "XOS_SpriteOp",256+43,A%,"m8",1,1 TO r0%,,,,,c%;f%:PROCr(" read none",FNe(r0%,f%)):PROCr(" none",c%)
+620 SYS "XOS_SpriteOp",256+44,A%,"m8",1,1,0 TO r0%;f%:PROCr(" write none",FNe(r0%,f%))
+630 SYS "XOS_SpriteOp",256+29,A%,"m8" TO r0%;f%:PROCr(" create",FNe(r0%,f%))
+640 SYS "XOS_SpriteOp",256+44,A%,"m8",1,1,0:SYS "XOS_SpriteOp",256+44,A%,"m8",2,0,&80:SYS "XOS_SpriteOp",256+44,A%,"m8",4,2,&40:SYS "XOS_SpriteOp",256+44,A%,"m8",3,2,&FF
+650 S$="m8":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m8",x%,1 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+660 S$=" ":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m8",x%,0 TO ,,,,,v%:S$=S$+" "+STR$~v%:SYS "XOS_SpriteOp",256+43,A%,"m8",x%,2 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+670 SYS "XOS_SpriteOp",256+15,A%,"m9",0,5,3,&79000051 TO r0%;f%:PROCr("m9 &79000051",FNe(r0%,f%))
+680 SYS "XOS_SpriteOp",256+43,A%,"m9",1,1 TO r0%,,,,,c%;f%:PROCr(" read none",FNe(r0%,f%)):PROCr(" none",c%)
+690 SYS "XOS_SpriteOp",256+44,A%,"m9",1,1,0 TO r0%;f%:PROCr(" write none",FNe(r0%,f%))
+700 SYS "XOS_SpriteOp",256+29,A%,"m9" TO r0%;f%:PROCr(" create",FNe(r0%,f%))
+710 SYS "XOS_SpriteOp",256+44,A%,"m9",1,1,0:SYS "XOS_SpriteOp",256+44,A%,"m9",2,0,&80:SYS "XOS_SpriteOp",256+44,A%,"m9",4,2,&40:SYS "XOS_SpriteOp",256+44,A%,"m9",3,2,&FF
+720 S$="m9":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m9",x%,1 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+730 S$=" ":FOR x%=0 TO 4:SYS "XOS_SpriteOp",256+43,A%,"m9",x%,0 TO ,,,,,v%:S$=S$+" "+STR$~v%:SYS "XOS_SpriteOp",256+43,A%,"m9",x%,2 TO ,,,,,v%:S$=S$+" "+STR$~v%:NEXT:BPUT#R%,S$
+740 SYS "XOS_SpriteOp",256+43,A%,"m0",5,0 TO r0%;f%:PROCr("outside",FNe(r0%,f%))
+750 SYS "XOS_SpriteOp",256+44,A%,"m0",0,3,0 TO r0%;f%:PROCr("outside write",FNe(r0%,f%))
+760 SYS "XOS_SpriteOp",256+29,A%,"m0" TO r0%;f%:PROCr("again",FNe(r0%,f%))
+770 PROCa("a",A%)
+780 SYS "XOS_SpriteOp",256+30,A%,"m1" TO r0%;f%:PROCr("remove",FNe(r0%,f%))
+790 SYS "XOS_SpriteOp",256+30,A%,"m1" TO r0%;f%:PROCr("remove again",FNe(r0%,f%))
+800 SYS "XOS_SpriteOp",256+30,A%,"m6" TO r0%;f%:PROCr("remove wide",FNe(r0%,f%))
+810 PROCa("b",A%)
+
+case sprite_no_room
+10 PROCmode(25)
+20 DIM A% 200:FOR i%=0 TO 196 STEP 4:A%!i%=0:NEXT:!A%=200:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"s",0,8,8,28 TO r0%;f%:PROCr("s",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+15,A%,"t",0,4,4,28 TO r0%;f%:PROCr("t",FNe(r0%,f%))
+60 SYS "XOS_SpriteOp",256+8,A% TO ,,,,,c%:PROCr("free",c%)
+70 SYS "XOS_SpriteOp",256+29,A%,"s" TO r0%;f%:PROCr("mask",FNe(r0%,f%))
+80 SYS "XOS_SpriteOp",256+37,A%,"t",1 TO r0%;f%:PROCr("palette",FNe(r0%,f%))
+90 SYS "XOS_SpriteOp",256+15,A%,"u",0,1,1,0 TO r0%;f%:PROCr("palette 1bpp",FNe(r0%,f%))
+100 SYS "XOS_SpriteOp",256+31,A%,"t",0 TO r0%;f%:PROCr("row",FNe(r0%,f%))
+110 SYS "XOS_SpriteOp",256+57,A%,"t",0,4 TO r0%;f%:PROCr("rows",FNe(r0%,f%))
+120 SYS "XOS_SpriteOp",256+45,A%,"s",0 TO r0%;f%:PROCr("column",FNe(r0%,f%))
+130 SYS "XOS_SpriteOp",256+27,A%,"t","v" TO r0%;f%:PROCr("copy",FNe(r0%,f%))
+140 PROCa("a",A%)
+150 SYS "XOS_SpriteOp",256+37,A%,"u",1 TO r0%;f%:PROCr("pal fits",FNe(r0%,f%))
+160 PROCa("b",A%)
+170 SYS "XOS_SpriteOp",256+29,A%,"u" TO r0%;f%:PROCr("mask fits",FNe(r0%,f%))
+180 PROCa("c",A%)
+
+case sprite_rows_columns_old
+10 PROCmode(25)
+20 DIM A% 2048:FOR i%=0 TO 2044 STEP 4:A%!i%=0:NEXT:!A%=2048:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"s",0,5,3,12 TO r0%;f%:PROCr("make",FNe(r0%,f%))
+50 PROCf("s",1)
+60 SYS "XOS_SpriteOp",256+29,A%,"s"
+70 SYS "XOS_SpriteOp",256+44,A%,"s",1,1,0:SYS "XOS_SpriteOp",256+44,A%,"s",3,2,&40:SYS "XOS_SpriteOp",256+44,A%,"s",0,0,0
+80 PROCa("start",A%):PROCp("start","s")
+90 SYS "XOS_SpriteOp",256+31,A%,"s",0 TO r0%;f%:PROCr("ins row 0",FNe(r0%,f%)):PROCa("ins row 0",A%)
+100 SYS "XOS_SpriteOp",256+31,A%,"s",4 TO r0%;f%:PROCr("ins row top",FNe(r0%,f%)):PROCa("ins row top",A%)
+110 SYS "XOS_SpriteOp",256+31,A%,"s",6 TO r0%;f%:PROCr("ins row over",FNe(r0%,f%))
+120 SYS "XOS_SpriteOp",256+32,A%,"s",1 TO r0%;f%:PROCr("del row 1",FNe(r0%,f%)):PROCa("del row 1",A%)
+130 SYS "XOS_SpriteOp",256+32,A%,"s",4 TO r0%;f%:PROCr("del row over",FNe(r0%,f%))
+140 SYS "XOS_SpriteOp",256+45,A%,"s",0 TO r0%;f%:PROCr("ins col 0",FNe(r0%,f%)):PROCa("ins col 0",A%)
+150 SYS "XOS_SpriteOp",256+45,A%,"s",6 TO r0%;f%:PROCr("ins col end",FNe(r0%,f%)):PROCa("ins col end",A%)
+160 SYS "XOS_SpriteOp",256+45,A%,"s",8 TO r0%;f%:PROCr("ins col over",FNe(r0%,f%))
+170 SYS "XOS_SpriteOp",256+46,A%,"s",2 TO r0%;f%:PROCr("del col 2",FNe(r0%,f%)):PROCa("del col 2",A%)
+180 SYS "XOS_SpriteOp",256+46,A%,"s",6 TO r0%;f%:PROCr("del col over",FNe(r0%,f%))
+190 SYS "XOS_SpriteOp",256+57,A%,"s",1,2 TO r0%;f%:PROCr("rows +2 at 1",FNe(r0%,f%)):PROCa("rows +2 at 1",A%)
+200 SYS "XOS_SpriteOp",256+57,A%,"s",0,-3 TO r0%;f%:PROCr("rows -3 at 0",FNe(r0%,f%)):PROCa("rows -3 at 0",A%)
+210 SYS "XOS_SpriteOp",256+57,A%,"s",1,0 TO r0%;f%:PROCr("rows 0",FNe(r0%,f%))
+220 SYS "XOS_SpriteOp",256+57,A%,"s",2,-4 TO r0%;f%:PROCr("rows over",FNe(r0%,f%))
+230 SYS "XOS_SpriteOp",256+57,A%,"s",6,1 TO r0%;f%:PROCr("rows at over",FNe(r0%,f%))
+240 SYS "XOS_SpriteOp",256+58,A%,"s",2,3 TO r0%;f%:PROCr("cols +3 at 2",FNe(r0%,f%)):PROCa("cols +3 at 2",A%)
+250 SYS "XOS_SpriteOp",256+58,A%,"s",5,-2 TO r0%;f%:PROCr("cols -2 at 5",FNe(r0%,f%)):PROCa("cols -2 at 5",A%)
+260 SYS "XOS_SpriteOp",256+58,A%,"s",1,0 TO r0%;f%:PROCr("cols 0",FNe(r0%,f%))
+270 SYS "XOS_SpriteOp",256+58,A%,"s",4,-4 TO r0%;f%:PROCr("cols over",FNe(r0%,f%))
+280 PROCp("end","s")
+290 GOTO 9000
+300 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+310 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+320 DEFPROCp(n$,s$):LOCAL w%,h%,m%,x%,y%,c%,t%,v%,S$:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%,m%
+330 FOR y%=h%-1 TO 0 STEP -1:S$=n$+" "+STR$y%+":":FOR x%=0 TO w%-1
+340 SYS "OS_SpriteOp",256+41,A%,s$,x%,y% TO ,,,,,c%,t%:S$=S$+" "+STR$~c%:IF t% THEN S$=S$+"t"+STR$~t%
+350 IF m% THEN SYS "OS_SpriteOp",256+43,A%,s$,x%,y% TO ,,,,,v%:S$=S$+"/"+STR$~v%
+360 NEXT:BPUT#R%,S$:NEXT:ENDPROC
+
+case sprite_rows_columns_new
+10 PROCmode(25)
+20 DIM A% 2048:FOR i%=0 TO 2044 STEP 4:A%!i%=0:NEXT:!A%=2048:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"s",0,5,3,&181680B5 TO r0%;f%:PROCr("make",FNe(r0%,f%))
+50 PROCf("s",1)
+60 SYS "XOS_SpriteOp",256+29,A%,"s"
+70 SYS "XOS_SpriteOp",256+44,A%,"s",1,1,0:SYS "XOS_SpriteOp",256+44,A%,"s",3,2,&40:SYS "XOS_SpriteOp",256+44,A%,"s",0,0,0
+80 PROCa("start",A%):PROCp("start","s")
+90 SYS "XOS_SpriteOp",256+31,A%,"s",0 TO r0%;f%:PROCr("ins row 0",FNe(r0%,f%)):PROCa("ins row 0",A%)
+100 SYS "XOS_SpriteOp",256+31,A%,"s",4 TO r0%;f%:PROCr("ins row top",FNe(r0%,f%)):PROCa("ins row top",A%)
+110 SYS "XOS_SpriteOp",256+31,A%,"s",6 TO r0%;f%:PROCr("ins row over",FNe(r0%,f%))
+120 SYS "XOS_SpriteOp",256+32,A%,"s",1 TO r0%;f%:PROCr("del row 1",FNe(r0%,f%)):PROCa("del row 1",A%)
+130 SYS "XOS_SpriteOp",256+32,A%,"s",4 TO r0%;f%:PROCr("del row over",FNe(r0%,f%))
+140 SYS "XOS_SpriteOp",256+45,A%,"s",0 TO r0%;f%:PROCr("ins col 0",FNe(r0%,f%)):PROCa("ins col 0",A%)
+150 SYS "XOS_SpriteOp",256+45,A%,"s",6 TO r0%;f%:PROCr("ins col end",FNe(r0%,f%)):PROCa("ins col end",A%)
+160 SYS "XOS_SpriteOp",256+45,A%,"s",8 TO r0%;f%:PROCr("ins col over",FNe(r0%,f%))
+170 SYS "XOS_SpriteOp",256+46,A%,"s",2 TO r0%;f%:PROCr("del col 2",FNe(r0%,f%)):PROCa("del col 2",A%)
+180 SYS "XOS_SpriteOp",256+46,A%,"s",6 TO r0%;f%:PROCr("del col over",FNe(r0%,f%))
+190 SYS "XOS_SpriteOp",256+57,A%,"s",1,2 TO r0%;f%:PROCr("rows +2 at 1",FNe(r0%,f%)):PROCa("rows +2 at 1",A%)
+200 SYS "XOS_SpriteOp",256+57,A%,"s",0,-3 TO r0%;f%:PROCr("rows -3 at 0",FNe(r0%,f%)):PROCa("rows -3 at 0",A%)
+210 SYS "XOS_SpriteOp",256+57,A%,"s",1,0 TO r0%;f%:PROCr("rows 0",FNe(r0%,f%))
+220 SYS "XOS_SpriteOp",256+57,A%,"s",2,-4 TO r0%;f%:PROCr("rows over",FNe(r0%,f%))
+230 SYS "XOS_SpriteOp",256+57,A%,"s",6,1 TO r0%;f%:PROCr("rows at over",FNe(r0%,f%))
+240 SYS "XOS_SpriteOp",256+58,A%,"s",2,3 TO r0%;f%:PROCr("cols +3 at 2",FNe(r0%,f%)):PROCa("cols +3 at 2",A%)
+250 SYS "XOS_SpriteOp",256+58,A%,"s",5,-2 TO r0%;f%:PROCr("cols -2 at 5",FNe(r0%,f%)):PROCa("cols -2 at 5",A%)
+260 SYS "XOS_SpriteOp",256+58,A%,"s",1,0 TO r0%;f%:PROCr("cols 0",FNe(r0%,f%))
+270 SYS "XOS_SpriteOp",256+58,A%,"s",4,-4 TO r0%;f%:PROCr("cols over",FNe(r0%,f%))
+280 PROCp("end","s")
+290 GOTO 9000
+300 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+310 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+320 DEFPROCp(n$,s$):LOCAL w%,h%,m%,x%,y%,c%,t%,v%,S$:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%,m%
+330 FOR y%=h%-1 TO 0 STEP -1:S$=n$+" "+STR$y%+":":FOR x%=0 TO w%-1
+340 SYS "OS_SpriteOp",256+41,A%,s$,x%,y% TO ,,,,,c%,t%:S$=S$+" "+STR$~c%:IF t% THEN S$=S$+"t"+STR$~t%
+350 IF m% THEN SYS "OS_SpriteOp",256+43,A%,s$,x%,y% TO ,,,,,v%:S$=S$+"/"+STR$~v%
+360 NEXT:BPUT#R%,S$:NEXT:ENDPROC
+
+case sprite_rows_columns_wide
+10 PROCmode(25)
+20 DIM A% 2048:FOR i%=0 TO 2044 STEP 4:A%!i%=0:NEXT:!A%=2048:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"s",0,5,3,&A01680B5 TO r0%;f%:PROCr("make",FNe(r0%,f%))
+50 PROCf("s",1)
+60 SYS "XOS_SpriteOp",256+29,A%,"s"
+70 SYS "XOS_SpriteOp",256+44,A%,"s",1,1,0:SYS "XOS_SpriteOp",256+44,A%,"s",3,2,&40:SYS "XOS_SpriteOp",256+44,A%,"s",0,0,0
+80 PROCa("start",A%):PROCp("start","s")
+90 SYS "XOS_SpriteOp",256+31,A%,"s",0 TO r0%;f%:PROCr("ins row 0",FNe(r0%,f%)):PROCa("ins row 0",A%)
+100 SYS "XOS_SpriteOp",256+31,A%,"s",4 TO r0%;f%:PROCr("ins row top",FNe(r0%,f%)):PROCa("ins row top",A%)
+110 SYS "XOS_SpriteOp",256+31,A%,"s",6 TO r0%;f%:PROCr("ins row over",FNe(r0%,f%))
+120 SYS "XOS_SpriteOp",256+32,A%,"s",1 TO r0%;f%:PROCr("del row 1",FNe(r0%,f%)):PROCa("del row 1",A%)
+130 SYS "XOS_SpriteOp",256+32,A%,"s",4 TO r0%;f%:PROCr("del row over",FNe(r0%,f%))
+140 SYS "XOS_SpriteOp",256+45,A%,"s",0 TO r0%;f%:PROCr("ins col 0",FNe(r0%,f%)):PROCa("ins col 0",A%)
+150 SYS "XOS_SpriteOp",256+45,A%,"s",6 TO r0%;f%:PROCr("ins col end",FNe(r0%,f%)):PROCa("ins col end",A%)
+160 SYS "XOS_SpriteOp",256+45,A%,"s",8 TO r0%;f%:PROCr("ins col over",FNe(r0%,f%))
+170 SYS "XOS_SpriteOp",256+46,A%,"s",2 TO r0%;f%:PROCr("del col 2",FNe(r0%,f%)):PROCa("del col 2",A%)
+180 SYS "XOS_SpriteOp",256+46,A%,"s",6 TO r0%;f%:PROCr("del col over",FNe(r0%,f%))
+190 SYS "XOS_SpriteOp",256+57,A%,"s",1,2 TO r0%;f%:PROCr("rows +2 at 1",FNe(r0%,f%)):PROCa("rows +2 at 1",A%)
+200 SYS "XOS_SpriteOp",256+57,A%,"s",0,-3 TO r0%;f%:PROCr("rows -3 at 0",FNe(r0%,f%)):PROCa("rows -3 at 0",A%)
+210 SYS "XOS_SpriteOp",256+57,A%,"s",1,0 TO r0%;f%:PROCr("rows 0",FNe(r0%,f%))
+220 SYS "XOS_SpriteOp",256+57,A%,"s",2,-4 TO r0%;f%:PROCr("rows over",FNe(r0%,f%))
+230 SYS "XOS_SpriteOp",256+57,A%,"s",6,1 TO r0%;f%:PROCr("rows at over",FNe(r0%,f%))
+240 SYS "XOS_SpriteOp",256+58,A%,"s",2,3 TO r0%;f%:PROCr("cols +3 at 2",FNe(r0%,f%)):PROCa("cols +3 at 2",A%)
+250 SYS "XOS_SpriteOp",256+58,A%,"s",5,-2 TO r0%;f%:PROCr("cols -2 at 5",FNe(r0%,f%)):PROCa("cols -2 at 5",A%)
+260 SYS "XOS_SpriteOp",256+58,A%,"s",1,0 TO r0%;f%:PROCr("cols 0",FNe(r0%,f%))
+270 SYS "XOS_SpriteOp",256+58,A%,"s",4,-4 TO r0%;f%:PROCr("cols over",FNe(r0%,f%))
+280 PROCp("end","s")
+290 GOTO 9000
+300 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+310 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+320 DEFPROCp(n$,s$):LOCAL w%,h%,m%,x%,y%,c%,t%,v%,S$:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%,m%
+330 FOR y%=h%-1 TO 0 STEP -1:S$=n$+" "+STR$y%+":":FOR x%=0 TO w%-1
+340 SYS "OS_SpriteOp",256+41,A%,s$,x%,y% TO ,,,,,c%,t%:S$=S$+" "+STR$~c%:IF t% THEN S$=S$+"t"+STR$~t%
+350 IF m% THEN SYS "OS_SpriteOp",256+43,A%,s$,x%,y% TO ,,,,,v%:S$=S$+"/"+STR$~v%
+360 NEXT:BPUT#R%,S$:NEXT:ENDPROC
+
+case sprite_rows_columns_deep
+10 PROCmode(25)
+20 DIM A% 2048:FOR i%=0 TO 2044 STEP 4:A%!i%=0:NEXT:!A%=2048:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"s",0,5,3,&301680B5 TO r0%;f%:PROCr("make",FNe(r0%,f%))
+50 PROCf("s",1)
+60 SYS "XOS_SpriteOp",256+29,A%,"s"
+70 SYS "XOS_SpriteOp",256+44,A%,"s",1,1,0:SYS "XOS_SpriteOp",256+44,A%,"s",3,2,&40:SYS "XOS_SpriteOp",256+44,A%,"s",0,0,0
+80 PROCa("start",A%):PROCp("start","s")
+90 SYS "XOS_SpriteOp",256+31,A%,"s",0 TO r0%;f%:PROCr("ins row 0",FNe(r0%,f%)):PROCa("ins row 0",A%)
+100 SYS "XOS_SpriteOp",256+31,A%,"s",4 TO r0%;f%:PROCr("ins row top",FNe(r0%,f%)):PROCa("ins row top",A%)
+110 SYS "XOS_SpriteOp",256+31,A%,"s",6 TO r0%;f%:PROCr("ins row over",FNe(r0%,f%))
+120 SYS "XOS_SpriteOp",256+32,A%,"s",1 TO r0%;f%:PROCr("del row 1",FNe(r0%,f%)):PROCa("del row 1",A%)
+130 SYS "XOS_SpriteOp",256+32,A%,"s",4 TO r0%;f%:PROCr("del row over",FNe(r0%,f%))
+140 SYS "XOS_SpriteOp",256+45,A%,"s",0 TO r0%;f%:PROCr("ins col 0",FNe(r0%,f%)):PROCa("ins col 0",A%)
+150 SYS "XOS_SpriteOp",256+45,A%,"s",6 TO r0%;f%:PROCr("ins col end",FNe(r0%,f%)):PROCa("ins col end",A%)
+160 SYS "XOS_SpriteOp",256+45,A%,"s",8 TO r0%;f%:PROCr("ins col over",FNe(r0%,f%))
+170 SYS "XOS_SpriteOp",256+46,A%,"s",2 TO r0%;f%:PROCr("del col 2",FNe(r0%,f%)):PROCa("del col 2",A%)
+180 SYS "XOS_SpriteOp",256+46,A%,"s",6 TO r0%;f%:PROCr("del col over",FNe(r0%,f%))
+190 SYS "XOS_SpriteOp",256+57,A%,"s",1,2 TO r0%;f%:PROCr("rows +2 at 1",FNe(r0%,f%)):PROCa("rows +2 at 1",A%)
+200 SYS "XOS_SpriteOp",256+57,A%,"s",0,-3 TO r0%;f%:PROCr("rows -3 at 0",FNe(r0%,f%)):PROCa("rows -3 at 0",A%)
+210 SYS "XOS_SpriteOp",256+57,A%,"s",1,0 TO r0%;f%:PROCr("rows 0",FNe(r0%,f%))
+220 SYS "XOS_SpriteOp",256+57,A%,"s",2,-4 TO r0%;f%:PROCr("rows over",FNe(r0%,f%))
+230 SYS "XOS_SpriteOp",256+57,A%,"s",6,1 TO r0%;f%:PROCr("rows at over",FNe(r0%,f%))
+240 SYS "XOS_SpriteOp",256+58,A%,"s",2,3 TO r0%;f%:PROCr("cols +3 at 2",FNe(r0%,f%)):PROCa("cols +3 at 2",A%)
+250 SYS "XOS_SpriteOp",256+58,A%,"s",5,-2 TO r0%;f%:PROCr("cols -2 at 5",FNe(r0%,f%)):PROCa("cols -2 at 5",A%)
+260 SYS "XOS_SpriteOp",256+58,A%,"s",1,0 TO r0%;f%:PROCr("cols 0",FNe(r0%,f%))
+270 SYS "XOS_SpriteOp",256+58,A%,"s",4,-4 TO r0%;f%:PROCr("cols over",FNe(r0%,f%))
+280 PROCp("end","s")
+290 GOTO 9000
+300 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+310 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+320 DEFPROCp(n$,s$):LOCAL w%,h%,m%,x%,y%,c%,t%,v%,S$:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%,m%
+330 FOR y%=h%-1 TO 0 STEP -1:S$=n$+" "+STR$y%+":":FOR x%=0 TO w%-1
+340 SYS "OS_SpriteOp",256+41,A%,s$,x%,y% TO ,,,,,c%,t%:S$=S$+" "+STR$~c%:IF t% THEN S$=S$+"t"+STR$~t%
+350 IF m% THEN SYS "OS_SpriteOp",256+43,A%,s$,x%,y% TO ,,,,,v%:S$=S$+"/"+STR$~v%
+360 NEXT:BPUT#R%,S$:NEXT:ENDPROC
+
+case sprite_rows_columns_all
+10 PROCmode(25)
+20 DIM A% 1024:FOR i%=0 TO 1020 STEP 4:A%!i%=0:NEXT:!A%=1024:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"s",0,3,2,12 TO r0%;f%:PROCr("make",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+57,A%,"s",0,-2 TO r0%;f%:PROCr("del rows all",FNe(r0%,f%)):PROCa("del rows all",A%)
+60 SYS "XOS_SpriteOp",256+15,A%,"t",0,3,2,28 TO r0%;f%:PROCr("make2",FNe(r0%,f%))
+70 SYS "XOS_SpriteOp",256+58,A%,"t",0,-3 TO r0%;f%:PROCr("del cols all",FNe(r0%,f%)):PROCa("del cols all",A%)
+80 SYS "XOS_SpriteOp",256+15,A%,"u",0,1,1,12 TO r0%;f%:PROCr("make3",FNe(r0%,f%))
+90 SYS "XOS_SpriteOp",256+32,A%,"u",0 TO r0%;f%:PROCr("del last row",FNe(r0%,f%)):PROCa("del last row",A%)
+100 SYS "XOS_SpriteOp",256+15,A%,"v",0,1,1,12 TO r0%;f%:PROCr("make4",FNe(r0%,f%))
+110 SYS "XOS_SpriteOp",256+46,A%,"v",0 TO r0%;f%:PROCr("del last col",FNe(r0%,f%)):PROCa("del last col",A%)
+
+case sprite_flips
+10 PROCmode(25)
+20 DIM A% 4096:FOR i%=0 TO 4092 STEP 4:A%!i%=0:NEXT:!A%=4096:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"f0",0,5,3,12 TO r0%;f%:PROCr("f0 12",FNe(r0%,f%))
+50 PROCf("f0",1):SYS "XOS_SpriteOp",256+29,A%,"f0":SYS "XOS_SpriteOp",256+44,A%,"f0",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"f0",1,2,&40
+60 SYS "XOS_SpriteOp",256+33,A%,"f0" TO r0%;f%:PROCr("f0 x",FNe(r0%,f%)):PROCa("f0 x",A%)
+70 PROCp("f0 x","f0")
+80 SYS "XOS_SpriteOp",256+47,A%,"f0" TO r0%;f%:PROCr("f0 y",FNe(r0%,f%)):PROCa("f0 y",A%)
+90 PROCp("f0 y","f0")
+100 SYS "XOS_SpriteOp",256+15,A%,"f1",0,8,3,12 TO r0%;f%:PROCr("f1 12",FNe(r0%,f%))
+110 PROCf("f1",1):SYS "XOS_SpriteOp",256+29,A%,"f1":SYS "XOS_SpriteOp",256+44,A%,"f1",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"f1",1,2,&40
+120 SYS "XOS_SpriteOp",256+33,A%,"f1" TO r0%;f%:PROCr("f1 x",FNe(r0%,f%)):PROCa("f1 x",A%)
+130 PROCp("f1 x","f1")
+140 SYS "XOS_SpriteOp",256+47,A%,"f1" TO r0%;f%:PROCr("f1 y",FNe(r0%,f%)):PROCa("f1 y",A%)
+150 PROCp("f1 y","f1")
+160 SYS "XOS_SpriteOp",256+15,A%,"f2",0,3,3,28 TO r0%;f%:PROCr("f2 28",FNe(r0%,f%))
+170 PROCf("f2",1):SYS "XOS_SpriteOp",256+29,A%,"f2":SYS "XOS_SpriteOp",256+44,A%,"f2",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"f2",1,2,&40
+180 SYS "XOS_SpriteOp",256+33,A%,"f2" TO r0%;f%:PROCr("f2 x",FNe(r0%,f%)):PROCa("f2 x",A%)
+190 PROCp("f2 x","f2")
+200 SYS "XOS_SpriteOp",256+47,A%,"f2" TO r0%;f%:PROCr("f2 y",FNe(r0%,f%)):PROCa("f2 y",A%)
+210 PROCp("f2 y","f2")
+220 SYS "XOS_SpriteOp",256+15,A%,"f3",0,13,3,0 TO r0%;f%:PROCr("f3 0",FNe(r0%,f%))
+230 PROCf("f3",1):SYS "XOS_SpriteOp",256+29,A%,"f3":SYS "XOS_SpriteOp",256+44,A%,"f3",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"f3",1,2,&40
+240 SYS "XOS_SpriteOp",256+33,A%,"f3" TO r0%;f%:PROCr("f3 x",FNe(r0%,f%)):PROCa("f3 x",A%)
+250 PROCp("f3 x","f3")
+260 SYS "XOS_SpriteOp",256+47,A%,"f3" TO r0%;f%:PROCr("f3 y",FNe(r0%,f%)):PROCa("f3 y",A%)
+270 PROCp("f3 y","f3")
+280 SYS "XOS_SpriteOp",256+15,A%,"f4",0,5,3,&181680B5 TO r0%;f%:PROCr("f4 &181680B5",FNe(r0%,f%))
+290 PROCf("f4",1):SYS "XOS_SpriteOp",256+29,A%,"f4":SYS "XOS_SpriteOp",256+44,A%,"f4",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"f4",1,2,&40
+300 SYS "XOS_SpriteOp",256+33,A%,"f4" TO r0%;f%:PROCr("f4 x",FNe(r0%,f%)):PROCa("f4 x",A%)
+310 PROCp("f4 x","f4")
+320 SYS "XOS_SpriteOp",256+47,A%,"f4" TO r0%;f%:PROCr("f4 y",FNe(r0%,f%)):PROCa("f4 y",A%)
+330 PROCp("f4 y","f4")
+340 SYS "XOS_SpriteOp",256+15,A%,"f5",0,3,3,&301680B5 TO r0%;f%:PROCr("f5 &301680B5",FNe(r0%,f%))
+350 PROCf("f5",1):SYS "XOS_SpriteOp",256+29,A%,"f5":SYS "XOS_SpriteOp",256+44,A%,"f5",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"f5",1,2,&40
+360 SYS "XOS_SpriteOp",256+33,A%,"f5" TO r0%;f%:PROCr("f5 x",FNe(r0%,f%)):PROCa("f5 x",A%)
+370 PROCp("f5 x","f5")
+380 SYS "XOS_SpriteOp",256+47,A%,"f5" TO r0%;f%:PROCr("f5 y",FNe(r0%,f%)):PROCa("f5 y",A%)
+390 PROCp("f5 y","f5")
+400 SYS "XOS_SpriteOp",256+15,A%,"f6",0,3,3,&A01680B5 TO r0%;f%:PROCr("f6 &A01680B5",FNe(r0%,f%))
+410 PROCf("f6",1):SYS "XOS_SpriteOp",256+29,A%,"f6":SYS "XOS_SpriteOp",256+44,A%,"f6",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"f6",1,2,&40
+420 SYS "XOS_SpriteOp",256+33,A%,"f6" TO r0%;f%:PROCr("f6 x",FNe(r0%,f%)):PROCa("f6 x",A%)
+430 PROCp("f6 x","f6")
+440 SYS "XOS_SpriteOp",256+47,A%,"f6" TO r0%;f%:PROCr("f6 y",FNe(r0%,f%)):PROCa("f6 y",A%)
+450 PROCp("f6 y","f6")
+460 SYS "XOS_SpriteOp",256+15,A%,"f7",0,13,3,&81680B5 TO r0%;f%:PROCr("f7 &81680B5",FNe(r0%,f%))
+470 PROCf("f7",1):SYS "XOS_SpriteOp",256+29,A%,"f7":SYS "XOS_SpriteOp",256+44,A%,"f7",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"f7",1,2,&40
+480 SYS "XOS_SpriteOp",256+33,A%,"f7" TO r0%;f%:PROCr("f7 x",FNe(r0%,f%)):PROCa("f7 x",A%)
+490 PROCp("f7 x","f7")
+500 SYS "XOS_SpriteOp",256+47,A%,"f7" TO r0%;f%:PROCr("f7 y",FNe(r0%,f%)):PROCa("f7 y",A%)
+510 PROCp("f7 y","f7")
+520 SYS "XOS_SpriteOp",256+15,A%,"f8",0,3,3,2 TO r0%;f%:PROCr("f8 2",FNe(r0%,f%))
+530 PROCf("f8",1):SYS "XOS_SpriteOp",256+29,A%,"f8":SYS "XOS_SpriteOp",256+44,A%,"f8",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"f8",1,2,&40
+540 SYS "XOS_SpriteOp",256+33,A%,"f8" TO r0%;f%:PROCr("f8 x",FNe(r0%,f%)):PROCa("f8 x",A%)
+550 PROCp("f8 x","f8")
+560 SYS "XOS_SpriteOp",256+47,A%,"f8" TO r0%;f%:PROCr("f8 y",FNe(r0%,f%)):PROCa("f8 y",A%)
+570 PROCp("f8 y","f8")
+580 GOTO 9000
+590 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+600 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+610 DEFPROCp(n$,s$):LOCAL w%,h%,m%,x%,y%,c%,t%,v%,S$:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%,m%
+620 FOR y%=h%-1 TO 0 STEP -1:S$=n$+" "+STR$y%+":":FOR x%=0 TO w%-1
+630 SYS "OS_SpriteOp",256+41,A%,s$,x%,y% TO ,,,,,c%,t%:S$=S$+" "+STR$~c%:IF t% THEN S$=S$+"t"+STR$~t%
+640 IF m% THEN SYS "OS_SpriteOp",256+43,A%,s$,x%,y% TO ,,,,,v%:S$=S$+"/"+STR$~v%
+650 NEXT:BPUT#R%,S$:NEXT:ENDPROC
+660 DEFFNo:LOCAL o%,n%:o%=A%!8:n%=A%!4:WHILE n%>1:o%+=A%!o%:n%-=1:ENDWHILE:=o%
+
+case sprite_flips_wastage
+10 PROCmode(25)
+20 DIM A% 2048:FOR i%=0 TO 2044 STEP 4:A%!i%=0:NEXT:!A%=2048:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"w",0,7,3,12 TO r0%;f%:PROCr("make",FNe(r0%,f%))
+50 o%=FNo:A%!(o%+24)=8
+60 PROCf("w",1)
+70 PROCa("start",A%):PROCp("start","w")
+80 SYS "XOS_SpriteOp",256+47,A%,"w" TO r0%;f%:PROCr("y",FNe(r0%,f%)):PROCa("y",A%)
+90 PROCp("y","w")
+100 SYS "XOS_SpriteOp",256+33,A%,"w" TO r0%;f%:PROCr("x",FNe(r0%,f%)):PROCa("x",A%)
+110 SYS "XOS_SpriteOp",256+15,A%,"v",0,13,2,12 TO r0%;f%:PROCr("make2",FNe(r0%,f%))
+120 o%=FNo:A%!(o%+24)=24
+130 PROCf("v",3)
+140 PROCa("v",A%):PROCp("v","v")
+150 SYS "XOS_SpriteOp",256+47,A%,"v" TO r0%;f%:PROCr("vy",FNe(r0%,f%)):PROCa("vy",A%)
+160 PROCp("vy","v")
+170 SYS "XOS_SpriteOp",256+15,A%,"p",0,5,2,&181680B5 TO r0%;f%:PROCr("make3",FNe(r0%,f%))
+180 PROCf("p",1):o%=FNo:k%=o%+A%!(o%+32):A%!k%=A%!k% OR &FFF00000:A%!(k%+4)=A%!(k%+4) OR &ABC00000
+190 PROCa("p",A%)
+200 SYS "XOS_SpriteOp",256+47,A%,"p" TO r0%;f%:PROCr("py",FNe(r0%,f%)):PROCa("py",A%)
+210 SYS "XOS_SpriteOp",256+33,A%,"p" TO r0%;f%:PROCr("px",FNe(r0%,f%)):PROCa("px",A%)
+220 GOTO 9000
+230 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+240 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,5*x%+3*y%+k%,0:NEXT:NEXT:ENDPROC
+250 DEFPROCp(n$,s$):LOCAL w%,h%,m%,x%,y%,c%,t%,v%,S$:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%,m%
+260 FOR y%=h%-1 TO 0 STEP -1:S$=n$+" "+STR$y%+":":FOR x%=0 TO w%-1
+270 SYS "OS_SpriteOp",256+41,A%,s$,x%,y% TO ,,,,,c%,t%:S$=S$+" "+STR$~c%:IF t% THEN S$=S$+"t"+STR$~t%
+280 IF m% THEN SYS "OS_SpriteOp",256+43,A%,s$,x%,y% TO ,,,,,v%:S$=S$+"/"+STR$~v%
+290 NEXT:BPUT#R%,S$:NEXT:ENDPROC
+300 DEFFNo:LOCAL o%,n%:o%=A%!8:n%=A%!4:WHILE n%>1:o%+=A%!o%:n%-=1:ENDWHILE:=o%
+
+case sprite_wastage
+10 PROCmode(25)
+20 DIM A% 2048:FOR i%=0 TO 2044 STEP 4:A%!i%=0:NEXT:!A%=2048:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"w",0,7,3,12 TO r0%;f%:PROCr("make",FNe(r0%,f%))
+50 o%=FNo:A%!(o%+24)=8
+60 PROCf("w",1)
+70 PROCa("start",A%)
+80 SYS "XOS_SpriteOp",256+54,A%,"w" TO r0%;f%:PROCr("remove",FNe(r0%,f%)):PROCa("remove",A%)
+90 PROCp("w","w")
+100 SYS "XOS_SpriteOp",256+54,A%,"w" TO r0%;f%:PROCr("again",FNe(r0%,f%)):PROCa("again",A%)
+110 SYS "XOS_SpriteOp",256+15,A%,"v",0,13,2,12 TO r0%;f%:PROCr("make2",FNe(r0%,f%))
+120 o%=FNo:A%!(o%+24)=24
+130 PROCf("v",3)
+140 PROCa("v",A%):PROCp("v start","v")
+150 SYS "XOS_SpriteOp",256+54,A%,"v" TO r0%;f%:PROCr("shrinks",FNe(r0%,f%)):PROCa("shrinks",A%)
+160 PROCp("v","v")
+170 SYS "XOS_SpriteOp",256+15,A%,"n",0,5,2,&181680B5 TO r0%;f%:PROCr("make3",FNe(r0%,f%))
+180 SYS "XOS_SpriteOp",256+54,A%,"n" TO r0%;f%:PROCr("new format",FNe(r0%,f%)):PROCa("new format",A%)
+190 SYS "XOS_SpriteOp",256+15,A%,"m",0,5,2,28 TO r0%;f%:PROCr("make4",FNe(r0%,f%))
+200 o%=FNo:A%!(o%+24)=8:A%!(o%+28)=31
+210 PROCf("m",2)
+220 SYS "XOS_SpriteOp",256+29,A%,"m":k%=o%+A%!(o%+36):A%!k%=A%!k% AND NOT &FF:A%!(k%+8)=A%!(k%+8) AND NOT &FF
+230 SYS "XOS_SpriteOp",256+44,A%,"m",1,0,0
+240 PROCa("m",A%):PROCp("m start","m")
+250 SYS "XOS_SpriteOp",256+54,A%,"m" TO r0%;f%:PROCr("masked",FNe(r0%,f%)):PROCa("masked",A%)
+260 PROCp("m","m")
+270 GOTO 9000
+280 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+290 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+300 DEFPROCp(n$,s$):LOCAL w%,h%,m%,x%,y%,c%,t%,v%,S$:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%,m%
+310 FOR y%=h%-1 TO 0 STEP -1:S$=n$+" "+STR$y%+":":FOR x%=0 TO w%-1
+320 SYS "OS_SpriteOp",256+41,A%,s$,x%,y% TO ,,,,,c%,t%:S$=S$+" "+STR$~c%:IF t% THEN S$=S$+"t"+STR$~t%
+330 IF m% THEN SYS "OS_SpriteOp",256+43,A%,s$,x%,y% TO ,,,,,v%:S$=S$+"/"+STR$~v%
+340 NEXT:BPUT#R%,S$:NEXT:ENDPROC
+350 DEFFNo:LOCAL o%,n%:o%=A%!8:n%=A%!4:WHILE n%>1:o%+=A%!o%:n%-=1:ENDWHILE:=o%
+
+case sprite_palettes
+10 PROCmode(25)
+20 DIM A% 16384:FOR i%=0 TO 16380 STEP 4:A%!i%=0:NEXT:!A%=16384:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"a",0,2,2,0 TO r0%;f%:PROCr("1bpp",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+37,A%,"a",-1 TO r0%,,,c%;f%:PROCr(" read none",FNe(r0%,f%)):PROCr(" n",c%)
+60 SYS "XOS_SpriteOp",256+37,A%,"a",1 TO r0%;f%:PROCr("1bpp make",FNe(r0%,f%)):PROCa("1bpp make",A%)
+70 SYS "XOS_SpriteOp",256+37,A%,"a",-1 TO r0%,,,c%,,m%;f%:PROCr(" read",FNe(r0%,f%)):PROCr(" n",c%):PROCr(" m",m%)
+80 SYS "XOS_SpriteOp",256+15,A%,"b",0,2,2,8 TO r0%;f%:PROCr("2bpp",FNe(r0%,f%))
+90 SYS "XOS_SpriteOp",256+37,A%,"b",1 TO r0%;f%:PROCr("2bpp make",FNe(r0%,f%)):PROCa("2bpp make",A%)
+100 SYS "XOS_SpriteOp",256+15,A%,"c",0,2,2,12 TO r0%;f%:PROCr("4bpp",FNe(r0%,f%))
+110 SYS "XOS_SpriteOp",256+37,A%,"c",1 TO r0%;f%:PROCr("4bpp make",FNe(r0%,f%)):PROCa("4bpp make",A%)
+120 o%=FNo:A%!(o%+44)=&12345612:A%!(o%+48)=&ABCDEF11:A%!(o%+60)=&777777FF
+130 SYS "XOS_SpriteOp",256+37,A%,"c",1 TO r0%;f%:PROCr("4bpp again",FNe(r0%,f%)):PROCa("4bpp again",A%)
+140 SYS "XOS_SpriteOp",256+37,A%,"c",0 TO r0%;f%:PROCr("4bpp remove",FNe(r0%,f%)):PROCa("4bpp remove",A%)
+150 SYS "XOS_SpriteOp",256+37,A%,"c",0 TO r0%;f%:PROCr("4bpp remove again",FNe(r0%,f%)):PROCa("4bpp remove again",A%)
+160 SYS "XOS_SpriteOp",256+15,A%,"d",0,2,2,28 TO r0%;f%:PROCr("8bpp",FNe(r0%,f%))
+170 SYS "XOS_SpriteOp",256+37,A%,"d",1 TO r0%;f%:PROCr("8bpp make",FNe(r0%,f%)):PROCa("8bpp make",A%)
+180 o%=FNo:A%!(o%+44)=&12345612:A%!(o%+56)=&9ABCDE10:A%!(o%+300)=&FFFFFF10
+190 SYS "XOS_SpriteOp",256+37,A%,"d",1 TO r0%;f%:PROCr("8bpp again",FNe(r0%,f%)):PROCa("8bpp again",A%)
+200 SYS "XOS_SpriteOp",256+37,A%,"d",&80000001 TO r0%;f%:PROCr("8bpp full",FNe(r0%,f%)):PROCa("8bpp full",A%)
+210 o%=FNo:A%!(o%+44+8*200)=&A0B0C010:A%!(o%+44+8*17)=&11223310
+220 SYS "XOS_SpriteOp",256+37,A%,"d",1 TO r0%;f%:PROCr("8bpp back",FNe(r0%,f%)):PROCa("8bpp back",A%)
+230 SYS "XOS_SpriteOp",256+37,A%,"d",&80000001 TO r0%;f%:PROCr("8bpp full again",FNe(r0%,f%)):PROCa("8bpp full again",A%)
+240 SYS "XOS_SpriteOp",256+37,A%,"d",&80000001 TO r0%;f%:PROCr("8bpp full same",FNe(r0%,f%)):PROCa("8bpp full same",A%)
+250 SYS "XOS_SpriteOp",256+37,A%,"d",0 TO r0%;f%:PROCr("8bpp remove",FNe(r0%,f%)):PROCa("8bpp remove",A%)
+260 SYS "XOS_SpriteOp",256+15,A%,"e",0,2,2,&201680B5 TO r0%;f%:PROCr("new 8bpp",FNe(r0%,f%))
+270 SYS "XOS_SpriteOp",256+37,A%,"e",&80000001 TO r0%;f%:PROCr("new 8bpp full",FNe(r0%,f%)):PROCa("new 8bpp full",A%)
+280 SYS "XOS_SpriteOp",256+15,A%,"f",0,2,2,&181680B5 TO r0%;f%:PROCr("new 4bpp",FNe(r0%,f%))
+290 SYS "XOS_SpriteOp",256+37,A%,"f",1 TO r0%;f%:PROCr("new 4bpp make",FNe(r0%,f%)):PROCa("new 4bpp make",A%)
+300 SYS "XOS_SpriteOp",256+15,A%,"g",0,2,2,&301680B5 TO r0%;f%:PROCr("deep",FNe(r0%,f%))
+310 SYS "XOS_SpriteOp",256+37,A%,"g",1 TO r0%;f%:PROCr("deep make",FNe(r0%,f%))
+320 SYS "XOS_SpriteOp",256+37,A%,"g",0 TO r0%;f%:PROCr("deep remove",FNe(r0%,f%))
+330 SYS "XOS_SpriteOp",256+37,A%,"g",-1 TO r0%,,,c%,,m%;f%:PROCr(" deep read",FNe(r0%,f%)):PROCr(" n",c%):PROCr(" m",m%)
+340 SYS "XOS_SpriteOp",256+15,A%,"h",0,3,2,12 TO r0%;f%:PROCr("mask then palette",FNe(r0%,f%))
+350 SYS "XOS_SpriteOp",256+29,A%,"h"
+360 SYS "XOS_SpriteOp",256+37,A%,"h",1 TO r0%;f%:PROCr("masked make",FNe(r0%,f%)):PROCa("masked make",A%)
+370 GOTO 9000
+380 DEFFNo:LOCAL o%,n%:o%=A%!8:n%=A%!4:WHILE n%>1:o%+=A%!o%:n%-=1:ENDWHILE:=o%
+
+case sprite_append
+10 PROCmode(25)
+20 DIM A% 4096:FOR i%=0 TO 4092 STEP 4:A%!i%=0:NEXT:!A%=4096:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"a",0,5,2,12 TO r0%;f%:PROCr("a",FNe(r0%,f%))
+50 PROCf("a",1)
+60 SYS "XOS_SpriteOp",256+15,A%,"b",0,3,2,12 TO r0%;f%:PROCr("b",FNe(r0%,f%))
+70 PROCf("b",8)
+80 SYS "XOS_SpriteOp",256+15,A%,"c",0,5,3,12 TO r0%;f%:PROCr("c",FNe(r0%,f%))
+90 PROCf("c",3)
+100 SYS "XOS_SpriteOp",256+15,A%,"d",0,3,2,28 TO r0%;f%:PROCr("d",FNe(r0%,f%))
+110 PROCa("start",A%)
+120 SYS "XOS_SpriteOp",256+35,A%,"a","b",0 TO r0%;f%:PROCr("ab",FNe(r0%,f%)):PROCa("ab",A%)
+130 PROCp("ab","a")
+140 SYS "XOS_SpriteOp",256+35,A%,"c","a",1 TO r0%;f%:PROCr("ac",FNe(r0%,f%)):PROCa("ac",A%)
+150 SYS "XOS_SpriteOp",256+35,A%,"c","a",1 TO r0%;f%:PROCr("ac wrong",FNe(r0%,f%))
+160 SYS "XOS_SpriteOp",256+35,A%,"c","c",0 TO r0%;f%:PROCr("self",FNe(r0%,f%))
+170 SYS "XOS_SpriteOp",256+35,A%,"c","d",0 TO r0%;f%:PROCr("modes",FNe(r0%,f%))
+180 SYS "XOS_SpriteOp",256+35,A%,"c","zz",0 TO r0%;f%:PROCr("missing",FNe(r0%,f%))
+190 SYS "XOS_SpriteOp",256+15,A%,"p",0,3,2,12 TO r0%;f%:PROCr("p",FNe(r0%,f%))
+200 PROCf("p",2)
+210 SYS "XOS_SpriteOp",256+29,A%,"p":SYS "XOS_SpriteOp",256+44,A%,"p",1,1,0
+220 SYS "XOS_SpriteOp",256+15,A%,"q",0,3,2,12 TO r0%;f%:PROCr("q",FNe(r0%,f%))
+230 PROCf("q",5)
+240 SYS "XOS_SpriteOp",256+35,A%,"q","p",0 TO r0%;f%:PROCr("pq",FNe(r0%,f%)):PROCa("pq",A%)
+250 PROCp("pq","q")
+260 SYS "XOS_SpriteOp",256+15,A%,"n1",0,3,2,&181680B5 TO r0%;f%:PROCr("n1",FNe(r0%,f%))
+270 PROCf("n1",1)
+280 SYS "XOS_SpriteOp",256+29,A%,"n1"
+290 SYS "XOS_SpriteOp",256+15,A%,"n2",0,3,2,&181680B5 TO r0%;f%:PROCr("n2",FNe(r0%,f%))
+300 PROCf("n2",9)
+310 SYS "XOS_SpriteOp",256+35,A%,"n1","n2",1 TO r0%;f%:PROCr("n12 below",FNe(r0%,f%)):PROCa("n12 below",A%)
+320 PROCp("n12","n1")
+330 SYS "XOS_SpriteOp",256+15,A%,"w1",0,7,2,12 TO r0%;f%:PROCr("w1",FNe(r0%,f%))
+340 o%=FNo:A%!(o%+24)=8
+350 PROCf("w1",1)
+360 SYS "XOS_SpriteOp",256+15,A%,"w2",0,2,2,12 TO r0%;f%:PROCr("w2",FNe(r0%,f%))
+370 PROCf("w2",6)
+380 SYS "XOS_SpriteOp",256+35,A%,"w1","w2",0 TO r0%;f%:PROCr("wastage",FNe(r0%,f%)):PROCa("wastage",A%)
+390 PROCp("wastage","w1")
+400 SYS "XOS_SpriteOp",256+15,A%,"pa",0,2,2,12 TO r0%;f%:PROCr("pal1",FNe(r0%,f%))
+410 SYS "XOS_SpriteOp",256+37,A%,"pa",1
+420 SYS "XOS_SpriteOp",256+15,A%,"pb",0,2,2,12 TO r0%;f%:PROCr("pal2",FNe(r0%,f%))
+430 SYS "XOS_SpriteOp",256+35,A%,"pb","pa",0 TO r0%;f%:PROCr("palettes",FNe(r0%,f%)):PROCa("palettes",A%)
+440 GOTO 9000
+450 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+460 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+470 DEFPROCp(n$,s$):LOCAL w%,h%,m%,x%,y%,c%,t%,v%,S$:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%,m%
+480 FOR y%=h%-1 TO 0 STEP -1:S$=n$+" "+STR$y%+":":FOR x%=0 TO w%-1
+490 SYS "OS_SpriteOp",256+41,A%,s$,x%,y% TO ,,,,,c%,t%:S$=S$+" "+STR$~c%:IF t% THEN S$=S$+"t"+STR$~t%
+500 IF m% THEN SYS "OS_SpriteOp",256+43,A%,s$,x%,y% TO ,,,,,v%:S$=S$+"/"+STR$~v%
+510 NEXT:BPUT#R%,S$:NEXT:ENDPROC
+520 DEFFNo:LOCAL o%,n%:o%=A%!8:n%=A%!4:WHILE n%>1:o%+=A%!o%:n%-=1:ENDWHILE:=o%
+
+case sprite_append_room
+10 PROCmode(25)
+20 DIM A% 256:FOR i%=0 TO 252 STEP 4:A%!i%=0:NEXT:!A%=256:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"a",0,8,4,28 TO r0%;f%:PROCr("a",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+15,A%,"b",0,8,4,28 TO r0%;f%:PROCr("b",FNe(r0%,f%))
+60 SYS "XOS_SpriteOp",256+29,A%,"a"
+70 PROCa("start",A%)
+80 SYS "XOS_SpriteOp",256+35,A%,"a","b",1 TO r0%;f%:PROCr("no room",FNe(r0%,f%)):PROCa("no room",A%)
+
+case sprite_alpha
+10 PROCmode(25)
+20 DIM A% 8192:FOR i%=0 TO 8188 STEP 4:A%!i%=0:NEXT:!A%=8192:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"s",0,3,2,&301680B5 TO r0%;f%:PROCr("s",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+42,A%,"s",0,0,&112233,0:SYS "XOS_SpriteOp",256+42,A%,"s",1,0,&445566,0:SYS "XOS_SpriteOp",256+42,A%,"s",2,0,&778899,0
+60 SYS "XOS_SpriteOp",256+42,A%,"s",0,1,&AABBCC,0:SYS "XOS_SpriteOp",256+42,A%,"s",1,1,&DDEEFF,0:SYS "XOS_SpriteOp",256+42,A%,"s",2,1,&102030,0
+70 SYS "XOS_SpriteOp",256+29,A%,"s":SYS "XOS_SpriteOp",256+44,A%,"s",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"s",2,1,0
+80 PROCa("start",A%)
+90 SYS "XOS_SpriteOp",256+38,A%,"s",&80000000 TO r0%,,,c%;f%:PROCr("to wide",FNe(r0%,f%)):PROCr(" r3",c%):PROCa("to wide",A%)
+100 SYS "XOS_SpriteOp",256+44,A%,"s",1,0,&40:SYS "XOS_SpriteOp",256+44,A%,"s",1,1,&C0
+110 SYS "XOS_SpriteOp",256+38,A%,"s",&C0000000 TO r0%;f%:PROCr("to channel",FNe(r0%,f%)):PROCa("to channel",A%)
+120 SYS "XOS_SpriteOp",256+38,A%,"s",&C0000000 TO r0%;f%:PROCr("channel again",FNe(r0%,f%)):PROCa("channel again",A%)
+130 SYS "XOS_SpriteOp",256+38,A%,"s",&80 TO r0%;f%:PROCr("to bit cutoff",FNe(r0%,f%)):PROCa("to bit cutoff",A%)
+140 SYS "XOS_SpriteOp",256+38,A%,"s",&80 TO r0%;f%:PROCr("to bit again",FNe(r0%,f%)):PROCa("to bit again",A%)
+150 SYS "XOS_SpriteOp",256+38,A%,"s",&80000000 TO r0%;f%:PROCr("to wide again",FNe(r0%,f%)):PROCa("to wide again",A%)
+160 SYS "XOS_SpriteOp",256+38,A%,"s",0 TO r0%;f%:PROCr("to bit cutoff 0",FNe(r0%,f%)):PROCa("to bit cutoff 0",A%)
+170 SYS "XOS_SpriteOp",256+44,A%,"s",1,0,&40
+180 SYS "XOS_SpriteOp",256+38,A%,"s",0 TO r0%;f%:PROCr("lossy cutoff 0",FNe(r0%,f%)):PROCa("lossy cutoff 0",A%)
+190 SYS "XOS_SpriteOp",256+38,A%,"s",&C0000000 TO r0%;f%:PROCr("lossy channel 0",FNe(r0%,f%)):PROCa("lossy channel 0",A%)
+200 SYS "XOS_SpriteOp",256+38,A%,"s",&40000000 TO r0%;f%:PROCr("reserved",FNe(r0%,f%))
+210 SYS "XOS_SpriteOp",256+38,A%,"s",&40000080 TO r0%;f%:PROCr("reserved 2",FNe(r0%,f%))
+220 SYS "XOS_SpriteOp",256+15,A%,"o",0,3,2,28 TO r0%;f%:PROCr("o",FNe(r0%,f%))
+230 SYS "XOS_SpriteOp",256+38,A%,"o",&80 TO r0%;f%:PROCr("old format",FNe(r0%,f%))
+240 SYS "XOS_SpriteOp",256+15,A%,"p",0,3,2,&301680B5 TO r0%;f%:PROCr("p",FNe(r0%,f%))
+250 SYS "XOS_SpriteOp",256+38,A%,"p",&C0000000 TO r0%;f%:PROCr("none to channel",FNe(r0%,f%)):PROCa("none to channel",A%)
+260 SYS "XOS_SpriteOp",256+38,A%,"p",&80 TO r0%;f%:PROCr("channel to bit",FNe(r0%,f%)):PROCa("channel to bit",A%)
+270 SYS "XOS_SpriteOp",256+38,A%,"p",&180 TO r0%;f%:PROCr("opaque dropped",FNe(r0%,f%)):PROCa("opaque dropped",A%)
+280 SYS "XOS_SpriteOp",256+29,A%,"p"
+290 SYS "XOS_SpriteOp",256+38,A%,"p",&180 TO r0%;f%:PROCr("opaque mask dropped",FNe(r0%,f%)):PROCa("opaque mask dropped",A%)
+300 SYS "XOS_SpriteOp",256+29,A%,"p":SYS "XOS_SpriteOp",256+44,A%,"p",0,0,0
+310 SYS "XOS_SpriteOp",256+38,A%,"p",&180 TO r0%;f%:PROCr("kept",FNe(r0%,f%)):PROCa("kept",A%)
+320 SYS "XOS_SpriteOp",256+38,A%,"p",&80000100 TO r0%;f%:PROCr("opaque wide dropped",FNe(r0%,f%)):PROCa("opaque wide dropped",A%)
+
+case sprite_alpha_types
+10 PROCmode(25)
+20 DIM A% 8192:FOR i%=0 TO 8188 STEP 4:A%!i%=0:NEXT:!A%=8192:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"f",0,3,2,&281680B5 TO r0%;f%:PROCr("f",FNe(r0%,f%))
+50 PROCf("f",&7F01):SYS "XOS_SpriteOp",256+29,A%,"f":SYS "XOS_SpriteOp",256+44,A%,"f",0,0,0
+60 SYS "XOS_SpriteOp",256+38,A%,"f",&80000000 TO r0%;f%:PROCr("f wide",FNe(r0%,f%)):PROCa("f wide",A%)
+70 SYS "XOS_SpriteOp",256+44,A%,"f",1,0,&47:SYS "XOS_SpriteOp",256+44,A%,"f",2,1,&88
+80 SYS "XOS_SpriteOp",256+38,A%,"f",&C0000080 TO r0%;f%:PROCr("f channel",FNe(r0%,f%)):PROCa("f channel",A%)
+90 SYS "XOS_SpriteOp",256+38,A%,"f",&C0000000 TO r0%;f%:PROCr("f channel 0",FNe(r0%,f%)):PROCa("f channel 0",A%)
+100 SYS "XOS_SpriteOp",256+38,A%,"f",&40 TO r0%;f%:PROCr("f bit",FNe(r0%,f%)):PROCa("f bit",A%)
+110 SYS "XOS_SpriteOp",256+15,A%,"k",0,3,2,&79000051 TO r0%;f%:PROCr("k",FNe(r0%,f%))
+120 PROCf("k",&7F01):SYS "XOS_SpriteOp",256+29,A%,"k":SYS "XOS_SpriteOp",256+44,A%,"k",0,0,0
+130 SYS "XOS_SpriteOp",256+38,A%,"k",&80000000 TO r0%;f%:PROCr("k wide",FNe(r0%,f%)):PROCa("k wide",A%)
+140 SYS "XOS_SpriteOp",256+44,A%,"k",1,0,&47:SYS "XOS_SpriteOp",256+44,A%,"k",2,1,&88
+150 SYS "XOS_SpriteOp",256+38,A%,"k",&C0000080 TO r0%;f%:PROCr("k channel",FNe(r0%,f%)):PROCa("k channel",A%)
+160 SYS "XOS_SpriteOp",256+38,A%,"k",&C0000000 TO r0%;f%:PROCr("k channel 0",FNe(r0%,f%)):PROCa("k channel 0",A%)
+170 SYS "XOS_SpriteOp",256+38,A%,"k",&40 TO r0%;f%:PROCr("k bit",FNe(r0%,f%)):PROCa("k bit",A%)
+180 SYS "XOS_SpriteOp",256+15,A%,"r",0,3,2,&501680B5 TO r0%;f%:PROCr("r",FNe(r0%,f%))
+190 PROCf("r",&7F01):SYS "XOS_SpriteOp",256+29,A%,"r":SYS "XOS_SpriteOp",256+44,A%,"r",0,0,0
+200 SYS "XOS_SpriteOp",256+38,A%,"r",&80000000 TO r0%;f%:PROCr("r wide",FNe(r0%,f%)):PROCa("r wide",A%)
+210 SYS "XOS_SpriteOp",256+44,A%,"r",1,0,&47:SYS "XOS_SpriteOp",256+44,A%,"r",2,1,&88
+220 SYS "XOS_SpriteOp",256+38,A%,"r",&C0000080 TO r0%;f%:PROCr("r channel",FNe(r0%,f%)):PROCa("r channel",A%)
+230 SYS "XOS_SpriteOp",256+38,A%,"r",&C0000000 TO r0%;f%:PROCr("r channel 0",FNe(r0%,f%)):PROCa("r channel 0",A%)
+240 SYS "XOS_SpriteOp",256+38,A%,"r",&40 TO r0%;f%:PROCr("r bit",FNe(r0%,f%)):PROCa("r bit",A%)
+250 SYS "XOS_SpriteOp",256+15,A%,"q",0,3,2,&201680B5 TO r0%;f%:PROCr("q",FNe(r0%,f%))
+260 PROCf("q",&7F01):SYS "XOS_SpriteOp",256+29,A%,"q":SYS "XOS_SpriteOp",256+44,A%,"q",0,0,0
+270 SYS "XOS_SpriteOp",256+38,A%,"q",&80000000 TO r0%;f%:PROCr("q wide",FNe(r0%,f%)):PROCa("q wide",A%)
+280 SYS "XOS_SpriteOp",256+44,A%,"q",1,0,&47:SYS "XOS_SpriteOp",256+44,A%,"q",2,1,&88
+290 SYS "XOS_SpriteOp",256+38,A%,"q",&C0000080 TO r0%;f%:PROCr("q channel",FNe(r0%,f%)):PROCa("q channel",A%)
+300 SYS "XOS_SpriteOp",256+38,A%,"q",&C0000000 TO r0%;f%:PROCr("q channel 0",FNe(r0%,f%)):PROCa("q channel 0",A%)
+310 SYS "XOS_SpriteOp",256+38,A%,"q",&40 TO r0%;f%:PROCr("q bit",FNe(r0%,f%)):PROCa("q bit",A%)
+320 SYS "XOS_SpriteOp",256+15,A%,"t",0,3,2,&78600051 TO r0%;f%:PROCr("t",FNe(r0%,f%))
+330 PROCf("t",&7F01):SYS "XOS_SpriteOp",256+29,A%,"t":SYS "XOS_SpriteOp",256+44,A%,"t",0,0,0
+340 SYS "XOS_SpriteOp",256+38,A%,"t",&80000000 TO r0%;f%:PROCr("t wide",FNe(r0%,f%)):PROCa("t wide",A%)
+350 SYS "XOS_SpriteOp",256+44,A%,"t",1,0,&47:SYS "XOS_SpriteOp",256+44,A%,"t",2,1,&88
+360 SYS "XOS_SpriteOp",256+38,A%,"t",&C0000080 TO r0%;f%:PROCr("t channel",FNe(r0%,f%)):PROCa("t channel",A%)
+370 SYS "XOS_SpriteOp",256+38,A%,"t",&C0000000 TO r0%;f%:PROCr("t channel 0",FNe(r0%,f%)):PROCa("t channel 0",A%)
+380 SYS "XOS_SpriteOp",256+38,A%,"t",&40 TO r0%;f%:PROCr("t bit",FNe(r0%,f%)):PROCa("t bit",A%)
+390 GOTO 9000
+400 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+410 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+
+case sprite_verify
+10 PROCmode(25)
+20 DIM A% 1024:FOR i%=0 TO 1020 STEP 4:A%!i%=0:NEXT:!A%=1024:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("empty",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+15,A%,"a",0,5,3,12:SYS "XOS_SpriteOp",256+15,A%,"b",0,3,2,&181680B5:SYS "XOS_SpriteOp",256+29,A%,"b"
+60 SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("sound",FNe(r0%,f%))
+70 DIM B% 1024:FOR i%=0 TO 1020 STEP 4:B%!i%=A%!i%:NEXT:a%=A%!8:b%=a%+A%!a%
+80 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!0=A%!12-4:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("size",FNe(r0%,f%))
+90 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!4=3:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("count",FNe(r0%,f%))
+100 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!4=0:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("count0",FNe(r0%,f%))
+110 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!12=1028:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("free",FNe(r0%,f%))
+120 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!12=20:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("free small",FNe(r0%,f%))
+130 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!8=12:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("first",FNe(r0%,f%))
+140 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!8=18:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("first odd",FNe(r0%,f%))
+150 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!a%=A%!a%+400:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("next",FNe(r0%,f%))
+160 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!a%=20:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("next small",FNe(r0%,f%))
+170 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!a%=0:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("next zero",FNe(r0%,f%))
+180 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(a%+24)=32:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("lbit",FNe(r0%,f%))
+190 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(a%+28)=32:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("rbit",FNe(r0%,f%))
+200 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(b%+24)=8:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("lbit new",FNe(r0%,f%))
+210 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(b%+40)=&781680B9:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("word ro5",FNe(r0%,f%))
+220 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(a%+40)=3:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("word numbered",FNe(r0%,f%))
+230 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(a%+40-8)=A%!a%:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("image",FNe(r0%,f%))
+240 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(a%+40-8)=40:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("image low",FNe(r0%,f%))
+250 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(b%+36)=A%!b%-4:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("mask",FNe(r0%,f%))
+260 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(b%+36)=40:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("mask low",FNe(r0%,f%))
+270 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(b%+36)=A%!(b%+32):SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("mask equal image",FNe(r0%,f%))
+280 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(a%+20)=1000:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("height",FNe(r0%,f%))
+290 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(a%+16)=&10000:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("width",FNe(r0%,f%))
+300 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(a%+4)=&01020304:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("name",FNe(r0%,f%))
+310 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(b%+40)=&181680B7:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("dpi",FNe(r0%,f%))
+320 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT:A%!(b%+40)=&78308051:SYS "XOS_SpriteOp",256+17,A% TO r0%;f%:PROCr("ro5 flags",FNe(r0%,f%))
+330 FOR i%=0 TO 1020 STEP 4:A%!i%=B%!i%:NEXT
+340 PROCa("a",A%)
+
+case sprite_files
+10 PROCmode(25)
+20 DIM A% 4096:FOR i%=0 TO 4092 STEP 4:A%!i%=0:NEXT:!A%=4096:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"one",0,5,3,12:SYS "XOS_SpriteOp",256+15,A%,"two",0,3,2,28:SYS "XOS_SpriteOp",256+15,A%,"Three",0,2,2,0
+50 PROCf("one",1):PROCf("two",4)
+60 SYS "XOS_SpriteOp",256+12,A%,"HostFS:$.SprF" TO r0%;f%:PROCr("save",FNe(r0%,f%)):PROCa("save",A%)
+70 SYS "OS_File",5,"HostFS:$.SprF" TO c%,,l%,,k%:PROCr("object",c%):PROCr("length",k%):PROCr("type",l%>>>8 AND &FFF)
+80 DIM B% 4096:!B%=4096:B%!8=16:SYS "XOS_SpriteOp",256+9,B%
+90 SYS "XOS_SpriteOp",256+15,B%,"four",0,2,2,12:SYS "XOS_SpriteOp",256+15,B%,"two",0,6,1,12:SYS "XOS_SpriteOp",256+15,B%,"one",0,1,1,28
+100 SYS "XOS_SpriteOp",256+10,B%,"HostFS:$.SprF" TO r0%;f%:PROCr("load",FNe(r0%,f%)):PROCa("load",B%)
+110 SYS "XOS_SpriteOp",256+9,B%:SYS "XOS_SpriteOp",256+15,B%,"four",0,2,2,12:SYS "XOS_SpriteOp",256+15,B%,"two",0,6,1,12:SYS "XOS_SpriteOp",256+15,B%,"Five",0,1,1,28
+120 SYS "XOS_SpriteOp",256+11,B%,"HostFS:$.SprF" TO r0%;f%:PROCr("merge",FNe(r0%,f%)):PROCa("merge",B%)
+130 SYS "XOS_SpriteOp",256+11,B%,"HostFS:$.SprF" TO r0%;f%:PROCr("merge again",FNe(r0%,f%)):PROCa("merge again",B%)
+140 SYS "XOS_SpriteOp",256+10,B%,"HostFS:$.SprMissing" TO r0%;f%:PROCr("missing",FNe(r0%,f%)):PROCa("missing",B%)
+150 F%=OPENOUT"HostFS:$.SprX":BPUT#F%,"not a sprite file at all":CLOSE#F%
+160 SYS "XOS_SpriteOp",256+10,B%,"HostFS:$.SprX" TO r0%;f%:PROCr("not sprites",FNe(r0%,f%)):PROCa("not sprites",B%)
+170 SYS "XOS_SpriteOp",256+15,B%,"four",0,2,2,12
+180 SYS "XOS_SpriteOp",256+11,B%,"HostFS:$.SprX" TO r0%;f%:PROCr("merge not sprites",FNe(r0%,f%)):PROCa("merge not",B%)
+190 DIM C% 64:!C%=64:C%!8=16:SYS "XOS_SpriteOp",256+9,C%
+200 SYS "XOS_SpriteOp",256+10,C%,"HostFS:$.SprF" TO r0%;f%:PROCr("too big",FNe(r0%,f%)):PROCa("too big",C%)
+210 SYS "XOS_SpriteOp",256+15,C%,"x",0,1,1,12
+220 SYS "XOS_SpriteOp",256+11,C%,"HostFS:$.SprF" TO r0%;f%:PROCr("merge too big",FNe(r0%,f%)):PROCa("merge too big",C%)
+230 SYS "XOS_SpriteOp",256+9,B%
+240 SYS "XOS_SpriteOp",256+12,B%,"HostFS:$.SprE" TO r0%;f%:PROCr("save empty",FNe(r0%,f%))
+250 SYS "OS_File",5,"HostFS:$.SprE" TO c%:PROCr("empty object",c%)
+260 SYS "XOS_SpriteOp",256+15,B%,"y",0,1,1,12
+270 SYS "XOS_SpriteOp",256+12,B%,"HostFS:$.SprE" TO r0%;f%:PROCr("save one",FNe(r0%,f%))
+280 SYS "OS_File",5,"HostFS:$.SprE" TO c%,,,,k%:PROCr("one object",c%):PROCr(" length",k%)
+290 SYS "XOS_SpriteOp",256+25,B%,"y"
+300 SYS "XOS_SpriteOp",256+15,B%,"z",0,1,1,12
+310 SYS "XOS_SpriteOp",256+11,B%,"HostFS:$.SprE" TO r0%;f%:PROCr("merge empty",FNe(r0%,f%)):PROCa("merge empty",B%)
+320 SYS "OS_File",6,"HostFS:$.SprF":SYS "OS_File",6,"HostFS:$.SprX":SYS "OS_File",6,"HostFS:$.SprE"
+330 GOTO 9000
+340 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+350 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+
+case sprite_get
+10 PROCmode(25)
+20 DIM A% 16384:FOR i%=0 TO 16380 STEP 4:A%!i%=0:NEXT:!A%=16384:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 PROCmode(12)
+50 FOR i%=0 TO 15:GCOL i%:RECTANGLE FILL i%*8,0,7,40:NEXT
+60 GCOL 3:MOVE 0,60:DRAW 200,100
+70 SYS "XOS_SpriteOp",256+16,A%,"g1",0,0,0,63,7 TO r0%;f%:PROCr("get16",FNe(r0%,f%))
+80 SYS "XOS_SpriteOp",256+16,A%,"g2",0,12,4,30,10 TO r0%;f%:PROCr("get16 wastage",FNe(r0%,f%))
+90 SYS "XOS_SpriteOp",256+16,A%,"g3",0,30,10,12,4 TO r0%;f%:PROCr("get16 reversed",FNe(r0%,f%))
+100 SYS "XOS_SpriteOp",256+16,A%,"g4",1,12,4,30,10 TO r0%;f%:PROCr("get16 palette",FNe(r0%,f%))
+110 VDU 24,16;0;40;30;:GCOL 128+9
+120 SYS "XOS_SpriteOp",256+16,A%,"g5",0,0,0,63,39 TO r0%;f%:PROCr("get16 window",FNe(r0%,f%))
+130 VDU 26:ORIGIN 8,4
+140 SYS "XOS_SpriteOp",256+16,A%,"g6",0,0,0,15,7 TO r0%;f%:PROCr("get16 origin",FNe(r0%,f%))
+150 VDU 29,0;0;
+160 SYS "XOS_SpriteOp",256+16,A%,"g7",0,1270,1020,1290,1030 TO r0%;f%:PROCr("get16 offscreen",FNe(r0%,f%))
+170 MOVE 4,2:MOVE 20,10
+180 SYS "XOS_SpriteOp",256+14,A%,"g8",0 TO r0%;f%:PROCr("get14",FNe(r0%,f%))
+190 SYS "XOS_SpriteOp",256+14,A%,"g8",0 TO r0%;f%:PROCr("get14 replace",FNe(r0%,f%))
+200 PROCz:PROCa("mode12",A%)
+210 PROCmode(28)
+220 FOR i%=0 TO 15:GCOL i%:RECTANGLE FILL i%*8,0,7,40:NEXT
+230 GCOL 3:MOVE 0,60:DRAW 200,100
+240 SYS "XOS_SpriteOp",256+16,A%,"h1",0,4,4,30,10 TO r0%;f%:PROCr("get28",FNe(r0%,f%))
+250 SYS "XOS_SpriteOp",256+16,A%,"h2",1,4,4,30,10 TO r0%;f%:PROCr("get28 palette",FNe(r0%,f%))
+260 PROCmode(0)
+270 FOR i%=0 TO 15:GCOL i%:RECTANGLE FILL i%*8,0,7,40:NEXT
+280 GCOL 3:MOVE 0,60:DRAW 200,100
+290 SYS "XOS_SpriteOp",256+16,A%,"h3",0,6,4,40,10 TO r0%;f%:PROCr("get0",FNe(r0%,f%))
+300 PROCmode(2)
+310 FOR i%=0 TO 15:GCOL i%:RECTANGLE FILL i%*8,0,7,40:NEXT
+320 GCOL 3:MOVE 0,60:DRAW 200,100
+330 SYS "XOS_SpriteOp",256+16,A%,"h4",0,6,4,40,10 TO r0%;f%:PROCr("get2",FNe(r0%,f%))
+340 PROCz:PROCa("numbered",A%)
+350 PROCmode(25)
+360 GOTO 9000
+370 DEFPROCz:LOCAL o%,n%,w%,h%,b%,l%:o%=A%!8:n%=A%!4
+380 WHILE n%>0:w%=4*(A%!(o%+16)+1):h%=A%!(o%+20)+1:b%=A%!(o%+24):l%=A%!(o%+28):PROCzr(o%+A%!(o%+32),w%,h%,b%,l%)
+390 IF (A%!(o%+40) AND &FFFFFF00)=0 AND A%!(o%+36)<>A%!(o%+32) THEN PROCzr(o%+A%!(o%+36),w%,h%,b%,l%)
+400 o%+=A%!o%:n%-=1:ENDWHILE:ENDPROC
+410 DEFPROCzr(s%,w%,h%,b%,l%):LOCAL r%:FOR r%=1 TO h%:A%!s%=A%!s% AND NOT ((1<<b%)-1)
+420 IF l%<31 THEN A%!(s%+w%-4)=A%!(s%+w%-4) AND ((2<<l%)-1)
+430 s%+=w%:NEXT:ENDPROC
+
+case sprite_get_selectors
+10 PROCmode(25)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 DIM S% 32
+50 S%!0=1:S%!4=320:S%!8=256:S%!12=4:S%!16=-1:S%!20=-1:PROCscreen(S%)
+60 FOR i%=0 TO 15:GCOL i%:RECTANGLE FILL i%*8,0,7,40:NEXT
+70 GCOL 3:MOVE 0,60:DRAW 200,100
+80 SYS "XOS_SpriteOp",256+16,A%,"s0",0,4,4,30,10 TO r0%;f%:PROCr("sel4",FNe(r0%,f%))
+90 SYS "XOS_SpriteOp",256+40,A%,"s0" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+100 S%!0=1:S%!4=320:S%!8=256:S%!12=5:S%!16=-1:S%!20=-1:PROCscreen(S%)
+110 FOR i%=0 TO 15:GCOL i%:RECTANGLE FILL i%*8,0,7,40:NEXT
+120 GCOL 3:MOVE 0,60:DRAW 200,100
+130 SYS "XOS_SpriteOp",256+16,A%,"s1",0,4,4,30,10 TO r0%;f%:PROCr("sel5",FNe(r0%,f%))
+140 SYS "XOS_SpriteOp",256+40,A%,"s1" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+150 S%!0=1:S%!4=320:S%!8=256:S%!12=3:S%!16=-1:S%!20=-1:PROCscreen(S%)
+160 FOR i%=0 TO 15:GCOL i%:RECTANGLE FILL i%*8,0,7,40:NEXT
+170 GCOL 3:MOVE 0,60:DRAW 200,100
+180 SYS "XOS_SpriteOp",256+16,A%,"s2",0,4,4,30,10 TO r0%;f%:PROCr("sel3",FNe(r0%,f%))
+190 SYS "XOS_SpriteOp",256+40,A%,"s2" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+200 S%!0=1:S%!4=320:S%!8=256:S%!12=2:S%!16=-1:S%!20=-1:PROCscreen(S%)
+210 FOR i%=0 TO 15:GCOL i%:RECTANGLE FILL i%*8,0,7,40:NEXT
+220 GCOL 3:MOVE 0,60:DRAW 200,100
+230 SYS "XOS_SpriteOp",256+16,A%,"s3",0,4,4,30,10 TO r0%;f%:PROCr("sel2",FNe(r0%,f%))
+240 SYS "XOS_SpriteOp",256+40,A%,"s3" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+250 S%!0=1:S%!4=320:S%!8=256:S%!12=1:S%!16=-1:S%!20=-1:PROCscreen(S%)
+260 FOR i%=0 TO 15:GCOL i%:RECTANGLE FILL i%*8,0,7,40:NEXT
+270 GCOL 3:MOVE 0,60:DRAW 200,100
+280 SYS "XOS_SpriteOp",256+16,A%,"s4",0,4,4,30,10 TO r0%;f%:PROCr("sel1",FNe(r0%,f%))
+290 SYS "XOS_SpriteOp",256+40,A%,"s4" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+300 S%!0=1:S%!4=320:S%!8=256:S%!12=0:S%!16=-1:S%!20=-1:PROCscreen(S%)
+310 FOR i%=0 TO 15:GCOL i%:RECTANGLE FILL i%*8,0,7,40:NEXT
+320 GCOL 3:MOVE 0,60:DRAW 200,100
+330 SYS "XOS_SpriteOp",256+16,A%,"s5",0,4,4,30,10 TO r0%;f%:PROCr("sel0",FNe(r0%,f%))
+340 SYS "XOS_SpriteOp",256+40,A%,"s5" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" w",w%):PROCr(" m",m%)
+350 SYS "XOS_SpriteOp",256+16,A%,"s9",1,4,4,30,10 TO r0%;f%:PROCr("deep palette",FNe(r0%,f%))
+360 S%!0=1:S%!4=320:S%!8=256:S%!12=4:S%!16=-1:S%!20=0:S%!24=&80:S%!28=-1:PROCscreen(S%)
+370 FOR i%=0 TO 15:GCOL i%:RECTANGLE FILL i%*8,0,7,40:NEXT
+380 GCOL 3:MOVE 0,60:DRAW 200,100
+390 SYS "XOS_SpriteOp",256+16,A%,"s8",0,4,4,30,10 TO r0%;f%:PROCr("sel 4K",FNe(r0%,f%))
+400 SYS "XOS_SpriteOp",256+40,A%,"s8" TO ,,,w%,c%,k%,m%;f%:IF (f% AND 1)=0 THEN PROCr(" m",m%)
+410 S%!0=1:S%!4=320:S%!8=256:S%!12=3:S%!16=-1:S%!20=0:S%!24=&80:S%!28=3:S%!32=255:S%!36=-1:PROCscreen(S%)
+420 FOR i%=0 TO 15:GCOL i%:RECTANGLE FILL i%*8,0,7,40:NEXT
+430 GCOL 3:MOVE 0,60:DRAW 200,100
+440 SYS "XOS_SpriteOp",256+16,A%,"s7",1,4,4,30,10 TO r0%;f%:PROCr("sel full",FNe(r0%,f%))
+450 PROCa("selectors",A%)
+460 PROCmode(25)
+
+case sprite_get_wastage
+10 PROCmode(25)
+20 DIM A% 16384:FOR i%=0 TO 16380 STEP 4:A%!i%=0:NEXT:!A%=16384:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 PROCmode(12)
+50 GCOL 128+5:CLG
+60 SYS "XOS_SpriteOp",256+16,A%,"a1",0,2,0,23,15 TO r0%;f%:PROCr("m12 1",FNe(r0%,f%))
+70 SYS "XOS_SpriteOp",256+16,A%,"a2",0,4,0,25,15 TO r0%;f%:PROCr("m12 2",FNe(r0%,f%))
+80 SYS "XOS_SpriteOp",256+16,A%,"a3",0,6,0,27,15 TO r0%;f%:PROCr("m12 3",FNe(r0%,f%))
+90 SYS "XOS_SpriteOp",256+16,A%,"a4",0,8,0,29,15 TO r0%;f%:PROCr("m12 4",FNe(r0%,f%))
+100 SYS "XOS_SpriteOp",256+16,A%,"a5",0,10,0,31,15 TO r0%;f%:PROCr("m12 5",FNe(r0%,f%))
+110 SYS "XOS_SpriteOp",256+16,A%,"a6",0,12,0,33,15 TO r0%;f%:PROCr("m12 6",FNe(r0%,f%))
+120 SYS "XOS_SpriteOp",256+16,A%,"a7",0,14,0,35,15 TO r0%;f%:PROCr("m12 7",FNe(r0%,f%))
+130 GCOL 128+9
+140 SYS "XOS_SpriteOp",256+16,A%,"b9",0,6,0,27,15 TO r0%;f%:PROCr("m12 bg9",FNe(r0%,f%))
+150 GCOL 3,128+2
+160 SYS "XOS_SpriteOp",256+16,A%,"be",0,6,0,27,15 TO r0%;f%:PROCr("m12 eor",FNe(r0%,f%))
+170 GCOL 128+0:VDU 24,20;0;1000;1000;
+180 SYS "XOS_SpriteOp",256+16,A%,"bw",0,6,0,27,15 TO r0%;f%:PROCr("m12 window",FNe(r0%,f%))
+190 VDU 26
+200 PROCz:PROCa("m12",A%)
+210 SYS "XOS_SpriteOp",256+9,A%
+220 PROCmode(28)
+230 GCOL 128+7:CLG
+240 SYS "XOS_SpriteOp",256+16,A%,"c1",0,2,0,11,7 TO r0%;f%:PROCr("m28 1",FNe(r0%,f%))
+250 SYS "XOS_SpriteOp",256+16,A%,"c2",0,4,0,13,7 TO r0%;f%:PROCr("m28 2",FNe(r0%,f%))
+260 SYS "XOS_SpriteOp",256+16,A%,"c3",0,6,0,15,7 TO r0%;f%:PROCr("m28 3",FNe(r0%,f%))
+270 PROCz:PROCa("m28",A%)
+280 SYS "XOS_SpriteOp",256+9,A%
+290 PROCmode(0)
+300 GCOL 128+1:CLG
+310 SYS "XOS_SpriteOp",256+16,A%,"d1",0,2,0,23,15 TO r0%;f%:PROCr("m0 1",FNe(r0%,f%))
+320 SYS "XOS_SpriteOp",256+16,A%,"d3",0,6,0,27,15 TO r0%;f%:PROCr("m0 3",FNe(r0%,f%))
+330 SYS "XOS_SpriteOp",256+16,A%,"d7",0,14,0,35,15 TO r0%;f%:PROCr("m0 7",FNe(r0%,f%))
+340 SYS "XOS_SpriteOp",256+16,A%,"d8",0,16,0,37,15 TO r0%;f%:PROCr("m0 8",FNe(r0%,f%))
+350 SYS "XOS_SpriteOp",256+16,A%,"d9",0,18,0,39,15 TO r0%;f%:PROCr("m0 9",FNe(r0%,f%))
+360 SYS "XOS_SpriteOp",256+16,A%,"d15",0,30,0,51,15 TO r0%;f%:PROCr("m0 15",FNe(r0%,f%))
+370 SYS "XOS_SpriteOp",256+16,A%,"d17",0,34,0,55,15 TO r0%;f%:PROCr("m0 17",FNe(r0%,f%))
+380 SYS "XOS_SpriteOp",256+16,A%,"d31",0,62,0,83,15 TO r0%;f%:PROCr("m0 31",FNe(r0%,f%))
+390 PROCz:PROCa("m0",A%)
+400 PROCmode(25)
+410 GOTO 9000
+420 DEFPROCz:LOCAL o%,n%,w%,h%,b%,l%:o%=A%!8:n%=A%!4
+430 WHILE n%>0:w%=4*(A%!(o%+16)+1):h%=A%!(o%+20)+1:b%=A%!(o%+24):l%=A%!(o%+28):PROCzr(o%+A%!(o%+32),w%,h%,b%,l%)
+440 IF (A%!(o%+40) AND &FFFFFF00)=0 AND A%!(o%+36)<>A%!(o%+32) THEN PROCzr(o%+A%!(o%+36),w%,h%,b%,l%)
+450 o%+=A%!o%:n%-=1:ENDWHILE:ENDPROC
+460 DEFPROCzr(s%,w%,h%,b%,l%):LOCAL r%:FOR r%=1 TO h%:A%!s%=A%!s% AND NOT ((1<<b%)-1)
+470 IF l%<31 THEN A%!(s%+w%-4)=A%!(s%+w%-4) AND ((2<<l%)-1)
+480 s%+=w%:NEXT:ENDPROC
+
+case sprite_alpha_edges
+10 PROCmode(25)
+20 DIM A% 16384:FOR i%=0 TO 16380 STEP 4:A%!i%=0:NEXT:!A%=16384:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"w",0,8,1,&301680B5 TO r0%;f%:PROCr("w",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+29,A%,"w":SYS "XOS_SpriteOp",256+38,A%,"w",&80000000
+60 SYS "XOS_SpriteOp",256+44,A%,"w",0,0,&0:SYS "XOS_SpriteOp",256+44,A%,"w",1,0,&1:SYS "XOS_SpriteOp",256+44,A%,"w",2,0,&46:SYS "XOS_SpriteOp",256+44,A%,"w",3,0,&47
+70 SYS "XOS_SpriteOp",256+44,A%,"w",4,0,&48:SYS "XOS_SpriteOp",256+44,A%,"w",5,0,&7F:SYS "XOS_SpriteOp",256+44,A%,"w",6,0,&80:SYS "XOS_SpriteOp",256+44,A%,"w",7,0,&FF
+80 SYS "XOS_SpriteOp",256+27,A%,"w","v":SYS "XOS_SpriteOp",256+27,A%,"w","u":SYS "XOS_SpriteOp",256+27,A%,"w","c"
+90 PROCa("start",A%)
+100 SYS "XOS_SpriteOp",256+38,A%,"w",&47 TO r0%;f%:PROCr("cutoff 47",FNe(r0%,f%)):PROCa("cutoff 47",A%)
+110 SYS "XOS_SpriteOp",256+38,A%,"v",0 TO r0%;f%:PROCr("cutoff 0",FNe(r0%,f%)):PROCa("cutoff 0",A%)
+120 SYS "XOS_SpriteOp",256+38,A%,"u",1 TO r0%;f%:PROCr("cutoff 1",FNe(r0%,f%)):PROCa("cutoff 1",A%)
+130 SYS "XOS_SpriteOp",256+38,A%,"c",&C0000000 TO r0%;f%:PROCr("channel then",FNe(r0%,f%)):PROCa("channel then",A%)
+140 SYS "XOS_SpriteOp",256+38,A%,"c",&47 TO r0%;f%:PROCr("channel to cutoff 47",FNe(r0%,f%)):PROCa("channel to cutoff 47",A%)
+150 SYS "XOS_SpriteOp",256+15,A%,"f",0,8,1,&281680B5 TO r0%;f%:PROCr("f",FNe(r0%,f%))
+160 SYS "XOS_SpriteOp",256+29,A%,"f":SYS "XOS_SpriteOp",256+38,A%,"f",&80000000
+170 SYS "XOS_SpriteOp",256+44,A%,"f",0,0,&0:SYS "XOS_SpriteOp",256+44,A%,"f",1,0,&1:SYS "XOS_SpriteOp",256+44,A%,"f",2,0,&46:SYS "XOS_SpriteOp",256+44,A%,"f",3,0,&47
+180 SYS "XOS_SpriteOp",256+44,A%,"f",4,0,&48:SYS "XOS_SpriteOp",256+44,A%,"f",5,0,&7F:SYS "XOS_SpriteOp",256+44,A%,"f",6,0,&80:SYS "XOS_SpriteOp",256+44,A%,"f",7,0,&FF
+190 SYS "XOS_SpriteOp",256+27,A%,"f","g"
+200 SYS "XOS_SpriteOp",256+38,A%,"f",&C0000047 TO r0%;f%:PROCr("type 5 cutoff 47",FNe(r0%,f%)):PROCa("type 5 cutoff 47",A%)
+210 SYS "XOS_SpriteOp",256+38,A%,"g",&C0000000 TO r0%;f%:PROCr("type 5 cutoff 0",FNe(r0%,f%)):PROCa("type 5 cutoff 0",A%)
+220 SYS "XOS_SpriteOp",256+9,A%
+230 SYS "XOS_SpriteOp",256+15,A%,"n",0,3,2,&301680B5 TO r0%;f%:PROCr("n",FNe(r0%,f%))
+240 SYS "XOS_SpriteOp",256+27,A%,"n","m":SYS "XOS_SpriteOp",256+27,A%,"n","l":SYS "XOS_SpriteOp",256+27,A%,"n","k"
+250 SYS "XOS_SpriteOp",256+38,A%,"n",&80 TO r0%;f%:PROCr("none to bit",FNe(r0%,f%)):PROCa("none to bit",A%)
+260 SYS "XOS_SpriteOp",256+38,A%,"m",&80000000 TO r0%;f%:PROCr("none to wide",FNe(r0%,f%)):PROCa("none to wide",A%)
+270 SYS "XOS_SpriteOp",256+38,A%,"l",&C0000100 TO r0%;f%:PROCr("none to channel bit8",FNe(r0%,f%)):PROCa("none to channel bit8",A%)
+280 SYS "XOS_SpriteOp",256+29,A%,"k"
+290 SYS "XOS_SpriteOp",256+38,A%,"k",&C0000100 TO r0%;f%:PROCr("opaque bit to channel bit8",FNe(r0%,f%)):PROCa("opaque bit to channel bit8",A%)
+300 SYS "XOS_SpriteOp",256+38,A%,"k",&180 TO r0%;f%:PROCr("opaque channel to bit bit8",FNe(r0%,f%)):PROCa("opaque channel to bit bit8",A%)
+310 SYS "XOS_SpriteOp",256+38,A%,"k",&80000100 TO r0%;f%:PROCr("opaque bit to wide bit8",FNe(r0%,f%)):PROCa("opaque bit to wide bit8",A%)
+320 SYS "XOS_SpriteOp",256+38,A%,"k",&180 TO r0%;f%:PROCr("opaque wide to bit bit8",FNe(r0%,f%)):PROCa("opaque wide to bit bit8",A%)
+330 SYS "XOS_SpriteOp",256+9,A%
+340 SYS "XOS_SpriteOp",256+15,A%,"x",0,5,2,&301680B5 TO r0%;f%:PROCr("x",FNe(r0%,f%))
+350 SYS "XOS_SpriteOp",256+29,A%,"x":SYS "XOS_SpriteOp",256+44,A%,"x",4,1,0:SYS "XOS_SpriteOp",256+44,A%,"x",0,0,0
+360 PROCa("x start",A%)
+370 SYS "XOS_SpriteOp",256+38,A%,"x",&80000000 TO r0%;f%:PROCr("5 to wide",FNe(r0%,f%)):PROCa("5 to wide",A%)
+380 SYS "XOS_SpriteOp",256+44,A%,"x",2,0,&33
+390 SYS "XOS_SpriteOp",256+38,A%,"x",&20 TO r0%;f%:PROCr("5 to bit",FNe(r0%,f%)):PROCa("5 to bit",A%)
+400 SYS "XOS_SpriteOp",256+38,A%,"x",&C0000000 TO r0%;f%:PROCr("5 to channel",FNe(r0%,f%)):PROCa("5 to channel",A%)
+410 SYS "XOS_SpriteOp",256+38,A%,"x",&80000000 TO r0%;f%:PROCr("5 channel to wide",FNe(r0%,f%)):PROCa("5 channel to wide",A%)
+420 SYS "XOS_SpriteOp",256+9,A%
+430 SYS "XOS_SpriteOp",256+15,A%,"y",0,40,1,&301680B5 TO r0%;f%:PROCr("y",FNe(r0%,f%))
+440 SYS "XOS_SpriteOp",256+29,A%,"y":SYS "XOS_SpriteOp",256+44,A%,"y",39,0,0:SYS "XOS_SpriteOp",256+44,A%,"y",33,0,0
+450 SYS "XOS_SpriteOp",256+38,A%,"y",&80000000 TO r0%;f%:PROCr("40 to wide",FNe(r0%,f%)):PROCa("40 to wide",A%)
+460 SYS "XOS_SpriteOp",256+38,A%,"y",&80 TO r0%;f%:PROCr("40 to bit",FNe(r0%,f%)):PROCa("40 to bit",A%)
+470 SYS "XOS_SpriteOp",256+9,A%
+480 SYS "XOS_SpriteOp",256+15,A%,"d",0,2,1,&300B402F TO r0%;f%:PROCr("d",FNe(r0%,f%))
+490 SYS "XOS_SpriteOp",256+38,A%,"d",&C0000000 TO r0%;f%:PROCr("dpi 23 to channel",FNe(r0%,f%)):PROCa("dpi 23 to channel",A%)
+500 SYS "XOS_SpriteOp",256+38,A%,"d",&80 TO r0%;f%:PROCr("dpi 23 back",FNe(r0%,f%)):PROCa("dpi 23 back",A%)
+510 SYS "XOS_SpriteOp",256+15,A%,"e",0,2,1,&78600031 TO r0%;f%:PROCr("e",FNe(r0%,f%))
+520 SYS "XOS_SpriteOp",256+38,A%,"e",&80000000 TO r0%;f%:PROCr("eig 3 to wide",FNe(r0%,f%)):PROCa("eig 3 to wide",A%)
+
+case sprite_alpha_words
+10 PROCmode(25)
+20 DIM A% 16384:FOR i%=0 TO 16380 STEP 4:A%!i%=0:NEXT:!A%=16384:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 SYS "XOS_SpriteOp",256+15,A%,"a",0,3,1,&300B4169 TO r0%;f%:PROCr("a",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",256+29,A%,"a":SYS "XOS_SpriteOp",256+27,A%,"a","b":SYS "XOS_SpriteOp",256+27,A%,"a","c"
+60 SYS "XOS_SpriteOp",256+38,A%,"a",&80000000 TO r0%;f%:PROCr("dpi to wide",FNe(r0%,f%)):PROCa("dpi to wide",A%)
+70 SYS "XOS_SpriteOp",256+38,A%,"a",&80 TO r0%;f%:PROCr("dpi back",FNe(r0%,f%)):PROCa("dpi back",A%)
+80 SYS "XOS_SpriteOp",256+38,A%,"b",&80 TO r0%;f%:PROCr("dpi same",FNe(r0%,f%)):PROCa("dpi same",A%)
+90 SYS "XOS_SpriteOp",256+38,A%,"c",&C0000000 TO r0%;f%:PROCr("dpi channel",FNe(r0%,f%)):PROCa("dpi channel",A%)
+100 SYS "XOS_SpriteOp",256+15,A%,"r",0,3,1,&78600081 TO r0%;f%:PROCr("r",FNe(r0%,f%))
+110 SYS "XOS_SpriteOp",256+29,A%,"r"
+120 SYS "XOS_SpriteOp",256+38,A%,"r",&80 TO r0%;f%:PROCr("ro5 same",FNe(r0%,f%)):PROCa("ro5 same",A%)
+130 SYS "XOS_SpriteOp",256+15,A%,"q",0,3,1,&F86000A1 TO r0%;f%:PROCr("q",FNe(r0%,f%))
+140 SYS "XOS_SpriteOp",256+29,A%,"q":SYS "XOS_SpriteOp",256+44,A%,"q",1,0,&47
+150 SYS "XOS_SpriteOp",256+38,A%,"q",0 TO r0%;f%:PROCr("ro5 wide lossy refused",FNe(r0%,f%)):PROCa("ro5 wide lossy refused",A%)
+160 SYS "XOS_SpriteOp",256+38,A%,"q",&80000000 TO r0%;f%:PROCr("ro5 wide same",FNe(r0%,f%)):PROCa("ro5 wide same",A%)
+170 SYS "XOS_SpriteOp",256+15,A%,"o",0,3,1,&78600071 TO r0%;f%:PROCr("o",FNe(r0%,f%))
+180 SYS "XOS_SpriteOp",256+38,A%,"o",&80 TO r0%;f%:PROCr("ro5 none to bit",FNe(r0%,f%)):PROCa("ro5 none to bit",A%)
+190 SYS "XOS_SpriteOp",256+15,A%,"t",0,3,1,&301680B5 TO r0%;f%:PROCr("t",FNe(r0%,f%))
+200 SYS "XOS_SpriteOp",256+38,A%,"t",&C0000000
+210 SYS "XOS_SpriteOp",256+38,A%,"t",&180 TO r0%;f%:PROCr("channel opaque dropped",FNe(r0%,f%)):PROCa("channel opaque dropped",A%)
+220 SYS "XOS_SpriteOp",256+15,A%,"u",0,3,1,&301680B5 TO r0%;f%:PROCr("u",FNe(r0%,f%))
+230 SYS "XOS_SpriteOp",256+38,A%,"u",&C0000000:SYS "XOS_SpriteOp",256+42,A%,"u",1,0,&80123456,0
+240 SYS "XOS_SpriteOp",256+38,A%,"u",&180 TO r0%;f%:PROCr("channel kept",FNe(r0%,f%)):PROCa("channel kept",A%)
+250 SYS "XOS_SpriteOp",256+15,A%,"k",0,3,1,&79000051 TO r0%;f%:PROCr("k",FNe(r0%,f%))
+260 SYS "XOS_SpriteOp",256+29,A%,"k":SYS "XOS_SpriteOp",256+38,A%,"k",&80000000:SYS "XOS_SpriteOp",256+44,A%,"k",1,0,&47
+270 SYS "XOS_SpriteOp",256+38,A%,"k",&C0000000 TO r0%;f%:PROCr("4bit lossy refused",FNe(r0%,f%)):PROCa("4bit lossy refused",A%)
+280 SYS "XOS_SpriteOp",256+44,A%,"k",1,0,&44
+290 SYS "XOS_SpriteOp",256+38,A%,"k",&C0000000 TO r0%;f%:PROCr("4bit lossless",FNe(r0%,f%)):PROCa("4bit lossless",A%)
+300 DIM B% 400:!B%=400:B%!8=16:SYS "XOS_SpriteOp",256+9,B%
+310 SYS "XOS_SpriteOp",256+15,B%,"big",0,64,1,&301680B5 TO r0%;f%:PROCr("big",FNe(r0%,f%))
+320 SYS "XOS_SpriteOp",256+29,B%,"big"
+330 SYS "XOS_SpriteOp",256+38,B%,"big",&80000000 TO r0%,,,c%;f%:PROCr("no room",FNe(r0%,f%)):PROCr(" r3",c%):PROCa("no room",B%)
+340 SYS "XOS_SpriteOp",256+38,B%,"big",&C0000000 TO r0%,,,c%;f%:PROCr("no room channel",FNe(r0%,f%)):PROCr(" r3",c%)
+
+case sprite_mode_variables
+10 PROCmode(25)
+20 w%=&81680B5:PROCv
+30 w%=&101680B5:PROCv
+40 w%=&181680B5:PROCv
+50 w%=&201680B5:PROCv
+60 w%=&281680B5:PROCv
+70 w%=&301680B5:PROCv
+80 w%=&381680B5:PROCv
+90 w%=&401680B5:PROCv
+100 w%=&481680B5:PROCv
+110 w%=&501680B5:PROCv
+120 w%=&581680B5:PROCv
+130 w%=&601680B5:PROCv
+140 w%=&681680B5:PROCv
+150 w%=&701680B5:PROCv
+160 w%=&781680B5:PROCv
+170 w%=&300B4169:PROCv
+180 w%=&301680B7:PROCv
+190 w%=&300000B5:PROCv
+200 w%=&1805C02D:PROCv
+210 w%=&A01680B5:PROCv
+220 w%=&500B405B:PROCv
+230 w%=&78100051:PROCv
+240 w%=&78200051:PROCv
+250 w%=&78300051:PROCv
+260 w%=&78400051:PROCv
+270 w%=&78500051:PROCv
+280 w%=&78600051:PROCv
+290 w%=&78700051:PROCv
+300 w%=&78800051:PROCv
+310 w%=&78900051:PROCv
+320 w%=&78A00051:PROCv
+330 w%=&78B00051:PROCv
+340 w%=&79000051:PROCv
+350 w%=&79100051:PROCv
+360 w%=&79200051:PROCv
+370 w%=&79300051:PROCv
+380 w%=&79400051:PROCv
+390 w%=&7FF00051:PROCv
+400 w%=&78508051:PROCv
+410 w%=&7860C051:PROCv
+420 w%=&78A04051:PROCv
+430 w%=&78301051:PROCv
+440 w%=&78408051:PROCv
+450 w%=&78600151:PROCv
+460 w%=&786000C1:PROCv
+470 w%=&78600021:PROCv
+480 w%=&781680B5:PROCv
+490 w%=&78600005:PROCv
+500 w%=&78400009:PROCv
+510 GOTO 9000
+520 DEFPROCv:LOCAL v%,x%,f%,S$:S$=STR$~w%+":":FOR v%=0 TO 13:SYS "OS_ReadModeVariable",w%,v% TO ,,x%;f%
+530 IF f% AND 2 THEN S$=S$+" C" ELSE S$=S$+" "+STR$~x%
+540 NEXT:BPUT#R%,S$:ENDPROC
+
+case sprite_output
+10 PROCmode(25)
+20 DIM A% 16384:FOR i%=0 TO 16380 STEP 4:A%!i%=0:NEXT:!A%=16384:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 DIM V% 1024,W% 1024,N% 16:FOR i%=0 TO 1020 STEP 4:V%!i%=0:W%!i%=0:NEXT
+50 SYS "XOS_SpriteOp",256+15,A%,"s",0,32,16,28 TO r0%;f%:PROCr("s",FNe(r0%,f%))
+60 SYS "XOS_SpriteOp",256+15,A%,"t",0,8,4,&301680B5 TO r0%;f%:PROCr("t",FNe(r0%,f%))
+70 SYS "XOS_SpriteOp",256+62,A%,0 TO r0%,,,c%;f%:PROCr("size screen",FNe(r0%,f%)):PROCr(" r3",c%)
+80 SYS "XOS_SpriteOp",256+62,A%,"s" TO r0%,,,c%;f%:PROCr("size s",FNe(r0%,f%)):PROCr(" r3",c%)
+90 PROCvars("scr")
+100 $N%="s":PROCsw("to s",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+110 PROCvars("in s")
+120 GCOL 128+3:CLG:GCOL 5:MOVE 0,0:DRAW 20,10:RECTANGLE FILL 10,10,8,6
+130 VDU 4:PRINT TAB(0,0)"Hi";
+140 PROCvars("drawn s")
+150 PROCsw("back",s0%,s1%,s2%,s3%)
+160 PROCr(" saved",V%!0<>0):PROCvars("back")
+170 PROCa("a",A%)
+180 PROCsw("to s again",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+190 PROCr(" gx",FNv(138)):PROCr(" gy",FNv(139)):PROCr(" tx",POS):PROCr(" ty",VPOS)
+200 PROCsw("back again",s0%,s1%,s2%,s3%)
+210 PROCsw("no save area",256+60,A%,N%,0):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+220 PROCr(" gx",FNv(138)):PROCr(" gy",FNv(139))
+230 PROCsw("back none",s0%,s1%,s2%,s3%)
+240 PROCsw("kernel area",256+60,A%,N%,1):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+250 PROCr(" gx",FNv(138)):PROCr(" gy",FNv(139))
+260 PROCsw("back kernel",s0%,s1%,s2%,s3%)
+270 SYS "XOS_SpriteOp",256+61,A%,"s",W% TO r0%;f%:PROCr("mask none",FNe(r0%,f%))
+280 SYS "XOS_SpriteOp",256+29,A%,"s"
+290 PROCsw("to mask",256+61,A%,N%,W%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+300 PROCvars("in mask")
+310 GCOL 128+0:CLG:GCOL 1:MOVE 2,2:DRAW 30,20
+320 PROCsw("mask back",s0%,s1%,s2%,s3%)
+330 PROCa("b",A%)
+340 FOR i%=0 TO 1020 STEP 4:W%!i%=0:NEXT
+350 $N%="t":PROCsw("to t",256+60,A%,N%,W%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+360 PROCvars("in t")
+370 GCOL 128+3:CLG:GCOL 5:MOVE 0,0:DRAW 10,4
+380 PROCsw("t back",s0%,s1%,s2%,s3%)
+390 PROCa("c",A%)
+400 MODE 25:PROCfont:VDU 23,1,0;0;0;0;
+410 $N%="s":PROCsw("to s mode",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+420 MODE 25:PROCfont:VDU 23,1,0;0;0;0;
+430 PROCvars("after mode")
+440 PROCsw("restore after mode",s0%,s1%,s2%,s3%)
+450 PROCvars("restored after mode")
+460 GOTO 9000
+470 DEFPROCq(n$,v%):LOCAL d%,z%:SYS "OS_ReadDynamicArea",3 TO d%,z%
+480 IF v%>=A% AND v%<A%+!A% THEN BPUT#R%,n$+" A+"+STR$~(v%-A%):ENDPROC
+490 IF v%>=V% AND v%<V%+1024 THEN BPUT#R%,n$+" V+"+STR$~(v%-V%):ENDPROC
+500 IF v%>=W% AND v%<W%+1024 THEN BPUT#R%,n$+" W+"+STR$~(v%-W%):ENDPROC
+510 IF v%=FNv(149) THEN BPUT#R%,n$+" screen":ENDPROC
+520 IF z% AND v%>=d% AND v%<d%+(z% AND &7FFFFFFF) THEN BPUT#R%,n$+" S+"+STR$~(v%-d%):ENDPROC
+530 BPUT#R%,n$+" "+STR$~v%:ENDPROC
+540 DEFPROCvars(n$):LOCAL i%,S$:S$=n$+" m":FOR i%=0 TO 12:S$=S$+" "+STR$~FNm(i%):NEXT:BPUT#R%,S$
+550 S$=n$+" v":FOR i%=128 TO 147:S$=S$+" "+STR$~FNv(i%):NEXT:BPUT#R%,S$
+560 S$=n$+" w":FOR i%=150 TO 165:S$=S$+" "+STR$~FNv(i%):NEXT:FOR i%=167 TO 170:S$=S$+" "+STR$~FNv(i%):NEXT:BPUT#R%,S$
+570 S$=n$+" x "+STR$~FNv(256)+" "+STR$~FNv(257):BPUT#R%,S$:PROCq(n$+" start",FNv(148)):ENDPROC
+580 DEFPROCsw(n$,r0%,r1%,r2%,r3%):SYS "XOS_SpriteOp",r0%,r1%,r2%,r3% TO o0%,o1%,o2%,o3%;f%:PROCr(n$,FNe(o0%,f%))
+590 PROCr(" r0",o0%):PROCq(" r1",o1%):PROCq(" r2",o2%):PROCq(" r3",o3%):ENDPROC
+
+case sprite_output_kinds
+10 PROCmode(25)
+20 DIM A% 32768:FOR i%=0 TO 32764 STEP 4:A%!i%=0:NEXT:!A%=32768:A%!8=16
+30 SYS "XOS_SpriteOp",256+9,A%
+40 DIM V% 1024,W% 1024,N% 16:FOR i%=0 TO 1020 STEP 4:V%!i%=0:W%!i%=0:NEXT
+50 SYS "XOS_SpriteOp",256+15,A%,"s",0,32,16,28 TO r0%;f%:PROCr("s",FNe(r0%,f%))
+60 MOVE 100,60
+70 $N%="s":PROCsw("kernel",256+60,A%,N%,1):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+80 PROCvars("kernel in s")
+90 MOVE 6,4
+100 PROCsw("kernel back",s0%,s1%,s2%,s3%)
+110 PROCvars("kernel back")
+120 MOVE 0,0
+130 SYS "XOS_ChangeDynamicArea",3,8192
+140 SYS "XOS_SpriteOp",15,,"q",0,16,8,12 TO r0%;f%:PROCr("sys",FNe(r0%,f%))
+150 $N%="q":PROCsw("sys switch",60,0,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+160 PROCvars("in sys")
+170 PROCsw("sys back",s0%,s1%,s2%,s3%)
+180 SYS "OS_ReadDynamicArea",3 TO d%:PROCr(" r1 da3",o1%=d%):PROCr(" r2 off",o2%-d%)
+190 SYS "XOS_SpriteOp",25,,"q" TO r0%;f%:PROCr("sys delete",FNe(r0%,f%))
+200 SYS "XOS_ChangeDynamicArea",3,-8192
+210 SYS "XOS_SpriteOp",256+15,A%,"w",0,7,3,12 TO r0%;f%:PROCr("w",FNe(r0%,f%))
+220 o%=FNo:A%!(o%+24)=8
+230 FOR i%=0 TO 1020 STEP 4:V%!i%=0:NEXT
+240 $N%="w":PROCsw("wastage",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+250 PROCvars("in wastage")
+260 GCOL 128+2:CLG:GCOL 9:PLOT 69,0,0:PLOT 69,2,0
+270 PROCsw("wastage back",s0%,s1%,s2%,s3%)
+280 PROCa("w",A%)
+290 SYS "XOS_SpriteOp",256+15,A%,"k2",0,24,20,2 TO r0%;f%:PROCr("k2",FNe(r0%,f%))
+300 REM
+310 FOR i%=0 TO 1020 STEP 4:V%!i%=0:NEXT
+320 $N%="k2":PROCsw("k2",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+330 PROCvars("in k2")
+340 PROCsw(" back",s0%,s1%,s2%,s3%)
+350 SYS "XOS_SpriteOp",256+15,A%,"k12",0,24,20,12 TO r0%;f%:PROCr("k12",FNe(r0%,f%))
+360 REM
+370 FOR i%=0 TO 1020 STEP 4:V%!i%=0:NEXT
+380 $N%="k12":PROCsw("k12",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+390 PROCvars("in k12")
+400 PROCsw(" back",s0%,s1%,s2%,s3%)
+410 SYS "XOS_SpriteOp",256+15,A%,"k0",0,24,20,0 TO r0%;f%:PROCr("k0",FNe(r0%,f%))
+420 REM
+430 FOR i%=0 TO 1020 STEP 4:V%!i%=0:NEXT
+440 $N%="k0":PROCsw("k0",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+450 PROCvars("in k0")
+460 PROCsw(" back",s0%,s1%,s2%,s3%)
+470 SYS "XOS_SpriteOp",256+15,A%,"k4",0,24,20,&201680B5 TO r0%;f%:PROCr("k4",FNe(r0%,f%))
+480 REM
+490 FOR i%=0 TO 1020 STEP 4:V%!i%=0:NEXT
+500 $N%="k4":PROCsw("k4",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+510 PROCvars("in k4")
+520 PROCsw(" back",s0%,s1%,s2%,s3%)
+530 SYS "XOS_SpriteOp",256+15,A%,"kf",0,24,20,&201680B5 TO r0%;f%:PROCr("kf",FNe(r0%,f%))
+540 SYS "XOS_SpriteOp",256+37,A%,"kf",&80000001
+550 FOR i%=0 TO 1020 STEP 4:V%!i%=0:NEXT
+560 $N%="kf":PROCsw("kf",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+570 PROCvars("in kf")
+580 PROCsw(" back",s0%,s1%,s2%,s3%)
+590 SYS "XOS_SpriteOp",256+15,A%,"k3",0,24,20,&181680B5 TO r0%;f%:PROCr("k3",FNe(r0%,f%))
+600 REM
+610 FOR i%=0 TO 1020 STEP 4:V%!i%=0:NEXT
+620 $N%="k3":PROCsw("k3",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+630 PROCvars("in k3")
+640 PROCsw(" back",s0%,s1%,s2%,s3%)
+650 SYS "XOS_SpriteOp",256+15,A%,"k5",0,24,20,&281680B5 TO r0%;f%:PROCr("k5",FNe(r0%,f%))
+660 REM
+670 FOR i%=0 TO 1020 STEP 4:V%!i%=0:NEXT
+680 $N%="k5":PROCsw("k5",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+690 PROCvars("in k5")
+700 PROCsw(" back",s0%,s1%,s2%,s3%)
+710 SYS "XOS_SpriteOp",256+15,A%,"ka",0,24,20,&501680B5 TO r0%;f%:PROCr("ka",FNe(r0%,f%))
+720 REM
+730 FOR i%=0 TO 1020 STEP 4:V%!i%=0:NEXT
+740 $N%="ka":PROCsw("ka",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+750 PROCvars("in ka")
+760 PROCsw(" back",s0%,s1%,s2%,s3%)
+770 SYS "XOS_SpriteOp",256+15,A%,"kk",0,24,20,&79000051 TO r0%;f%:PROCr("kk",FNe(r0%,f%))
+780 REM
+790 FOR i%=0 TO 1020 STEP 4:V%!i%=0:NEXT
+800 $N%="kk":PROCsw("kk",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+810 PROCvars("in kk")
+820 PROCsw(" back",s0%,s1%,s2%,s3%)
+830 SYS "XOS_SpriteOp",256+15,A%,"ky",0,24,20,&200B40B5 TO r0%;f%:PROCr("ky",FNe(r0%,f%))
+840 REM
+850 FOR i%=0 TO 1020 STEP 4:V%!i%=0:NEXT
+860 $N%="ky":PROCsw("ky",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+870 PROCvars("in ky")
+880 PROCsw(" back",s0%,s1%,s2%,s3%)
+890 SYS "XOS_SpriteOp",256+15,A%,"kz",0,24,20,18 TO r0%;f%:PROCr("kz",FNe(r0%,f%))
+900 REM
+910 FOR i%=0 TO 1020 STEP 4:V%!i%=0:NEXT
+920 $N%="kz":PROCsw("kz",256+60,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+930 PROCvars("in kz")
+940 PROCsw(" back",s0%,s1%,s2%,s3%)
+950 SYS "XOS_SpriteOp",256+15,A%,"m",0,9,5,&301680B5 TO r0%;f%:PROCr("m",FNe(r0%,f%))
+960 SYS "XOS_SpriteOp",256+29,A%,"m"
+970 FOR i%=0 TO 1020 STEP 4:V%!i%=0:NEXT
+980 $N%="m":PROCsw("1bpp mask",256+61,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+990 PROCvars("in 1bpp mask")
+1000 GCOL 128+0:CLG:GCOL 1:MOVE 0,0:DRAW 16,8
+1010 PROCsw(" back",s0%,s1%,s2%,s3%)
+1020 SYS "XOS_SpriteOp",256+15,A%,"n",0,9,5,&B01680B5 TO r0%;f%:PROCr("n",FNe(r0%,f%))
+1030 SYS "XOS_SpriteOp",256+29,A%,"n"
+1040 FOR i%=0 TO 1020 STEP 4:V%!i%=0:NEXT
+1050 $N%="n":PROCsw("wide mask",256+61,A%,N%,V%):s0%=o0%:s1%=o1%:s2%=o2%:s3%=o3%
+1060 PROCvars("in wide mask")
+1070 GCOL 128+0:CLG:GCOL 7:MOVE 0,0:DRAW 16,8
+1080 PROCsw(" back",s0%,s1%,s2%,s3%)
+1090 PROCa("masks",A%)
+1100 GOTO 9000
+1110 DEFPROCq(n$,v%):LOCAL d%,z%:SYS "OS_ReadDynamicArea",3 TO d%,z%
+1120 IF v%>=A% AND v%<A%+!A% THEN BPUT#R%,n$+" A+"+STR$~(v%-A%):ENDPROC
+1130 IF v%>=V% AND v%<V%+1024 THEN BPUT#R%,n$+" V+"+STR$~(v%-V%):ENDPROC
+1140 IF v%>=W% AND v%<W%+1024 THEN BPUT#R%,n$+" W+"+STR$~(v%-W%):ENDPROC
+1150 IF v%=FNv(149) THEN BPUT#R%,n$+" screen":ENDPROC
+1160 IF z% AND v%>=d% AND v%<d%+(z% AND &7FFFFFFF) THEN BPUT#R%,n$+" S+"+STR$~(v%-d%):ENDPROC
+1170 BPUT#R%,n$+" "+STR$~v%:ENDPROC
+1180 DEFPROCvars(n$):LOCAL i%,S$:S$=n$+" m":FOR i%=0 TO 12:S$=S$+" "+STR$~FNm(i%):NEXT:BPUT#R%,S$
+1190 S$=n$+" v":FOR i%=128 TO 147:S$=S$+" "+STR$~FNv(i%):NEXT:BPUT#R%,S$
+1200 S$=n$+" w":FOR i%=150 TO 165:S$=S$+" "+STR$~FNv(i%):NEXT:FOR i%=167 TO 170:S$=S$+" "+STR$~FNv(i%):NEXT:BPUT#R%,S$
+1210 S$=n$+" x "+STR$~FNv(256)+" "+STR$~FNv(257):BPUT#R%,S$:PROCq(n$+" start",FNv(148)):ENDPROC
+1220 DEFPROCsw(n$,r0%,r1%,r2%,r3%):SYS "XOS_SpriteOp",r0%,r1%,r2%,r3% TO o0%,o1%,o2%,o3%;f%:PROCr(n$,FNe(o0%,f%))
+1230 PROCr(" r0",o0%):PROCq(" r1",o1%):PROCq(" r2",o2%):PROCq(" r3",o3%):ENDPROC
+1240 DEFFNo:LOCAL o%,n%:o%=A%!8:n%=A%!4:WHILE n%>1:o%+=A%!o%:n%-=1:ENDWHILE:=o%
+
+case default_colours_deep
+10 DIM S% 64
+20 S%!0=1:S%!4=640:S%!8=480:S%!12=5:S%!16=-1:S%!20=-1:PROCscreen(S%)
+30 S$="s32":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:S$=S$+" m0 "+STR$~FNm(0)+" m3 "+STR$~FNm(3):BPUT#R%,S$
+40 GCOL 3:COLOUR 2:VDU 20:S$="s32 vdu20":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:BPUT#R%,S$
+50 S%!0=1:S%!4=640:S%!8=480:S%!12=4:S%!16=-1:S%!20=-1:PROCscreen(S%)
+60 S$="s16":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:S$=S$+" m0 "+STR$~FNm(0)+" m3 "+STR$~FNm(3):BPUT#R%,S$
+70 GCOL 3:COLOUR 2:VDU 20:S$="s16 vdu20":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:BPUT#R%,S$
+80 S%!0=1:S%!4=640:S%!8=480:S%!12=4:S%!16=-1:S%!20=0:S%!24=128:S%!28=-1:PROCscreen(S%)
+90 S$="s565":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:S$=S$+" m0 "+STR$~FNm(0)+" m3 "+STR$~FNm(3):BPUT#R%,S$
+100 GCOL 3:COLOUR 2:VDU 20:S$="s565 vdu20":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:BPUT#R%,S$
+110 S%!0=1:S%!4=640:S%!8=480:S%!12=4:S%!16=-1:S%!20=3:S%!24=4095:S%!28=-1:PROCscreen(S%)
+120 S$="s4k":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:S$=S$+" m0 "+STR$~FNm(0)+" m3 "+STR$~FNm(3):BPUT#R%,S$
+130 GCOL 3:COLOUR 2:VDU 20:S$="s4k vdu20":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:BPUT#R%,S$
+140 S%!0=1:S%!4=640:S%!8=480:S%!12=3:S%!16=-1:S%!20=-1:PROCscreen(S%)
+150 S$="s8":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:S$=S$+" m0 "+STR$~FNm(0)+" m3 "+STR$~FNm(3):BPUT#R%,S$
+160 GCOL 3:COLOUR 2:VDU 20:S$="s8 vdu20":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:BPUT#R%,S$
+170 S%!0=1:S%!4=640:S%!8=480:S%!12=3:S%!16=-1:S%!20=0:S%!24=0:S%!28=3:S%!32=63:S%!36=-1:PROCscreen(S%)
+180 S$="s8l":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:S$=S$+" m0 "+STR$~FNm(0)+" m3 "+STR$~FNm(3):BPUT#R%,S$
+190 GCOL 3:COLOUR 2:VDU 20:S$="s8l vdu20":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:BPUT#R%,S$
+200 S%!0=1:S%!4=640:S%!8=480:S%!12=2:S%!16=-1:S%!20=-1:PROCscreen(S%)
+210 S$="s4":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:S$=S$+" m0 "+STR$~FNm(0)+" m3 "+STR$~FNm(3):BPUT#R%,S$
+220 GCOL 3:COLOUR 2:VDU 20:S$="s4 vdu20":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:BPUT#R%,S$
+230 PROCmode(28)
+240 S$="m28":FOR i%=153 TO 160:S$=S$+" "+STR$~FNv(i%):NEXT:BPUT#R%,S$
+250 PROCmode(25)
+
+case sprite_put
+10 PROCmode(28)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16:SYS "XOS_SpriteOp",256+9,A%
+30 SYS "XOS_SpriteOp",256+15,A%,"e",0,6,4,28:PROCf("e",3):SYS "XOS_SpriteOp",256+29,A%,"e":SYS "XOS_SpriteOp",256+44,A%,"e",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"e",5,3,0
+40 SYS "XOS_SpriteOp",256+15,A%,"f",0,5,3,12:PROCf("f",1):SYS "XOS_SpriteOp",256+29,A%,"f":SYS "XOS_SpriteOp",256+44,A%,"f",2,1,0
+50 SYS "XOS_SpriteOp",256+15,A%,"g",0,3,2,&301680B5:PROCf("g",&40302):SYS "XOS_SpriteOp",256+29,A%,"g":SYS "XOS_SpriteOp",256+44,A%,"g",1,0,0
+60 SYS "XOS_SpriteOp",256+15,A%,"h",0,10,3,&81680B5:PROCf("h",0):SYS "XOS_SpriteOp",256+29,A%,"h":SYS "XOS_SpriteOp",256+44,A%,"h",4,1,0
+70 SYS "XOS_SpriteOp",256+15,A%,"i",0,4,4,&201680B5:PROCf("i",&21):SYS "XOS_SpriteOp",256+29,A%,"i":SYS "XOS_SpriteOp",256+44,A%,"i",3,3,0
+80 FOR a%=0 TO 15:SYS "XOS_SpriteOp",256+34,A%,"e",40+a%*70,40,a%:NEXT
+90 FOR a%=0 TO 15:SYS "XOS_SpriteOp",256+34,A%,"f",40+a%*70,120,a%:NEXT
+100 FOR a%=0 TO 15:SYS "XOS_SpriteOp",256+34,A%,"g",40+a%*70,200,a%:NEXT
+110 FOR a%=0 TO 15:SYS "XOS_SpriteOp",256+34,A%,"h",40+a%*70,280,a%:NEXT
+120 FOR a%=0 TO 15:SYS "XOS_SpriteOp",256+34,A%,"i",40+a%*70,360,a%:NEXT
+130 GCOL 128+5:CLG:SYS "XOS_SpriteOp",256+34,A%,"e",-4,500,0:SYS "XOS_SpriteOp",256+34,A%,"e",1276,500,8:SYS "XOS_SpriteOp",256+34,A%,"e",600,-2,0:SYS "XOS_SpriteOp",256+34,A%,"e",600,956,0
+140 MOVE 700,700:SYS "XOS_SpriteOp",256+28,A%,"e",0:MOVE 701,701:SYS "XOS_SpriteOp",256+28,A%,"e",8
+150 VDU 24,800;600;830;640;:SYS "XOS_SpriteOp",256+34,A%,"e",790,610,0:SYS "XOS_SpriteOp",256+34,A%,"f",820,630,8:VDU 26
+160 SYS "XOS_SpriteOp",256+34,A%,"zz",0,0,0 TO r0%;f%:PROCr("missing",FNe(r0%,f%))
+170 SYS "XOS_SpriteOp",256+34,A%,"i",0,0,8 TO r0%;f%:PROCr("alpha mask put",FNe(r0%,f%))
+180 GOTO 9000
+190 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+200 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+
+case sprite_put_4bpp
+10 PROCmode(12)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16:SYS "XOS_SpriteOp",256+9,A%
+30 SYS "XOS_SpriteOp",256+15,A%,"e",0,6,4,28:PROCf("e",3):SYS "XOS_SpriteOp",256+29,A%,"e":SYS "XOS_SpriteOp",256+44,A%,"e",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"e",5,3,0
+40 SYS "XOS_SpriteOp",256+15,A%,"f",0,5,3,12:PROCf("f",1):SYS "XOS_SpriteOp",256+29,A%,"f":SYS "XOS_SpriteOp",256+44,A%,"f",2,1,0
+50 SYS "XOS_SpriteOp",256+15,A%,"g",0,3,2,&301680B5:PROCf("g",&40302):SYS "XOS_SpriteOp",256+29,A%,"g":SYS "XOS_SpriteOp",256+44,A%,"g",1,0,0
+60 SYS "XOS_SpriteOp",256+15,A%,"h",0,10,3,&81680B5:PROCf("h",0):SYS "XOS_SpriteOp",256+29,A%,"h":SYS "XOS_SpriteOp",256+44,A%,"h",4,1,0
+70 SYS "XOS_SpriteOp",256+15,A%,"i",0,4,4,&201680B5:PROCf("i",&21):SYS "XOS_SpriteOp",256+29,A%,"i":SYS "XOS_SpriteOp",256+44,A%,"i",3,3,0
+80 FOR a%=0 TO 7:SYS "XOS_SpriteOp",256+34,A%,"e",40+a%*120,40,a%:NEXT
+90 FOR a%=0 TO 7:SYS "XOS_SpriteOp",256+34,A%,"f",40+a%*120,120,a%+8:NEXT
+100 FOR a%=0 TO 7:SYS "XOS_SpriteOp",256+34,A%,"g",40+a%*120,200,a%:NEXT
+110 FOR a%=0 TO 7:SYS "XOS_SpriteOp",256+34,A%,"h",40+a%*120,280,a%+8:NEXT
+120 GOTO 9000
+130 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+140 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+
+case sprite_put_1bpp
+10 PROCmode(0)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16:SYS "XOS_SpriteOp",256+9,A%
+30 SYS "XOS_SpriteOp",256+15,A%,"e",0,6,4,28:PROCf("e",3):SYS "XOS_SpriteOp",256+29,A%,"e":SYS "XOS_SpriteOp",256+44,A%,"e",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"e",5,3,0
+40 SYS "XOS_SpriteOp",256+15,A%,"f",0,5,3,12:PROCf("f",1):SYS "XOS_SpriteOp",256+29,A%,"f":SYS "XOS_SpriteOp",256+44,A%,"f",2,1,0
+50 SYS "XOS_SpriteOp",256+15,A%,"g",0,3,2,&301680B5:PROCf("g",&40302):SYS "XOS_SpriteOp",256+29,A%,"g":SYS "XOS_SpriteOp",256+44,A%,"g",1,0,0
+60 SYS "XOS_SpriteOp",256+15,A%,"h",0,10,3,&81680B5:PROCf("h",0):SYS "XOS_SpriteOp",256+29,A%,"h":SYS "XOS_SpriteOp",256+44,A%,"h",4,1,0
+70 SYS "XOS_SpriteOp",256+15,A%,"i",0,4,4,&201680B5:PROCf("i",&21):SYS "XOS_SpriteOp",256+29,A%,"i":SYS "XOS_SpriteOp",256+44,A%,"i",3,3,0
+80 FOR a%=0 TO 7:SYS "XOS_SpriteOp",256+34,A%,"e",40+a%*120,40,a%:NEXT
+90 FOR a%=0 TO 7:SYS "XOS_SpriteOp",256+34,A%,"f",40+a%*120,120,a%+8:NEXT
+100 FOR a%=0 TO 7:SYS "XOS_SpriteOp",256+34,A%,"g",40+a%*120,200,a%:NEXT
+110 FOR a%=0 TO 7:SYS "XOS_SpriteOp",256+34,A%,"h",40+a%*120,280,a%+8:NEXT
+120 GOTO 9000
+130 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+140 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+
+case sprite_plot_mask
+10 PROCmode(28)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16:SYS "XOS_SpriteOp",256+9,A%
+30 SYS "XOS_SpriteOp",256+15,A%,"e",0,6,4,28:PROCf("e",3):SYS "XOS_SpriteOp",256+29,A%,"e":SYS "XOS_SpriteOp",256+44,A%,"e",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"e",5,3,0
+40 SYS "XOS_SpriteOp",256+15,A%,"f",0,5,3,12:PROCf("f",1):SYS "XOS_SpriteOp",256+29,A%,"f":SYS "XOS_SpriteOp",256+44,A%,"f",2,1,0
+50 SYS "XOS_SpriteOp",256+15,A%,"g",0,3,2,&301680B5:PROCf("g",&40302):SYS "XOS_SpriteOp",256+29,A%,"g":SYS "XOS_SpriteOp",256+44,A%,"g",1,0,0
+60 SYS "XOS_SpriteOp",256+15,A%,"h",0,10,3,&81680B5:PROCf("h",0):SYS "XOS_SpriteOp",256+29,A%,"h":SYS "XOS_SpriteOp",256+44,A%,"h",4,1,0
+70 SYS "XOS_SpriteOp",256+15,A%,"i",0,4,4,&201680B5:PROCf("i",&21):SYS "XOS_SpriteOp",256+29,A%,"i":SYS "XOS_SpriteOp",256+44,A%,"i",3,3,0
+80 FOR a%=0 TO 7:GCOL a%,128+(a%*9 AND 63):SYS "XOS_SpriteOp",256+49,A%,"e",40+a%*80,40:NEXT
+90 FOR a%=0 TO 7:GCOL a%,128+(a%*5+1 AND 63):SYS "XOS_SpriteOp",256+49,A%,"g",40+a%*80,140:NEXT
+100 GCOL 0,128+33:SYS "XOS_SpriteOp",256+30,A%,"f":SYS "XOS_SpriteOp",256+49,A%,"f",40,240
+110 MOVE 400,400:GCOL 3,128+20:SYS "XOS_SpriteOp",256+48,A%,"h"
+120 DIM S% 16:S%!0=3:S%!4=2:S%!8=1:S%!12=1:GCOL 0,128+21:SYS "XOS_SpriteOp",256+50,A%,"e",500,500,0,S%
+130 S%!0=1:S%!4=1:S%!8=2:S%!12=1:SYS "XOS_SpriteOp",256+50,A%,"h",500,600,0,S%
+140 FOR c%=0 TO 7:GCOL c%,40+c%:S%!0=c% MOD 3+1:S%!4=c% MOD 2+1:S%!8=1:S%!12=1:SYS "XOS_SpriteOp",256+51,65+c%,0,40+c%*90,800,0,S%:NEXT
+150 GCOL 0,9:SYS "XOS_SpriteOp",256+51,ASC"Z",0,40,700,0,0
+160 GOTO 9000
+170 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+180 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+
+case sprite_put_scaled
+10 PROCmode(28)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16:SYS "XOS_SpriteOp",256+9,A%
+30 SYS "XOS_SpriteOp",256+15,A%,"e",0,6,4,28:PROCf("e",3):SYS "XOS_SpriteOp",256+29,A%,"e":SYS "XOS_SpriteOp",256+44,A%,"e",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"e",5,3,0
+40 SYS "XOS_SpriteOp",256+15,A%,"f",0,5,3,12:PROCf("f",1):SYS "XOS_SpriteOp",256+29,A%,"f":SYS "XOS_SpriteOp",256+44,A%,"f",2,1,0
+50 SYS "XOS_SpriteOp",256+15,A%,"g",0,3,2,&301680B5:PROCf("g",&40302):SYS "XOS_SpriteOp",256+29,A%,"g":SYS "XOS_SpriteOp",256+44,A%,"g",1,0,0
+60 SYS "XOS_SpriteOp",256+15,A%,"h",0,10,3,&81680B5:PROCf("h",0):SYS "XOS_SpriteOp",256+29,A%,"h":SYS "XOS_SpriteOp",256+44,A%,"h",4,1,0
+70 SYS "XOS_SpriteOp",256+15,A%,"i",0,4,4,&201680B5:PROCf("i",&21):SYS "XOS_SpriteOp",256+29,A%,"i":SYS "XOS_SpriteOp",256+44,A%,"i",3,3,0
+80 DIM S% 16,T% 256,U% 1024
+90 FOR i%=0 TO 255:T%?i%=(i%*7+3) AND 255:U%!(i%*4)=(i%*13+5) AND 255:NEXT
+100 PROCs(1,1,1,1):SYS "XOS_SpriteOp",256+52,A%,"e",40,40,0,S%,0
+110 PROCs(2,2,1,1):SYS "XOS_SpriteOp",256+52,A%,"e",100,40,0,S%,0
+120 PROCs(3,2,2,3):SYS "XOS_SpriteOp",256+52,A%,"e",200,40,0,S%,0
+130 PROCs(5,4,4,5):SYS "XOS_SpriteOp",256+52,A%,"e",300,40,8,S%,0
+140 PROCs(2,3,1,1):SYS "XOS_SpriteOp",256+52,A%,"e",400,40,3,S%,0
+150 SYS "XOS_SpriteOp",256+52,A%,"e",500,40,0,0,0
+160 PROCs(2,2,1,1):SYS "XOS_SpriteOp",256+52,A%,"f",40,200,0,S%,T%
+170 SYS "XOS_SpriteOp",256+52,A%,"f",140,200,8,S%,T%
+180 SYS "XOS_SpriteOp",256+52,A%,"f",240,200,0,S%,0 TO r0%;f%:PROCr("4bpp no table",FNe(r0%,f%))
+190 SYS "XOS_SpriteOp",256+52,A%,"e",340,200,32,S%,U%
+200 SYS "XOS_SpriteOp",256+52,A%,"e",440,200,8,S%,T%
+210 SYS "XOS_SpriteOp",256+37,A%,"f",1:SYS "XOS_SpriteOp",256+52,A%,"f",540,200,16,S%,T%
+220 SYS "XOS_SpriteOp",256+52,A%,"g",40,400,0,S%,0 TO r0%;f%:PROCr("deep no table",FNe(r0%,f%))
+230 FOR i%=0 TO 3:SYS "XOS_SpriteOp",256+52,A%,"h",40+i%*100,500,i%,S%,T%:NEXT
+240 PROCs(7,1,3,1):SYS "XOS_SpriteOp",256+52,A%,"h",500,500,0,S%,T%
+250 PROCs(1,1,2,2):SYS "XOS_SpriteOp",256+52,A%,"e",40,600,0,S%,0
+260 PROCs(1,3,1,1):SYS "XOS_SpriteOp",256+52,A%,"e",100,600,0,S%,0
+270 VDU 24,700;600;760;640;:PROCs(4,4,1,1):SYS "XOS_SpriteOp",256+52,A%,"e",680,590,0,S%,0:VDU 26
+280 VDU 24,800;0;1000;100;:SYS "XOS_SpriteOp",256+65,A%,"f",810,10,0,0,T%:VDU 26
+290 VDU 24,1000;0;1278;150;:PROCs(2,1,1,1):SYS "XOS_SpriteOp",256+65,A%,"e",1000,0,8,S%,0:VDU 26
+300 GOTO 9000
+310 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+320 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+330 DEFPROCs(a%,b%,c%,d%):S%!0=a%:S%!4=b%:S%!8=c%:S%!12=d%:ENDPROC
+
+case sprite_put_scaled_deep
+10 DIM Q% 64:Q%!0=1:Q%!4=640:Q%!8=480:Q%!12=5:Q%!16=-1:Q%!20=-1:PROCscreen(Q%)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16:SYS "XOS_SpriteOp",256+9,A%
+30 SYS "XOS_SpriteOp",256+15,A%,"e",0,6,4,28:PROCf("e",3):SYS "XOS_SpriteOp",256+29,A%,"e":SYS "XOS_SpriteOp",256+44,A%,"e",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"e",5,3,0
+40 SYS "XOS_SpriteOp",256+15,A%,"f",0,5,3,12:PROCf("f",1):SYS "XOS_SpriteOp",256+29,A%,"f":SYS "XOS_SpriteOp",256+44,A%,"f",2,1,0
+50 SYS "XOS_SpriteOp",256+15,A%,"g",0,3,2,&301680B5:PROCf("g",&40302):SYS "XOS_SpriteOp",256+29,A%,"g":SYS "XOS_SpriteOp",256+44,A%,"g",1,0,0
+60 SYS "XOS_SpriteOp",256+15,A%,"h",0,10,3,&81680B5:PROCf("h",0):SYS "XOS_SpriteOp",256+29,A%,"h":SYS "XOS_SpriteOp",256+44,A%,"h",4,1,0
+70 SYS "XOS_SpriteOp",256+15,A%,"i",0,4,4,&201680B5:PROCf("i",&21):SYS "XOS_SpriteOp",256+29,A%,"i":SYS "XOS_SpriteOp",256+44,A%,"i",3,3,0
+80 DIM S% 16,T% 256:FOR i%=0 TO 255:T%?i%=(i%*7+3) AND 255:NEXT
+90 PROCs(2,2,1,1):SYS "XOS_SpriteOp",256+52,A%,"e",40,40,0,S%,T%
+100 SYS "XOS_SpriteOp",256+52,A%,"f",140,40,0,S%,T%
+110 SYS "XOS_SpriteOp",256+52,A%,"e",240,40,0,S%,0 TO r0%;f%:PROCr("palettised no table",FNe(r0%,f%))
+120 SYS "XOS_SpriteOp",256+37,A%,"f",1:SYS "XOS_SpriteOp",256+52,A%,"f",340,40,16,S%,T%
+130 SYS "XOS_SpriteOp",256+52,A%,"g",440,40,0,S%,0
+140 SYS "XOS_SpriteOp",256+52,A%,"g",540,40,8,S%,0
+150 SYS "XOS_SpriteOp",256+15,A%,"k",0,4,3,&281680B5:PROCf("k",&7C1F)
+160 SYS "XOS_SpriteOp",256+52,A%,"k",640,40,0,S%,0
+170 SYS "XOS_SpriteOp",256+15,A%,"l",0,4,3,&501680B5:PROCf("l",&F81F)
+180 SYS "XOS_SpriteOp",256+52,A%,"l",740,40,0,S%,0
+190 SYS "XOS_SpriteOp",256+34,A%,"g",40,300,0:SYS "XOS_SpriteOp",256+34,A%,"g",140,300,8
+200 GOTO 9000
+210 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+220 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+230 DEFPROCs(a%,b%,c%,d%):S%!0=a%:S%!4=b%:S%!8=c%:S%!12=d%:ENDPROC
+
+case sprite_alpha_plot
+10 DIM Q% 64:Q%!0=1:Q%!4=640:Q%!8=480:Q%!12=5:Q%!16=-1:Q%!20=-1:PROCscreen(Q%)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16:SYS "XOS_SpriteOp",256+9,A%
+30 SYS "XOS_SpriteOp",256+15,A%,"e",0,6,4,28:PROCf("e",3):SYS "XOS_SpriteOp",256+29,A%,"e":SYS "XOS_SpriteOp",256+44,A%,"e",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"e",5,3,0
+40 SYS "XOS_SpriteOp",256+15,A%,"f",0,5,3,12:PROCf("f",1):SYS "XOS_SpriteOp",256+29,A%,"f":SYS "XOS_SpriteOp",256+44,A%,"f",2,1,0
+50 SYS "XOS_SpriteOp",256+15,A%,"g",0,3,2,&301680B5:PROCf("g",&40302):SYS "XOS_SpriteOp",256+29,A%,"g":SYS "XOS_SpriteOp",256+44,A%,"g",1,0,0
+60 SYS "XOS_SpriteOp",256+15,A%,"h",0,10,3,&81680B5:PROCf("h",0):SYS "XOS_SpriteOp",256+29,A%,"h":SYS "XOS_SpriteOp",256+44,A%,"h",4,1,0
+70 SYS "XOS_SpriteOp",256+15,A%,"i",0,4,4,&201680B5:PROCf("i",&21):SYS "XOS_SpriteOp",256+29,A%,"i":SYS "XOS_SpriteOp",256+44,A%,"i",3,3,0
+80 GCOL 128+0:CLG:DIM S% 16:S%!0=2:S%!4=2:S%!8=1:S%!12=1
+90 RECTANGLE FILL 0,0,1279,200
+100 SYS "XOS_SpriteOp",256+15,A%,"j",0,4,2,&301680B5:PROCf("j",&804020):SYS "XOS_SpriteOp",256+29,A%,"j":SYS "XOS_SpriteOp",256+38,A%,"j",&80000000
+110 FOR i%=0 TO 7:SYS "XOS_SpriteOp",256+44,A%,"j",i% MOD 4,i% DIV 4,i%*36:NEXT
+120 SYS "XOS_SpriteOp",256+52,A%,"j",40,40,8,S%,0:SYS "XOS_SpriteOp",256+52,A%,"j",140,40,0,S%,0
+130 SYS "XOS_SpriteOp",256+52,A%,"j",240,40,&8008,S%,0:SYS "XOS_SpriteOp",256+52,A%,"j",340,40,&8000,S%,0
+140 SYS "XOS_SpriteOp",256+38,A%,"j",&C0000000
+150 SYS "XOS_SpriteOp",256+52,A%,"j",440,40,8,S%,0:SYS "XOS_SpriteOp",256+52,A%,"j",540,40,0,S%,0
+160 SYS "XOS_SpriteOp",256+52,A%,"j",640,40,&4008,S%,0
+170 SYS "XOS_SpriteOp",256+34,A%,"j",740,40,8 TO r0%;f%:PROCr("alpha put",FNe(r0%,f%))
+180 SYS "XOS_SpriteOp",256+34,A%,"j",840,40,0
+190 GOTO 9000
+200 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+210 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+
+case sprite_put_transformed
+10 PROCmode(28)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16:SYS "XOS_SpriteOp",256+9,A%
+30 SYS "XOS_SpriteOp",256+15,A%,"e",0,6,4,28:PROCf("e",3):SYS "XOS_SpriteOp",256+29,A%,"e":SYS "XOS_SpriteOp",256+44,A%,"e",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"e",5,3,0
+40 SYS "XOS_SpriteOp",256+15,A%,"f",0,5,3,12:PROCf("f",1):SYS "XOS_SpriteOp",256+29,A%,"f":SYS "XOS_SpriteOp",256+44,A%,"f",2,1,0
+50 SYS "XOS_SpriteOp",256+15,A%,"g",0,3,2,&301680B5:PROCf("g",&40302):SYS "XOS_SpriteOp",256+29,A%,"g":SYS "XOS_SpriteOp",256+44,A%,"g",1,0,0
+60 SYS "XOS_SpriteOp",256+15,A%,"h",0,10,3,&81680B5:PROCf("h",0):SYS "XOS_SpriteOp",256+29,A%,"h":SYS "XOS_SpriteOp",256+44,A%,"h",4,1,0
+70 SYS "XOS_SpriteOp",256+15,A%,"i",0,4,4,&201680B5:PROCf("i",&21):SYS "XOS_SpriteOp",256+29,A%,"i":SYS "XOS_SpriteOp",256+44,A%,"i",3,3,0
+80 DIM M% 24,P% 32,B% 16
+90 PROCm(&10000,0,0,&10000,100*256,100*256):SYS "XOS_SpriteOp",256+56,A%,"e",0,0,0,M%,0
+100 PROCm(&20000,0,0,&18000,200*256,100*256):SYS "XOS_SpriteOp",256+56,A%,"e",0,0,0,M%,0
+110 PROCm(0,&10000,-&10000,0,400*256,100*256):SYS "XOS_SpriteOp",256+56,A%,"e",0,0,0,M%,0
+120 PROCm(&10000,0,&8000,&10000,500*256,100*256):SYS "XOS_SpriteOp",256+56,A%,"e",0,0,8,M%,0
+130 PROCm(-&10000,0,0,&10000,700*256,100*256):SYS "XOS_SpriteOp",256+56,A%,"e",0,0,0,M%,0
+140 PROCm(&B505,&B505,-&B505,&B505,900*256,100*256):SYS "XOS_SpriteOp",256+56,A%,"e",0,0,0,M%,0
+150 P%!0=100*256:P%!4=330*256:P%!8=124*256:P%!12=330*256:P%!16=124*256:P%!20=314*256:P%!24=100*256:P%!28=314*256
+160 SYS "XOS_SpriteOp",256+56,A%,"e",1,0,0,P%,0
+170 B%!0=1:B%!4=1:B%!8=4:B%!12=3
+180 PROCm(&20000,0,0,&20000,300*256,300*256):SYS "XOS_SpriteOp",256+56,A%,"e",2,B%,0,M%,0
+190 GCOL 0,128+17:SYS "XOS_SpriteOp",256+55,A%,"e",0,0,0,0
+200 PROCm(&30000,0,0,&10000,500*256,300*256):SYS "XOS_SpriteOp",256+55,A%,"e",0,0,0,M%
+210 PROCm(&20000,0,0,&20000,700*256,300*256):SYS "XOS_SpriteOp",256+56,A%,"f",0,0,0,M%,0
+220 PROCm(&10000,0,0,&10000,100*256,500*256):SYS "XOS_SpriteOp",256+56,A%,"h",0,0,0,M%,0
+230 PROCm(&28000,0,0,&28000,300*256,500*256):SYS "XOS_SpriteOp",256+56,A%,"h",0,0,8,M%,0
+240 PROCm(&10000,0,0,&10000,-3*256,500*256):SYS "XOS_SpriteOp",256+56,A%,"e",0,0,0,M%,0
+250 GOTO 9000
+260 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+270 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+280 DEFPROCm(a%,b%,c%,d%,e%,f%):M%!0=a%:M%!4=b%:M%!8=c%:M%!12=d%:M%!16=e%:M%!20=f%:ENDPROC
+
+case sprite_screen_save
+10 PROCmode(28)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16:SYS "XOS_SpriteOp",256+9,A%
+30 SYS "XOS_SpriteOp",256+15,A%,"e",0,6,4,28:PROCf("e",3):SYS "XOS_SpriteOp",256+29,A%,"e":SYS "XOS_SpriteOp",256+44,A%,"e",0,0,0:SYS "XOS_SpriteOp",256+44,A%,"e",5,3,0
+40 SYS "XOS_SpriteOp",256+15,A%,"f",0,5,3,12:PROCf("f",1):SYS "XOS_SpriteOp",256+29,A%,"f":SYS "XOS_SpriteOp",256+44,A%,"f",2,1,0
+50 SYS "XOS_SpriteOp",256+15,A%,"g",0,3,2,&301680B5:PROCf("g",&40302):SYS "XOS_SpriteOp",256+29,A%,"g":SYS "XOS_SpriteOp",256+44,A%,"g",1,0,0
+60 SYS "XOS_SpriteOp",256+15,A%,"h",0,10,3,&81680B5:PROCf("h",0):SYS "XOS_SpriteOp",256+29,A%,"h":SYS "XOS_SpriteOp",256+44,A%,"h",4,1,0
+70 SYS "XOS_SpriteOp",256+15,A%,"i",0,4,4,&201680B5:PROCf("i",&21):SYS "XOS_SpriteOp",256+29,A%,"i":SYS "XOS_SpriteOp",256+44,A%,"i",3,3,0
+80 FOR i%=0 TO 15:GCOL i%*4:RECTANGLE FILL i%*40,0,39,60:NEXT
+90 SYS "XOS_SpriteOp",2,,"HostFS:$.SprScr",1 TO r0%;f%:PROCr("save",FNe(r0%,f%))
+100 SYS "OS_File",5,"HostFS:$.SprScr" TO c%,,l%,,k%:PROCr("object",c%):PROCr("type",l%>>>8 AND &FFF)
+110 CLG:VDU 19,1,16,255,0,0
+120 SYS "XOS_SpriteOp",3,,"HostFS:$.SprScr" TO r0%;f%:PROCr("load",FNe(r0%,f%))
+130 SYS "OS_ReadPalette",1,16 TO ,,c%:PROCr("palette 1",c%)
+140 SYS "OS_File",6,"HostFS:$.SprScr"
+150 SYS "XOS_ChangeDynamicArea",3,4096
+160 SYS "XOS_SpriteOp",256+16,0,"7",0,0,0,31,15:SYS "XOS_SpriteOp",256+16,A%,"x",0,0,0,31,15
+170 MOVE 0,0:MOVE 31,15:VDU 23,27,1,7;0;0;0;
+180 VDU 23,27,0,7;0;0;0;
+190 MOVE 600,500:PLOT &ED,600,500:PLOT &E9,40,40:PLOT &EE,0,0:PLOT &EF,10,10:PLOT &E8,0,0:PLOT &EC,20,20
+200 SYS "XOS_SpriteOp",25,,"7" TO r0%;f%:PROCr("delete 7",FNe(r0%,f%))
+210 SYS "XOS_ChangeDynamicArea",3,-4096
+220 GOTO 9000
+230 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+240 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+
+case sprite_system
+10 PROCmode(25)
+20 SYS "OS_Byte",163,242,65 TO ,c%,k%:PROCr("65",c%):PROCr(" size",k%)
+30 SYS "OS_Byte",163,242,66 TO ,c%,k%:PROCr("66",c%):PROCr(" h",k%)
+40 SYS "XOS_SpriteOp",8 TO r0%;f%:PROCr("read",FNe(r0%,f%))
+50 SYS "XOS_SpriteOp",15,,"1",0,16,16,25 TO r0%;f%:PROCr("create none",FNe(r0%,f%))
+60 SYS "XOS_SpriteOp",24,,"1" TO r0%;f%:PROCr("select none",FNe(r0%,f%))
+70 SYS "XOS_ChangeDynamicArea",3,4096 TO r0%,c%;f%:PROCr("grow",FNe(r0%,f%)):PROCr(" by",c%)
+80 SYS "OS_ReadDynamicArea",3 TO ,c%:PROCr(" da",c%)
+90 SYS "XOS_SpriteOp",8 TO r0%,,c%,k%,x%,l%;f%:PROCr("read",FNe(r0%,f%)):PROCr(" size",c%):PROCr(" count",k%):PROCr(" first",x%):PROCr(" free",l%)
+100 SYS "OS_Byte",163,242,65 TO ,c%,k%:PROCr("65",c%):PROCr(" size",k%)
+110 SYS "XOS_SpriteOp",15,,"1",0,16,16,25 TO r0%;f%:PROCr("create",FNe(r0%,f%))
+120 VDU 23,27,0,1;0;0;0;
+130 SYS "OS_Byte",163,242,66 TO ,c%,k%:PROCr("66",c%):PROCr(" h",k%)
+140 VDU 23,27,0,7;0;0;0;
+150 SYS "OS_Byte",163,242,66 TO ,c%,k%:PROCr("66 missing",c%):PROCr(" h",k%)
+160 MOVE 0,0:MOVE 95,31:VDU 23,27,1,2;0;0;0;
+170 SYS "OS_Byte",163,242,66 TO ,c%,k%:PROCr("66 got",c%):PROCr(" h",k%)
+180 SYS "XOS_SpriteOp",40,,"2" TO r0%,,,w%,c%;f%:PROCr("info 2",FNe(r0%,f%)):PROCr(" w",w%):PROCr(" h",c%)
+190 VDU 23,27,2,1;0;0;0;:VDU 23,27,255,1;0;0;0;
+200 SYS "OS_Byte",163,242,66 TO ,c%,k%:PROCr("66 ignored",c%):PROCr(" h",k%)
+210 SYS "XOS_SpriteOp",25,,"2" TO r0%;f%:PROCr("delete 2",FNe(r0%,f%))
+220 SYS "OS_Byte",163,242,66 TO ,c%,k%:PROCr("66 deleted",c%):PROCr(" h",k%)
+230 SYS "XOS_SpriteOp",24,,"1" TO r0%,,c%;f%:PROCr("select 1",FNe(r0%,f%)):PROCr(" r2",c%=0)
+240 SYS "OS_Byte",163,242,66 TO ,c%,k%:PROCr("66 selected",c%):PROCr(" h",k%)
+250 SYS "XOS_SpriteOp",26,,"1","3" TO r0%;f%:PROCr("rename 1",FNe(r0%,f%))
+260 SYS "OS_Byte",163,242,66 TO ,c%,k%:PROCr("66 renamed",c%):PROCr(" h",k%)
+270 SYS "XOS_SpriteOp",15,,"9",0,256,256,28 TO r0%;f%:PROCr("too big",FNe(r0%,f%))
+280 SYS "OS_ReadDynamicArea",3 TO ,c%:PROCr(" da",c%)
+290 SYS "XOS_SpriteOp",8 TO r0%,,c%,k%,x%,l%;f%:PROCr("read",FNe(r0%,f%)):PROCr(" size",c%):PROCr(" count",k%):PROCr(" first",x%):PROCr(" free",l%)
+300 SYS "XOS_SpriteOp",62,,"3" TO r0%,,,c%;f%:PROCr("save size",FNe(r0%,f%)):PROCr(" r3",c%)
+310 SYS "XOS_SpriteOp",62,,0 TO r0%,,,c%;f%:PROCr("save size screen",FNe(r0%,f%)):PROCr(" r3",c%)
+320 SYS "XOS_SpriteOp",9 TO r0%;f%:PROCr("init",FNe(r0%,f%))
+330 SYS "OS_Byte",163,242,66 TO ,c%,k%:PROCr("66 init",c%):PROCr(" h",k%)
+340 SYS "XOS_SpriteOp",8 TO r0%,,c%,k%,x%,l%;f%:PROCr("read",FNe(r0%,f%)):PROCr(" size",c%):PROCr(" count",k%):PROCr(" first",x%):PROCr(" free",l%)
+350 SYS "XOS_ChangeDynamicArea",3,4096 TO r0%,c%;f%:PROCr("grow",FNe(r0%,f%)):PROCr(" by",c%)
+360 SYS "XOS_SpriteOp",15,,"x",0,4,1013,28 TO r0%;f%:PROCr("fill",FNe(r0%,f%))
+370 SYS "XOS_SpriteOp",8 TO r0%,,c%,k%,x%,l%;f%:PROCr("read",FNe(r0%,f%)):PROCr(" size",c%):PROCr(" count",k%):PROCr(" free",l%)
+380 SYS "XOS_ChangeDynamicArea",3,-4096 TO r0%,c%;f%:PROCr("shrink full",FNe(r0%,f%)):PROCr(" by",c%)
+390 SYS "OS_ReadDynamicArea",3 TO ,c%:PROCr(" da",c%)
+400 SYS "XOS_SpriteOp",25,,"x" TO r0%;f%:PROCr("delete x",FNe(r0%,f%))
+410 SYS "XOS_ChangeDynamicArea",3,-8192 TO r0%,c%;f%:PROCr("shrink emptied",FNe(r0%,f%)):PROCr(" by",c%)
+420 SYS "OS_ReadDynamicArea",3 TO ,c%:PROCr(" da",c%)
+430 SYS "XOS_SpriteOp",8 TO r0%,,c%,k%,x%,l%;f%:PROCr("read",FNe(r0%,f%)):PROCr(" size",c%):PROCr(" count",k%):PROCr(" free",l%)
+440 SYS "XOS_ChangeDynamicArea",3,4096 TO r0%,c%;f%:PROCr("grow",FNe(r0%,f%)):PROCr(" by",c%)
+450 SYS "XOS_SpriteOp",9 TO r0%;f%:PROCr("init",FNe(r0%,f%))
+460 SYS "XOS_ChangeDynamicArea",3,-4096 TO r0%,c%;f%:PROCr("shrink",FNe(r0%,f%)):PROCr(" by",c%)
+470 SYS "OS_ReadDynamicArea",3 TO ,c%:PROCr(" da",c%)
+480 SYS "OS_Byte",163,242,65 TO ,c%,k%:PROCr("65",c%):PROCr(" size",k%)
+
+case sprite_transformed_offsets
+10 PROCmode(28)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16:SYS "XOS_SpriteOp",256+9,A%
+30 SYS "XOS_SpriteOp",256+15,A%,"s",0,12,12,28
+40 FOR r%=0 TO 11:FOR x%=0 TO 11:A%?(60+12*r%+x%)=&40+x%+12*(11-r%):NEXT:NEXT
+50 DIM M% 24,P% 32,B% 16,S% 16
+60 PROCt(&10000,&0,&0,&10000,0,0,0):PROCt(&10000,&0,&0,&10000,1,64,0):PROCt(&10000,&0,&0,&10000,2,128,0):PROCt(&10000,&0,&0,&10000,3,192,0):PROCt(&10000,&0,&0,&10000,4,256,0)
+70 PROCt(&10000,&0,&0,&10000,5,320,0):PROCt(&10000,&0,&0,&10000,6,384,0):PROCt(&10000,&0,&0,&10000,7,448,0):PROCt(&10000,&0,&0,&10000,8,0,0):PROCt(&10000,&0,&0,&10000,9,0,64)
+80 PROCt(&10000,&0,&0,&10000,10,0,128):PROCt(&10000,&0,&0,&10000,11,0,192):PROCt(&10000,&0,&0,&10000,12,0,256):PROCt(&10000,&0,&0,&10000,13,0,320):PROCt(&10000,&0,&0,&10000,14,0,384)
+90 PROCt(&10000,&0,&0,&10000,15,0,448):PROCt(&FFFF0000,&0,&0,&10000,16,0,0):PROCt(&FFFF0000,&0,&0,&10000,17,64,0):PROCt(&FFFF0000,&0,&0,&10000,18,128,0):PROCt(&FFFF0000,&0,&0,&10000,19,192,0)
+100 PROCt(&FFFF0000,&0,&0,&10000,20,256,0):PROCt(&FFFF0000,&0,&0,&10000,21,320,0):PROCt(&FFFF0000,&0,&0,&10000,22,384,0):PROCt(&FFFF0000,&0,&0,&10000,23,448,0):PROCt(&FFFF0000,&0,&0,&10000,24,0,0)
+110 PROCt(&FFFF0000,&0,&0,&10000,25,0,64):PROCt(&FFFF0000,&0,&0,&10000,26,0,128):PROCt(&FFFF0000,&0,&0,&10000,27,0,192):PROCt(&FFFF0000,&0,&0,&10000,28,0,256):PROCt(&FFFF0000,&0,&0,&10000,29,0,320)
+120 PROCt(&FFFF0000,&0,&0,&10000,30,0,384):PROCt(&FFFF0000,&0,&0,&10000,31,0,448):PROCt(&10000,&0,&0,&FFFF0000,32,0,0):PROCt(&10000,&0,&0,&FFFF0000,33,64,0):PROCt(&10000,&0,&0,&FFFF0000,34,128,0)
+130 PROCt(&10000,&0,&0,&FFFF0000,35,192,0):PROCt(&10000,&0,&0,&FFFF0000,36,256,0):PROCt(&10000,&0,&0,&FFFF0000,37,320,0):PROCt(&10000,&0,&0,&FFFF0000,38,384,0):PROCt(&10000,&0,&0,&FFFF0000,39,448,0)
+140 PROCt(&10000,&0,&0,&FFFF0000,40,0,0):PROCt(&10000,&0,&0,&FFFF0000,41,0,64):PROCt(&10000,&0,&0,&FFFF0000,42,0,128):PROCt(&10000,&0,&0,&FFFF0000,43,0,192):PROCt(&10000,&0,&0,&FFFF0000,44,0,256)
+150 PROCt(&10000,&0,&0,&FFFF0000,45,0,320):PROCt(&10000,&0,&0,&FFFF0000,46,0,384):PROCt(&10000,&0,&0,&FFFF0000,47,0,448):PROCt(&0,&10000,&FFFF0000,&0,48,0,0):PROCt(&0,&10000,&FFFF0000,&0,49,64,0)
+160 PROCt(&0,&10000,&FFFF0000,&0,50,128,0):PROCt(&0,&10000,&FFFF0000,&0,51,192,0):PROCt(&0,&10000,&FFFF0000,&0,52,256,0):PROCt(&0,&10000,&FFFF0000,&0,53,320,0):PROCt(&0,&10000,&FFFF0000,&0,54,384,0)
+170 PROCt(&0,&10000,&FFFF0000,&0,55,448,0):PROCt(&0,&10000,&FFFF0000,&0,56,0,0):PROCt(&0,&10000,&FFFF0000,&0,57,0,64):PROCt(&0,&10000,&FFFF0000,&0,58,0,128):PROCt(&0,&10000,&FFFF0000,&0,59,0,192)
+180 PROCt(&0,&10000,&FFFF0000,&0,60,0,256):PROCt(&0,&10000,&FFFF0000,&0,61,0,320):PROCt(&0,&10000,&FFFF0000,&0,62,0,384):PROCt(&0,&10000,&FFFF0000,&0,63,0,448):PROCt(&0,&FFFF0000,&10000,&0,64,0,0)
+190 PROCt(&0,&FFFF0000,&10000,&0,65,64,0):PROCt(&0,&FFFF0000,&10000,&0,66,128,0):PROCt(&0,&FFFF0000,&10000,&0,67,192,0):PROCt(&0,&FFFF0000,&10000,&0,68,256,0):PROCt(&0,&FFFF0000,&10000,&0,69,320,0)
+200 PROCt(&0,&FFFF0000,&10000,&0,70,384,0):PROCt(&0,&FFFF0000,&10000,&0,71,448,0):PROCt(&0,&FFFF0000,&10000,&0,72,0,0):PROCt(&0,&FFFF0000,&10000,&0,73,0,64):PROCt(&0,&FFFF0000,&10000,&0,74,0,128)
+210 PROCt(&0,&FFFF0000,&10000,&0,75,0,192):PROCt(&0,&FFFF0000,&10000,&0,76,0,256):PROCt(&0,&FFFF0000,&10000,&0,77,0,320):PROCt(&0,&FFFF0000,&10000,&0,78,0,384):PROCt(&0,&FFFF0000,&10000,&0,79,0,448)
+220 PROCt(&10000,&0,&0,&10000,80,0,0):PROCt(&FFFF0000,&0,&0,&FFFF0000,81,0,0):PROCt(&10000,&0,&0,&10000,82,128,128):PROCt(&FFFF0000,&0,&0,&FFFF0000,83,128,128):PROCt(&10000,&0,&0,&10000,84,256,256)
+230 PROCt(&FFFF0000,&0,&0,&FFFF0000,85,256,256):PROCt(&10000,&0,&0,&10000,86,384,384):PROCt(&FFFF0000,&0,&0,&FFFF0000,87,384,384)
+240 GOTO 9000
+250 DEFPROCm(a%,b%,c%,d%,e%,f%):M%!0=a%:M%!4=b%:M%!8=c%:M%!12=d%:M%!16=e%:M%!20=f%:ENDPROC
+260 DEFPROCt(a%,b%,c%,d%,g%,o%,p%):PROCm(a%,b%,c%,d%,((g% MOD 16)*40+20)*512+o%,((g% DIV 16)*40+20)*512+p%):SYS "XOS_SpriteOp",256+56,A%,"s",0,0,0,M%,0:ENDPROC
+
+case sprite_transformed_shears
+10 PROCmode(28)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16:SYS "XOS_SpriteOp",256+9,A%
+30 SYS "XOS_SpriteOp",256+15,A%,"s",0,12,12,28
+40 FOR r%=0 TO 11:FOR x%=0 TO 11:A%?(60+12*r%+x%)=&40+x%+12*(11-r%):NEXT:NEXT
+50 DIM M% 24,P% 32,B% 16,S% 16
+60 PROCt(&10000,&0,&8000,&10000,0,0,0):PROCt(&10000,&0,&8000,&10000,1,128,0):PROCt(&10000,&0,&8000,&10000,2,256,0):PROCt(&10000,&0,&8000,&10000,3,0,128):PROCt(&10000,&0,&8000,&10000,4,0,256)
+70 PROCt(&10000,&0,&8000,&10000,5,256,256):PROCt(&10000,&0,&FFFF8000,&10000,6,0,0):PROCt(&10000,&0,&FFFF8000,&10000,7,128,0):PROCt(&10000,&0,&FFFF8000,&10000,8,256,0)
+80 PROCt(&10000,&0,&FFFF8000,&10000,9,0,128):PROCt(&10000,&0,&FFFF8000,&10000,10,0,256):PROCt(&10000,&0,&FFFF8000,&10000,11,256,256):PROCt(&10000,&0,&4000,&10000,12,0,0)
+90 PROCt(&10000,&0,&4000,&10000,13,128,0):PROCt(&10000,&0,&4000,&10000,14,256,0):PROCt(&10000,&0,&4000,&10000,15,0,128):PROCt(&10000,&0,&4000,&10000,16,0,256):PROCt(&10000,&0,&4000,&10000,17,256,256)
+100 PROCt(&10000,&0,&FFFFC000,&10000,18,0,0):PROCt(&10000,&0,&FFFFC000,&10000,19,128,0):PROCt(&10000,&0,&FFFFC000,&10000,20,256,0):PROCt(&10000,&0,&FFFFC000,&10000,21,0,128)
+110 PROCt(&10000,&0,&FFFFC000,&10000,22,0,256):PROCt(&10000,&0,&FFFFC000,&10000,23,256,256):PROCt(&18000,&0,&0,&18000,24,0,0):PROCt(&18000,&0,&0,&18000,25,128,128):PROCt(&18000,&0,&0,&18000,26,256,256)
+120 PROCt(&C000,&0,&0,&C000,27,0,0):PROCt(&C000,&0,&0,&C000,28,128,128):PROCt(&C000,&0,&0,&C000,29,256,256):PROCt(&14000,&0,&0,&14000,30,0,0):PROCt(&14000,&0,&0,&14000,31,128,128)
+130 PROCt(&14000,&0,&0,&14000,32,256,256):PROCt(&A000,&0,&0,&A000,33,0,0):PROCt(&A000,&0,&0,&A000,34,128,128):PROCt(&A000,&0,&0,&A000,35,256,256):PROCt(&18000,&0,&0,&10000,36,0,0)
+140 PROCt(&10000,&0,&0,&18000,37,0,0):PROCt(&FFFE8000,&0,&0,&10000,38,0,0):PROCt(&10000,&0,&0,&FFFE8000,39,0,0):PROCt(&18000,&0,&0,&10000,40,256,256):PROCt(&10000,&0,&0,&18000,41,256,256)
+150 PROCt(&FFFE8000,&0,&0,&10000,42,256,256):PROCt(&10000,&0,&0,&FFFE8000,43,256,256):PROCt(&0,&18000,&FFFE8000,&0,44,0,0):PROCt(&0,&18000,&FFFE8000,&0,45,256,256)
+160 GOTO 9000
+170 DEFPROCm(a%,b%,c%,d%,e%,f%):M%!0=a%:M%!4=b%:M%!8=c%:M%!12=d%:M%!16=e%:M%!20=f%:ENDPROC
+180 DEFPROCt(a%,b%,c%,d%,g%,o%,p%):PROCm(a%,b%,c%,d%,((g% MOD 16)*40+20)*512+o%,((g% DIV 16)*40+20)*512+p%):SYS "XOS_SpriteOp",256+56,A%,"s",0,0,0,M%,0:ENDPROC
+
+case sprite_transformed_forms
+10 PROCmode(28)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16:SYS "XOS_SpriteOp",256+9,A%
+30 SYS "XOS_SpriteOp",256+15,A%,"s",0,12,12,28
+40 FOR r%=0 TO 11:FOR x%=0 TO 11:A%?(60+12*r%+x%)=&40+x%+12*(11-r%):NEXT:NEXT
+50 DIM M% 24,P% 32,B% 16,S% 16
+60 P%!0=&2800:P%!4=&4000:P%!8=&4000:P%!12=&4000:P%!16=&4000:P%!20=&2800:P%!24=&2800:P%!28=&2800:SYS "XOS_SpriteOp",256+56,A%,"s",1,0,0,P%,0
+70 P%!0=&7800:P%!4=&2800:P%!8=&9000:P%!12=&2800:P%!16=&9000:P%!20=&4000:P%!24=&7800:P%!28=&4000:SYS "XOS_SpriteOp",256+56,A%,"s",1,0,0,P%,0
+80 P%!0=&C800:P%!4=&4000:P%!8=&E000:P%!12=&4000:P%!16=&E800:P%!20=&2800:P%!24=&D000:P%!28=&2800:SYS "XOS_SpriteOp",256+56,A%,"s",1,0,0,P%,0
+90 P%!0=&13000:P%!4=&2800:P%!8=&11800:P%!12=&2800:P%!16=&11800:P%!20=&4000:P%!24=&13000:P%!28=&4000:SYS "XOS_SpriteOp",256+56,A%,"s",1,0,0,P%,0
+100 P%!0=&16800:P%!4=&5800:P%!8=&19800:P%!12=&5800:P%!16=&19800:P%!20=&2800:P%!24=&16800:P%!28=&2800:SYS "XOS_SpriteOp",256+56,A%,"s",1,0,0,P%,0
+110 B%!0=1:B%!4=1:B%!8=4:B%!12=3:PROCm(&10000,0,0,&10000,&1B800,&2800):SYS "XOS_SpriteOp",256+56,A%,"s",2,B%,0,M%,0
+120 B%!0=0:B%!4=0:B%!8=12:B%!12=12:PROCm(&10000,0,0,&10000,&20800,&2800):SYS "XOS_SpriteOp",256+56,A%,"s",2,B%,0,M%,0
+130 B%!0=2:B%!4=3:B%!8=10:B%!12=9:PROCm(&10000,0,0,&10000,&25800,&2800):SYS "XOS_SpriteOp",256+56,A%,"s",2,B%,0,M%,0
+140 B%!0=3:B%!4=3:B%!8=3:B%!12=8:PROCm(&10000,0,0,&10000,&2A800,&2800):SYS "XOS_SpriteOp",256+56,A%,"s",2,B%,0,M%,0
+150 B%!0=1:B%!4=1:B%!8=4:B%!12=3:PROCm(&20000,0,0,&20000,&34800,&2800):SYS "XOS_SpriteOp",256+56,A%,"s",2,B%,0,M%,0
+160 B%!0=1:B%!4=1:B%!8=4:B%!12=3:P%!0=&39800:P%!4=&2800:P%!8=&3AA00:P%!12=&2800:P%!16=&3AA00:P%!20=&3400:P%!24=&39800:P%!28=&3400:SYS "XOS_SpriteOp",256+56,A%,"s",3,B%,0,P%,0
+170 SYS "XOS_SpriteOp",256+29,A%,"s":FOR i%=0 TO 11:SYS "XOS_SpriteOp",256+44,A%,"s",i%,i%,0:SYS "XOS_SpriteOp",256+44,A%,"s",11-i%,i%,0:NEXT
+180 GCOL 0,128+17:PROCm(&18000,0,0,&10000,&3E800,&2800):SYS "XOS_SpriteOp",256+55,A%,"s",0,0,0,M%
+190 PROCm(0,&10000,-&10000,0,&43800,&2800):SYS "XOS_SpriteOp",256+55,A%,"s",0,0,0,M%
+200 S%!0=3:S%!4=2:S%!8=2:S%!12=1:SYS "XOS_SpriteOp",256+50,A%,"s",1148,28,0,S%
+210 GCOL 0,5:S%!0=5:S%!4=3:S%!8=2:S%!12=1:SYS "XOS_SpriteOp",256+51,ASC"A",0,1228,28,0,S%
+220 PROCm(&10000,0,0,&10000,&2800,&7800):SYS "XOS_SpriteOp",256+56,A%,"s",0,0,8,M%,0
+230 VDU 29,400;200;:PROCm(&10000,0,0,&10000,0,0):SYS "XOS_SpriteOp",256+56,A%,"s",0,0,0,M%,0
+240 P%!0=60*256:P%!4=24*256:P%!8=84*256:P%!12=24*256:P%!16=84*256:P%!20=0:P%!24=60*256:P%!28=0:SYS "XOS_SpriteOp",256+56,A%,"s",1,0,0,P%,0
+250 SYS "XOS_SpriteOp",256+52,A%,"s",120,0,0,0,0:VDU 29,0;0;
+260 PROCm(&10000,&10000,&10000,&10000,500*256,400*256)
+270 SYS "XOS_SpriteOp",256+56,A%,"s",0,0,0,M%,0 TO r0%;f%:PROCr("singular",FNe(r0%,f%))
+280 GOTO 9000
+290 DEFPROCm(a%,b%,c%,d%,e%,f%):M%!0=a%:M%!4=b%:M%!8=c%:M%!12=d%:M%!16=e%:M%!20=f%:ENDPROC
+300 DEFPROCt(a%,b%,c%,d%,g%,o%,p%):PROCm(a%,b%,c%,d%,((g% MOD 16)*40+20)*512+o%,((g% DIV 16)*40+20)*512+p%):SYS "XOS_SpriteOp",256+56,A%,"s",0,0,0,M%,0:ENDPROC
+
+case sprite_alpha_sweep
+10 DIM Q% 64:Q%!0=1:Q%!4=640:Q%!8=480:Q%!12=5:Q%!16=-1:Q%!20=-1:PROCscreen(Q%)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16:SYS "XOS_SpriteOp",256+9,A%
+30 DIM S% 16:S%!0=1:S%!4=1:S%!8=1:S%!12=1:DIM T% 1024:DIM V% 16
+40 V%!0=148:V%!4=6:V%!8=-1:SYS "OS_ReadVduVariables",V%,V%:B%=V%!0:L%=V%!4
+50 FOR y%=0 TO 479:FOR x%=320 TO 639:B%!(y%*L%+x%*4)=&808080:NEXT:NEXT
+60 SYS "XOS_SpriteOp",256+15,A%,"w",0,16,16,&301680B5:SYS "XOS_SpriteOp",256+29,A%,"w":SYS "XOS_SpriteOp",256+38,A%,"w",&80000000
+70 SYS "XOS_SpriteOp",256+15,A%,"v",0,16,16,&301680B5:SYS "XOS_SpriteOp",256+29,A%,"v":SYS "XOS_SpriteOp",256+38,A%,"v",&80000000
+80 FOR y%=0 TO 15:FOR x%=0 TO 15:SYS "XOS_SpriteOp",256+42,A%,"w",x%,y%,&FFFFFF,0:SYS "XOS_SpriteOp",256+42,A%,"v",x%,y%,&404040,0:NEXT:NEXT
+90 FOR y%=0 TO 15:FOR x%=0 TO 15:SYS "XOS_SpriteOp",256+44,A%,"w",x%,y%,x%+16*y%:SYS "XOS_SpriteOp",256+44,A%,"v",x%,y%,x%+16*y%:NEXT:NEXT
+100 SYS "XOS_SpriteOp",256+52,A%,"w",16,16,&8,S%,0:SYS "XOS_SpriteOp",256+52,A%,"w",62,16,&0,S%,0:SYS "XOS_SpriteOp",256+52,A%,"w",108,16,&4008,S%,0:SYS "XOS_SpriteOp",256+52,A%,"w",154,16,&4000,S%,0
+110 SYS "XOS_SpriteOp",256+52,A%,"w",200,16,&8008,S%,0:SYS "XOS_SpriteOp",256+52,A%,"w",246,16,&8000,S%,0:SYS "XOS_SpriteOp",256+52,A%,"w",292,16,&C008,S%,0
+120 SYS "XOS_SpriteOp",256+52,A%,"w",338,16,&C000,S%,0:SYS "XOS_SpriteOp",256+52,A%,"w",384,16,&FF08,S%,0:SYS "XOS_SpriteOp",256+52,A%,"w",430,16,&FF00,S%,0:SYS "XOS_SpriteOp",256+52,A%,"v",476,16,&8,S%,0
+130 SYS "XOS_SpriteOp",256+52,A%,"v",522,16,&0,S%,0:SYS "XOS_SpriteOp",256+52,A%,"v",568,16,&4008,S%,0:SYS "XOS_SpriteOp",256+52,A%,"v",16,56,&4000,S%,0:SYS "XOS_SpriteOp",256+52,A%,"v",62,56,&8008,S%,0
+140 SYS "XOS_SpriteOp",256+52,A%,"v",108,56,&8000,S%,0:SYS "XOS_SpriteOp",256+52,A%,"v",154,56,&C008,S%,0:SYS "XOS_SpriteOp",256+52,A%,"v",200,56,&C000,S%,0
+150 SYS "XOS_SpriteOp",256+52,A%,"v",246,56,&FF08,S%,0:SYS "XOS_SpriteOp",256+52,A%,"v",292,56,&FF00,S%,0:SYS "XOS_SpriteOp",256+52,A%,"w",656,16,&8,S%,0:SYS "XOS_SpriteOp",256+52,A%,"w",702,16,&0,S%,0
+160 SYS "XOS_SpriteOp",256+52,A%,"w",748,16,&4008,S%,0:SYS "XOS_SpriteOp",256+52,A%,"w",794,16,&4000,S%,0:SYS "XOS_SpriteOp",256+52,A%,"w",840,16,&8008,S%,0
+170 SYS "XOS_SpriteOp",256+52,A%,"w",886,16,&8000,S%,0:SYS "XOS_SpriteOp",256+52,A%,"w",932,16,&C008,S%,0:SYS "XOS_SpriteOp",256+52,A%,"w",978,16,&C000,S%,0
+180 SYS "XOS_SpriteOp",256+52,A%,"w",1024,16,&FF08,S%,0:SYS "XOS_SpriteOp",256+52,A%,"w",1070,16,&FF00,S%,0:SYS "XOS_SpriteOp",256+52,A%,"v",1116,16,&8,S%,0
+190 SYS "XOS_SpriteOp",256+52,A%,"v",1162,16,&0,S%,0:SYS "XOS_SpriteOp",256+52,A%,"v",1208,16,&4008,S%,0:SYS "XOS_SpriteOp",256+52,A%,"v",656,56,&4000,S%,0
+200 SYS "XOS_SpriteOp",256+52,A%,"v",702,56,&8008,S%,0:SYS "XOS_SpriteOp",256+52,A%,"v",748,56,&8000,S%,0:SYS "XOS_SpriteOp",256+52,A%,"v",794,56,&C008,S%,0
+210 SYS "XOS_SpriteOp",256+52,A%,"v",840,56,&C000,S%,0:SYS "XOS_SpriteOp",256+52,A%,"v",886,56,&FF08,S%,0:SYS "XOS_SpriteOp",256+52,A%,"v",932,56,&FF00,S%,0
+220 SYS "XOS_SpriteOp",256+15,A%,"b",0,16,16,28:FOR r%=0 TO 15:FOR x%=0 TO 15:A%?(FNo+44+16*r%+x%)=r%*16+x%:NEXT:NEXT
+230 FOR i%=0 TO 255:T%!(4*i%)=i%*&10101:NEXT
+240 SYS "XOS_SpriteOp",256+52,A%,"b",40,200,&20,S%,T%
+250 SYS "XOS_SpriteOp",256+52,A%,"b",120,200,0,S%,T%
+260 SYS "XOS_SpriteOp",256+15,A%,"c",0,16,16,&201680B5:FOR r%=0 TO 15:FOR x%=0 TO 15:A%?(FNo+44+16*r%+x%)=r%*16+x%:NEXT:NEXT
+270 SYS "XOS_SpriteOp",256+52,A%,"c",200,200,&20,S%,T%
+280 SYS "XOS_SpriteOp",256+52,A%,"c",280,200,0,S%,T%
+290 SYS "XOS_SpriteOp",256+37,A%,"b",1:SYS "XOS_SpriteOp",256+52,A%,"b",360,200,&10,S%,T%
+300 SYS "XOS_SpriteOp",256+34,A%,"w",440,200,8 TO r0%;f%:PROCr("wide put",FNe(r0%,f%))
+310 SYS "XOS_SpriteOp",256+34,A%,"w",500,200,0 TO r0%;f%:PROCr("wide put plain",FNe(r0%,f%))
+320 SYS "XOS_SpriteOp",256+49,A%,"w",560,200 TO r0%;f%:PROCr("wide mask",FNe(r0%,f%))
+330 MOVE 620,200:SYS "XOS_SpriteOp",256+48,A%,"w" TO r0%;f%:PROCr("wide mask cursor",FNe(r0%,f%))
+340 GOTO 9000
+350 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+360 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+370 DEFFNo:LOCAL o%,n%:o%=A%!8:n%=A%!4:WHILE n%>1:o%+=A%!o%:n%-=1:ENDWHILE:=o%
+
+case sprite_jpeg
+10 RESTORE:DIM B% 4096,C% 4096,M% 24,P% 32,S% 16:S%!0=2:S%!4=1:S%!8=1:S%!12=1
+20 PROCw("J1",694,7)
+30 PROCw("J2",383,4)
+40 PROCw("J8",1035,11)
+50 SYS "OS_File",255,"HostFS:$.J1",B% TO ,,,,L%
+60 FOR i%=0 TO L%-1:C%?i%=B%?i%:NEXT:C%?13=1:C%?15=72:C%?17=72:SYS "OS_File",10,"HostFS:$.J3",&C85,,C%,C%+L%
+70 C%?13=2:C%?15=118:C%?17=118:SYS "OS_File",10,"HostFS:$.J4",&C85,,C%,C%+L%
+80 C%?13=0:C%?15=1:C%?17=2:SYS "OS_File",10,"HostFS:$.J9",&C85,,C%,C%+L%
+90 C%?2=B%?0:C%?3=B%?1:FOR i%=20 TO L%-1:C%?(i%-16)=B%?i%:NEXT:SYS "OS_File",10,"HostFS:$.J5",&C85,,C%+2,C%+L%-16
+100 SYS "OS_File",10,"HostFS:$.J6",&C85,,B%,B%+L% DIV 2
+110 $C%="hello, not a jpeg":SYS "OS_File",10,"HostFS:$.J7",&C85,,C%,C%+17
+120 SYS "XJPEG_FileInfo",3,"HostFS:$.J1" TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("file J1",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+130 SYS "XJPEG_FileInfo",3,"HostFS:$.J2" TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("file J2",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+140 SYS "XJPEG_FileInfo",3,"HostFS:$.J3" TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("file J3",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+150 SYS "XJPEG_FileInfo",3,"HostFS:$.J4" TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("file J4",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+160 SYS "XJPEG_FileInfo",3,"HostFS:$.J5" TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("file J5",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+170 SYS "XJPEG_FileInfo",3,"HostFS:$.J6" TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("file J6",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+180 SYS "XJPEG_FileInfo",3,"HostFS:$.J7" TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("file J7",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+190 SYS "XJPEG_FileInfo",3,"HostFS:$.J8" TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("file J8",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+200 SYS "XJPEG_FileInfo",3,"HostFS:$.J9" TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("file J9",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+210 SYS "XJPEG_FileInfo",3,"HostFS:$.Nowhere" TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("file missing",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+220 SYS "XJPEG_Info",0,B%,L% TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("mem 0",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+230 SYS "XJPEG_Info",1,B%,L% TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("mem 1",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+240 SYS "XJPEG_Info",2,B%,L% TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("mem 2",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+250 SYS "XJPEG_Info",3,B%,L% TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("mem 3",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+260 SYS "XJPEG_Info",4,B%,L% TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("mem 4",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+270 SYS "XJPEG_Info",3,B%,40 TO r0%,,c%,k%,x%,l%,m%;f%:PROCr("mem short",FNe(r0%,f%)):IF (f% AND 1)=0 THEN PROCr(" r0",r0%):PROCr(" w",c%):PROCr(" h",k%):PROCr(" dx",x%):PROCr(" dy",l%):PROCr(" ws",m%)
+280 PROCmode(28)
+290 SYS "XJPEG_PlotScaled",B%,40,40,0,L%,0 TO r0%;f%:PROCr("plot",FNe(r0%,f%))
+300 SYS "XJPEG_PlotScaled",B%,100,40,S%,L%,0 TO r0%;f%:PROCr("plot x2",FNe(r0%,f%))
+310 SYS "XJPEG_PlotScaled",B%,200,40,0,L%,&800 TO r0%;f%:PROCr("plot trans",FNe(r0%,f%))
+320 SYS "XJPEG_PlotFileScaled","HostFS:$.J2",40,200,0,0 TO r0%;f%:PROCr("plot file",FNe(r0%,f%))
+330 SYS "XJPEG_PlotFileScaled","HostFS:$.J7",200,200,0,0 TO r0%;f%:PROCr("plot file bad",FNe(r0%,f%))
+340 SYS "XJPEG_PlotScaled",B%,260,200,0,40,0 TO r0%;f%:PROCr("plot short",FNe(r0%,f%))
+350 M%!0=&10000:M%!4=0:M%!8=0:M%!12=&10000:M%!16=400*256:M%!20=40*256
+360 SYS "XJPEG_PlotTransformed",B%,0,M%,L% TO r0%;f%:PROCr("tm matrix",FNe(r0%,f%))
+370 SYS "XJPEG_PlotTransformed",B%,1,M%,L% TO r0%;f%:PROCr("tm matrix as points",FNe(r0%,f%))
+380 M%!0=&20000:M%!16=520*256
+390 SYS "XJPEG_PlotTransformed",B%,0,M%,L% TO r0%;f%:PROCr("tm x2",FNe(r0%,f%))
+400 M%!0=0:M%!4=&10000:M%!8=-&10000:M%!12=0:M%!16=640*256
+410 SYS "XJPEG_PlotTransformed",B%,0,M%,L% TO r0%;f%:PROCr("tm turned",FNe(r0%,f%))
+420 P%!0=700*256:P%!4=72*256:P%!8=732*256:P%!12=72*256:P%!16=732*256:P%!20=40*256:P%!24=700*256:P%!28=40*256
+430 SYS "XJPEG_PlotTransformed",B%,1,P%,L% TO r0%;f%:PROCr("tm points",FNe(r0%,f%))
+440 P%!4=40*256:P%!12=40*256:P%!20=72*256:P%!28=72*256
+450 SYS "XJPEG_PlotTransformed",B%,1,P%,L% TO r0%;f%:PROCr("tm points flipped",FNe(r0%,f%))
+460 M%!0=&10000:M%!4=0:M%!8=0:M%!12=&10000:M%!16=820*256:M%!20=40*256
+470 SYS "XJPEG_PlotFileTransformed","HostFS:$.J1",0,M% TO r0%;f%:PROCr("tm file",FNe(r0%,f%))
+480 SYS "XJPEG_PDriverIntercept",0 TO r0%;f%:PROCr("intercept",FNe(r0%,f%))
+490 SYS "XJPEG_PDriverIntercept",2 TO r0%;f%:PROCr("intercept 2",FNe(r0%,f%)):PROCr(" was",r0%)
+500 SYS "XJPEG_PDriverIntercept",0 TO r0%;f%:PROCr("intercept 0",FNe(r0%,f%)):PROCr(" was",r0%)
+510 CLG
+520 FOR i%=1 TO 9:SYS "XOS_File",6,"HostFS:$.J"+STR$i%:NEXT
+530 GOTO 9000
+540 DEFPROCw(n$,l%,c%):LOCAL i%,j%,a$:j%=0:FOR i%=1 TO c%:READ a$
+550 WHILE LEN(a$)>0:B%?j%=EVAL("&"+LEFT$(a$,2)):a$=MID$(a$,3):j%+=1:ENDWHILE:NEXT
+560 SYS "OS_File",10,"HostFS:$."+n$,&C85,,B%,B%+l%:ENDPROC
+570 DATA FFD8FFE000104A46494600010100000100010000FFDB0084000302020302020303030304030304050805050404050A070706080C0A0C0C0B0A0B0B0D0E12100D0E110E0B0B1016101113141515150C0F1718161418121415140103040405040509050509
+580 DATA 140D0B0D1414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414FFC00011080010001003011100021101031101FFC401A20000010501010101010100000000000000000102030405
+590 DATA 060708090A0B100002010303020403050504040000017D01020300041105122131410613516107227114328191A1082342B1C11552D1F02433627282090A161718191A25262728292A3435363738393A434445464748494A535455565758595A63646566
+600 DATA 6768696A737475767778797A838485868788898A92939495969798999AA2A3A4A5A6A7A8A9AAB2B3B4B5B6B7B8B9BAC2C3C4C5C6C7C8C9CAD2D3D4D5D6D7D8D9DAE1E2E3E4E5E6E7E8E9EAF1F2F3F4F5F6F7F8F9FA010003010101010101010101000000
+610 DATA 0000000102030405060708090A0B1100020102040403040705040400010277000102031104052131061241510761711322328108144291A1B1C109233352F0156272D10A162434E125F11718191A262728292A35363738393A434445464748494A535455
+620 DATA 565758595A636465666768696A737475767778797A82838485868788898A92939495969798999AA2A3A4A5A6A7A8A9AAB2B3B4B5B6B7B8B9BAC2C3C4C5C6C7C8C9CAD2D3D4D5D6D7D8D9DAE2E3E4E5E6E7E8E9EAF2F3F4F5F6F7F8F9FAFFDA000C030100
+630 DATA 02110311003F00F91FC11F073FD5FEE3F4ACA9571F0DF11FC3EF1F407827E0E7FABFDC7E95ECD2AE7F53F0DF11FC3EF1ED3E08F8383F77FB8FD2BE0E9573FCB2E1BE23F87DE3E80F047C1C1FBBFDC7E95ECD2AE7F5470DF11FC3EF1FFFD9
+640 DATA FFD8FFE000104A46494600010100000100010000FFDB0043000302020302020303030304030304050805050404050A070706080C0A0C0C0B0A0B0B0D0E12100D0E110E0B0B1016101113141515150C0F171816141812141514FFC0000B08000800100101
+650 DATA 1100FFC400D20000010501010101010100000000000000000102030405060708090A0B100002010303020403050504040000017D01020300041105122131410613516107227114328191A1082342B1C11552D1F02433627282090A161718191A25262728
+660 DATA 292A3435363738393A434445464748494A535455565758595A636465666768696A737475767778797A838485868788898A92939495969798999AA2A3A4A5A6A7A8A9AAB2B3B4B5B6B7B8B9BAC2C3C4C5C6C7C8C9CAD2D3D4D5D6D7D8D9DAE1E2E3E4E5E6
+670 DATA E7E8E9EAF1F2F3F4F5F6F7F8F9FAFFDA0008010100003F00F0AFD9B7E1B7FC7AFEEBD3B57DABF163E21FFC3317ECE1AC78AACCF95E24BCDBA4683F26717F32B6C9398DD3F74892CFB641B5FC9D8482E2BFFFD9
+680 DATA FFD8FFE000104A46494600010100000100010000FFDB0084000302020302020303030304030304050805050404050A070706080C0A0C0C0B0A0B0B0D0E12100D0E110E0B0B1016101113141515150C0F1718161418121415140103040405040509050509
+690 DATA 140D0B0D1414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414141414FFC00011080018002803011100021101031101FFC401A20000010501010101010100000000000000000102030405
+700 DATA 060708090A0B100002010303020403050504040000017D01020300041105122131410613516107227114328191A1082342B1C11552D1F02433627282090A161718191A25262728292A3435363738393A434445464748494A535455565758595A63646566
+710 DATA 6768696A737475767778797A838485868788898A92939495969798999AA2A3A4A5A6A7A8A9AAB2B3B4B5B6B7B8B9BAC2C3C4C5C6C7C8C9CAD2D3D4D5D6D7D8D9DAE1E2E3E4E5E6E7E8E9EAF1F2F3F4F5F6F7F8F9FA010003010101010101010101000000
+720 DATA 0000000102030405060708090A0B1100020102040403040705040400010277000102031104052131061241510761711322328108144291A1B1C109233352F0156272D10A162434E125F11718191A262728292A35363738393A434445464748494A535455
+730 DATA 565758595A636465666768696A737475767778797A82838485868788898A92939495969798999AA2A3A4A5A6A7A8A9AAB2B3B4B5B6B7B8B9BAC2C3C4C5C6C7C8C9CAD2D3D4D5D6D7D8D9DAE2E3E4E5E6E7E8E9EAF2F3F4F5F6F7F8F9FAFFDA000C030100
+740 DATA 02110311003F00F82745F879F77F75FA57BF828EC78D83CE36D4EF745F879F77F75FA57DEE0A3B1F7183CE3CCEF745F879F77F75FA57DF60A3B1F7183CE36D4DB9FC3BE47FA2DAAFEF7A3C83F87D87BFF2FAF4FCA38F3C47FECFE7C93249FEFB6A9517D8
+750 DATA EF18BFE7FE697D8D97BF770FD4327C673DAA54DBA2EFFF0003F3F4DF4B45F879F77F75FA57F3E60A3B1FABE0F38DB52B68BF0EFEEFEEFF004AFD9B04B63FC77C1E71B6A77BA2FC3BFBBFBBFD2BEFB04B63EE3079C6DA9B73F873C8CDADAAFEF7A3C807DD
+760 DATA F61EFF00CBEBD3F27E3CF123FB3F9F24C927FBEDAA545F63BC62FF009FF9A5F6365EFDDC3F50C9F19CF6A951E9D177FF0081F9FA6FA3A27C3BFBBFBBFD2BF9F704B63F57C1E71B6A77DA2FC3BFBBFBBFD2BEFB04B63EE3079C6DA95B45F877F77F75FA57
+770 DATA ECB828EC7F8EF83CE36D4DB9FC3BF67CDADAA7EF7A49201F73D87BFF002FAF4FC9F8F3C47FECFE7C93249FEFB6A9517D8EF18BFE7FE697D8D97BF770FD4327C673DAA547A745DFFE07F5B6FA3A2FC3BFBBFBAFD2BF9F7051D8FD5F079C6DA9DF68BF0F3E
+780 DATA EFEEBF4AFBEC14763EE3079C6DA9DEE8BF0EFEEFEEBF4AFBEC12D8FB8C1E71B6A7FFD9
+
+case sprite_pointer
+10 PROCmode(28)
+20 DIM A% 65536:FOR i%=0 TO 65532 STEP 4:A%!i%=0:NEXT:!A%=65536:A%!8=16:SYS "XOS_SpriteOp",256+9,A%
+30 SYS "XOS_SpriteOp",256+15,A%,"p",1,8,8,1:PROCf("p",0)
+40 SYS "XOS_SpriteOp",256+15,A%,"q",1,8,8,12:PROCf("q",0)
+50 SYS "XOS_SpriteOp",256+15,A%,"d",0,8,8,&301680B5
+60 DIM T% 256:FOR i%=0 TO 255:T%?i%=i% AND 3:NEXT
+70 SYS "XOS_SpriteOp",256+36,A%,"p",1,0,0,0,0 TO r0%;f%:PROCr("ptr 2bpp",FNe(r0%,f%))
+80 FOR i%=1 TO 3:SYS "OS_ReadPalette",i%,25 TO ,,c%:PROCr(" ptr "+STR$i%,c%):NEXT
+90 SYS "XOS_SpriteOp",256+36,A%,"q",2,0,0,0,0 TO r0%;f%:PROCr("ptr 4bpp none",FNe(r0%,f%))
+100 SYS "XOS_SpriteOp",256+36,A%,"q",&22,0,0,0,T% TO r0%;f%:PROCr("ptr 4bpp table",FNe(r0%,f%))
+110 SYS "XOS_SpriteOp",256+36,A%,"d",3,0,0,0,0 TO r0%;f%:PROCr("ptr deep",FNe(r0%,f%))
+120 SYS "XOS_SpriteOp",256+36,A%,"d",3,0,0,0,T% TO r0%;f%:PROCr("ptr deep table",FNe(r0%,f%))
+130 SYS "XOS_SpriteOp",256+36,A%,"p",0,0,0,0,0 TO r0%;f%:PROCr("ptr shape 0",FNe(r0%,f%))
+140 SYS "XOS_SpriteOp",256+36,A%,"p",5,0,0,0,0 TO r0%;f%:PROCr("ptr shape 5",FNe(r0%,f%))
+150 SYS "XOS_SpriteOp",256+36,A%,"p",&71,0,0,0,0 TO r0%;f%:PROCr("ptr keep all",FNe(r0%,f%))
+160 SYS "OS_Byte",106,0
+170 SYS "XOS_SpriteOp",256+15,A%,"a",0,16,16,&A01680B5:SYS "XOS_SpriteOp",256+29,A%,"a"
+180 FOR y%=0 TO 15:FOR x%=0 TO 15:SYS "XOS_SpriteOp",256+42,A%,"a",x%,y%,x%+16*y% AND 63,0:SYS "XOS_SpriteOp",256+44,A%,"a",x%,y%,x%*16+y%:NEXT:NEXT
+190 GCOL 0,128+3:RECTANGLE FILL 0,200,1279,100
+200 SYS "XOS_SpriteOp",256+52,A%,"a",40,220,8,0,0 TO r0%;f%:PROCr("alpha 8bpp",FNe(r0%,f%))
+210 SYS "XOS_SpriteOp",256+52,A%,"a",160,220,&8000,0,0 TO r0%;f%:PROCr("trans 8bpp",FNe(r0%,f%))
+220 SYS "XOS_SpriteOp",256+34,A%,"a",220,220,8 TO r0%;f%:PROCr("alpha put",FNe(r0%,f%))
+230 SYS "XOS_SpriteOp",256+49,A%,"a",280,220 TO r0%;f%:PROCr("alpha mask",FNe(r0%,f%))
+240 CLG
+250 GOTO 9000
+260 DEFPROCf(s$,k%):LOCAL w%,h%,x%,y%:SYS "OS_SpriteOp",256+40,A%,s$ TO ,,,w%,h%
+270 FOR y%=0 TO h%-1:FOR x%=0 TO w%-1:SYS "OS_SpriteOp",256+42,A%,s$,x%,y%,x%+w%*y%+k%,0:NEXT:NEXT:ENDPROC
+
+case sprite_utils
+10 PROCmode(28)
+20 SYS "XOS_ChangeDynamicArea",3,8192
+30 SYS "XOS_CLI","SNew" TO r0%;f%:PROCr("snew",FNe(r0%,f%))
+40 SYS "OS_SpriteOp",15,,"a",0,8,8,28:SYS "OS_SpriteOp",15,,"bee",0,4,2,28:SYS "OS_SpriteOp",15,,"c12345678901",0,1,1,12
+50 SYS "XOS_CLI","SList { > HostFS:$.T }" TO r0%;f%:PROCr("slist",FNe(r0%,f%)):PROCl
+60 SYS "XOS_CLI","SInfo { > HostFS:$.T }" TO r0%;f%:PROCr("sinfo",FNe(r0%,f%)):PROCn
+70 SYS "XOS_CLI","SCopy a z" TO r0%;f%:PROCr("scopy",FNe(r0%,f%))
+80 SYS "XOS_CLI","SCopy a bee" TO r0%;f%:PROCr("scopy over",FNe(r0%,f%))
+90 SYS "XOS_CLI","SCopy nope y" TO r0%;f%:PROCr("scopy missing",FNe(r0%,f%))
+100 SYS "XOS_CLI","SCopy a" TO r0%;f%:PROCr("scopy one",FNe(r0%,f%))
+110 SYS "XOS_CLI","SRename z y" TO r0%;f%:PROCr("srename",FNe(r0%,f%))
+120 SYS "XOS_CLI","SRename y a" TO r0%;f%:PROCr("srename over",FNe(r0%,f%))
+130 SYS "XOS_CLI","SRename nope x" TO r0%;f%:PROCr("srename missing",FNe(r0%,f%))
+140 SYS "XOS_CLI","SList { > HostFS:$.T }" TO r0%;f%:PROCr("slist2",FNe(r0%,f%)):PROCl
+150 SYS "XOS_CLI","SFlipX bee" TO r0%;f%:PROCr("sflipx",FNe(r0%,f%))
+160 SYS "XOS_CLI","SFlipY bee" TO r0%;f%:PROCr("sflipy",FNe(r0%,f%))
+170 SYS "XOS_CLI","SFlipX nope" TO r0%;f%:PROCr("sflipx missing",FNe(r0%,f%))
+180 SYS "XOS_CLI","SChoose bee" TO r0%;f%:PROCr("schoose",FNe(r0%,f%))
+190 SYS "OS_Byte",163,242,66 TO ,c%,k%:PROCr(" selected",c%):PROCr(" h",k%)
+200 SYS "XOS_CLI","SChoose nope" TO r0%;f%:PROCr("schoose missing",FNe(r0%,f%))
+210 MOVE 0,0:MOVE 63,31
+220 SYS "XOS_CLI","SGet grab" TO r0%;f%:PROCr("sget",FNe(r0%,f%))
+230 SYS "OS_SpriteOp",40,,"grab" TO ,,,w%,c%:PROCr(" grab w",w%):PROCr(" grab h",c%)
+240 SYS "XOS_CLI","SDelete nope" TO r0%;f%:PROCr("sdelete missing",FNe(r0%,f%))
+250 SYS "XOS_CLI","SDelete y nope a" TO r0%;f%:PROCr("sdelete two",FNe(r0%,f%))
+260 SYS "XOS_CLI","SList { > HostFS:$.T }" TO r0%;f%:PROCr("slist3",FNe(r0%,f%)):PROCl
+270 SYS "XOS_CLI","SSave HostFS:$.SS" TO r0%;f%:PROCr("ssave",FNe(r0%,f%))
+280 SYS "XOS_CLI","SNew" TO r0%;f%:PROCr("snew2",FNe(r0%,f%))
+290 SYS "XOS_CLI","SInfo { > HostFS:$.T }" TO r0%;f%:PROCr("sinfo empty",FNe(r0%,f%)):PROCn
+300 SYS "XOS_CLI","SSave HostFS:$.SE" TO r0%;f%:PROCr("ssave empty",FNe(r0%,f%))
+310 SYS "XOS_CLI","SLoad HostFS:$.SS" TO r0%;f%:PROCr("sload",FNe(r0%,f%))
+320 SYS "XOS_CLI","SMerge HostFS:$.SS" TO r0%;f%:PROCr("smerge",FNe(r0%,f%))
+330 SYS "XOS_CLI","SList { > HostFS:$.T }" TO r0%;f%:PROCr("slist4",FNe(r0%,f%)):PROCl
+340 SYS "XOS_CLI","SLoad HostFS:$.Nowhere" TO r0%;f%:PROCr("sload missing",FNe(r0%,f%))
+350 SYS "XOS_CLI","ScreenSave HostFS:$.SC" TO r0%;f%:PROCr("screensave",FNe(r0%,f%))
+360 CLG
+370 SYS "XOS_CLI","ScreenLoad HostFS:$.SC" TO r0%;f%:PROCr("screenload",FNe(r0%,f%))
+380 SYS "XOS_CLI","SGet" TO r0%;f%:PROCr("sget noname",FNe(r0%,f%))
+390 SYS "XOS_CLI","SNew x" TO r0%;f%:PROCr("snew args",FNe(r0%,f%))
+400 SYS "XOS_File",6,"HostFS:$.SS":SYS "XOS_File",6,"HostFS:$.SC":SYS "XOS_File",6,"HostFS:$.T"
+410 SYS "XOS_CLI","SNew" TO r0%;f%:PROCr("snew end",FNe(r0%,f%))
+420 SYS "XOS_ChangeDynamicArea",3,-1000000
+430 GOTO 9000
+440 DEFPROCl:LOCAL F%,S$:F%=OPENIN"HostFS:$.T":IF F%=0 THEN ENDPROC
+450 WHILE NOT EOF#F%:S$=GET$#F%:IF S$<>"" THEN BPUT#R%,"> "+S$
+460 ENDWHILE:CLOSE#F%:ENDPROC
+470 DEFPROCn:LOCAL F%,S$,i%:F%=OPENIN"HostFS:$.T":IF F%=0 THEN ENDPROC
+480 WHILE NOT EOF#F%:S$=GET$#F%:i%=1:WHILE i%<=LEN(S$) AND INSTR("0123456789",MID$(S$,i%,1))=0:i%+=1:ENDWHILE
+490 IF i%<=LEN(S$) THEN PROCr("  figure",VAL(MID$(S$,i%)))
+500 ENDWHILE:CLOSE#F%:ENDPROC

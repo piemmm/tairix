@@ -234,7 +234,7 @@ impl Vdu {
     /// The pixels a text cell takes across and down, its glyph's lines and
     /// the cell's.
     fn cell_pixels(&self) -> (u32, u32, u32) {
-        let cell = self.screen.format.cell();
+        let cell = self.format().cell();
         (cell.size_x, cell.size_y, cell.space_y)
     }
 
@@ -430,14 +430,17 @@ impl Vdu {
         row: u32,
         c: u8,
     ) -> Result<(), Fail> {
-        if self.screen.format.has(Flags::TELETEXT) {
+        if self.format().has(Flags::TELETEXT) {
             return self.teletext_put(os, column, row, c);
         }
-        let format = self.screen.format;
+        if !self.format().has_cells() {
+            return Ok(());
+        }
+        let format = *self.format();
         let (fore, back) = self.colours.text_words(&format);
         let glyph = self.font.glyph(c).copied().unwrap_or([0; 8]);
         let (size_x, size_y, space_y) = self.cell_pixels();
-        let canvas = self.screen.canvas();
+        let canvas = self.canvas();
         let log2_bpc = format.log2_bpc();
         let bytes_across = (size_x << log2_bpc) / 8;
         let mut line = [0u8; 64];
@@ -466,14 +469,17 @@ impl Vdu {
         right: u32,
         bottom: u32,
     ) -> Result<(), Fail> {
-        if self.screen.format.has(Flags::TELETEXT) {
+        if !self.format().has_cells() {
+            return Ok(());
+        }
+        if self.format().has(Flags::TELETEXT) {
             return self.teletext_clear(os, left, top, right, bottom);
         }
-        let format = self.screen.format;
+        let format = *self.format();
         let (_, back) = self.colours.text_words(&format);
         let (size_x, size_y, space_y) = self.cell_pixels();
         let bytes_across = (size_x << format.log2_bpc()) / 8;
-        let canvas = self.screen.canvas();
+        let canvas = self.canvas();
         let (byte, length) = (left * bytes_across, (right - left + 1) * bytes_across);
         match gap_word(self, true, back) {
             Some(gap) if gap != back => {
@@ -513,7 +519,7 @@ impl Vdu {
         bottom: u32,
     ) -> Result<(), Fail> {
         let (size_x, _, space_y) = self.cell_pixels();
-        let height = self.screen.format.height();
+        let height = self.format().height();
         let rect = Rect {
             left: (left * size_x).cast_signed(),
             right: ((right + 1) * size_x - 1).cast_signed(),
@@ -531,16 +537,17 @@ impl Vdu {
         shift: Shift,
         screen: bool,
     ) -> Result<(), Fail> {
-        let format = self.screen.format;
+        let format = *self.format();
+        let (columns, rows) = format.cells();
         let whole = Window {
             left: 0,
             top: 0,
-            right: format.columns() - 1,
-            bottom: format.rows() - 1,
+            right: columns - 1,
+            bottom: rows - 1,
         };
         let window = if screen { whole } else { self.text.window };
         let full = window == whole && !self.text.windowed;
-        if full && matches!(shift, Shift::Up | Shift::Down) && self.screen.hardware_scrolls() {
+        if full && matches!(shift, Shift::Up | Shift::Down) && self.hardware_scrolls() {
             let (_, _, space_y) = self.cell_pixels();
             self.screen.hardware_scroll(shift == Shift::Up, space_y);
             let blank = if shift == Shift::Up {
@@ -563,13 +570,16 @@ impl Vdu {
         shift: Shift,
         count: u32,
     ) -> Result<(), Fail> {
-        if self.screen.format.has(Flags::TELETEXT) {
+        if self.format().has(Flags::TELETEXT) {
             return self.teletext_shift(os, window, shift, count);
         }
-        let format = self.screen.format;
+        if !self.format().has_cells() {
+            return Ok(());
+        }
+        let format = *self.format();
         let (size_x, _, space_y) = self.cell_pixels();
         let bytes_across = (size_x << format.log2_bpc()) / 8;
-        let canvas = self.screen.canvas();
+        let canvas = self.canvas();
         let columns = window.right - window.left + 1;
         let rows = window.bottom - window.top + 1;
         match shift {
@@ -663,16 +673,20 @@ impl Vdu {
                 }
             }
         };
-        let format = self.screen.format;
+        let format = *self.format();
+        let (columns, rows) = format.cells();
         let whole = Window {
             left: 0,
             top: 0,
-            right: format.columns() - 1,
-            bottom: format.rows() - 1,
+            right: columns - 1,
+            bottom: rows - 1,
         };
         let window = if extent == 0 { self.text.window } else { whole };
         if movement == 0 || matches!(shift, Shift::Up | Shift::Down) {
             return self.shift_cells(os, window, shift, 1);
+        }
+        if !format.has_cells() {
+            return Ok(());
         }
         self.shift_bytes(os, window, shift == Shift::Left)
     }
@@ -685,10 +699,10 @@ impl Vdu {
         window: Window,
         left_ward: bool,
     ) -> Result<(), Fail> {
-        let format = self.screen.format;
+        let format = *self.format();
         let (size_x, _, space_y) = self.cell_pixels();
         let bytes_across = (size_x << format.log2_bpc()) / 8;
-        let canvas = self.screen.canvas();
+        let canvas = self.canvas();
         let (_, back) = self.colours.text_words(&format);
         let top = window.top * space_y;
         let lines = (window.bottom - window.top + 1) * space_y;
@@ -762,10 +776,10 @@ impl Vdu {
     /// text background, matched to the soft character set; nought where none
     /// matches.
     pub(crate) fn read_char(&self, os: &mut Os<'_>, column: u32, row: u32) -> Result<u8, Fail> {
-        if self.screen.format.has(Flags::TELETEXT) {
+        if self.format().has(Flags::TELETEXT) {
             return Ok(self.teletext.char_at(column, row));
         }
-        let format = self.screen.format;
+        let format = *self.format();
         if column >= format.columns() || row >= format.rows() {
             return Ok(0);
         }
@@ -776,7 +790,7 @@ impl Vdu {
             (1 << (1 << format.log2_bpp())) - 1
         };
         let (size_x, size_y, space_y) = self.cell_pixels();
-        let canvas = self.screen.canvas();
+        let canvas = self.canvas();
         let step = if size_y > 8 { 2 } else { 1 };
         let mut glyph = [0u8; 8];
         let mut pixels = alloc::vec::Vec::new();
@@ -865,7 +879,7 @@ fn gap_word(vdu: &Vdu, gap: bool, back: u32) -> Option<u32> {
     if !gap {
         return None;
     }
-    let format = &vdu.screen.format;
+    let format = vdu.format();
     if format.has(Flags::BBC_GAP) {
         let pixel = crate::colour::Colours::text_pixel(format, &vdu.colours.text_back) | 2;
         return Some(crate::colour::replicate(format, pixel));

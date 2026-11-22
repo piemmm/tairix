@@ -60,6 +60,9 @@ pub const BLOCK: u8 = 0xB8;
 pub const ELLIPSE: u8 = 0xC0;
 /// A filled ellipse.
 pub const ELLIPSE_FILL: u8 = 0xC8;
+/// The sprite the system sprite area has selected, its bottom left at the
+/// point.
+pub const SPRITE: u8 = 0xE8;
 
 /// [`BLOCK`]'s colour bits that move the block, clearing where it was.
 pub const BLOCK_MOVE: u8 = 1;

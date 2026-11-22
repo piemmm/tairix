@@ -6,8 +6,6 @@
 //! and an incarnation that initialised but cannot be recorded for want of
 //! memory is finalised again rather than left running unrecorded.
 
-use alloc::vec::Vec;
-
 use super::header::{Field, BAD_FIELD};
 use super::squeeze::Unsqueezed;
 use super::{Incarnation, ModuleKey, Place, Shape};
@@ -369,13 +367,7 @@ impl Os<'_> {
         if shape.header.squeezed().is_none() {
             return Ok(());
         }
-        let mut squeezed = Vec::new();
-        let size = shape.header.size() as usize;
-        if squeezed.try_reserve_exact(size).is_err() {
-            return Err(self.no_memory());
-        }
-        squeezed.resize(size, 0);
-        self.read_bytes(shape.code, &mut squeezed)?;
+        let squeezed = self.read_vec(shape.code, shape.header.size() as usize)?;
         let most = self.memory.layout().rma.len();
         let expanded = match super::squeeze::unsqueeze(&squeezed, most) {
             Ok(expanded) => expanded,

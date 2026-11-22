@@ -85,13 +85,10 @@ pub(crate) fn word_21(os: &mut Os<'_>, reason: u8, block: u32) -> Result<(), Fai
             if !(1..=4).contains(&number) || width > MOST_WIDTH || height > MOST_HEIGHT {
                 return Ok(());
             }
-            let mut data = Vec::new();
-            let length = usize::from(width) * usize::from(height);
-            if data.try_reserve_exact(length).is_err() {
-                return Err(os.no_memory());
-            }
-            data.resize(length, 0);
-            os.read_bytes(u32::from_le_bytes([d0, d1, d2, d3]), &mut data)?;
+            let data = os.read_vec(
+                u32::from_le_bytes([d0, d1, d2, d3]),
+                usize::from(width) * usize::from(height),
+            )?;
             with(os, |vdu, _| {
                 vdu.pointer.shapes[usize::from(number - 1)] = Shape {
                     width,

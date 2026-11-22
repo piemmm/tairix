@@ -200,7 +200,10 @@ pub(crate) const KEYWORDS: [Keyword; 34] = [
     keyword("NoScroll", Kind::NoParm(SCROLL, 1)),
     keyword(
         "SpriteSize",
-        Kind::Size(Field::new(cmos::SPRITE_SIZE, 0, 7), PAGE_SIZE),
+        Kind::Size(
+            Field::new(cmos::SPRITE_SIZE, 0, cmos::SPRITE_SIZE_BITS),
+            PAGE_SIZE,
+        ),
     ),
     keyword("Sync", Kind::Special(Special::Sync)),
     keyword(

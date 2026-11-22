@@ -8,12 +8,9 @@
 //! that is empty, which shows nothing after the bytes. Only the label and the
 //! text are characters `COUNT` counts and `WIDTH` wraps.
 
-use alloc::vec::Vec;
-
 use super::Statement;
 use crate::machine::program::spelt;
 use crate::machine::{len32, Machine, Step};
-use crate::messages::Error;
 
 /// The label field's width.
 const LABEL_FIELD: usize = 10;
@@ -29,12 +26,8 @@ impl Machine<'_, '_> {
         end: u32,
     ) -> Step {
         self.write_raw(&head(address, bytes))?;
-        let mut text = Vec::new();
         let length = end.saturating_sub(statement.start);
-        text.try_reserve_exact(length as usize)
-            .map_err(|_| Error::NoRoom)?;
-        text.resize(length as usize, 0);
-        self.os.read_bytes(statement.start, &mut text)?;
+        let text = self.os.read_vec(statement.start, length as usize)?;
         if statement.field && text.first() == Some(&b'.') {
             let word = text.iter().position(|&b| b == b' ').unwrap_or(text.len());
             let label = spelt(&text[..word])?;

@@ -13,6 +13,7 @@ use tairix_riscos_kernel::os::{Entry, Fail, Os, Regs};
 use tairix_riscos_kernel::vectors::Vector;
 use tairix_vdu::code::{Control, Operation, FIRST_DEFINED};
 
+use crate::plot::Ink;
 use crate::state::{with, Vdu};
 use crate::text::Needs;
 
@@ -24,8 +25,8 @@ const UK_PLOT: Vector = Vector(0x19);
 /// the switches its codes set.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Stream {
-    code: u8,
-    gathered: [u8; 9],
+    pub(crate) code: u8,
+    pub(crate) gathered: [u8; 9],
     /// VDU 21: output discarded until VDU 6.
     pub(crate) disabled: bool,
     /// VDU 2: characters go to the printer too.
@@ -67,6 +68,17 @@ pub(crate) enum Effect {
     DefaultPalette,
     /// A VDU 23 the drivers do not know, to `UKVDU23V`.
     UnknownVdu23([u8; 9]),
+    /// `VDU 23,27`: the system area's sprite named `number` in decimal
+    /// selected, by `action` 0, or taken from the screen and selected, by 1.
+    Sprite {
+        action: u8,
+        number: u8,
+    },
+    /// The system area's selected sprite plotted at the graphics cursor in
+    /// `ink`'s action.
+    SpritePlot {
+        ink: Ink,
+    },
     /// A plot code the drivers do not draw, to `UKPlotV`.
     UnknownPlot {
         code: u8,
@@ -145,7 +157,7 @@ fn take(vdu: &mut Vdu, os: &mut Os<'_>, bytes: &[u8]) -> Result<(usize, Option<E
 }
 
 /// The parameters code `code` gathers.
-fn parameters(code: u8) -> u8 {
+pub(crate) fn parameters(code: u8) -> u8 {
     Control::of(code).map_or(0, Control::parameters)
 }
 
@@ -190,7 +202,7 @@ fn visible(vdu: &mut Vdu, os: &mut Os<'_>, b: u8) -> Result<Option<Effect>, Fail
             vdu.text.vdu5 = false;
         }
         5 => {
-            if vdu.screen.format.graphic() {
+            if vdu.format().graphic() {
                 vdu.text.vdu5 = true;
             }
         }
@@ -216,7 +228,7 @@ fn visible(vdu: &mut Vdu, os: &mut Os<'_>, b: u8) -> Result<Option<Effect>, Fail
         15 => vdu.text.paged = false,
         16 => vdu.clear_graphics(os)?,
         20 => {
-            let format = vdu.screen.format;
+            let format = *vdu.format();
             vdu.colours.defaults(&format);
             vdu.colours.publish(os, &format)?;
             return Ok(Some(Effect::DefaultPalette));
@@ -246,11 +258,11 @@ fn act(vdu: &mut Vdu, os: &mut Os<'_>) -> Result<Option<Effect>, Fail> {
             }))
         }
         17 => {
-            let format = vdu.screen.format;
+            let format = *vdu.format();
             vdu.colours.text_colour(&format, q[0]);
         }
         18 => {
-            let format = vdu.screen.format;
+            let format = *vdu.format();
             vdu.colours.graphics_colour(&format, q[0], q[1]);
             vdu.colours.publish(os, &format)?;
         }
@@ -282,14 +294,15 @@ impl Vdu {
     /// `VDU 28`: the text window, refused where off the screen or inside
     /// out; the cursor home, and copy-cursor editing over.
     pub(crate) fn set_text_window(&mut self, left: u8, bottom: u8, right: u8, top: u8) {
-        let format = &self.screen.format;
+        let format = self.format();
         let (l, b, r, t) = (
             u32::from(left),
             u32::from(bottom),
             u32::from(right),
             u32::from(top),
         );
-        if r >= format.columns() || b >= format.rows() || l > r || t > b {
+        let (columns, rows) = format.cells();
+        if r >= columns || b >= rows || l > r || t > b {
             return;
         }
         self.text.window = crate::text::Window {
@@ -308,11 +321,12 @@ impl Vdu {
     /// cursor at its corner, the text cursor home; scrolling moves the screen
     /// again.
     pub(crate) fn default_windows(&mut self) {
-        let format = self.screen.format;
+        let format = *self.format();
+        let (columns, rows) = format.cells();
         self.text.window = crate::text::Window {
             left: 0,
-            bottom: format.rows() - 1,
-            right: format.columns() - 1,
+            bottom: rows - 1,
+            right: columns - 1,
             top: 0,
         };
         self.text.windowed = false;
@@ -326,7 +340,7 @@ impl Vdu {
     /// `VDU 23`: an operation by its first parameter, or a character
     /// defined.
     fn vdu_23(&mut self, os: &mut Os<'_>, q: [u8; 9]) -> Result<Option<Effect>, Fail> {
-        let format = self.screen.format;
+        let format = *self.format();
         let rows = [q[1], q[2], q[3], q[4], q[5], q[6], q[7], q[8]];
         let Some(operation) = Operation::of(q[0]) else {
             if q[0] < FIRST_DEFINED {
@@ -384,8 +398,12 @@ impl Vdu {
             }
             Operation::Colours => return self.vdu_23_17(os, q).map(|()| None),
             Operation::Teletext => self.teletext_control(os, q[1], q[2])?,
-            // Sprites are RO22's: their VDU 23 passes on, as their plot codes do.
-            Operation::Sprites => return Ok(Some(Effect::UnknownVdu23(q))),
+            Operation::Sprites => {
+                return Ok(Some(Effect::Sprite {
+                    action: q[1],
+                    number: q[2],
+                }))
+            }
         }
         Ok(None)
     }
@@ -405,7 +423,7 @@ impl Vdu {
     /// `VDU 23,17`: tints, the ECF form, the text colours exchanged, the ECF
     /// origin and VDU 5's character size.
     fn vdu_23_17(&mut self, os: &mut Os<'_>, q: [u8; 9]) -> Result<(), Fail> {
-        let format = self.screen.format;
+        let format = *self.format();
         let word = |i: usize| i16::from_le_bytes([q[i], q[i + 1]]);
         match q[1] {
             0..=3 => self.colours.tint(q[1], q[2]),
@@ -492,6 +510,8 @@ fn perform(os: &mut Os<'_>, effect: Effect) -> Result<(), Fail> {
             os.call_vector(UK_PLOT, &mut regs, Entry::Supervisor)?;
             Ok(())
         }
+        Effect::Sprite { action, number } => crate::sprite::vdu_23_27(os, action, number),
+        Effect::SpritePlot { ink } => crate::sprite::plot_selected(os, ink),
         Effect::Keys => keys_before_scroll(os),
     }
 }

@@ -51,14 +51,33 @@ pub(crate) fn cover_screen(os: &mut Os<'_>, format: &Format) -> Result<(), Fail>
     )
 }
 
+/// The flag word and box as a mode change leaves them: disabled and empty.
+pub(crate) const RESET: [u32; 5] = [0, EMPTY[0], EMPTY[1], EMPTY[2], EMPTY[3]];
+
 /// The box disabled and emptied, as a mode change leaves it.
 pub(crate) fn reset(os: &mut Os<'_>) -> Result<(), Fail> {
-    os.write_word(BOX, 0)?;
-    empty(os)
+    set_words(os, RESET)
 }
 
 fn empty(os: &mut Os<'_>) -> Result<(), Fail> {
     for (i, &word) in (1u32..).zip(&EMPTY) {
+        os.write_word(BOX + 4 * i, word)?;
+    }
+    Ok(())
+}
+
+/// The flag word and the box, as zero page holds them.
+pub(crate) fn words(os: &mut Os<'_>) -> Result<[u32; 5], Fail> {
+    let mut words = [0; 5];
+    for (i, word) in (0u32..).zip(words.iter_mut()) {
+        *word = os.read_word(BOX + 4 * i)?;
+    }
+    Ok(words)
+}
+
+/// Sets the flag word and the box.
+pub(crate) fn set_words(os: &mut Os<'_>, words: [u32; 5]) -> Result<(), Fail> {
+    for (i, &word) in (0u32..).zip(&words) {
         os.write_word(BOX + 4 * i, word)?;
     }
     Ok(())

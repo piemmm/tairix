@@ -371,13 +371,7 @@ impl Os<'_> {
             }
             if index == n {
                 let size = usize::from(length.saturating_sub(2));
-                let mut text = Vec::new();
-                if text.try_reserve_exact(size).is_err() {
-                    return Err(self.no_memory());
-                }
-                text.resize(size, 0);
-                self.read_bytes(at.wrapping_add(1), &mut text)?;
-                return Ok(text);
+                return self.read_vec(at.wrapping_add(1), size);
             }
             at = at.wrapping_add(u32::from(length));
         }

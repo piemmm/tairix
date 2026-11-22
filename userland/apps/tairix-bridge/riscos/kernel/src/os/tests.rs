@@ -5,7 +5,7 @@
 use tairix_riscos_arm::psr;
 
 use crate::input::InputEvent;
-use crate::memory::layout::RISC_OS_5;
+use crate::memory::layout::{APPLICATION, RISC_OS_5};
 use crate::memory::Bits;
 use crate::os::{Ended, Fail, Outcome, Regs, Wait};
 use crate::swi::os::exit::ABEX;
@@ -626,4 +626,45 @@ fn a_copy_between_overlapping_ranges_moves_the_bytes_whole_either_way() {
         s.kernel.os().copy_bytes(from, to, length).expect("copied");
         assert_eq!(s.read(to, length as usize), pattern, "{shift} {up}");
     }
+}
+
+#[test]
+fn a_read_into_host_memory_aborts_before_the_host_grants_room_no_guest_memory_backs() {
+    let mut s = session();
+    s.write(DATA, b"abcdef");
+    let mut os = s.kernel.os();
+    assert_eq!(os.read_vec(DATA, 6).expect("read"), b"abcdef");
+    let mut grown = b"xy".to_vec();
+    os.read_onto(&mut grown, DATA + 2, 3).expect("appended");
+    assert_eq!(grown, b"xycde");
+    let end = APPLICATION + 0x1_0000;
+    let refused = os.read_vec(end - 4, usize::MAX);
+    assert!(
+        matches!(refused, Err(Fail::Unwind(_))),
+        "the abort, not a refused grant: {refused:?}"
+    );
+    assert_eq!(os.world.last_abort.address, end, "at the first page past");
+    let mut kept = b"z".to_vec();
+    assert!(os.read_onto(&mut kept, end - 1, 2).is_err());
+    assert_eq!(kept, b"z", "nothing appended by a read that aborts");
+}
+
+#[test]
+fn a_range_is_writable_only_where_every_page_takes_a_privileged_write() {
+    let mut s = session();
+    let mut os = s.kernel.os();
+    assert!(os.writable(DATA, u64::from(DATA) + 0x2000));
+    let host = RISC_OS_5.host.start;
+    assert!(
+        !os.writable(host, u64::from(host) + 4),
+        "the host pages are read-only"
+    );
+    assert!(
+        !os.writable(host - 4, u64::from(host) + 4),
+        "a range running onto them"
+    );
+    assert!(
+        !os.writable(0xFFFF_FFF0, 0x1_0000_0010),
+        "past the top of memory"
+    );
 }

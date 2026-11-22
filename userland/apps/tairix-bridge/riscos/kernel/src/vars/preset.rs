@@ -143,12 +143,7 @@ impl Os<'_> {
             // Only the number is read, so no length is too long.
             Preset::ReturnCode | Preset::RcLimit => length.min(VALUE_ROOM - 2),
         };
-        let mut given = Vec::new();
-        given
-            .try_reserve_exact(length as usize)
-            .map_err(|_| self.no_memory())?;
-        given.resize(length as usize, 0);
-        self.read_bytes(value, &mut given)?;
+        let given = self.read_vec(value, length as usize)?;
         match preset {
             Preset::Time => {
                 self.write_bytes(text, &given)?;

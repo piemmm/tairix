@@ -52,7 +52,7 @@ use tairix_drawing::{
     Style, Text, TextAlign, TextPath, Unit,
 };
 use tairix_drawing::{Encoding, Format, Image, PlacedPicture, Read, ReadError, Source};
-use tairix_image::{Density, DensityUnit, JpegFrame, Orientation};
+use tairix_image::{Density, DensityUnit, JpegFrame, JpegProcess, Orientation};
 use tairix_raster::{Pixel, Pyramid, Surface, MAX_SURFACE_PIXELS};
 use tairix_util::fallible::{self, try_push};
 
@@ -1022,7 +1022,7 @@ fn take_source(r: &mut Reader<'_>) -> Result<(Option<Encoding>, u64), DrawFailur
         SOURCE_JPEG => {
             let stored = (r.u32()?, r.u32()?);
             let components = r.u8()?;
-            let progressive = take_flag(r)?;
+            let process = JpegProcess::of_number(r.u8()?).ok_or(DrawFailure::ReplyMalformed)?;
             let orientation =
                 Orientation::from_tag(u32::from(r.u8()?)).ok_or(DrawFailure::ReplyMalformed)?;
             let density = if take_flag(r)? {
@@ -1044,7 +1044,7 @@ fn take_source(r: &mut Reader<'_>) -> Result<(Option<Encoding>, u64), DrawFailur
             Some(Encoding::Jpeg(JpegFrame {
                 stored,
                 components,
-                progressive,
+                process,
                 orientation,
                 density,
             }))
@@ -1107,7 +1107,7 @@ fn put_source(w: &mut Writer, source: Option<&Source>) {
             w.u32(frame.stored.0);
             w.u32(frame.stored.1);
             w.u8(frame.components);
-            w.u8(u8::from(frame.progressive));
+            w.u8(frame.process.number());
             w.u8(u8::try_from(frame.orientation.tag()).unwrap_or(1));
             w.u8(u8::from(frame.density.is_some()));
             if let Some(density) = frame.density {

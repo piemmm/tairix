@@ -185,11 +185,14 @@ pub fn damage(os: &mut Os<'_>, mut each: impl FnMut(u32, u32)) {
 }
 
 /// The text cursor, where one is to be drawn: shown, not removed, not in
-/// VDU 5, its shape covering a line of its cell.
+/// VDU 5, its shape covering a line of its cell, and output on the screen
+/// whose text it marks.
 pub fn cursor(os: &mut Os<'_>) -> Option<Cursor> {
     read(os, |vdu, _| {
         let t = &vdu.text;
-        if !t.cursor.shown || t.cursor.appearance == 1 || t.vdu5 || vdu.cursors_removed > 0 {
+        let hidden = !t.cursor.shown || t.cursor.appearance == 1 || t.vdu5;
+        let elsewhere = vdu.cursors_removed > 0 || vdu.output != crate::output::Output::Screen;
+        if hidden || elsewhere {
             return None;
         }
         let cell = vdu.screen.format.cell();

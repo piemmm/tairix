@@ -317,11 +317,7 @@ impl Os<'_> {
                 let Some(entry) = self.entry_at(here)? else {
                     break;
                 };
-                let mut name = Vec::new();
-                name.try_reserve_exact(entry.name_length as usize)
-                    .map_err(|_| self.no_memory())?;
-                name.resize(entry.name_length as usize, 0);
-                self.read_bytes(entry.name, &mut name)?;
+                let mut name = self.read_vec(entry.name, entry.name_length as usize)?;
                 for byte in &mut name {
                     *byte = self.world.resource_fs.fold(*byte);
                 }

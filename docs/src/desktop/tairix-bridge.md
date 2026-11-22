@@ -1788,6 +1788,17 @@ there.
   narrower than its colours, lines too short for their pixels, text past the
   screen, or Teletext in other than sixteen colours or past a page of 255 by
   255 cells — is refused as a bad mode.
+- **ScreenModes.** `*LoadModeFile` reads a monitor definition file as
+  RISC OS 5 does: keys in any case, a line whose first character is `#` a
+  comment, a mode's size its timings' display, which an `x_res` or `y_res`
+  must agree with, the title kept to 31 characters, and each fault refused
+  with the error RISC OS 5 gives it. `ScreenModes_ReadInfo` gives the title,
+  the file's DPMS state and a display's speaker mask,
+  `ScreenModes_EnumerateAudioFormats` a display's sound formats, and
+  `ScreenModes_Features` RISC OS 5's one flag. No display describes itself
+  here, so there are no speakers or formats. Their answers are held to
+  RISC OS 5's by tests rather than the screen corpus, since a file loaded
+  there would change the monitor for everything recorded after it.
 - **Screen memory.** Dynamic area 2, mapped twice, so a screen a hardware
   scroll has moved reads on past the area's end; it grows for a mode that
   needs more and shrinks no further than the current screen's banks.
@@ -1843,6 +1854,102 @@ whole character set from the first-party font first, so no RISC OS glyph is
 in any screen; `drawn.txt` holds what each read and every line of the screen
 it drew, which the replay holds the drivers to byte for byte.
 
+## Sprites
+
+Sprites are the `vdu` crate's `sprite` module: `OS_SpriteOp` through
+`SpriteV`, whose default is the kernel's reasons and, while SpriteExtend is
+active, SpriteExtend's in front of them; SpriteExtend's JPEG SWIs; and the
+SpriteUtils commands. Areas, control blocks, mode words, palettes and masks
+are read through `lib/image`'s sprite structures.
+
+- **Areas.** The system area is dynamic area 3, sized from
+  `*Configure SpriteSize`, its header rewritten as it grows and its shrink
+  held to what it uses; `OS_Byte` 163,242,65 and 66 read it, and `PLOT`
+  &E8–&EF and `VDU 23,27` use the sprite it has selected. Names match
+  case-blind in ASCII, twelve bytes at most, ended by any byte at or below a
+  space. Every walk is held to the area's block before anything is trusted: a
+  sprite outside it, misaligned, or shorter than a control block is
+  "Unrecognised sprite data" (&71E), where RISC OS 5 reads on or aborts.
+- **Editing and files.** Rows and columns are inserted in colour nought
+  under a clear mask; masks are created solid; palettes are made from the
+  depth's default or the screen's, as RISC OS 5 makes each; alpha masks and
+  channels convert both ways. A file is the area from its count word; one
+  loaded is held to a saved area's form first, and a merge replaces the
+  area's sprites of the file's names.
+- **Taking from the screen** (14, 16): the rectangle, its corners inclusive,
+  in the destination's own pixel form, a numbered mode's rows keeping the
+  screen's word alignment; pixels outside the graphics window are the
+  background colour.
+- **Output to a sprite** (60–62): every drawing path writes the destination
+  — the screen or a sprite or its mask — in its own pixel form, with
+  `Service_SwitchingOutputToSprite`; save areas hold the VDU state in the
+  drivers' own layout, validated before it is restored, and a mode change
+  returns output to the screen.
+- **The kernel's plots** (28, 34, 48, 49) copy the sprite's rows bit for bit
+  whatever the depths, combined by the GCOL action, a mask pixel covering its
+  image pixel's bits. A mask plot without a mask fills a rectangle of the
+  sprite's size in pixels; an eight-bit alpha mask, asked for, is refused as
+  a bad mode (&708).
+- **SpriteExtend's plots.** A scaled plot's pixel takes the source pixel
+  whose span reaches past its far edge (50, 51, 52, 65). A transformed plot
+  (55, 56) draws a pixel whose centre lies strictly past the image's lower
+  edges and on or within its upper ones, sampling the source on each row's
+  centre line at a grid anchored to the image of the source rectangle's top
+  left, columns stepped in 16.16; no matrix is the identity, and points are
+  from the graphics origin. The parallelogram form maps the rectangle's first
+  corner to its first point, the whole sprite's first corner being its top
+  left. Translation tables are read as bytes onto a palettised destination,
+  wide or not; onto a deep one a narrow table gives colours in their
+  colour-number form, and flag bit 4 lets a palette naming every pixel value
+  stand for it; a deep sprite reaches a palettised destination only through
+  a 32K table. Alpha blends each channel as
+  `((S × A) >> 8) + ((D × (256 − A)) >> 8)`, `A` the alpha widened to 256 and
+  scaled by the translucency; a colour mapping descriptor's transfer function
+  is called once for each colour a deep sprite holds.
+- **Pointer shapes** (36): a sprite of 256 colours or fewer, its pixels
+  through the table to the pointer's four colours, scaled by the eigen
+  factors where no factors are given, cut to 32 by 32; its palette entries 1
+  to 3 set the pointer's colours as `VDU 19` sets them.
+- **Screen save and load** (2, 3) save the graphics window as `screendump`,
+  and plot a file's first sprite at the window's corner in its mode and
+  palette.
+- **JPEGs.** `JPEG_Info` and `JPEG_FileInfo` read the stored raster, the
+  process, and the density, 90 times a pixel aspect where only that or none
+  is stated, with RISC OS 5's workspace figure; `JPEG_Info` reads its header
+  past the length given, as far as memory goes, as RISC OS 5 does. A plot
+  reads the whole length given, aborting where that runs past memory, and
+  decodes the stored raster, EXIF orientation unapplied, through `lib/image`;
+  a transformed plot is made only where its transform is a scaling, else
+  "not a scaling" (&71B). `JPEG_PDriverIntercept`'s bit 0 passes the plots
+  to `PDriver_JPEGSWI`, the JPEG SWI's offset in R8; an offset past it is
+  out of range for the module.
+- **SpriteUtils**: each command the `OS_SpriteOp` it names on the system
+  area, its error the call's; `*SDelete` stops at the first it cannot delete.
+  `*SList` and `*SInfo` give the names, and the area's size, free space and
+  count, in the emulator's own words.
+
+Known differences from RISC OS 5, each deliberate:
+
+- a transformed plot that steps through source rows unevenly — a vertical
+  shear, a turn other than a right angle, a parallelogram whose height does
+  not divide evenly — can take the neighbouring source row at an exact tie,
+  about one pixel in a hundred, RISC OS 5 rounding its row arithmetic where
+  this is exact;
+- a blend onto a palettised destination, and a JPEG drawn on one, take the
+  palette colour nearest the result, where RISC OS 5 matches through
+  ColourTrans's table (RO23); dithering is not offered, and a colour mapping
+  onto a palettised destination draws nothing;
+- a JPEG's pixels are `lib/image`'s decoder's;
+- a sprite taken from the screen has its wastage zeroed, and removing
+  wastage fills with zeros, where RISC OS 5 leaves bytes from beyond the
+  rectangle or the row;
+- `JPEG_PDriverIntercept` starts at nought, where RISC OS 5's first answer is
+  whatever its workspace held;
+- output to a sprite no text cell fits keeps a one-cell window and draws no
+  text, where RISC OS 5 writes outside the sprite; output to a sprite of no
+  pixels is refused (&71E); a save area that is not one the drivers wrote is
+  restored as a fresh state.
+
 ## The reference harness
 
 `cargo xtask riscos --reference <dir>` records each crate's corpus —
@@ -1896,8 +2003,9 @@ directory the machine boots from (`*Configure FileSystem HostFS`,
   formats are the crate's `corpus` module's, so the harness and the replays
   read them alike.
 - **Running.** Where `<dir>` holds RPCEmu, it runs headless, as one of the
-  command's own children, until the harness writes a byte to a named pipe
-  once it is done, the emulator exits, or twenty minutes pass. Otherwise the
+  command's own children, until the harness, once done, saves a byte to a
+  named pipe (HostFS opens none to write it a byte at a time), the emulator
+  exits, or twenty minutes pass. Otherwise the
   harness is left in `hostfs/`; boot the machine from it and run the command
   again to import what it recorded. Every scenario runs on the one machine in
   the corpus's order, but one marked `lasting`, which changes the machine in a

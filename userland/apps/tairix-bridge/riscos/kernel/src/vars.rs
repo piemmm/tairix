@@ -240,13 +240,7 @@ impl Os<'_> {
         if length > LONGEST {
             return Err(self.error(NO_ROOM));
         }
-        let mut text = Vec::new();
-        if text.try_reserve_exact(length).is_err() {
-            return Err(self.no_memory());
-        }
-        text.resize(length, 0);
-        self.read_bytes(node.value + LENGTH_FIELD, &mut text)?;
-        Ok(text)
+        self.read_vec(node.value + LENGTH_FIELD, length)
     }
 
     /// A variable's value as the expansions read it; a code variable's read
@@ -284,13 +278,7 @@ impl Os<'_> {
         if length > LONGEST {
             return Err(self.buffer_overflow());
         }
-        let mut value = Vec::new();
-        if value.try_reserve_exact(length).is_err() {
-            return Err(self.no_memory());
-        }
-        value.resize(length, 0);
-        self.read_bytes(regs.r[0], &mut value)?;
-        Ok(value)
+        self.read_vec(regs.r[0], length)
     }
 
     /// Calls a code variable's write entry with `text`, R3 its name.
@@ -598,13 +586,7 @@ impl Os<'_> {
         if length > LONGEST {
             return Err(self.error(NO_ROOM));
         }
-        let mut bytes = Vec::new();
-        if bytes.try_reserve_exact(length).is_err() {
-            return Err(self.no_memory());
-        }
-        bytes.resize(length, 0);
-        self.read_bytes(address, &mut bytes)?;
-        Ok(bytes)
+        self.read_vec(address, length)
     }
 
     /// `OS_SetVarVal` deleting: the first match from the context; a code

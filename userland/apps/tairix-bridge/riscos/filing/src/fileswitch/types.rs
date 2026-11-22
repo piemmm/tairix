@@ -89,12 +89,7 @@ fn named_type(os: &mut Os<'_>, name: &[u8]) -> Result<Option<u32>, Fail> {
                 Err(unwind) => return Err(unwind),
             }
             context = regs.r[3];
-            let mut value = Vec::new();
-            if value.try_reserve_exact(regs.r[2] as usize).is_err() {
-                return Err(os.no_memory());
-            }
-            value.resize(regs.r[2] as usize, 0);
-            os.read_bytes(frame + room, &mut value)?;
+            let value = os.read_vec(frame + room, regs.r[2] as usize)?;
             if !value.eq_ignore_ascii_case(name) {
                 continue;
             }

@@ -106,7 +106,7 @@ fn a_source_whose_facts_the_pixels_contradict_is_refused() {
         encoding: Encoding::Jpeg(tairix_image::JpegFrame {
             stored,
             components,
-            progressive: false,
+            process: tairix_image::JpegProcess::Baseline,
             orientation: Orientation::from_tag(tag).expect("defined"),
             density: None,
         }),

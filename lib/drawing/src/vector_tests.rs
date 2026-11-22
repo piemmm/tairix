@@ -245,7 +245,7 @@ pub(crate) fn pictured(ids: &mut Ids) -> (Drawing, alloc::vec::Vec<u8>) {
     )
     .expect("kept");
     if let crate::image::Encoding::Jpeg(frame) = &mut source.encoding {
-        frame.progressive = true;
+        frame.process = tairix_image::JpegProcess::Progressive;
     }
     let progressive =
         crate::image::Image::new(pixels_of(), rect(0.0, 0.0, 40.0, 20.0), Some(source))

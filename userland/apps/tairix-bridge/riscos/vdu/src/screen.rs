@@ -100,11 +100,7 @@ impl Screen {
         }
     }
 
-    /// `ScreenStart` and `DisplayStart`.
-    pub(crate) const fn screen_start(&self) -> u32 {
-        self.base + self.vdu_start
-    }
-
+    /// `DisplayStart`.
     pub(crate) const fn display_start_address(&self) -> u32 {
         self.base + self.display_start
     }

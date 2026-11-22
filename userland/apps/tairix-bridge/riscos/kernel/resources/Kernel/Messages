@@ -90,6 +90,30 @@ BadMode:This screen mode cannot be shown
 BadModeString:The screen mode is not described in a way that can be read
 BadScreenModeReason:OS_ScreenMode has no such reason
 
+# Sprites.
+NoSystemSprites:There is no system sprite area
+NoRoomForSprite:There is no room in the sprite area for the sprite
+NoSpritesToSave:The sprite area holds no sprites to save
+SpriteNoMemory:There is not enough memory for that sprite operation
+SpriteNotFound:Sprite not found
+BadSpriteFile:Not a sprite file
+NoRoomToCopySprite:There is no room in the sprite area for the copy
+OutsideSprite:That is outside the sprite
+NoRoomToGrowSprite:There is no room in the sprite area to enlarge the sprite
+SpriteTableRequired:A translation table is needed to plot this sprite
+UnknownSpriteOp:OS_SpriteOp has no such reason
+CannotJoinSprites:Sprites of different shapes or modes cannot be joined
+SpriteReservedFlags:A reserved flag bit is set
+NoDeepSpritePalette:A sprite of more than 256 colours has no palette
+NoDeepNewSpritePalette:A sprite of more than 256 colours cannot be given a palette
+UnrecognisedSpriteData:Unrecognised sprite data
+BadSpriteMode:No sprite may be in that mode
+BadSpriteModeWord:That sprite mode word names no type or resolution RISC OS has
+UnknownSpriteMode:No such screen mode
+SpriteBadJPEG:The JPEG cannot be read
+SpriteJPEGNotScaling:A JPEG is plotted only scaled, never turned or sheared
+NoGreyScaledSprites:Grey-scaled sprite plotting is no longer provided
+
 # The machine.
 UnknownReadSysInfoReason:Reason code not known to OS_ReadSysInfo
 UnknownPlatformFeaturesReason:Reason code not known to OS_PlatformFeatures

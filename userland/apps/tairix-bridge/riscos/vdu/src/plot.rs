@@ -16,7 +16,7 @@ use tairix_vdu::plot::{
     self as codes, ARC, BLOCK, CIRCLE, CIRCLE_FILL, DOTTED_WITHOUT_ENDS, ELLIPSE_FILL,
     FILL_RIGHT_TO_BACKGROUND, FILL_RIGHT_TO_NON_FOREGROUND, FILL_TO_FOREGROUND,
     FILL_TO_NON_BACKGROUND, FLOOD, FLOOD_TO_FOREGROUND, LINE, PARALLELOGRAM, POINT, RECTANGLE,
-    SECTOR, SEGMENT, TRIANGLE,
+    SECTOR, SEGMENT, SPRITE, TRIANGLE,
 };
 
 use crate::arc::{self, Circle};
@@ -100,7 +100,7 @@ impl Vdu {
     /// A point in OS units from the origin, in pixels, held within
     /// [`REACH`]. The sums wrap as the ARM's do.
     pub(crate) fn pixels_of(&self, x: i32, y: i32) -> Point {
-        let format = &self.screen.format;
+        let format = self.format();
         (
             (x.wrapping_add(self.graphics.origin.0) >> format.x_eig()).clamp(-REACH, REACH),
             (y.wrapping_add(self.graphics.origin.1) >> format.y_eig()).clamp(-REACH, REACH),
@@ -110,7 +110,7 @@ impl Vdu {
     /// A point in pixels, in OS units from the origin, wrapping as the ARM's
     /// sums do.
     pub(crate) fn units_of(&self, p: Point) -> (i32, i32) {
-        let format = &self.screen.format;
+        let format = self.format();
         (
             (p.0 << format.x_eig()).wrapping_sub(self.graphics.origin.0),
             (p.1 << format.y_eig()).wrapping_sub(self.graphics.origin.1),
@@ -122,7 +122,7 @@ impl Vdu {
     pub(crate) fn set_graphics_window(&mut self, left: i32, bottom: i32, right: i32, top: i32) {
         let (left, bottom) = self.pixels_of(left, bottom);
         let (right, top) = self.pixels_of(right, top);
-        let format = &self.screen.format;
+        let format = self.format();
         let on_screen = left >= 0
             && bottom >= 0
             && right < format.width().cast_signed()
@@ -170,6 +170,10 @@ impl Vdu {
         let point = self.point_named(code, x, y);
         self.graphics.new_point = self.pixels_of(point.0, point.1);
         let shape = code & codes::SHAPE;
+        if shape == SPRITE {
+            self.visit(point);
+            return Ok(Ink::of(u32::from(code)).map(|ink| Effect::SpritePlot { ink }));
+        }
         if shape > ELLIPSE_FILL {
             self.graphics.cursor = point;
             return Ok(Some(Effect::UnknownPlot {
@@ -186,7 +190,7 @@ impl Vdu {
         let Some(ink) = ink else {
             return Ok(None);
         };
-        if !self.screen.format.graphic() {
+        if !self.format().graphic() {
             return Ok(None);
         }
         let block = ink_block(os, ink)?;
@@ -233,7 +237,7 @@ impl Vdu {
     /// The circle about `centre` through `edge`, round in OS units whatever
     /// the pixels' shape.
     fn circle(&self, centre: Point, edge: Point) -> Circle {
-        let format = &self.screen.format;
+        let format = self.format();
         let (xe, ye) = (format.x_eig(), format.y_eig());
         let (tall, wide) = if ye >= xe {
             (1 << (ye - xe), 1)
@@ -262,7 +266,7 @@ impl Vdu {
         block: &Block,
     ) -> Result<(), Fail> {
         let window = self.graphics.window;
-        let canvas = self.screen.canvas();
+        let canvas = self.canvas();
         let mut drawn: Option<Rect> = None;
         for (y, left, right) in spans {
             let (left, right) = (left.max(window.left), right.min(window.right));
@@ -386,7 +390,7 @@ impl Vdu {
         if !window.holds(x, y) {
             return Ok(());
         }
-        let format = self.screen.format;
+        let format = *self.format();
         let mask = format.pixel_mask();
         let back = Colours::gcol_pixel(&format, &self.colours.back) & mask;
         let fore = Colours::gcol_pixel(&format, &self.colours.fore) & mask;
@@ -396,7 +400,7 @@ impl Vdu {
             FILL_TO_FOREGROUND => p & mask != fore,
             _ => p & mask == fore,
         };
-        let canvas = self.screen.canvas();
+        let canvas = self.canvas();
         let mut line = Line::new(canvas, window);
         line.start(y);
         if !fills(line.at(os, x)?) {
@@ -430,7 +434,7 @@ impl Vdu {
         if !window.holds(x, y) {
             return Ok(());
         }
-        let format = self.screen.format;
+        let format = *self.format();
         let mask = format.pixel_mask();
         let colour = if to_foreground {
             &self.colours.fore
@@ -449,7 +453,7 @@ impl Vdu {
         let open = |filled: &BitVec, point: Point, p: u32| {
             fills(p) && filled.get(index(point)) == Some(false)
         };
-        let canvas = self.screen.canvas();
+        let canvas = self.canvas();
         let mut seeds: Vec<Point> = Vec::new();
         try_push(&mut seeds, (x, y)).map_err(|_| os.no_memory())?;
         let mut line = Line::new(canvas, window);
@@ -514,7 +518,7 @@ impl Vdu {
     /// source is what lies on the screen, the destination what lies in the
     /// window.
     fn block_copy(&mut self, os: &mut Os<'_>, form: u8) -> Result<(), Fail> {
-        if form & codes::INK == 0 || !self.screen.format.graphic() {
+        if form & codes::INK == 0 || !self.format().graphic() {
             return Ok(());
         }
         let (a, b, to) = (
@@ -523,7 +527,7 @@ impl Vdu {
             self.graphics.cursor_pixels,
         );
         let corner = (a.0.min(b.0), a.1.min(b.1));
-        let format = self.screen.format;
+        let format = *self.format();
         let source = Rect {
             left: corner.0.max(0),
             bottom: corner.1.max(0),
@@ -534,7 +538,7 @@ impl Vdu {
             return Ok(());
         }
         let (dx, dy) = (to.0 - corner.0, to.1 - corner.1);
-        let canvas = self.screen.canvas();
+        let canvas = self.canvas();
         let across = (source.right - source.left + 1).cast_unsigned() as usize;
         let lines = (source.top - source.bottom + 1).cast_unsigned() as usize;
         let mut pixels = Vec::new();
@@ -601,7 +605,7 @@ impl Vdu {
     /// `VDU 16`: the graphics window cleared in the background colour and
     /// action.
     pub(crate) fn clear_graphics(&mut self, os: &mut Os<'_>) -> Result<(), Fail> {
-        if !self.screen.format.graphic() {
+        if !self.format().graphic() {
             return Ok(());
         }
         let block = Block::read(os, workspace::BACKGROUND)?;
@@ -617,7 +621,7 @@ impl Vdu {
     /// foreground colour and action, its background left as it was; then
     /// the cursor on a character.
     pub(crate) fn vdu5_print(&mut self, os: &mut Os<'_>, c: u8) -> Result<(), Fail> {
-        if !self.screen.format.graphic() {
+        if !self.format().graphic() {
             return Ok(());
         }
         let glyph = self.font.glyph(c).copied().unwrap_or([0; 8]);

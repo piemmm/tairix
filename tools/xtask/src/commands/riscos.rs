@@ -501,7 +501,8 @@ fn harness_program<'a>(
     text.push(obey::run());
     text.extend([
         "CLOSE#O%:PROCdone:END".into(),
-        "DEF PROCdone:LOCAL D%:D%=OPENOUT\"HostFS:$.Done\":BPUT#D%,0:CLOSE#D%:ENDPROC".into(),
+        // Saved, as HostFS opens no named pipe for a BPUT.
+        "DEF PROCdone:SYS\"OS_File\",10,\"HostFS:$.Done\",&FFD,,PAGE,PAGE+1:ENDPROC".into(),
         "DEF FNh(N%)=\"&\"+RIGHT$(\"0000000\"+STR$~N%,8)".into(),
         "DEF FNr(R$,N%,F%)=\" \"+R$+\"=\"+FNh(N%)".into(),
         // An item an error leaves undefined, `S%` set, gives way to it.
@@ -1220,7 +1221,7 @@ mod tests {
             .find(|line| line.contains("DEF PROCdone"))
             .expect("PROCdone");
         assert!(
-            done.contains("D%=OPENOUT\"HostFS:$.Done\":BPUT#D%,0:CLOSE#D%"),
+            done.contains("SYS\"OS_File\",10,\"HostFS:$.Done\",&FFD,,PAGE,PAGE+1"),
             "{done}"
         );
     }

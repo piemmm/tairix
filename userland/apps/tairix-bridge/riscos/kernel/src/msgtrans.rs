@@ -660,13 +660,7 @@ impl Os<'_> {
 
     /// The file's bytes, copied for a walk.
     fn file_bytes(&mut self, file: Opened) -> Result<Vec<u8>, Fail> {
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(file.length as usize)
-            .map_err(|_| self.no_memory())?;
-        bytes.resize(file.length as usize, 0);
-        self.read_bytes(file.data, &mut bytes)?;
-        Ok(bytes)
+        self.read_vec(file.data, file.length as usize)
     }
 
     /// Where `token`'s value is in `file`, and its length; none if it is not
@@ -705,12 +699,7 @@ impl Os<'_> {
         let mut bytes = Vec::new();
         while read < rest {
             let more = PIECE.min(rest - read);
-            bytes
-                .try_reserve(more as usize)
-                .map_err(|_| self.no_memory())?;
-            let start = bytes.len();
-            bytes.resize(start + more as usize, 0);
-            self.read_bytes(file.data.wrapping_add(at + read), &mut bytes[start..])?;
+            self.read_onto(&mut bytes, file.data.wrapping_add(at + read), more as usize)?;
             read += more;
             if let Some(length) = scan::value_length(&bytes, 0) {
                 return Ok(Some(len32(length)));
@@ -792,12 +781,7 @@ impl Os<'_> {
                 bytes.push(0);
                 return Ok(bytes);
             }
-            let start = bytes.len();
-            bytes
-                .try_reserve(usize::from(length))
-                .map_err(|_| self.no_memory())?;
-            bytes.resize(start + usize::from(length), 0);
-            self.read_bytes(at, &mut bytes[start..])?;
+            self.read_onto(&mut bytes, at, usize::from(length))?;
             at = at.wrapping_add(u32::from(length));
         }
     }
@@ -811,12 +795,7 @@ impl Os<'_> {
         buffer: u32,
         size: u32,
     ) -> Result<u32, Fail> {
-        let mut value = Vec::new();
-        value
-            .try_reserve_exact(found.length as usize)
-            .map_err(|_| self.no_memory())?;
-        value.resize(found.length as usize, 0);
-        self.read_bytes(found.value, &mut value)?;
+        let value = self.read_vec(found.value, found.length as usize)?;
         let dictionary = if value.contains(&crate::dictionary::ESCAPE) {
             self.dictionary_bytes()?
         } else {
@@ -853,12 +832,7 @@ impl Os<'_> {
         let Some((at, length)) = self.find_value(file, token)? else {
             return Ok(None);
         };
-        let mut value = Vec::new();
-        value
-            .try_reserve_exact(length as usize)
-            .map_err(|_| self.no_memory())?;
-        value.resize(length as usize, 0);
-        self.read_bytes(at, &mut value)?;
+        let value = self.read_vec(at, length as usize)?;
         let expansion = scan::Expansion {
             parameters: [0, 1, 2, 3].map(|n| parameters[n].as_deref()),
             dictionary: &[],
@@ -1431,14 +1405,7 @@ impl Os<'_> {
             let buffer = at.next_multiple_of(4);
             regs.r[..4].copy_from_slice(&[file.descriptor, frame, buffer, BUFFER]);
             os.perform(X | LOOKUP, &mut regs)?;
-            let mut text = alloc::vec::Vec::new();
-            let length = regs.r[3].min(BUFFER) as usize;
-            if text.try_reserve_exact(length).is_err() {
-                return Err(os.no_memory());
-            }
-            text.resize(length, 0);
-            os.read_bytes(regs.r[2], &mut text)?;
-            Ok(text)
+            os.read_vec(regs.r[2], regs.r[3].min(BUFFER) as usize)
         })
     }
 

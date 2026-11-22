@@ -1405,7 +1405,7 @@ fn a_frame_states_its_stored_raster_its_turn_and_its_density() {
         "the raster as stored, before its turn"
     );
     assert_eq!(frame.components, 1);
-    assert!(!frame.progressive);
+    assert_eq!(frame.process, crate::JpegProcess::Baseline);
     assert_eq!(
         frame.orientation,
         Orientation::from_tag(6).expect("defined")
@@ -1422,6 +1422,18 @@ fn a_frame_states_its_stored_raster_its_turn_and_its_density() {
             .picture_size(frame.stored.0, frame.stored.1),
         "what a decode answers is the stored raster turned"
     );
+    let stored = crate::jpeg_decode_stored(&turned, &ROOMY).expect("decodes");
+    assert_eq!(
+        (stored.width(), stored.height()),
+        frame.stored,
+        "the raster as stored, unturned"
+    );
+    let unturned = decode(&two_tone_landscape(), &ROOMY).expect("decodes");
+    assert_eq!(
+        stored.pixels(),
+        unturned.pixels(),
+        "the same pixels as the raster with no turn"
+    );
 
     let plain = crate::jpeg_frame(&two_tone_landscape()).expect("a frame");
     assert_eq!(plain.orientation, Orientation::IDENTITY);
@@ -1431,7 +1443,7 @@ fn a_frame_states_its_stored_raster_its_turn_and_its_density() {
 
     let progressive =
         crate::jpeg_frame(&build_progressive_single_block_example()).expect("a frame");
-    assert!(progressive.progressive);
+    assert_eq!(progressive.process, crate::JpegProcess::Progressive);
     assert_eq!(
         crate::jpeg_frame(&[0xFF, 0xD8, 0xFF, 0xD9]).err(),
         Some(DecodeError::JpegMissingFrameHeader),

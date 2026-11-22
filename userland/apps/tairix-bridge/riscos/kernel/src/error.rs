@@ -200,13 +200,7 @@ impl Os<'_> {
             let mut regs = Regs::default();
             regs.r[..3].copy_from_slice(&[file.descriptor(), file.request(), 0]);
             self.perform(crate::swi::X | crate::msgtrans::LOOKUP, &mut regs)?;
-            let mut value = Vec::new();
-            value
-                .try_reserve_exact(regs.r[3] as usize)
-                .map_err(|_| self.no_memory())?;
-            value.resize(regs.r[3] as usize, 0);
-            self.read_bytes(regs.r[2], &mut value)?;
-            Ok(value)
+            self.read_vec(regs.r[2], regs.r[3] as usize)
         });
         self.world.translating = false;
         match found {

@@ -21,6 +21,9 @@ impl Flags {
     pub const HI_RES_MONO: Self = Self(1 << 4);
     /// Characters twice their height.
     pub const DOUBLE_VERTICAL: Self = Self(1 << 5);
+    /// No hardware scrolling: the screen drawn is a sprite output has been
+    /// switched to.
+    pub const HARD_SCROLL_DISABLED: Self = Self(1 << 6);
     /// A full palette, each of its colours its own.
     pub const FULL_PALETTE: Self = Self(1 << 7);
     /// A default palette of greys.
@@ -206,6 +209,20 @@ pub static MODES: [Mode; 54] = [
 #[must_use]
 pub fn numbered(number: u32) -> Option<&'static Mode> {
     MODES.get(usize::try_from(number).ok()?)
+}
+
+/// The low `width` bits of `value` repeated until `total` bits are filled:
+/// how screen memory holds a pixel a mode doubles across its wider field,
+/// and how a colour fills a word of pixels.
+#[must_use]
+pub const fn repeated(value: u32, width: u32, total: u32) -> u32 {
+    let mut out = value;
+    let mut filled = width;
+    while filled < total {
+        out |= out << filled;
+        filled *= 2;
+    }
+    out
 }
 
 #[cfg(test)]

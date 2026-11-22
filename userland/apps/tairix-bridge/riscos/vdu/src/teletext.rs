@@ -64,8 +64,8 @@ impl Vdu {
     /// The page sized to the mode, every cell a space.
     fn teletext_page(&mut self, os: &mut Os<'_>) -> Result<(), Fail> {
         let (columns, rows) = (
-            self.screen.format.columns() as usize,
-            self.screen.format.rows() as usize,
+            self.format().columns() as usize,
+            self.format().rows() as usize,
         );
         let (columns, rows) = (columns.min(MOST_COLUMNS), rows.min(MOST_ROWS));
         if self.teletext.cells.len() == rows
@@ -214,7 +214,7 @@ impl Vdu {
         if let Some(slot) = self.teletext.controls.get_mut(usize::from(action)) {
             *slot = value;
         }
-        if self.screen.format.has(Flags::TELETEXT) {
+        if self.format().has(Flags::TELETEXT) {
             self.teletext_page(os)?;
             self.teletext_draw(os, 0, true)?;
         }
@@ -225,8 +225,8 @@ impl Vdu {
     /// half of a double-height pair has changed — or every row after it
     /// where `all`.
     fn teletext_draw(&mut self, os: &mut Os<'_>, first: u32, all: bool) -> Result<(), Fail> {
-        let format = self.screen.format;
-        let canvas = self.screen.canvas();
+        let format = *self.format();
+        let canvas = self.canvas();
         let frame = format.line_length() * format.height();
         let cell = format.cell();
         let mut lower = false;

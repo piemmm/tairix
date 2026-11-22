@@ -85,3 +85,12 @@ fn a_number_alone_in_a_text_program_stores_no_line() {
     let out = basic("10 A=1  \n20 PRINT A\n30\n");
     assert_eq!(out, "         1\n");
 }
+
+#[test]
+fn sys_passes_a_string_in_any_register_the_first_included() {
+    assert_eq!(
+        basic("10 SYS \"OS_Write0\",\"first\"\n20 PRINT \" then\"\n"),
+        "first then\n"
+    );
+    assert_eq!(basic("10 R%=7:SYS &2,\"x\":PRINT R%\n"), "x         7\n");
+}

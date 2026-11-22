@@ -518,7 +518,7 @@ impl<'i> Raster<'i> {
             Some(Source {
                 encoding: Encoding::Jpeg(frame),
                 bytes,
-            }) if progressive || !frame.progressive => Self::Jpeg(bytes, *frame),
+            }) if progressive || !frame.process.progressive() => Self::Jpeg(bytes, *frame),
             _ => Self::Pixels(image.pixels()),
         }
     }

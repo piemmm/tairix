@@ -29,13 +29,16 @@ mod frames;
 mod hline;
 mod mode;
 mod modestring;
+mod output;
 mod palette;
 mod plot;
 mod pointer;
 mod raster;
+mod saved;
 mod screen;
 mod screenmodes;
 mod select;
+mod sprite;
 mod state;
 mod stream;
 mod swis;
@@ -61,11 +64,21 @@ pub const DRIVERS: VduDrivers = VduDrivers {
     monitor: select::monitor,
     set_monitor: select::set_monitor,
     origin,
-    routines: &[hline::routine, screen::area_handler],
-    vectors: &[VectorDefault {
-        vector: palette::PALETTE_V,
-        code: palette::vector,
-    }],
+    routines: &[
+        hline::routine,
+        screen::area_handler,
+        sprite::system_area_handler,
+    ],
+    vectors: &[
+        VectorDefault {
+            vector: palette::PALETTE_V,
+            code: palette::vector,
+        },
+        VectorDefault {
+            vector: tairix_riscos_kernel::vectors::SPRITE,
+            code: sprite::vector,
+        },
+    ],
 };
 
 /// The routines' places among [`VduDrivers::routines`].
@@ -74,11 +87,17 @@ mod routine {
     pub(crate) const HLINE: u32 = 0;
     /// The screen area's handler.
     pub(crate) const SCREEN_AREA: u32 = 1;
+    /// The system sprite area's handler.
+    pub(crate) const SYSTEM_SPRITES: u32 = 2;
 }
 
 /// The built-in modules this crate provides, for the session's
 /// `Config::modules`.
-pub static MODULES: [&Builtin; 1] = [&screenmodes::SCREEN_MODES];
+pub static MODULES: [&Builtin; 3] = [
+    &screenmodes::SCREEN_MODES,
+    &sprite::extend::SPRITE_EXTEND,
+    &sprite::utils::SPRITE_UTILS,
+];
 
 /// A copy-cursor editing key.
 fn edit(

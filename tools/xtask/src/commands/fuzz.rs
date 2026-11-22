@@ -210,6 +210,16 @@ pub const TARGETS: &[Target] = &[
         description: "userland/apps/tairix-bridge/riscos/vdu: hostile VDU streams — every control code with any parameters, modes no monitor shows, windows off the screen or inside out, shapes reaching the ends of the coordinate range — and the drivers' SWIs, OS_Byte and OS_Word reasons with hostile registers and blocks; every refusal a value, every error block readable, the drivers still answering",
     },
     Target {
+        package: "tairix-riscos-vdu",
+        test: "fuzz_sprites",
+        description: "userland/apps/tairix-bridge/riscos/vdu sprites: every OS_SpriteOp reason with each naming over areas whose blocks and sprites are salted, factors, matrices, parallelograms and tables pointing anywhere, output switched to sprites, the JPEG SWIs over JPEGs with bytes changed, PLOT &E8-&EF, VDU 23,27 and the SpriteUtils commands; every refusal a value, every error block readable, the drivers still answering",
+    },
+    Target {
+        package: "tairix-riscos-vdu",
+        test: "fuzz_screenmodes",
+        description: "userland/apps/tairix-bridge/riscos/vdu ScreenModes: hostile monitor definition files — a good file's lines dropped, repeated, reordered or garbled, unknown keys, numbers past any range, modes past the most kept, or random bytes — loaded with *LoadModeFile, then ScreenModes' SWIs at every offset with hostile registers, the screen modes enumerated and selected, and the mode extension service with hostile selectors; every refusal a value, every error block readable, the drivers still answering",
+    },
+    Target {
         package: "tairix-riscos-filing",
         test: "fuzz_hostfs",
         description: "userland/apps/tairix-bridge/riscos/filing HostFS relay: hostile requests from the session worker against the server, over a tree with roots and files beside them, each answered by a reply that answers it and nothing changed outside the writable root; every message that decodes re-encoding to its own bytes; a session whose relay fails or damages its replies still answering",

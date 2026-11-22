@@ -179,7 +179,7 @@ fn write_sprite(
     }
     let palette_len = match (parsed.layout, source.kind()) {
         (
-            Layout::Indexed { bits },
+            Layout::Indexed { bits, .. },
             PictureKind::Indexed {
                 depth,
                 palette,
@@ -296,10 +296,11 @@ fn write_rows(
         rows.read(source, y);
         line.fill(0);
         match (layout, kind) {
-            (Layout::Indexed { bits }, PictureKind::Indexed { palette, .. }) => {
+            (Layout::Indexed { bits, field }, PictureKind::Indexed { palette, .. }) => {
                 indices_fit(&rows.samples, palette.len())?;
                 for (x, &index) in (0u64..).zip(&rows.samples) {
-                    put_bits(&mut line, x * u64::from(bits), bits, u32::from(index));
+                    let value = tairix_vdu::mode::repeated(u32::from(index), bits, field);
+                    put_bits(&mut line, x * u64::from(field), field, value);
                 }
             }
             (Layout::Packed { bytes, channels }, PictureKind::Rgba) => {

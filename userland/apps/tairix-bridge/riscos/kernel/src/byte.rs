@@ -49,7 +49,7 @@ pub mod var {
     /// The `*Exec` file's handle.
     pub(crate) const EXEC_HANDLE: u8 = 0xC6;
     /// The `*Spool` file's handle.
-    pub(crate) const SPOOL_HANDLE: u8 = 0xC7;
+    pub const SPOOL_HANDLE: u8 = 0xC7;
     /// Escape's effect on Break: bit 0 ignores the escape character.
     pub(crate) const ESCAPE_BREAK: u8 = 0xC8;
     /// Keyboard input disabled.
@@ -77,7 +77,7 @@ pub mod var {
     /// Acknowledging escape only clears it.
     pub(crate) const ESCAPE_EFFECT: u8 = 0xE6;
     /// `OS_Byte` 3's output streams.
-    pub(crate) const WRCH_DEST: u8 = 0xEC;
+    pub const WRCH_DEST: u8 = 0xEC;
     /// `OS_Byte` 4's cursor key mode.
     pub const CURSOR_EDIT: u8 = 0xED;
     /// What the keypad's codes are counted from, in place of `0`.

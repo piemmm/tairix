@@ -28,7 +28,7 @@ pub(crate) mod kind {
     /// The border.
     pub(super) const BORDER: u32 = 24;
     /// One of the pointer's colours.
-    pub(super) const POINTER: u32 = 25;
+    pub(crate) const POINTER: u32 = 25;
     /// The supremacy bit.
     pub(super) const SUPREMACY: u32 = 0x80;
 }
@@ -36,7 +36,7 @@ pub(crate) mod kind {
 /// `PaletteV`'s reasons.
 pub(crate) mod reason {
     pub(crate) const READ: u32 = 1;
-    pub(super) const SET: u32 = 2;
+    pub(crate) const SET: u32 = 2;
     pub(super) const FIRST_FLASH: u32 = 3;
     pub(super) const SECOND_FLASH: u32 = 4;
     pub(super) const DEFAULT: u32 = 5;

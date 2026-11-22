@@ -643,13 +643,7 @@ impl Os<'_> {
     /// R5's top bit keeps the unused arguments off the end.
     pub(crate) fn substitute_args(&mut self, regs: &mut Regs, flags: u32) -> Result<(), Fail> {
         let args = self.terminated_text(regs.r[0])?;
-        let length = (regs.r[4] as usize).min(LONGEST_TEXT);
-        let mut template = Vec::new();
-        if template.try_reserve_exact(length).is_err() {
-            return Err(self.no_memory());
-        }
-        template.resize(length, 0);
-        self.read_bytes(regs.r[3], &mut template)?;
+        let template = self.read_vec(regs.r[3], (regs.r[4] as usize).min(LONGEST_TEXT))?;
         let append = flags >> 31 == 0;
         let out = substitute(&args, &template, append, regs.r[2] as usize)
             .map_err(|error| self.error(obey_error(error)))?;

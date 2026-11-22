@@ -145,6 +145,14 @@ fn every_numbered_depth_is_written_back_byte_for_byte() {
     }
 }
 
+/// The regression's other half: a mode 2 sprite read back is written in its
+/// eight-bit fields, each colour repeated across, as RISC OS 5 holds it.
+#[test]
+fn a_doubling_modes_sprite_is_written_back_in_its_wide_fields() {
+    same_after_rewrite(&one(Fixture::new(2, 8, 5, 2)
+        .pixels(&[0x55, 0xFF, 0x33, 0xBB, 0x00, 0x11, 0x22, 0x44, 0x88, 0xCC])));
+}
+
 #[test]
 fn a_short_vidc_palette_is_kept_as_the_file_held_it() {
     let pixels = values(8, 8, 0);

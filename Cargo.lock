@@ -4730,6 +4730,7 @@ dependencies = [
  "tairix-colour",
  "tairix-fscopy",
  "tairix-fuzzseed",
+ "tairix-image",
  "tairix-riscos-arm",
  "tairix-riscos-basic",
  "tairix-riscos-filing",

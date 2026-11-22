@@ -500,22 +500,21 @@ impl Machine<'_, '_> {
         if left > regs.len() {
             return Err(Error::StackCorrupt.into());
         }
-        while left > 0 {
+        // The first input's string block lies below it, so blocks are passed
+        // until the SWI's number is met, not until the inputs are counted.
+        let header = loop {
             let header = self.header_at(at)?.ok_or(Error::StackCorrupt)?;
             match (header.kind, header.aux) {
-                (Kind::Int, 1) => {
+                (Kind::Int, 1) if left > 0 => {
                     left -= 1;
                     regs[left] = self.os.read_word(at + 4)?;
                 }
                 (Kind::LocalBlock, 1) => {}
+                (Kind::Int, 0) if left == 0 => break header,
                 _ => return Err(Error::StackCorrupt.into()),
             }
             at += header.length;
-        }
-        let header = self.header_at(at)?.ok_or(Error::StackCorrupt)?;
-        if (header.kind, header.aux) != (Kind::Int, 0) {
-            return Err(Error::StackCorrupt.into());
-        }
+        };
         let number = [self.os.read_word(at + 4)?];
         let base = at + header.length;
         let outputs = self.take(token::TO)?;

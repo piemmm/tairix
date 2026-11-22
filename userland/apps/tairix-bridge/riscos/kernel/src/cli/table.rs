@@ -549,12 +549,7 @@ impl Os<'_> {
             }
         }
         match found {
-            Ok(()) => {
-                let length = lookup.r[3] as usize;
-                let mut text = alloc::vec![0; length.min(crate::error::TEXT)];
-                self.read_bytes(lookup.r[2], &mut text)?;
-                Ok(text)
-            }
+            Ok(()) => self.read_vec(lookup.r[2], (lookup.r[3] as usize).min(crate::error::TEXT)),
             Err(Fail::Error(block)) => {
                 let (text, _) =
                     self.read_until(block.wrapping_add(4), crate::error::TEXT, |b| b == 0)?;
@@ -567,7 +562,8 @@ impl Os<'_> {
 
 /// The parameters of `tail`: each one's start and end, spaces between them,
 /// one starting with `"` running to its closing `"` and spaces in it kept.
-pub(crate) fn parameters(tail: &[u8]) -> Vec<(usize, usize)> {
+#[must_use]
+pub fn parameters(tail: &[u8]) -> Vec<(usize, usize)> {
     let mut words = Vec::new();
     let mut at = 0;
     while at < tail.len() {

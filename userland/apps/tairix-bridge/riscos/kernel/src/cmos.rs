@@ -59,7 +59,10 @@ pub(crate) const SCREEN_SIZE: u8 = 0x8F;
 pub(crate) const RAM_DISC: u8 = 0x90;
 pub(crate) const SYSTEM_HEAP: u8 = 0x91;
 pub(crate) const RMA_SIZE: u8 = 0x92;
-pub(crate) const SPRITE_SIZE: u8 = 0x93;
+/// The pages of the system sprite area.
+pub const SPRITE_SIZE: u8 = 0x93;
+/// The low bits of [`SPRITE_SIZE`] that count its pages.
+pub const SPRITE_SIZE_BITS: u8 = 7;
 /// The configured language.
 pub(crate) const LANGUAGE: u8 = 0xB9;
 /// The current year's century.

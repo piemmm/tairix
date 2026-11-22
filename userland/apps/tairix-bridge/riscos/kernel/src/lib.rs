@@ -25,6 +25,7 @@ mod amb;
 pub mod byte;
 mod callbacks;
 mod cli;
+pub use cli::table::parameters as command_parameters;
 mod clock;
 pub mod cmos;
 mod convert;

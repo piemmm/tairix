@@ -23,34 +23,85 @@ const fn byte(words: &[u32; FRAME_WORDS], offset: usize) -> u8 {
 const COPY_CHUNK: u32 = 4096;
 
 impl Os<'_> {
-    /// Fills `out` from guest memory at `address`.
-    pub fn read_bytes(&mut self, address: u32, out: &mut [u8]) -> Result<(), Fail> {
+    /// Walks `length` bytes from `address` a page at a time, handing `each`
+    /// a page's frame, the offset in it, how far into the range the page
+    /// starts, and how many of its bytes the range covers. Stops at the
+    /// first page a privileged access refuses, or that the range would wrap
+    /// past the top of memory to reach, and gives where that page is.
+    fn walk(
+        &mut self,
+        address: u32,
+        length: usize,
+        write: bool,
+        mut each: impl FnMut(&mut Self, Frame, usize, usize, usize),
+    ) -> Result<(), u32> {
         let mut at = address;
         let mut done = 0;
-        while done < out.len() {
-            let (frame, offset) = page_of(self, at, false).ok_or_else(|| self.aborted(at))?;
-            let n = (PAGE_SIZE as usize - offset).min(out.len() - done);
-            if let Some(words) = self.memory.frame_words(frame) {
-                for (i, slot) in out[done..done + n].iter_mut().enumerate() {
-                    *slot = byte(words, offset + i);
-                }
-            }
+        while done < length {
+            let (frame, offset) = page_of(self, at, write).ok_or(at)?;
+            let n = (PAGE_SIZE as usize - offset).min(length - done);
+            each(self, frame, offset, done, n);
             done += n;
-            if done < out.len() {
-                at = self.advance(at, n)?;
+            if done < length {
+                at = u32::try_from(n)
+                    .ok()
+                    .and_then(|n| at.checked_add(n))
+                    .ok_or(at)?;
             }
         }
         Ok(())
     }
 
+    /// Fills `out` from guest memory at `address`.
+    pub fn read_bytes(&mut self, address: u32, out: &mut [u8]) -> Result<(), Fail> {
+        self.walk(address, out.len(), false, |os, frame, offset, done, n| {
+            if let Some(words) = os.memory.frame_words(frame) {
+                for (i, slot) in out[done..done + n].iter_mut().enumerate() {
+                    *slot = byte(words, offset + i);
+                }
+            }
+        })
+        .map_err(|at| self.aborted(at))
+    }
+
+    /// Appends `length` bytes of guest memory from `address` to `out`. The
+    /// range is proven readable before the host grants room for it, so a
+    /// length no guest memory backs costs the host nothing.
+    ///
+    /// # Errors
+    ///
+    /// The abort a read in the range takes; "System heap full" where the
+    /// host refuses the room.
+    pub fn read_onto(
+        &mut self,
+        out: &mut Vec<u8>,
+        address: u32,
+        length: usize,
+    ) -> Result<(), Fail> {
+        self.walk(address, length, false, |_, _, _, _, _| {})
+            .map_err(|at| self.aborted(at))?;
+        out.try_reserve(length).map_err(|_| self.no_memory())?;
+        let start = out.len();
+        out.resize(start + length, 0);
+        self.read_bytes(address, &mut out[start..])
+    }
+
+    /// `length` bytes of guest memory from `address`, read as
+    /// [`Os::read_onto`] reads them.
+    ///
+    /// # Errors
+    ///
+    /// As [`Os::read_onto`].
+    pub fn read_vec(&mut self, address: u32, length: usize) -> Result<Vec<u8>, Fail> {
+        let mut bytes = Vec::new();
+        self.read_onto(&mut bytes, address, length)?;
+        Ok(bytes)
+    }
+
     /// Writes `bytes` to guest memory at `address`.
     pub fn write_bytes(&mut self, address: u32, bytes: &[u8]) -> Result<(), Fail> {
-        let mut at = address;
-        let mut done = 0;
-        while done < bytes.len() {
-            let (frame, offset) = page_of(self, at, true).ok_or_else(|| self.aborted(at))?;
-            let n = (PAGE_SIZE as usize - offset).min(bytes.len() - done);
-            if let Some(words) = self.memory.frame_words_mut(frame) {
+        self.walk(address, bytes.len(), true, |os, frame, offset, done, n| {
+            if let Some(words) = os.memory.frame_words_mut(frame) {
                 for (i, &value) in bytes[done..done + n].iter().enumerate() {
                     let place = offset + i;
                     let shift = 8 * (place % 4);
@@ -58,12 +109,8 @@ impl Os<'_> {
                     *word = (*word & !(0xFF << shift)) | (u32::from(value) << shift);
                 }
             }
-            done += n;
-            if done < bytes.len() {
-                at = self.advance(at, n)?;
-            }
-        }
-        Ok(())
+        })
+        .map_err(|at| self.aborted(at))
     }
 
     /// The words of the page holding `address`, which a privileged mode may
@@ -105,15 +152,6 @@ impl Os<'_> {
             .frame_words(frame)
             .map(|words| (words, offset / 4))
             .ok_or(Fail::Unwind(super::Unwind::Ended(super::Ended::Fault)))
-    }
-
-    /// `at` moved on by `n` bytes of a page; an access that would wrap past
-    /// the top of memory aborts there.
-    fn advance(&mut self, at: u32, n: usize) -> Result<u32, Fail> {
-        u32::try_from(n)
-            .ok()
-            .and_then(|n| at.checked_add(n))
-            .ok_or_else(|| self.aborted(at))
     }
 
     /// The byte at `address`.
@@ -184,7 +222,6 @@ impl Os<'_> {
     pub fn write_word(&mut self, address: u32, value: u32) -> Result<(), Fail> {
         self.write_bytes(address, &value.to_le_bytes())
     }
-
     /// The byte at `address` if a privileged mode may read it, without
     /// aborting: for the kernel's reading of what the guest may have
     /// overwritten.

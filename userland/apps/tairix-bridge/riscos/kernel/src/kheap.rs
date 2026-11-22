@@ -84,8 +84,8 @@ pub(crate) const UNKNOWN_REASON: Error = heap_error(HeapError::BadReason);
 
 impl Os<'_> {
     /// Whether a privileged mode may read and write every byte from `start`
-    /// to `end`.
-    pub(crate) fn writable(&mut self, start: u32, end: u64) -> bool {
+    /// to `end`: a change that must never be left half made asks first.
+    pub fn writable(&mut self, start: u32, end: u64) -> bool {
         let both = PRIVILEGED_READ | PRIVILEGED_WRITE;
         self.memory.check_access(start, end) & both == both
     }

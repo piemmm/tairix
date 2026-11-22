@@ -460,12 +460,7 @@ impl Machine<'_, '_> {
         if self.page.saturating_add(length).saturating_add(MARGIN) > self.himem {
             return Err(Error::NoRoom.into());
         }
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(length as usize)
-            .map_err(|_| Error::NoRoom)?;
-        bytes.resize(length as usize, 0);
-        self.os.read_bytes(start, &mut bytes)?;
+        let bytes = self.os.read_vec(start, length as usize)?;
         let staging = self.himem - MARGIN / 2 - length.next_multiple_of(4);
         self.os.write_bytes(staging, &bytes)?;
         self.load_staged(staging, length)

@@ -22,7 +22,7 @@ fn banks_lie_one_after_another_and_the_second_is_known() {
     let mut s = screen(1, 0x14000);
     assert_eq!(s.banks(), 4);
     s.set_bank(true, 2);
-    assert_eq!(s.screen_start(), 0x10_0000 + 20_480);
+    assert_eq!(s.canvas().start, 0x10_0000 + 20_480);
     assert!(s.writing_second());
     assert_eq!(s.needed(), 2 * 20_480);
     assert_eq!(s.display_start_address(), 0x10_0000, "the display unmoved");

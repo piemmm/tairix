@@ -24,7 +24,7 @@ pub(crate) fn routine(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         regs.r[2].cast_signed(),
     );
     with(os, |vdu, os| {
-        if !vdu.screen.format.graphic() {
+        if !vdu.format().graphic() {
             return Ok(());
         }
         vdu.draw_spans(os, [(y, left.min(right), left.max(right))], &block)

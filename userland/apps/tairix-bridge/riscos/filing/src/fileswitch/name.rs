@@ -433,8 +433,7 @@ pub(crate) fn read_disc(
         &mut regs,
         |os, _, room| {
             let length = os.read_byte(room)?;
-            let mut bytes = alloc::vec![0; usize::from(length)];
-            os.read_bytes(room + 1, &mut bytes)?;
+            let bytes = os.read_vec(room + 1, usize::from(length))?;
             boot = os.read_byte(room + 1 + u32::from(length))?;
             if bytes.iter().all(|&b| b > b' ' && b != b'.' && b != b':') {
                 name = bytes;

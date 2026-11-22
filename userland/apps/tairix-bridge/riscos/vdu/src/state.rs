@@ -11,10 +11,12 @@ use tairix_riscos_kernel::os::{Ended, Fail, Os, Unwind};
 use crate::colour::Colours;
 use crate::font::Font;
 use crate::frames::Frames;
+use crate::output::Output;
 use crate::palette::Palette;
 use crate::plot::Graphics;
 use crate::pointer::Pointer;
 use crate::screen::Screen;
+use crate::sprite::Sprites;
 use crate::stream::Stream;
 use crate::teletext::Teletext;
 use crate::text::Text;
@@ -31,6 +33,12 @@ pub(crate) struct Vdu {
     pub(crate) pointer: Pointer,
     pub(crate) frames: Frames,
     pub(crate) teletext: Teletext,
+    pub(crate) sprites: Sprites,
+    /// Where the drivers draw, and what switches output back there.
+    pub(crate) output: Output,
+    pub(crate) context: crate::output::Context,
+    /// The drivers' own save area, `OS_SpriteOp` 60's save area 1.
+    pub(crate) kernel_save: Option<crate::saved::Saved>,
     /// The current monitor type.
     pub(crate) monitor: u32,
     /// `OS_Byte` 114: the modes selected from now on take the second bank.
