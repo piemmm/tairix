@@ -21,21 +21,24 @@ use crate::swi::os::read_unsigned::{BOUNDED, BYTE_SIZED, TERMINATED};
 
 /// An integer in signed decimal, as RISC OS writes one: `-` before a
 /// negative one, no leading zeros.
-pub(crate) struct Decimal {
+#[derive(Clone, Copy, Debug)]
+pub struct Decimal {
     digits: [u8; 12],
     len: usize,
 }
 
 impl Decimal {
     /// `n` written out.
-    pub(crate) fn of(n: i32) -> Self {
+    #[must_use]
+    pub fn of(n: i32) -> Self {
         let mut digits = [0; 12];
         let len = tairix_util::fmt::format_i32(n, &mut digits).len();
         Self { digits, len }
     }
 
     /// The text.
-    pub(crate) fn as_bytes(&self) -> &[u8] {
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
         &self.digits[..self.len]
     }
 }

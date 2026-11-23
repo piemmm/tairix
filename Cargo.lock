@@ -4703,6 +4703,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-riscos-draw"
+version = "0.0.0"
+dependencies = [
+ "tairix-drawing",
+ "tairix-fscopy",
+ "tairix-fuzzseed",
+ "tairix-riscos-arm",
+ "tairix-riscos-basic",
+ "tairix-riscos-filing",
+ "tairix-riscos-kernel",
+ "tairix-riscos-vdu",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-riscos-filing"
 version = "0.0.0"
 dependencies = [
@@ -4751,6 +4766,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-collections",
  "tairix-colour",
+ "tairix-drawing",
  "tairix-fscopy",
  "tairix-fuzzseed",
  "tairix-image",
@@ -4758,6 +4774,7 @@ dependencies = [
  "tairix-raster",
  "tairix-riscos-arm",
  "tairix-riscos-basic",
+ "tairix-riscos-draw",
  "tairix-riscos-filing",
  "tairix-riscos-kernel",
  "tairix-teletext",

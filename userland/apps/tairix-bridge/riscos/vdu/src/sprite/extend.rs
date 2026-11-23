@@ -72,7 +72,7 @@ fn vector(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let Some(naming) = Naming::of(regs.r[0]) else {
         return super::kernel(os, regs);
     };
-    let asked = regs.r[0] & 0xFF;
+    let asked = regs.r[0] & tairix_riscos_kernel::swi::sprite_op::REASON;
     match asked {
         reason::VERIFY => verify::verify(os, naming, regs),
         reason::PUT_GREY_SCALED => Err(os.error(NO_GREY_SCALED)),

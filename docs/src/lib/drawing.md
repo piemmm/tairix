@@ -371,6 +371,13 @@ up from the paper's foot, and RISC OS's Latin-1 for text and names
 document as a Draw file when it begins with the format's signature and as SVG otherwise,
 so a file is read by what it holds, never by its name.
 
+`riscos::format` is the format's one definition: its signature, header,
+object and path element layouts, codes and style bits, and `Objects`, the
+walk of a run of objects that refuses one whose size does not frame it
+(`Misframed`). The reader and writer use it, and so do TAIRiX Bridge's Draw
+and DrawFile modules and SpriteExtend, so the layout is never written down
+twice.
+
 `riscos::read` reads a file into one layer, finding its font table and
 options first, as later RISC OS lets them follow the objects that need
 them:

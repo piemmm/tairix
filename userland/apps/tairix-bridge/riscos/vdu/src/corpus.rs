@@ -297,6 +297,63 @@ pub const fn unit(log2_bpp: u32) -> usize {
     1 << log2_bpp.saturating_sub(3)
 }
 
+/// How a replayed case's recording differs from genuine RISC OS's, if it
+/// does: the first reading that differs, else the screen's shape or its
+/// first line that differs.
+#[must_use]
+pub fn difference(ours: &Recorded, genuine: &Recorded) -> Option<String> {
+    if ours.lines != genuine.lines {
+        let first = ours
+            .lines
+            .iter()
+            .zip(&genuine.lines)
+            .position(|(a, b)| a != b)
+            .unwrap_or(ours.lines.len().min(genuine.lines.len()));
+        return Some(format!(
+            "reading {first}: {:?} where genuine RISC OS read {:?}",
+            ours.lines.get(first),
+            genuine.lines.get(first)
+        ));
+    }
+    match (&ours.screen, &genuine.screen) {
+        (Some(a), Some(b)) if a == b => None,
+        (Some(a), Some(b)) => {
+            let shape = |s: &Screen| (s.width, s.height, s.log2_bpp, s.line_length);
+            if shape(a) != shape(b) {
+                return Some(format!(
+                    "a screen of {:?} where genuine RISC OS had {:?}",
+                    shape(a),
+                    shape(b)
+                ));
+            }
+            let stride = (b.line_length as usize).max(1);
+            let mut differing = a
+                .bytes
+                .chunks(stride)
+                .zip(b.bytes.chunks(stride))
+                .enumerate()
+                .filter(|(_, (x, y))| x != y);
+            let (first, (x, y)) = differing.next()?;
+            let unit = unit(b.log2_bpp);
+            Some(format!(
+                "{} lines differ, the first {first}:\n  ours    {}\n  genuine {}",
+                1 + differing.count(),
+                encode_row(x, unit),
+                encode_row(y, unit)
+            ))
+        }
+        (a, b) => Some(format!(
+            "a screen {} where genuine RISC OS {}",
+            if a.is_some() { "saved" } else { "not saved" },
+            if b.is_some() {
+                "saved one"
+            } else {
+                "saved none"
+            }
+        )),
+    }
+}
+
 /// A screen line's bytes in `unit`s: each run of three or more alike as
 /// `NxHH…`, the units between as hexadecimal, each part set apart by a
 /// space.

@@ -34,6 +34,8 @@ use super::paint::{self, PlotFlags, Scale};
 use super::{NO_MEMORY, RESERVED_FLAGS};
 
 pub(crate) use tairix_riscos_kernel::swi::chunk::SPRITE_EXTEND as CHUNK;
+/// `JPEG_PlotTransformed`'s place in [`CHUNK`], which other modules call.
+const PLOT_TRANSFORMED: u32 = tairix_riscos_kernel::swi::jpeg::PLOT_TRANSFORMED - CHUNK;
 /// The names of SpriteExtend's JPEG SWIs, in [`CHUNK`].
 pub(crate) const NAMES: &[&str] = &[
     "Info",
@@ -133,7 +135,7 @@ pub(crate) fn swi(os: &mut Os<'_>, offset: u32, regs: &mut Regs) -> Result<(), F
                 Picture::of(flags, SCALED_TRANSLUCENCY_SHIFT, SCALED_MAPPING, descriptor),
             )
         }
-        4 => {
+        PLOT_TRANSFORMED => {
             let bytes = os.read_vec(regs.r[0], regs.r[3] as usize)?;
             let [_, flags, shape, _, descriptor, ..] = regs.r;
             plot_transformed(os, &bytes, flags, shape, descriptor)

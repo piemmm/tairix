@@ -26,6 +26,45 @@ const CALL_A_SWI_HOPS: u32 = 16;
 /// A number no SWI has, for a chain followed too far.
 const UNKNOWN: u32 = 0x80;
 
+/// SpriteExtend's JPEG SWIs other modules call.
+pub mod jpeg {
+    use super::chunk::SPRITE_EXTEND;
+
+    /// `JPEG_PlotTransformed`.
+    pub const PLOT_TRANSFORMED: u32 = SPRITE_EXTEND + 0x04;
+}
+
+/// `OS_SpriteOp`'s reasons other modules call, and the bits R0 adds to a
+/// reason to name a sprite in R1's area.
+pub mod sprite_op {
+    /// R0's bits that hold the reason.
+    pub const REASON: u32 = 0xFF;
+    /// A sprite by the name at R2.
+    pub const BY_NAME: u32 = 0x100;
+    /// A sprite by its address in R2.
+    pub const BY_POINTER: u32 = 0x200;
+    /// A sprite's size, mask and mode.
+    pub const READ_INFO: u32 = 40;
+    /// A sprite plotted through a matrix or onto a parallelogram.
+    pub const PUT_TRANSFORMED: u32 = 56;
+    /// Output switched to a sprite's mask.
+    pub const SWITCH_TO_MASK: u32 = 61;
+}
+
+/// Draw's SWIs other modules call.
+pub mod draw {
+    use super::chunk::DRAW;
+
+    /// `Draw_TransformPath`.
+    pub const TRANSFORM_PATH: u32 = DRAW + 0x0A;
+}
+
+/// The printer drivers' SWIs other modules call.
+pub mod pdriver {
+    /// `PDriver_DeclareFont`.
+    pub const DECLARE_FONT: u32 = 0x8_0155;
+}
+
 /// The SWI chunks of the modules the kernel builds in.
 pub mod chunk {
     /// `MessageTrans`.
@@ -42,6 +81,10 @@ pub mod chunk {
     pub const SOUND_SCHEDULER: u32 = 0x4_01C0;
     /// `ColourTrans`.
     pub const COLOUR_TRANS: u32 = 0x4_0740;
+    /// `Draw`.
+    pub const DRAW: u32 = 0x4_0700;
+    /// `DrawFile`.
+    pub const DRAW_FILE: u32 = 0x4_5540;
     /// The Font Manager.
     pub const FONT: u32 = 0x4_0080;
     /// `InverseTable`.
@@ -54,9 +97,14 @@ pub mod chunk {
     pub const SPRITE_EXTEND: u32 = 0x4_9980;
 }
 
-/// The Font Manager's SWIs ColourTrans calls.
+/// The Font Manager's SWIs other modules call.
 pub mod font {
     use super::chunk::FONT;
+
+    /// `Font_FindFont`.
+    pub const FIND_FONT: u32 = FONT + 0x01;
+    /// `Font_LoseFont`.
+    pub const LOSE_FONT: u32 = FONT + 0x02;
 
     /// `Font_SetFontColours`.
     pub const SET_FONT_COLOURS: u32 = FONT + 0x12;

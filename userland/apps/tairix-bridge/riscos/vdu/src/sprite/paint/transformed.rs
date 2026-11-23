@@ -16,18 +16,25 @@
 //!   both held to the rectangle.
 //!
 //! The parallelogram form maps the rectangle's first corner to its first
-//! point, the whole sprite's first corner being its top left. Both forms'
-//! points are from the graphics origin, and no matrix at all is the
-//! identity. Every product is exact or refused: a guest's matrix too extreme
-//! to carry draws nothing.
+//! point, the whole sprite's first corner being its top left. The matrix
+//! form is the parallelogram Draw makes of the rectangle, held to the sprite:
+//! SpriteExtend has `Draw_TransformPath` move its first corner and the two
+//! beside it in place, so a claimant of `DrawV` sees them and may move them,
+//! Draw's refusal of a matrix that overflows is the plot's, and with Draw
+//! gone the plot fails as its call does. Both forms' points are from the
+//! graphics origin, and no matrix at all leaves the corners where they are.
+//! Every product is exact or refused: a parallelogram too extreme to carry
+//! draws nothing.
 
-use tairix_riscos_kernel::os::{Fail, Os};
+use tairix_drawing::riscos::format::{END, MOVE};
+use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::output::workspace;
+use tairix_riscos_kernel::swi::{draw, X};
 use tairix_util::divisor::gcd;
 
 use super::super::format;
 use super::super::header::Sprite;
-use super::colours::{converted_first, mapped};
+use super::colours::{converted_first, mapped, Conversion, Converted};
 use super::scaled::{paint, plot_block};
 use super::source::{Checked, Source};
 use super::{Destination, Mapping, PlotFlags};
@@ -43,6 +50,8 @@ const STEP_BITS: u32 = 16;
 /// The fraction bits a row's offset is carried to: enough that rounding
 /// it down never moves the step grid's whole part.
 const ROW_BITS: u32 = 32;
+/// The words of the path SpriteExtend hands Draw: three moves and the end.
+const CORNER_PATH_WORDS: usize = 10;
 
 /// `OS_SpriteOp` 56: the sprite through R6's matrix or parallelogram, the
 /// part of it R4 names where R3 asks, turned into the destination's pixels
@@ -60,11 +69,13 @@ pub(crate) fn put_transformed(
     let destination = Destination::now(os)?;
     let (mut source, converted, destination) =
         converted_first(os, &checked, &destination, flags, table)?;
-    if !converted.draws() {
-        return Ok(());
-    }
-    let Some(mut transform) = Transform::read(os, &checked, &destination, form, rectangle, shape)?
-    else {
+    let handed = Handed {
+        row: handed_row(&checked, form),
+        action: flags.0,
+        table: table_in_use(&converted, &checked, &destination, table),
+    };
+    let transform = Transform::read(os, &checked, &destination, form, rectangle, shape, handed)?;
+    let Some(mut transform) = transform.filter(|_| converted.draws()) else {
         return Ok(());
     };
     if !mapped(&checked.pixels, flags) {
@@ -93,7 +104,13 @@ pub(crate) fn plot_mask_transformed(
 ) -> Result<(), Fail> {
     let checked = Source::check(os, sprite)?;
     let destination = Destination::now(os)?;
-    let Some(mut transform) = Transform::read(os, &checked, &destination, form, rectangle, shape)?
+    let handed = Handed {
+        row: handed_row(&checked, form),
+        action: PlotFlags::MASKED,
+        table: 0,
+    };
+    let Some(mut transform) =
+        Transform::read(os, &checked, &destination, form, rectangle, shape, handed)?
     else {
         return Ok(());
     };
@@ -108,6 +125,114 @@ pub(crate) fn plot_mask_transformed(
         &mut transform,
         solid,
     )
+}
+
+/// R4, R5 and R7 as SpriteExtend hands them to Draw with the corners, which
+/// a claimant of `DrawV` sees: the sprite's row in words, or in bits where a
+/// source rectangle is named, the plot's action, and the table it plots
+/// through.
+#[derive(Clone, Copy, Debug)]
+struct Handed {
+    row: u32,
+    action: u32,
+    table: u32,
+}
+
+/// The sprite's row as R4 hands it to Draw for R3 `form`.
+fn handed_row(checked: &Checked<'_>, form: u32) -> u32 {
+    let words = checked.row_words();
+    if form & SOURCE_RECTANGLE == 0 {
+        words
+    } else {
+        words.wrapping_mul(u32::BITS)
+    }
+}
+
+/// The table at `table` as the plot uses it: none where it maps a sprite of
+/// the destination's depth to itself.
+fn table_in_use(
+    converted: &Converted,
+    checked: &Checked<'_>,
+    destination: &Destination,
+    table: u32,
+) -> u32 {
+    let identity = checked.pixels.log2_bpp == destination.format.log2_bpp()
+        && matches!(&converted.conversion, Conversion::Bytes(bytes)
+            if bytes.iter().enumerate().all(|(i, &byte)| usize::from(byte) == i));
+    if identity {
+        0
+    } else {
+        table
+    }
+}
+
+/// `corners` each held to a sprite of `size` pixels, their order kept.
+fn held(corners: [i128; 4], size: (i128, i128)) -> [i128; 4] {
+    let [x0, y0, x1, y1] = corners;
+    [
+        x0.clamp(0, size.0),
+        y0.clamp(0, size.1),
+        x1.clamp(0, size.0),
+        y1.clamp(0, size.1),
+    ]
+}
+
+/// The path SpriteExtend hands Draw: moves to the rectangle `corners`' first
+/// corner, the one along its row, and the one along its column, each in
+/// 1/256 OS units of a sprite at `eig`, carried in a word as RISC OS's are.
+fn corner_path(corners: [i128; 4], eig: (u32, u32)) -> [u32; CORNER_PATH_WORDS] {
+    let unit = |pixels: i128, eig: u32| u32::try_from(pixels).unwrap_or(0).wrapping_shl(8 + eig);
+    let [x0, y0, x1, y1] = corners;
+    let (x0, y0, x1, y1) = (
+        unit(x0, eig.0),
+        unit(y0, eig.1),
+        unit(x1, eig.0),
+        unit(y1, eig.1),
+    );
+    [MOVE, x0, y0, MOVE, x1, y0, MOVE, x0, y1, END]
+}
+
+/// The parallelogram the matrix at `matrix` makes of the rectangle
+/// `corners`, its first point and the two beside it, as Draw moves the
+/// corners in place below SpriteExtend's stack.
+fn drawn_corners(
+    os: &mut Os<'_>,
+    corners: [i128; 4],
+    eig: (u32, u32),
+    matrix: u32,
+    handed: Handed,
+) -> Result<[i128; 8], Fail> {
+    let mut path = [0u8; 4 * CORNER_PATH_WORDS];
+    for (bytes, word) in path
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(corner_path(corners, eig))
+    {
+        *bytes = word.to_le_bytes();
+    }
+    os.below_supervisor_stack(len32(path.len()), |os, at| {
+        os.write_bytes(at, &path)?;
+        let mut regs = Regs::default();
+        regs.r[..8].copy_from_slice(&[
+            at,
+            0,
+            matrix,
+            0,
+            handed.row,
+            handed.action,
+            matrix,
+            handed.table,
+        ]);
+        os.perform(X | draw::TRANSFORM_PATH, &mut regs)?;
+        let mut point = |n: u32| -> Result<[i128; 2], Fail> {
+            let x = os.read_word(at.wrapping_add(12 * n + 4))?.cast_signed();
+            let y = os.read_word(at.wrapping_add(12 * n + 8))?.cast_signed();
+            Ok([i128::from(x), i128::from(y)])
+        };
+        let [[x0, y0], [x1, y1], [x3, y3]] = [point(0)?, point(1)?, point(2)?];
+        Ok([x0, y0, x1, y1, 0, 0, x3, y3])
+    })
 }
 
 /// The pixel a picture of `size` pixels, held at the standard screen's
@@ -255,41 +380,21 @@ struct Forward {
 }
 
 impl Forward {
-    /// The map `words` give, a matrix or a parallelogram, for the rectangle
-    /// `corners` of a sprite at `eig`.
-    fn of(
-        corners: [i128; 4],
-        parallelogram: bool,
-        words: [i128; 8],
-        eig: (i128, i128),
-    ) -> Option<Self> {
+    /// The map the parallelogram `points` gives the rectangle `corners`.
+    fn of(corners: [i128; 4], points: [i128; 8]) -> Option<Self> {
         let [x0, y0, x1, y1] = corners;
-        if parallelogram {
-            let [px0, py0, px1, py1, _, _, px3, py3] = words;
-            let (dx, dy) = (x1.checked_sub(x0)?, y1.checked_sub(y0)?);
-            return Some(Self {
-                jacobian: [
-                    px1.checked_sub(px0)?.checked_mul(dy)?,
-                    px3.checked_sub(px0)?.checked_mul(dx)?,
-                    py1.checked_sub(py0)?.checked_mul(dy)?,
-                    py3.checked_sub(py0)?.checked_mul(dx)?,
-                ],
-                den: dx.checked_mul(dy)?,
-                origin: (px0, py0),
-                base: (x0, y0),
-            });
-        }
-        let [x_across, y_across, x_down, y_down, shift_x, shift_y, _, _] = words;
+        let [px0, py0, px1, py1, _, _, px3, py3] = points;
+        let (dx, dy) = (x1.checked_sub(x0)?, y1.checked_sub(y0)?);
         Some(Self {
             jacobian: [
-                x_across << eig.0,
-                x_down << eig.1,
-                y_across << eig.0,
-                y_down << eig.1,
+                px1.checked_sub(px0)?.checked_mul(dy)?,
+                px3.checked_sub(px0)?.checked_mul(dx)?,
+                py1.checked_sub(py0)?.checked_mul(dy)?,
+                py3.checked_sub(py0)?.checked_mul(dx)?,
             ],
-            den: 256,
-            origin: (shift_x, shift_y),
-            base: (0, 0),
+            den: dx.checked_mul(dy)?,
+            origin: (px0, py0),
+            base: (x0, y0),
         })
     }
 
@@ -411,7 +516,9 @@ struct Transform {
 }
 
 impl Transform {
-    /// The geometry R3, R4 and R6 give, if it draws anything.
+    /// The geometry R3, R4 and R6 give, if it draws anything: R6's
+    /// parallelogram, or the one Draw makes of the rectangle through R6's
+    /// matrix, `handed` its other registers.
     fn read(
         os: &mut Os<'_>,
         checked: &Checked<'_>,
@@ -419,10 +526,11 @@ impl Transform {
         form: u32,
         rectangle: u32,
         shape: u32,
+        handed: Handed,
     ) -> Result<Option<Self>, Fail> {
-        let (width, height) = (i128::from(checked.width), i128::from(checked.height));
-        let corners = if form & SOURCE_RECTANGLE == 0 {
-            [0, height, width, 0]
+        let size = (i128::from(checked.width), i128::from(checked.height));
+        let given = if form & SOURCE_RECTANGLE == 0 {
+            [0, size.1, size.0, 0]
         } else {
             let mut words = [0i128; 4];
             for (i, word) in (0u32..).zip(words.iter_mut()) {
@@ -430,38 +538,25 @@ impl Transform {
             }
             words
         };
-        let parallelogram = form & PARALLELOGRAM != 0;
-        let mut words = [0x1_0000, 0, 0, 0x1_0000, 0, 0, 0, 0];
-        if parallelogram || shape != 0 {
-            let count = if parallelogram { 8 } else { 6 };
-            for (i, word) in (0u32..).zip(words.iter_mut().take(count)) {
-                *word = i128::from(os.read_word(shape.wrapping_add(4 * i))?.cast_signed());
+        let (corners, mut points) = if form & PARALLELOGRAM == 0 {
+            let corners = held(given, size);
+            let points = drawn_corners(os, corners, checked.pixels.shown.eig, shape, handed)?;
+            (corners, points)
+        } else {
+            let mut points = [0i128; 8];
+            for (i, point) in (0u32..).zip(points.iter_mut()) {
+                *point = i128::from(os.read_word(shape.wrapping_add(4 * i))?.cast_signed());
             }
-        }
+            (given, points)
+        };
         let origin = state::with(os, |vdu, _| Ok(vdu.graphics.origin))?;
-        let points = if parallelogram { 0..8 } else { 4..6 };
-        for (i, word) in words
-            .iter_mut()
-            .enumerate()
-            .take(points.end)
-            .skip(points.start)
-        {
+        for (i, point) in points.iter_mut().enumerate() {
             let along = if i % 2 == 0 { origin.0 } else { origin.1 };
-            *word += i128::from(along) << 8;
+            *point += i128::from(along) << 8;
         }
-        let eig = checked.pixels.shown.eig;
-        let eig = (i128::from(eig.0), i128::from(eig.1));
         let format = destination.format;
         let pixel = (256i128 << format.x_eig(), 256i128 << format.y_eig());
-        Ok(Self::of(
-            corners,
-            parallelogram,
-            words,
-            eig,
-            (width, height),
-            pixel,
-            destination.window,
-        ))
+        Ok(Self::of(corners, points, size, pixel, destination.window))
     }
 
     /// The rows, from the top, of the sprite it reads: the source
@@ -472,14 +567,12 @@ impl Transform {
         row(height - self.top)..row(height - self.bottom)
     }
 
-    /// The geometry of the rectangle `corners` through `words`, a matrix or
-    /// a parallelogram, for a sprite of `size` pixels at `eig` drawn on
-    /// `pixel`-sized pixels within `window`.
+    /// The geometry of the rectangle `corners` of a sprite of `size` pixels
+    /// mapped onto the parallelogram `points`, drawn on `pixel`-sized pixels
+    /// within `window`.
     fn of(
         corners: [i128; 4],
-        parallelogram: bool,
-        words: [i128; 8],
-        eig: (i128, i128),
+        points: [i128; 8],
         size: (i128, i128),
         pixel: (i128, i128),
         window: Rect,
@@ -490,7 +583,7 @@ impl Transform {
         if left >= right || bottom >= top {
             return None;
         }
-        let forward = Forward::of(corners, parallelogram, words, eig)?;
+        let forward = Forward::of(corners, points)?;
         let (u, v) = forward.inverse()?;
         let images = [
             forward.image(left, bottom)?,

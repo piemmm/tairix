@@ -29,6 +29,7 @@ pub use cli::table::parameters as command_parameters;
 mod clock;
 pub mod cmos;
 mod convert;
+pub use convert::Decimal;
 pub mod corpus;
 mod dictionary;
 mod dynamic;

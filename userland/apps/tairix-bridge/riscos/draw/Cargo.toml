@@ -1,0 +1,35 @@
+[package]
+name = "tairix-riscos-draw"
+description = "TAIRiX Bridge's Draw and DrawFile modules: paths processed, filled and stroked to RISC OS 5's recorded rules, and Draw files rendered through them, over guest memory. no_std, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The kernel: guest memory, SWIs, vectors and the module seam.
+tairix-riscos-kernel = { path = "../kernel", version = "=0.0.0" }
+# The processor's flags, which a vector's claimant answers in.
+tairix-riscos-arm = { path = "../arm", version = "=0.0.0" }
+# The VDU drivers: where output goes, and the foreground a fill plots in.
+tairix-riscos-vdu = { path = "../vdu", version = "=0.0.0" }
+# The Draw file format's one definition: the path elements the module reads,
+# the cap and join codes, and the object walk DrawFile renders through.
+tairix-drawing = { path = "../../../../../lib/drawing", version = "=0.0.0" }
+# Fallible buffers a path's segments are held in.
+tairix-util = { path = "../../../../../lib/util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The seeded generator the fuzz harnesses draw from.
+tairix-fuzzseed = { path = "../../../../../tests/fuzzseed", version = "=0.0.0" }
+# The filing system and BASIC the recorded programs run under, and the
+# session a test makes.
+tairix-riscos-filing = { path = "../filing", version = "=0.0.0", features = ["test-support"] }
+tairix-riscos-basic = { path = "../basic", version = "=0.0.0" }
+# The in-memory tree the replay's HostFS disc is served over.
+tairix-fscopy = { path = "../../../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }

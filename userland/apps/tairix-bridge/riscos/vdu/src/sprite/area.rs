@@ -5,6 +5,7 @@
 
 use tairix_image::{sprite_area as block, SpriteName, SPRITE_HEADER_LEN};
 use tairix_riscos_kernel::os::{Fail, Os};
+use tairix_riscos_kernel::swi::sprite_op::{BY_NAME, BY_POINTER, REASON};
 
 use super::header::Sprite;
 use super::{NOT_FOUND, NO_SYSTEM_AREA, UNRECOGNISED};
@@ -23,21 +24,21 @@ pub(crate) enum Naming {
 impl Naming {
     /// R0's naming; none past the three forms.
     pub(crate) const fn of(r0: u32) -> Option<Self> {
-        match r0 >> 8 {
+        match r0 & !REASON {
             0 => Some(Self::System),
-            1 => Some(Self::Named),
-            2 => Some(Self::Pointer),
+            BY_NAME => Some(Self::Named),
+            BY_POINTER => Some(Self::Pointer),
             _ => None,
         }
     }
 
     /// The area value R0 holds for it.
     pub(crate) const fn value(self) -> u32 {
-        (match self {
+        match self {
             Self::System => 0,
-            Self::Named => 1,
-            Self::Pointer => 2,
-        }) << 8
+            Self::Named => BY_NAME,
+            Self::Pointer => BY_POINTER,
+        }
     }
 }
 

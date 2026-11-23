@@ -1,0 +1,11 @@
+# Draw's messages, in TAIRiX Bridge's own words.
+Reserved:A flag Draw keeps for itself is set
+BadElement:The path holds an element Draw does not know
+Looped:The path's continuations lead back on themselves
+Order:The path's elements are in an order Draw cannot follow
+Lengthens:Done in place, this would change the path's length
+Full:The output path has no room for more
+Flatten:The path's curves must be flattened first
+CapJoin:The cap and join block asks for a cap or join Draw does not have
+Overflow:The matrix takes a point outside the coordinates Draw can hold
+Unsupported:Draw has no floating-point form of this call

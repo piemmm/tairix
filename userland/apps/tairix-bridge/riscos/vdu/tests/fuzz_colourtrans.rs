@@ -3,6 +3,8 @@
 //! areas and buffers pointing anywhere, sizes asked and translucencies past
 //! any range — in screens of every depth, and `*ColourTransMap`,
 //! `*ColourTransMapSize` and `*ColourTransLoadings` with hostile numbers.
+//! No pointer reaches the kernel's own memory, where a table written would
+//! break the machine rather than the modules.
 //!
 //! The invariants, checked after every call:
 //!
@@ -18,13 +20,12 @@
 
 mod common;
 
-use common::{answers, command, drivers, select_depth};
+use common::{answers, command, drivers, rma_used, select_depth, KernelMemory};
 use tairix_fuzzseed::Prng;
 use tairix_riscos_filing::session::Session;
 use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::os::{Fail, Regs};
 use tairix_riscos_kernel::swi::chunk::{BLEND_TABLE, COLOUR_TRANS, INVERSE_TABLE};
-use tairix_riscos_kernel::swi::os::READ_DYNAMIC_AREA;
 use tairix_riscos_kernel::swi::X;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -38,9 +39,11 @@ const SALTED: u32 = 0x4000;
 const SWIS: [(u32, u32); 3] = [(COLOUR_TRANS, 36), (INVERSE_TABLE, 2), (BLEND_TABLE, 2)];
 
 /// A session with the drivers and their modules, its application space
-/// salted with palettes, calibration tables and noise.
-fn boot(rng: &mut Prng) -> Session {
+/// salted with palettes, calibration tables and noise, and its kernel's own
+/// memory, which no salted word points into.
+fn boot(rng: &mut Prng) -> (Session, KernelMemory) {
     let mut session = drivers(b"");
+    let kernel = KernelMemory::of(&mut session);
     let mut bytes = vec![0u8; SALTED as usize];
     rng.fill(&mut bytes);
     for chunk in bytes.chunks_mut(256) {
@@ -65,32 +68,43 @@ fn boot(rng: &mut Prng) -> Session {
             _ => {}
         }
     }
+    for slot in bytes.as_chunks_mut::<4>().0 {
+        if kernel.holds(u32::from_le_bytes(*slot)) {
+            *slot = hostile(rng, &kernel).to_le_bytes();
+        }
+    }
     let _ = session.kernel.os().write_bytes(APPLICATION, &bytes);
-    session
+    (session, kernel)
 }
 
 /// A hostile register value: small numbers, flags, translucencies past any
 /// range, pointers into the salted space, at the start of one of its blocks
-/// or nowhere.
-fn hostile(rng: &mut Prng) -> u32 {
-    let into = APPLICATION + u32::try_from(rng.below(SALTED as usize)).unwrap_or(0);
-    let block = APPLICATION + 256 * u32::try_from(rng.below(SALTED as usize / 256)).unwrap_or(0);
-    let small = u32::try_from(rng.below(300)).unwrap_or(0);
-    let anything = rng.next_u32();
-    *rng.pick(&[
-        0,
-        1,
-        small,
-        256,
-        257,
-        u32::MAX,
-        0x8000_0000,
-        into,
-        into | 3,
-        block,
-        0xFFFF_FFFC,
-        anything,
-    ])
+/// or nowhere, but never into the kernel's own memory.
+fn hostile(rng: &mut Prng, kernel: &KernelMemory) -> u32 {
+    loop {
+        let into = APPLICATION + u32::try_from(rng.below(SALTED as usize)).unwrap_or(0);
+        let block =
+            APPLICATION + 256 * u32::try_from(rng.below(SALTED as usize / 256)).unwrap_or(0);
+        let small = u32::try_from(rng.below(300)).unwrap_or(0);
+        let anything = rng.next_u32();
+        let value = *rng.pick(&[
+            0,
+            1,
+            small,
+            256,
+            257,
+            u32::MAX,
+            0x8000_0000,
+            into,
+            into | 3,
+            block,
+            0xFFFF_FFFC,
+            anything,
+        ]);
+        if !kernel.holds(value) {
+            return value;
+        }
+    }
 }
 
 /// A command with hostile numbers: the calibration's sizes, its pairs or the
@@ -117,27 +131,15 @@ fn hostile_command(rng: &mut Prng) -> String {
     text
 }
 
-/// The RMA's bytes in use: grown as claims need, it keeps what it grew by.
-fn rma_used(session: &mut Session) -> u32 {
-    let free = common::rma_free(session);
-    let mut regs = Regs::new([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    session
-        .kernel
-        .os()
-        .perform(X | READ_DYNAMIC_AREA, &mut regs)
-        .expect("the RMA");
-    regs.r[1] - free
-}
-
 /// One hostile call, its outcome a value.
-fn call(session: &mut Session, rng: &mut Prng) {
+fn call(session: &mut Session, rng: &mut Prng, kernel: &KernelMemory) {
     let result = match rng.below(8) {
         0 => command(session, &hostile_command(rng)),
         1 => select_depth(session, u32::try_from(rng.below(6)).unwrap_or(0)),
         _ => {
             let mut regs = Regs::new([0; 13]);
             for register in &mut regs.r {
-                *register = hostile(rng);
+                *register = hostile(rng, kernel);
             }
             let &(chunk, count) = rng.pick(&SWIS);
             let swi = chunk + u32::try_from(rng.below(count as usize)).unwrap_or(0);
@@ -166,10 +168,10 @@ fn hostile_colour_calls_leave_the_drivers_answering() {
             None if runs >= SMOKE_RUNS => break,
             _ => {}
         }
-        let mut session = boot(&mut rng);
+        let (mut session, kernel) = boot(&mut rng);
         let held = rma_used(&mut session);
         for step in 0..CALLS {
-            call(&mut session, &mut rng);
+            call(&mut session, &mut rng, &kernel);
             assert!(
                 answers(&mut session),
                 "OS_ReadModeVariable after step {step}"

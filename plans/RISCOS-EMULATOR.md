@@ -79,8 +79,10 @@ an application's own documents folder, the reference harness);
 | RO23.4 | Calibration and the colour models: `SetCalibration`, `ReadCalibration`, `ConvertDeviceColour`, `ConvertDevicePalette`, CIE, HSV and CMYK, the `*` commands and the file writers | done |
 | RO23.5 | Font colours: `ReturnFontColours`, `SetFontColours` | done |
 | RO23.6 | ColourTrans's match taken by sprite blends, JPEGs and colour mapping onto palettised destinations, and the InverseTable and BlendTable modules that serve them | done |
-| RO24 | Draw and DrawFile | planned |
-| RO25 | The Font Manager: TAIRiX faces through the font service, Acorn outline fonts, painting, the cache | planned |
+| RO24.1 | Draw: every SWI through `DrawV`, `Draw_ProcessPath`'s stages in RISC OS's order and every destination, the fill's pixel classes, rules and clip, dashing, thickening and flattening by the recorded rules, with the known differences §8 states | done |
+| RO24.2 | DrawFile: the file checked whole before anything is drawn, every object rendered through Draw, ColourTrans and SpriteExtend, `DrawFile_BBox`, `DrawFile_DeclareFonts` and `*Render`, as RISC OS 5.30 does with no Font Manager; `lib/drawing`'s Draw format layer the one definition of the file | done |
+| RO24.3 | SpriteExtend's matrix plots (55, 56) as the parallelogram Draw makes of the source rectangle through `Draw_TransformPath`, as RISC OS 5's are | done |
+| RO25 | The Font Manager: TAIRiX faces through the font service, Acorn outline fonts, painting, the cache; DrawFile's text and text areas through it, pinned against genuine RISC OS | planned |
 | RO26 | SharedCLibrary; the FPEmulator, VFPSupport, CallASWI and DDEUtils SWIs | planned |
 | RO27 | The session worker and its protocol: contexts, scheduling, pacing, the relays, containment | planned |
 | RO28 | The front end: launches, single-tasking screens, fullscreen, input, settings, the session window, the bundle | planned |
@@ -1190,8 +1192,10 @@ is fuzzed.
     source at 256ths of its weight and a narrower one at the whole weight,
     its bits repeated where the destination's are wider. Onto a palettised
     destination a blend, a JPEG and a colour mapping match through
-    ColourTrans's 32K table and BlendTable's rule (RO23.6). Accepted known
-    differences:
+    ColourTrans's 32K table and BlendTable's rule (RO23.6). A matrix plot is
+    the parallelogram Draw makes of the source rectangle's corners, held to
+    the sprite, through `Draw_TransformPath`, as genuine SpriteExtend has
+    Draw make it (RO24.3). Accepted known differences:
     a transformed plot stepping unevenly through source rows can take the
     neighbouring row at an exact tie, about a pixel in a hundred; a JPEG's
     pixels are `lib/image`'s, undithered; wastage is zeroed where RISC OS 5
@@ -1226,15 +1230,24 @@ is fuzzed.
     on 256 colours in five-bit form, and matches through the 32K table or,
     below 256 colours, BlendTable's rule, an alpha's share in steps of 32.
   - Known differences are on the docs page.
-- **Draw** (RO24):
-  - `Draw_Fill`, `Draw_Stroke`, `Draw_StrokePath`, `Draw_FlattenPath`,
-    `Draw_TransformPath`, and `Draw_ProcessPath` with every output option.
-  - Fill styles with RISC OS's boundary and interior pixel bits; dashes, joins,
-    caps and flatness; 16.16 matrices.
-  - Paths flatten through `lib/bezier` and are scan-converted to RISC OS's
-    pixel rules.
-  - `DrawFile_Render`, `BBox` and `DeclareFonts` go through `lib/drawing`'s
-    reader.
+- **Draw** (RO24), the `draw` crate:
+  - Every SWI is `DrawV` with R8 its index; the convenience calls re-enter it
+    as `Draw_ProcessPath`, so a claimant sees what RISC OS's shows it.
+  - A path streams through RISC OS's stages in its order — closed, flattened,
+    dashed, thickened, flattened again, transformed — into an output buffer, a
+    count, a box, the path itself, or the fill, each stage handing on what it
+    makes as it makes it, every element a step the host may stop.
+  - Flattening is RISC OS's own recorded bisection, not `lib/bezier`'s, whose
+    pieces are not RISC OS's; the fill scan-converts to RISC OS's pixel
+    classes, its store bounded by the memory policy.
+  - DrawFile checks a file whole, then renders each object through Draw,
+    ColourTrans and SpriteExtend, as RISC OS 5.30 does with no Font Manager.
+    Each walk of nested groups and tagged objects overflows its supervisor
+    stack where RISC OS 5.30's does, so no file nests deeper than the host's
+    own stack follows.
+    The file's layout is `lib/drawing`'s Draw format layer
+    (`riscos::format`), which the drawing editor's reader and writer share.
+  - Known differences are on the docs page.
 - **The Font Manager** (RO25): every `Font_` SWI.
   - **Names and faces.** Fonts are named by RISC OS identifier
     (`Family.Weight.Style`). The standard families map to TAIRiX faces through
@@ -1250,6 +1263,9 @@ is fuzzed.
     `Font_SetPalette`. What it passes there is pinned with the Font Manager.
   - **The cache.** Bounded by the memory policy.
   - **The desktop font.** It is the TAIRiX interface face.
+  - **DrawFile's text** and text areas go through it, pinned against genuine
+    RISC OS: until it answers, DrawFile renders as RISC OS 5.30 does with no
+    Font Manager.
 
 ## 9. The Wimp and the Toolbox (RO39–RO45)
 

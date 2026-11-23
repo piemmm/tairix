@@ -227,7 +227,17 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-riscos-vdu",
         test: "fuzz_colourtrans",
-        description: "userland/apps/tairix-bridge/riscos/vdu ColourTrans, InverseTable and BlendTable: every SWI with hostile registers over salted palettes, calibration tables and buffers pointing anywhere, sizes asked and translucencies past any range, in screens of every depth, and *ColourTransMap, *ColourTransMapSize and *ColourTransLoadings with hostile numbers; every refusal a value, every error block readable, the drivers still answering",
+        description: "userland/apps/tairix-bridge/riscos/vdu ColourTrans, InverseTable and BlendTable: every SWI with hostile registers over salted palettes, calibration tables and buffers pointing anywhere but the kernel's own memory, sizes asked and translucencies past any range, in screens of every depth, and *ColourTransMap, *ColourTransMapSize and *ColourTransLoadings with hostile numbers; every refusal a value, every error block readable, the drivers still answering, the modules re-initialised holding none of the RMA they took",
+    },
+    Target {
+        package: "tairix-riscos-draw",
+        test: "fuzz_draw",
+        description: "userland/apps/tairix-bridge/riscos/draw Draw: every SWI, and DrawV at any index, with hostile registers over salted paths — codes, orders and continuations broken, points at the ends of the coordinate range — cap and join blocks, dash patterns of any count and length, matrices and output buffers pointing anywhere but the kernel's own memory, in screens of every depth; every refusal a value, a call asking endless work stopped by its host, every error block readable, the drivers still answering, the module re-initialised holding none of the RMA it took",
+    },
+    Target {
+        package: "tairix-riscos-draw",
+        test: "fuzz_drawfile",
+        description: "userland/apps/tairix-bridge/riscos/draw DrawFile: Draw files of every object type with hostile fields — sizes past what holds them, font tables twice or naming nothing, sprites of any mode, groups and tagged objects nesting deep, text areas with any commands — or a sound file's bytes changed, rendered, measured and their fonts declared under hostile flags, matrices, clips and lengths, and *Render with hostile arguments; every refusal a value, a call asking endless work stopped by its host, every error block readable, the drivers still answering, the modules a render reaches re-initialised holding none of the RMA they took",
     },
     Target {
         package: "tairix-riscos-filing",

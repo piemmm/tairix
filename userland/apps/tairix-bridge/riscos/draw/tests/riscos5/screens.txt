@@ -1,0 +1,412 @@
+# The Draw module's screens: each case run by genuine RISC OS 5's BASIC V,
+# and what it read and drew recorded, which the replay holds the module to.
+# The frame is the VDU drivers' (`tairix_riscos_vdu::corpus::program`):
+# `PROCr` records a reading, `FNm` a mode variable, `FNe` an error's
+# number, and the screen is saved at the end. The cases here keep to what
+# the module matches to the unit: a thick line's width across a slant, a
+# long mitre's tip and a dash along a slant differ in low bits
+# (`docs/src/desktop/tairix-bridge.md`), and are held to RISC OS in the
+# crate's own tests instead. Each case builds its paths with `PROCp`,
+# defined in its own lines.
+
+case swis_answer_drawv_with_r8_their_index
+10 PROCmode(28):DIM c% 256,l% 4096,p% 512,b% 512,k% 64
+20 FOR s%=0 TO 2 STEP 2:P%=c%:[OPT s%
+30 STMFD R13!,{R9,R10}:LDR R9,la:LDR R10,[R9]:CMP R10,#3600:ADDLT R10,R10,#36:STRLT R10,[R9]
+40 ADDLT R9,R9,R10:ADDLT R9,R9,#4:STMLTIA R9,{R0-R8}:LDMFD R13!,{R9,R10}:MOV PC,R14
+50 .la EQUD l%:]:NEXT
+60 !p%=2:p%!4=0:p%!8=0:p%!12=8:p%!16=25600:p%!20=0:p%!24=8:p%!28=25600:p%!32=25600:p%!36=5:p%!40=0:p%!44=1024
+70 k%!0=p%:k%!4=0:k%!8=0
+80 SYS "OS_Claim",&20,c%,0
+90 FOR n%=0 TO 16:IF n%<>13 AND n%<>15 THEN PROCcall(n%)
+100 NEXT
+110 SYS "OS_Release",&20,c%,0
+120 GOTO 9000
+130 DEFPROCcall(n%):LOCAL r0%,r1%,r4%,r7%,f%,j%,i%,v%
+140 !l%=-36:!b%=0:b%!4=400:r1%=0:r4%=0:r7%=0
+150 IF n%=6 OR n%=8 OR n%=10 THEN r1%=b%
+160 IF n%=12 THEN r4%=k%
+170 IF n%=14 THEN r7%=k%
+180 SYS &60700+n%,p%,r1%,0,0,r4%,0,0,r7% TO r0%;f%:PROCr("swi"+STR$n%,FNe(r0%,f%))
+190 IF !l%<0 THEN ENDPROC
+200 FOR j%=0 TO !l% STEP 36:FOR i%=0 TO 8:v%=l%!(4+j%+4*i%):IF v%=p% THEN v%=-2 ELSE IF v%=b% THEN v%=-3 ELSE IF v%=k% THEN v%=-4
+210 IF i%=4 AND n%=12 AND j%=72 THEN v%=-5
+220 PROCr(" r"+STR$i%,v%):NEXT:NEXT:ENDPROC
+
+case process_path_writes_and_counts_as_risc_os_did
+10 PROCmode(28):DIM p% 512,b% 1024,m% 32,j% 128,d% 64
+20 PROCp(p%,"2,0,0,6,0,25600,25600,25600,25600,0,8,30000,-9000,5")
+30 FOR f%=0 TO 7:o%=0:IF f% AND 1 THEN o%=o% OR &08000000
+40 IF f% AND 2 THEN o%=o% OR &10000000
+50 IF f% AND 4 THEN o%=o% OR &40000000
+60 SYS "XDraw_ProcessPath",p%,o%,0,0,0,0,0,3 TO r0%;g%:PROCr("count"+STR$f%,FNe(r0%,g%)):PROCr(" bytes",r0%)
+70 !b%=0:b%!4=1000:SYS "XDraw_ProcessPath",p%,o%,0,0,0,0,0,b% TO r0%;g%:PROCr("out"+STR$f%,FNe(r0%,g%)):PROCr(" end",r0%-b%)
+80 PROCw(b%):NEXT
+90 m%!0=&8000:m%!4=&4000:m%!8=-&2000:m%!12=&18000:m%!16=1000:m%!20=-777
+100 !b%=0:b%!4=1000:SYS "XDraw_ProcessPath",p%,&10000000,m%,0,0,0,0,b% TO r0%;g%:PROCr("mapped",FNe(r0%,g%)):PROCw(b%)
+110 SYS "XDraw_ProcessPath",p%,&16000000,m%,0,0,0,0,j% TO r0%;g%:PROCr("box",FNe(r0%,g%)):PROCr(" r0",r0%)
+120 FOR i%=0 TO 12 STEP 4:PROCr(" b",j%!i%):NEXT
+130 SYS "XDraw_ProcessPath",p%,0,0,0,0,0,0,&80000000+j% TO r0%;g%:PROCr("oldbox",FNe(r0%,g%)):PROCr(" r0",r0%)
+140 FOR i%=0 TO 12 STEP 4:PROCr(" b",j%!i%):NEXT
+150 FOR s%=8 TO 40 STEP 8:!b%=0:b%!4=s%:SYS "XDraw_ProcessPath",p%,0,0,0,0,0,0,b% TO r0%;g%:PROCr("room"+STR$s%,FNe(r0%,g%)):NEXT
+160 d%!0=3000:d%!4=3:d%!8=6000:d%!12=4000:d%!16=2000:PROCp(j%,"2,0,0,8,30000,0,8,30000,-9000,8,0,-9000,5")
+170 !b%=0:b%!4=1000:SYS "XDraw_ProcessPath",j%,&10000000,0,0,0,0,d%,b% TO r0%;g%:PROCr("dashed",FNe(r0%,g%)):PROCw(b%)
+180 SYS "XDraw_TransformPath",p%,0,m%,0 TO r0%;g%:PROCr("inplace",FNe(r0%,g%)):PROCr(" r0",r0%):PROCw(p%)
+190 GOTO 9000
+200 DEFPROCp(a%,s$):LOCAL i%,v$:i%=0:WHILE s$<>"":v$=s$:IF INSTR(s$,",") THEN v$=LEFT$(s$,INSTR(s$,",")-1):s$=MID$(s$,INSTR(s$,",")+1) ELSE s$=""
+210 a%!i%=VAL v$:i%+=4:ENDWHILE:a%!i%=0:a%!(i%+4)=256:ENDPROC
+220 DEFPROCw(a%):LOCAL i%,t%:i%=0:REPEAT:t%=a%!i%:PROCr(" e",t%):i%+=4
+230 IF (t% AND 255)<>0 AND (t% AND 255)<>5 AND (t% AND 255)<>4 THEN PROCr(" x",a%!i%):PROCr(" y",a%!(i%+4)):i%+=8:IF (t% AND 255)=6 THEN PROCr(" x",a%!i%):PROCr(" y",a%!(i%+4)):PROCr(" x",a%!(i%+8)):PROCr(" y",a%!(i%+12)):i%+=16
+240 UNTIL (t% AND 255)=0 OR i%>900:ENDPROC
+
+case refusals_carry_risc_os_numbers
+10 PROCmode(28):DIM p% 256,q% 256,b% 256,j% 64
+20 !p%=2:p%!4=0:p%!8=0:p%!12=8:p%!16=9000:p%!20=0:p%!24=0:p%!28=256
+30 RESTORE 40:FOR r%=0 TO 9:READ o%:!j%=0:j%!4=48:SYS "XDraw_ProcessPath",p%,o%,0,0,0,0,0,j% TO r0%;g%:PROCr("flags"+STR$r%,FNe(r0%,g%)):NEXT
+40 DATA &100,&01000000,&02000000,&80000000,&40,&80,&3F,&06000000,&04000000,&7E0000FF
+50 SYS "XDraw_ProcessPath",p%,&10000000,0,0,0,0,0,0 TO r0%;g%:PROCr("inplaceflat",FNe(r0%,g%))
+60 SYS "XDraw_ProcessPath",p%,&20000000,0,0,8,0,0,0 TO r0%;g%:PROCr("inplacethick",FNe(r0%,g%))
+70 !q%=9:SYS "XDraw_ProcessPath",q%,0,0,0,0,0,0,3 TO r0%;g%:PROCr("badelement",FNe(r0%,g%))
+80 !q%=8:SYS "XDraw_ProcessPath",q%,0,0,0,0,0,0,3 TO r0%;g%:PROCr("order",FNe(r0%,g%))
+90 !q%=2:q%!12=5:q%!16=5:SYS "XDraw_ProcessPath",q%,0,0,0,0,0,0,3 TO r0%;g%:PROCr("twocloses",FNe(r0%,g%))
+100 !q%=2:q%!4=0:q%!8=0:q%!12=6:q%!16=0:q%!20=9:q%!24=9:q%!28=9:q%!32=9:q%!36=0:q%!40=0
+110 SYS "XDraw_ProcessPath",q%,&30,0,0,0,0,0,1 TO r0%;g%:PROCr("unflatfill",FNe(r0%,g%))
+120 SYS "XDraw_ProcessPath",q%,&20000000,0,0,100,0,0,3 TO r0%;g%:PROCr("unflatthick",FNe(r0%,g%))
+130 b%!0=&400:b%!4=&A0000:SYS "XDraw_ProcessPath",p%,&30000000,0,0,100,b%,0,3 TO r0%;g%:PROCr("bigcap",FNe(r0%,g%))
+140 b%!0=3:SYS "XDraw_ProcessPath",p%,&30000000,0,0,100,b%,0,3 TO r0%;g%:PROCr("joinunneeded",FNe(r0%,g%))
+150 FOR n%=1 TO 15 STEP 2:SYS &60700+n%,p%,0,0,0,0,0,0,0 TO r0%;g%:IF n%<>13 AND n%<>15 THEN PROCr("fp"+STR$n%,FNe(r0%,g%))
+160 NEXT
+170 SYS &60710,p% TO r0%;g%:PROCr("swi16",FNe(r0%,g%))
+180 SYS "XDraw_Fill",p%,&100 TO r0%;g%:PROCr("fillbits",FNe(r0%,g%))
+190 SYS "XDraw_Stroke",p%,&80000000 TO r0%;g%:PROCr("strokeall",FNe(r0%,g%)):PROCr(" r0",r0%)
+200 SYS "XDraw_Stroke",p%,&40000000 TO r0%;g%:PROCr("strokebits",FNe(r0%,g%))
+210 j%!0=&7FFFFFFF:j%!4=0:j%!8=0:j%!12=&10000:j%!16=0:j%!20=0:q%!0=2:q%!4=0:q%!8=0:q%!12=8:q%!16=200000:q%!20=0:q%!24=0:q%!28=256
+215 !b%=0:b%!4=200:SYS "XDraw_TransformPath",q%,b%,j%,0 TO r0%;g%:PROCr("overflow",FNe(r0%,g%)):PROCr(" first",b%!0):PROCr(" x",b%!4)
+220 GOTO 9000
+
+case fill_rules_and_classes_mode_28
+10 PROCmode(28):DIM p% 1024
+20 PROCp(p%,"2,1024,1024,8,15360,2048,8,4096,12288,5,2,6144,1024,8,14336,9216,8,2048,7168,5")
+30 FOR r%=0 TO 3:FOR k%=0 TO 3:VDU 29,(r%*80)*2;(k%*60)*2;:GCOL 0,1+r%+4*k%
+40 SYS "XDraw_Fill",p%,r% OR (4<<k%),0,0 TO r0%;g%:IF g% AND 1 THEN PROCr("err",FNe(r0%,g%))
+50 NEXT:NEXT:VDU 29,0;0;
+60 GOTO 9000
+70 DEFPROCp(a%,s$):LOCAL i%,v$:i%=0:WHILE s$<>"":v$=s$:IF INSTR(s$,",") THEN v$=LEFT$(s$,INSTR(s$,",")-1):s$=MID$(s$,INSTR(s$,",")+1) ELSE s$=""
+80 a%!i%=VAL v$:i%+=4:ENDWHILE:a%!i%=0:a%!(i%+4)=256:ENDPROC
+
+case fills_in_other_modes_and_origins
+10 DIM p% 1024
+20 PROCp(p%,"2,0,0,8,20000,3000,8,9000,17000,5,2,23000,2000,6,30000,20000,36000,-3000,42000,9000,8,26000,16000,5")
+25 DIM md%(3):RESTORE 80:FOR m%=0 TO 3:READ md%(m%):NEXT
+30 FOR m%=0 TO 3:PROCmode(md%(m%)):FOR o%=0 TO 2:VDU 29,o%*331+7;o%*97+3:GCOL 3,1+o%
+40 SYS "XDraw_Fill",p%,0,0,0 TO r0%;g%:PROCr("m"+STR$md%(m%)+"o"+STR$o%,FNe(r0%,g%))
+50 NEXT:IF m%<3 THEN PROCdumpmid
+60 NEXT:VDU 29,0;0;
+70 GOTO 9000
+80 DATA 15,13,12,27
+90 DEFPROCp(a%,s$):LOCAL i%,v$:i%=0:WHILE s$<>"":v$=s$:IF INSTR(s$,",") THEN v$=LEFT$(s$,INSTR(s$,",")-1):s$=MID$(s$,INSTR(s$,",")+1) ELSE s$=""
+100 a%!i%=VAL v$:i%+=4:ENDWHILE:a%!i%=0:a%!(i%+4)=256:ENDPROC
+110 DEFPROCdumpmid:LOCAL x%,y%,c%:FOR y%=0 TO 200 STEP 9:FOR x%=0 TO 600 STEP 13:c%=POINT(x%,y%):IF c%>0 THEN PROCr("p"+STR$x%+","+STR$y%,c%)
+120 NEXT:NEXT:ENDPROC
+
+case thin_strokes_and_eor_subpaths
+10 PROCmode(28):DIM p% 1024
+20 PROCp(p%,"2,1000,1000,8,60000,1000,8,60000,30000,7,1000,30000,8,1000,1000,3,5000,5000,8,40000,25000,2,70000,3000,6,90000,40000,110000,-5000,130000,30000")
+30 GCOL 0,7:SYS "XDraw_Stroke",p%,0,0,0,0,0,0 TO r0%;g%:PROCr("thin",FNe(r0%,g%)):PROCr(" r0",r0%)
+40 VDU 29,0;200;:GCOL 3,4:SYS "XDraw_Stroke",p%,&3C,0,0,0,0,0 TO r0%;g%:PROCr("eorall",FNe(r0%,g%))
+50 VDU 29,300;200;:GCOL 3,5:SYS "XDraw_Stroke",p%,&80000018,0,0,0,0,0 TO r0%;g%:PROCr("together",FNe(r0%,g%))
+60 VDU 29,0;0;
+70 GOTO 9000
+80 DEFPROCp(a%,s$):LOCAL i%,v$:i%=0:WHILE s$<>"":v$=s$:IF INSTR(s$,",") THEN v$=LEFT$(s$,INSTR(s$,",")-1):s$=MID$(s$,INSTR(s$,",")+1) ELSE s$=""
+90 a%!i%=VAL v$:i%+=4:ENDWHILE:a%!i%=0:a%!(i%+4)=256:ENDPROC
+
+case thick_strokes_caps_and_joins_square_on
+10 PROCmode(28):DIM p% 1024,c% 64
+20 PROCp(p%,"2,4000,4000,8,40000,4000,8,40000,30000,8,14000,30000,2,60000,8000,8,90000,8000,7,90000,20000,8,60000,20000,2,110000,4000,8,110000,30000,5")
+30 RESTORE 80:FOR v%=0 TO 3:READ cap%,join%:c%!0=join% OR (cap%<<8) OR ((3-cap%)<<16):c%!4=&A0000:c%!8=&800080:c%!12=&1000040
+40 VDU 29,0;v%*230+8;:GCOL 3,1+v%
+50 SYS "XDraw_Stroke",p%,0,0,0,4096,c%,0 TO r0%;g%:PROCr("v"+STR$v%,FNe(r0%,g%))
+60 NEXT:VDU 29,0;0;
+70 GOTO 9000
+80 DATA 0,0,1,1,2,2,3,0
+90 DEFPROCp(a%,s$):LOCAL i%,v$:i%=0:WHILE s$<>"":v$=s$:IF INSTR(s$,",") THEN v$=LEFT$(s$,INSTR(s$,",")-1):s$=MID$(s$,INSTR(s$,",")+1) ELSE s$=""
+100 a%!i%=VAL v$:i%+=4:ENDWHILE:a%!i%=0:a%!(i%+4)=256:ENDPROC
+
+case stroke_path_outlines_square_on
+10 PROCmode(28):DIM p% 512,b% 8192,c% 64,d% 64
+20 PROCp(p%,"2,0,0,8,20000,0,8,20000,14000,8,0,14000,5,2,30000,0,8,50000,0,7,50000,6000,8,30000,6000")
+30 c%!0=&010100:c%!4=&A0000:c%!8=&800080:c%!12=&800080
+40 d%!0=0:d%!4=2:d%!8=6000:d%!12=4000
+50 RESTORE 110:FOR v%=0 TO 3:READ t%,dash%,w0%:c%!0=w0%:!b%=0:b%!4=8000
+60 IF dash% THEN dp%=d% ELSE dp%=0
+70 SYS "XDraw_StrokePath",p%,b%,0,0,t%,c%,dp% TO r0%;g%:PROCr("v"+STR$v%,FNe(r0%,g%)):PROCr(" end",r0%-b%):PROCsum(b%,r0%-b%)
+80 NEXT
+90 SYS "XDraw_StrokePath",p%,0,0,0,2000,c%,0 TO r0%;g%:PROCr("count",FNe(r0%,g%)):PROCr(" bytes",r0%)
+100 GOTO 9000
+110 DATA 2000,0,&010100,2000,1,&020200,2000,1,&000102,0,1,0
+120 DEFPROCp(a%,s$):LOCAL i%,v$:i%=0:WHILE s$<>"":v$=s$:IF INSTR(s$,",") THEN v$=LEFT$(s$,INSTR(s$,",")-1):s$=MID$(s$,INSTR(s$,",")+1) ELSE s$=""
+130 a%!i%=VAL v$:i%+=4:ENDWHILE:a%!i%=0:a%!(i%+4)=256:ENDPROC
+140 DEFPROCsum(a%,n%):LOCAL i%,s%,x%:s%=0:x%=0:FOR i%=0 TO n%-4 STEP 4:s%=s%+(a%!i% AND &FFFFFF):x%=x% EOR (a%!i%+i%*7919):NEXT:PROCr(" sum",s%):PROCr(" mix",x%):ENDPROC
+
+case dashed_strokes_square_on
+10 PROCmode(28):DIM p% 512,c% 64,d% 64
+20 PROCp(p%,"2,4000,4000,8,90000,4000,8,90000,60000,8,4000,60000,5,2,120000,4000,8,120000,60000")
+30 c%!0=&010100:c%!4=&A0000:c%!8=&800080:c%!12=&800080
+40 RESTORE 90:FOR v%=0 TO 3:READ s%,n%,a%,b%,e%:d%!0=s%:d%!4=n%:d%!8=a%:d%!12=b%:d%!16=e%
+50 VDU 29,(v% AND 1)*640;(v% DIV 2)*480;:GCOL 0,1+v%
+60 SYS "XDraw_Stroke",p%,0,0,0,(v% AND 1)*2048,c%,d% TO r0%;g%:PROCr("v"+STR$v%,FNe(r0%,g%))
+70 NEXT:VDU 29,0;0;
+80 GOTO 9000
+90 DATA 0,2,6000,4000,0,5000,2,6000,4000,0,0,3,9000,3000,1500,-1000,1,7000,0,0
+100 DEFPROCp(a%,s$):LOCAL i%,v$:i%=0:WHILE s$<>"":v$=s$:IF INSTR(s$,",") THEN v$=LEFT$(s$,INSTR(s$,",")-1):s$=MID$(s$,INSTR(s$,",")+1) ELSE s$=""
+110 a%!i%=VAL v$:i%+=4:ENDWHILE:a%!i%=0:a%!(i%+4)=256:ENDPROC
+
+case clipped_fills_and_strokes
+10 PROCmode(28):DIM p% 512,q% 512,k% 64,c% 64
+20 PROCp(p%,"2,2000,2000,8,100000,2000,8,100000,60000,8,2000,60000,5")
+30 PROCp(q%,"2,30000,20000,8,140000,30000,8,60000,110000,5")
+40 k%!0=q%:k%!4=0:k%!8=0:GCOL 0,3
+50 SYS "XDraw_FillClipped",p%,0,0,0,k% TO r0%;g%:PROCr("fill",FNe(r0%,g%)):PROCr(" r0",r0%-p%)
+60 VDU 29,640;0;:k%!4=&3C:GCOL 0,5:SYS "XDraw_StrokeClipped",p%,0,0,0,0,0,0,k% TO r0%;g%:PROCr("stroke",FNe(r0%,g%)):PROCr(" r0",r0%)
+70 VDU 29,0;480;:c%!0=&010101:c%!4=&A0000:c%!8=0:c%!12=0:k%!4=0:GCOL 3,6
+80 SYS "XDraw_StrokeClipped",p%,0,0,0,4096,c%,0,k% TO r0%;g%:PROCr("thick",FNe(r0%,g%))
+90 VDU 29,640;480;:GCOL 0,2:SYS "XDraw_ProcessPath",p%,&180000B0,0,0,0,0,0,1 TO r0%;g%:PROCr("again",FNe(r0%,g%))
+100 VDU 29,0;0;
+110 GOTO 9000
+120 DEFPROCp(a%,s$):LOCAL i%,v$:i%=0:WHILE s$<>"":v$=s$:IF INSTR(s$,",") THEN v$=LEFT$(s$,INSTR(s$,",")-1):s$=MID$(s$,INSTR(s$,",")+1) ELSE s$=""
+130 a%!i%=VAL v$:i%+=4:ENDWHILE:a%!i%=0:a%!(i%+4)=256:ENDPROC
+
+case flattening_and_the_matrix_on_screen
+10 PROCmode(28):DIM p% 1024,m% 32
+20 PROCp(p%,"2,4000,4000,6,4000,60000,90000,60000,90000,4000,6,60000,-20000,30000,30000,4000,4000,5")
+30 RESTORE 70:FOR v%=0 TO 5:READ fl%,a%,b%,c%,d%:m%!0=a%:m%!4=b%:m%!8=c%:m%!12=d%:m%!16=(v% MOD 3)*110000+5000:m%!20=(v% DIV 3)*120000+9000
+40 GCOL 0,1+v%:SYS "XDraw_Fill",p%,0,m%,fl% TO r0%;g%:PROCr("v"+STR$v%,FNe(r0%,g%))
+50 NEXT
+60 GOTO 9000
+70 DATA 0,&10000,0,0,&10000,100,&8000,0,0,&8000,2048,&10000,&4000,-&4000,&10000,60000,&C000,0,0,&6000,5,&16A0A,&16A0A,-&16A0A,&16A0A,1,&10000,0,0,&10000
+80 DEFPROCp(a%,s$):LOCAL i%,v$:i%=0:WHILE s$<>"":v$=s$:IF INSTR(s$,",") THEN v$=LEFT$(s$,INSTR(s$,",")-1):s$=MID$(s$,INSTR(s$,",")+1) ELSE s$=""
+90 a%!i%=VAL v$:i%+=4:ENDWHILE:a%!i%=0:a%!(i%+4)=256:ENDPROC
+
+case output_to_a_sprite_and_the_graphics_window
+10 PROCmode(28):DIM p% 512,a% 40000
+20 PROCp(p%,"2,-30000,-30000,8,400000,20000,8,20000,300000,5")
+30 !a%=40000:a%!4=0:a%!8=16:a%!12=16:SYS "OS_SpriteOp",&10F,a%,"s",0,64,48,28
+40 SYS "OS_SpriteOp",&13C,a%,"s" TO r0%,r1%,r2%,r3%:GCOL 0,9:CLG:GCOL 0,12
+50 SYS "XDraw_Fill",p%,0,0,0 TO e%;g%:PROCr("sprite",FNe(e%,g%))
+60 SYS "OS_SpriteOp",r0%,r1%,r2%,r3%
+70 SYS "OS_SpriteOp",&122,a%,"s",100,100,0
+80 VDU 24,200;100;700;500;:GCOL 0,14:SYS "XDraw_Fill",p%,&3C,0,0 TO e%;g%:PROCr("window",FNe(e%,g%)):VDU 26
+90 GOTO 9000
+100 DEFPROCp(a%,s$):LOCAL i%,v$:i%=0:WHILE s$<>"":v$=s$:IF INSTR(s$,",") THEN v$=LEFT$(s$,INSTR(s$,",")-1):s$=MID$(s$,INSTR(s$,",")+1) ELSE s$=""
+110 a%!i%=VAL v$:i%+=4:ENDWHILE:a%!i%=0:a%!(i%+4)=256:ENDPROC
+
+case drawfile_paths_groups_and_tagged_objects_through_draw_and_colourtrans
+10 PROCmode(28):DIM f% 8192,c% 1024,l% 8192,b% 64,m% 32,k% 32
+20 FOR s%=0 TO 2 STEP 2:FOR v%=0 TO 1:P%=c%+v%*512:[OPT s%
+30 STMFD R13!,{R9-R11}:LDR R9,la:LDR R10,[R9]:CMP R10,#&1C00:ADDLT R10,R10,#40:STRLT R10,[R9]:ADDLT R9,R9,R10:ADDLT R9,R9,#4
+40 MOVLT R11,#v%:STRLT R11,[R9],#4:STMLTIA R9,{R0-R8}:LDMFD R13!,{R9-R11}:MOV PC,R14
+50 .la EQUD l%:]:NEXT:NEXT
+60 RESTORE 1000:PROCload
+70 m%!0=&20000:m%!4=0:m%!8=0:m%!12=&10000:m%!16=-20000:m%!20=30000
+80 RESTORE 900:FOR t%=0 TO 7:READ fl%,mt%,cl%,r5%:k%!0=0:k%!4=0:k%!8=400:k%!12=300:IF cl%=2 THEN k%!0=240:k%!4=100:k%!8=600:k%!12=400
+90 IF cl%=3 THEN k%!0=600:k%!4=400:k%!8=240:k%!12=100
+100 mm%=0:IF mt% THEN mm%=m%
+110 kk%=0:IF cl% THEN kk%=k%
+120 SYS "OS_Claim",&20,c%,0:SYS "OS_Claim",&22,c%+512,0:!l%=-40
+130 SYS "XDrawFile_Render",fl%,f%,n%,mm%,kk%,r5% TO r0%;g%:PROCr("render"+STR$t%,FNe(r0%,g%))
+140 SYS "OS_Release",&20,c%,0:SYS "OS_Release",&22,c%+512,0:PROClog:NEXT
+150 FOR t%=0 TO 1:mm%=0:IF t% THEN mm%=m%
+160 SYS "XDrawFile_BBox",0,f%,n%,mm%,b% TO r0%;g%:PROCr("bbox"+STR$t%,FNe(r0%,g%)):FOR i%=0 TO 12 STEP 4:PROCr(" b",b%!i%):NEXT:NEXT
+170 GOTO 9000
+800 DEFPROCload:LOCAL i%:READ n%:FOR i%=0 TO (n%+3) DIV 4-1:READ f%!(4*i%):NEXT:ENDPROC
+810 DEFPROClog:LOCAL j%,i%,v%:IF !l%<0 THEN ENDPROC
+820 FOR j%=0 TO !l% STEP 40:IF l%!(4+j%)=0 THEN PROCr(" drawv",l%!(4+j%+36)):FOR i%=0 TO 6:v%=l%!(8+j%+4*i%):PROCr("  r"+STR$i%,FNa(v%,i%)):NEXT ELSE PROCr(" colourv",l%!(4+j%+36)):PROCr("  r0",l%!(8+j%)):PROCr("  r3",l%!(20+j%)):PROCr("  r4",l%!(24+j%))
+830 NEXT:ENDPROC
+840 DEFFNa(v%,i%):IF v%>=f% AND v%<f%+n% THEN =&E0000000+v%-f%
+850 IF v%=m% THEN =-2
+860 IF (i%=2 OR i%=5) AND v%<>0 THEN =-1
+870 =v%
+900 DATA 0,0,0,0, 1,0,0,0, 2,0,0,0, 3,0,0,0, 4,0,0,300, 0,1,0,0, 0,0,2,0, 0,0,3,0
+1000 DATA 860
+1010 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&30D40,&186A0,&2,&54
+1020 DATA &2328,&2328,&EE48,&C738,&FF00,&FFFFFFFF,&0,&0,&2,&2710,&2710,&8
+1030 DATA &EA60,&3A98,&8,&7530,&C350,&5,&0,&2,&60,&10D88,&2328,&1B198
+1040 DATA &C738,&FF000000,&FFFFFFFF,&0,&40,&2,&11170,&2710,&8,&1ADB0,&C350,&8
+1050 DATA &11170,&C350,&8,&1ADB0,&2710,&5,&0,&2,&60,&1B58,&DEA8,&F618
+1060 DATA &16B48,&FFFFFFFF,&FF0000,&1000,&25,&2,&2710,&EA60,&8,&EA60,&EA60,&8
+1070 DATA &EA60,&15F90,&8,&2710,&15F90,&5,&0,&2,&60,&109A0,&E290,&1DC90
+1080 DATA &16760,&FFFFFFFF,&FFFF0000,&800,&94,&0,&2,&1770,&FA0,&2,&11170,&EA60
+1090 DATA &8,&1D4C0,&EA60,&8,&1D4C0,&15F90,&0,&6,&84,&1FBD0,&2710,&27100
+1100 DATA &9C40,&20202020,&20202020,&20202020,&2,&60,&1FBD0,&2710,&27100,&9C40,&FFFF00,&FFFFFFFF
+1110 DATA &0,&0,&2,&1FBD0,&2710,&8,&27100,&2710,&8,&27100,&9C40,&8
+1120 DATA &1FBD0,&9C40,&5,&0,&7,&80,&1FBD0,&C350,&27100,&13880,&1234,&2
+1130 DATA &60,&1FBD0,&C350,&27100,&13880,&FF00FF00,&FFFFFFFF,&0,&0,&2,&1FBD0,&C350
+1140 DATA &8,&27100,&C350,&8,&27100,&13880,&8,&1FBD0,&13880,&5,&0,&53474154
+1150 DATA &63,&24,&3E8,&3E8,&7D0,&7D0,&1,&2,&3,&2,&38,&29810
+1160 DATA &2710,&2BF20,&4E20,&FF00,&FFFFFFFF,&0,&0,&8,&1,&2,&0,&2
+1170 DATA &60,&29810,&7530,&30D40,&EA60,&80808000,&0,&0,&0,&2,&29810,&7530
+1180 DATA &8,&30D40,&7530,&8,&30D40,&EA60,&8,&29810,&EA60,&5,&0
+
+case drawfile_refusals_and_where_they_are
+10 SYS "XOS_Module",4,"FontManager":PROCmode(28):DIM f% 8192,b% 64
+20 RESTORE 1000:FOR t%=1 TO 17:PROCload
+30 SYS "XDrawFile_Render",0,f%,n%,0,0 TO r0%;g%:PROCr("render"+STR$t%,FNe(r0%,g%))
+40 SYS "XDrawFile_BBox",0,f%,n%,0,b% TO r0%;g%:PROCr(" bbox",FNe(r0%,g%))
+50 SYS "XDrawFile_DeclareFonts",0,f%,n% TO r0%;g%:PROCr(" declare",FNe(r0%,g%)):NEXT
+60 SYS "XOS_Module",3,"FontManager":GOTO 9000
+800 DEFPROCload:LOCAL i%:READ n%:FOR i%=0 TO (n%+3) DIV 4-1:READ f%!(4*i%):NEXT:ENDPROC
+1000 DATA 124
+1010 DATA &70617257,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&2,&54
+1020 DATA &2328,&2328,&EE48,&C738,&FF00,&FFFFFFFF,&0,&0,&2,&2710,&2710,&8
+1030 DATA &EA60,&3A98,&8,&7530,&C350,&5,&0
+1040 DATA 124
+1050 DATA &77617244,&CA,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&2,&54
+1060 DATA &2328,&2328,&EE48,&C738,&FF00,&FFFFFFFF,&0,&0,&2,&2710,&2710,&8
+1070 DATA &EA60,&3A98,&8,&7530,&C350,&5,&0
+1080 DATA 124
+1090 DATA &77617244,&C8,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&2,&54
+1100 DATA &2328,&2328,&EE48,&C738,&FF00,&FFFFFFFF,&0,&0,&2,&2710,&2710,&8
+1110 DATA &EA60,&3A98,&8,&7530,&C350,&5,&0
+1120 DATA 176
+1130 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&0,&1C
+1140 DATA &6D6F4801,&6F747265,&654D2E6E,&6D756964,&0,&0,&18,&69725401,&7974696E,&64654D2E,&6D7569,&2
+1150 DATA &54,&2328,&2328,&EE48,&C738,&FF00,&FFFFFFFF,&0,&0,&2,&2710,&2710
+1160 DATA &8,&EA60,&3A98,&8,&7530,&C350,&5,&0
+1170 DATA 208
+1180 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&2,&54
+1190 DATA &2328,&2328,&EE48,&C738,&FF00,&FFFFFFFF,&0,&0,&2,&2710,&2710,&8
+1200 DATA &EA60,&3A98,&8,&7530,&C350,&5,&0,&0,&1C,&6D6F4801,&6F747265,&654D2E6E
+1210 DATA &6D756964,&0,&1,&38,&1,&1,&2,&2,&0,&FFFFFF00,&7,&1900
+1220 DATA &1900,&2710,&2710,&58
+1230 DATA 124
+1240 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&2,&FA0
+1250 DATA &2328,&2328,&EE48,&C738,&FF00,&FFFFFFFF,&0,&0,&2,&2710,&2710,&8
+1260 DATA &EA60,&3A98,&8,&7530,&C350,&5,&0
+1270 DATA 152
+1280 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&2,&54
+1290 DATA &2328,&2328,&EE48,&C738,&FF00,&FFFFFFFF,&0,&0,&2,&2710,&2710,&8
+1300 DATA &EA60,&3A98,&8,&7530,&C350,&5,&0,&2,&FA0,&0,&0,&0
+1310 DATA &0,&1
+1320 DATA 160
+1330 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&6,&78
+1340 DATA &2328,&2328,&EE48,&C738,&20202020,&20202020,&20202020,&2,&1F4,&2328,&2328,&EE48
+1350 DATA &C738,&FF00,&FFFFFFFF,&0,&0,&2,&2710,&2710,&8,&EA60,&3A98,&8
+1360 DATA &7530,&C350,&5,&0
+1370 DATA 152
+1380 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&7,&70
+1390 DATA &2328,&2328,&EE48,&C738,&5,&2,&3E7,&2328,&2328,&EE48,&C738,&FF00
+1400 DATA &FFFFFFFF,&0,&0,&2,&2710,&2710,&8,&EA60,&3A98,&8,&7530,&C350
+1410 DATA &5,&0
+1420 DATA 60
+1430 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&2,&54
+1440 DATA &2328,&2328,&EE48
+1450 DATA 3
+1460 DATA &617244
+1470 DATA 120
+1480 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&9,&50
+1490 DATA &3E8,&3E8,&C350,&C350,&A,&18,&3E8,&3E8,&C350,&C350,&0,&0
+1500 DATA &0,&0,&FFFFFF00,&3120215C,&6C65480A,&6F6C
+1510 DATA 116
+1520 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&9,&4C
+1530 DATA &3E8,&3E8,&C350,&C350,&A,&18,&3E8,&3E8,&C350,&C350,&0,&0
+1540 DATA &0,&0,&FFFFFF00,&6C6C6548,&6F
+1550 DATA 120
+1560 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&9,&50
+1570 DATA &3E8,&3E8,&C350,&C350,&A,&18,&3E8,&3E8,&C350,&C350,&0,&0
+1580 DATA &0,&0,&FFFFFF00,&3220215C,&6C65480A,&6F6C
+1590 DATA 124
+1600 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&9,&54
+1610 DATA &3E8,&3E8,&C350,&C350,&A,&18,&3E8,&3E8,&C350,&C350,&0,&0
+1620 DATA &0,&0,&FFFFFF00,&3120215C,&48395C0A,&6F6C6C65,&0
+1630 DATA 124
+1640 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&9,&54
+1650 DATA &3E8,&3E8,&C350,&C350,&A,&18,&3E8,&3E8,&C350,&C350,&0,&0
+1660 DATA &0,&0,&FFFFFF00,&3120215C,&48515C0A,&6F6C6C65,&0
+1670 DATA 164
+1680 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&0,&0,&0,&28
+1690 DATA &6D6F4801,&6F747265,&654D2E6E,&6D756964,&72540200,&74696E69,&6F422E79,&646C,&2,&54,&2328,&2328
+1700 DATA &EE48,&C738,&FF00,&FFFFFFFF,&0,&0,&2,&2710,&2710,&8,&EA60,&3A98
+1710 DATA &8,&7530,&C350,&5,&0
+
+case drawfile_sprites_text_and_a_jpeg
+10 SYS "XOS_Module",4,"FontManager":PROCmode(28):DIM f% 8192,b% 64
+20 RESTORE 1000:PROCload
+30 SYS "XDrawFile_Render",0,f%,n%,0,0 TO r0%;g%:PROCr("render",FNe(r0%,g%))
+40 SYS "XDrawFile_Render",1,f%,n%,0,0 TO r0%;g%:PROCr("boxes",FNe(r0%,g%))
+50 SYS "XOS_Module",3,"FontManager":GOTO 9000
+800 DEFPROCload:LOCAL i%:READ n%:FOR i%=0 TO (n%+3) DIV 4-1:READ f%!(4*i%):NEXT:ENDPROC
+1000 DATA 1568
+1010 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&186A0,&EA60,&5,&D4
+1020 DATA &2000,&2000,&4000,&4000,&BC,&6C6170,&0,&0,&0,&3,&0,&1F
+1030 DATA &AC,&AC,&1C,&FF000000,&FF000000,&EE001100,&EE001100,&DD002200,&DD002200,&CC003300,&CC003300,&BB004400
+1040 DATA &BB004400,&AA005500,&AA005500,&99006600,&99006600,&88007700,&88007700,&77008800,&77008800,&66009900,&66009900,&5500AA00
+1050 DATA &5500AA00,&4400BB00,&4400BB00,&3300CC00,&3300CC00,&2200DD00,&2200DD00,&1100EE00,&1100EE00,&FF00,&FF00,&4030201
+1060 DATA &8070605,&C0B0A09,&F0E0D,&5,&54,&6000,&2000,&8000,&6000,&3C,&61706F6E,&6C
+1070 DATA &0,&0,&3,&0,&1F,&2C,&2C,&1C,&4030201,&8070605,&C0B0A09,&F0E0D
+1080 DATA &D,&EC,&A000,&2000,&E000,&6000,&20000,&0,&0,&20000,&A000,&2000
+1090 DATA &BC,&7274,&0,&0,&0,&3,&0,&1F,&AC,&AC,&1C,&FF000000
+1100 DATA &FF000000,&EE001100,&EE001100,&DD002200,&DD002200,&CC003300,&CC003300,&BB004400,&BB004400,&AA005500,&AA005500,&99006600
+1110 DATA &99006600,&88007700,&88007700,&77008800,&77008800,&66009900,&66009900,&5500AA00,&5500AA00,&4400BB00,&4400BB00,&3300CC00
+1120 DATA &3300CC00,&2200DD00,&2200DD00,&1100EE00,&1100EE00,&FF00,&FF00,&4030201,&8070605,&C0B0A09,&F0E0D,&5
+1130 DATA &54,&10000,&2000,&12000,&4000,&3C,&6D646162,&65646F,&0,&0,&3,&0
+1140 DATA &1F,&2C,&2C,&63,&4030201,&8070605,&C0B0A09,&F0E0D,&1,&38,&2800,&9C00
+1150 DATA &7800,&BC00,&FF00,&FFFFFF00,&0,&1E00,&1E00,&2800,&A000,&6948,&0,&1C
+1160 DATA &6D6F4801,&6F747265,&654D2E6E,&6D756964,&0,&1,&38,&A000,&9C00,&F000,&BC00,&FF000000
+1170 DATA &FFFFFF00,&1,&1E00,&1E00,&A000,&A000,&6F46,&10,&304,&14000,&2000,&18000
+1180 DATA &6000,&2710,&2710,&1000,&800,&5A,&5A,&10000,&0,&0,&10000,&2710
+1190 DATA &2710,&2B6,&E0FFD8FF,&464A1000,&1004649,&1000001,&100,&8400DBFF,&2020300,&3020203,&4030303,&5040303
+1200 DATA &4050508,&70A0504,&C080607,&B0C0C0A,&D0B0B0A,&D10120E,&B0E110E,&1016100B,&15141311,&F0C1515,&14161817,&15141218
+1210 DATA &4030114,&5040504,&9050509,&D0B0D14,&14141414,&14141414,&14141414,&14141414,&14141414,&14141414,&14141414,&14141414
+1220 DATA &14141414,&14141414,&14141414,&14141414,&C0FF1414,&81100,&3100010,&2001101,&11030111,&1C4FF01,&10000A2,&1010105
+1230 DATA &10101,&0,&1000000,&5040302,&9080706,&100B0A,&3030102,&5030402,&40405,&17D0100,&4000302,&21120511
+1240 DATA &13064131,&22076151,&81321471,&2308A191,&15C1B142,&24F0D152,&82726233,&17160A09,&251A1918,&29282726,&3635342A,&3A393837
+1250 DATA &46454443,&4A494847,&56555453,&5A595857,&66656463,&6A696867,&76757473,&7A797877,&86858483,&8A898887,&95949392,&99989796
+1260 DATA &A4A3A29A,&A8A7A6A5,&B3B2AAA9,&B7B6B5B4,&C2BAB9B8,&C6C5C4C3,&CAC9C8C7,&D5D4D3D2,&D9D8D7D6,&E3E2E1DA,&E7E6E5E4,&F1EAE9E8
+1270 DATA &F5F4F3F2,&F9F8F7F6,&30001FA,&1010101,&1010101,&1,&1000000,&5040302,&9080706,&110B0A,&4020102,&7040304
+1280 DATA &40405,&770201,&11030201,&31210504,&51411206,&13716107,&8813222,&A1914214,&2309C1B1,&15F05233,&AD17262,&E1342416
+1290 DATA &1817F125,&27261A19,&352A2928,&39383736,&4544433A,&49484746,&5554534A,&59585756,&6564635A,&69686766,&7574736A,&79787776
+1300 DATA &8483827A,&88878685,&93928A89,&97969594,&A29A9998,&A6A5A4A3,&AAA9A8A7,&B5B4B3B2,&B9B8B7B6,&C4C3C2BA,&C8C7C6C5,&D3D2CAC9
+1310 DATA &D7D6D5D4,&E2DAD9D8,&E6E5E4E3,&EAE9E8E7,&F5F4F3F2,&F9F8F7F6,&DAFFFA,&1030C,&11031102,&F9003F00,&71FC11F,&E3FED53F
+1320 DATA &57A9ACF4,&1FF10D1F,&401FEFC3,&E7E02778,&7EDCBFFA,&AED2EC95,&DFF0537F,&F13EFC11,&F8083EED,&FB773F38,&EBED28F,&B2FC7395
+1330 DATA &F823BEE1,&FE8E37D,&1F1C7C04,&E9C7FDBB,&E72ACD5E,&F10D47F5,&1FEFC31F,&D9FF
+
+case star_render_loads_and_renders_with_its_arguments
+10 PROCmode(28):DIM f% 8192
+20 RESTORE 1000:PROCload:SYS "OS_File",10,"HostFS:$.RenderMe",&AFF,,f%,f%+n%
+30 SYS "XOS_CLI","Render HostFS:$.RenderMe" TO r0%;g%:PROCr("Render RenderMe",FNe(r0%,g%))
+40 SYS "XOS_CLI","Render HostFS:$.RenderMe 1 0 0 1 300 20" TO r0%;g%:PROCr("Render RenderMe 1 0 0 1 300 20",FNe(r0%,g%))
+50 SYS "XOS_CLI","Render -file HostFS:$.RenderMe 0.5 0 0 2 10 200 -bbox" TO r0%;g%:PROCr("Render -file RenderMe 0.5 0 0 2 10 200 -bbox",FNe(r0%,g%))
+60 SYS "XOS_CLI","Render HostFS:$.RenderMe 2 -suppress -bbox" TO r0%;g%:PROCr("Render RenderMe 2 -suppress -bbox",FNe(r0%,g%))
+70 SYS "XOS_CLI","Render HostFS:$.RenderMe 1 0 0 1 x 300 -flatness 3" TO r0%;g%:PROCr("Render RenderMe 1 0 0 1 x 300 -flatness 3",FNe(r0%,g%))
+80 SYS "XOS_CLI","Render" TO r0%;g%:PROCr("Render",FNe(r0%,g%))
+90 SYS "XOS_CLI","Render HostFS:$.RenderMe -flatness" TO r0%;g%:PROCr("Render RenderMe -flatness",FNe(r0%,g%))
+100 SYS "XOS_CLI","Render HostFS:$.RenderMe 1 2 3 4 5 6 7" TO r0%;g%:PROCr("Render RenderMe 1 2 3 4 5 6 7",FNe(r0%,g%))
+110 SYS "XOS_CLI","Render HostFS:$.Nowhere" TO r0%;g%:PROCr("Render Nowhere",FNe(r0%,g%))
+120 SYS "XOS_File",6,"HostFS:$.RenderMe"
+130 GOTO 9000
+800 DEFPROCload:LOCAL i%:READ n%:FOR i%=0 TO (n%+3) DIV 4-1:READ f%!(4*i%):NEXT:ENDPROC
+1000 DATA 232
+1010 DATA &77617244,&C9,&0,&626F7250,&20202065,&20202020,&0,&0,&1FBD0,&C350,&2,&60
+1020 DATA &2710,&2710,&EA60,&9C40,&FF00,&FFFFFFFF,&0,&0,&2,&2710,&2710,&8
+1030 DATA &EA60,&2710,&8,&EA60,&9C40,&8,&2710,&9C40,&5,&0,&2,&60
+1040 DATA &11170,&2710,&1D4C0,&9C40,&FFFFFFFF,&FF000000,&0,&0,&2,&11170,&2710,&8
+1050 DATA &1D4C0,&2710,&8,&1D4C0,&9C40,&8,&11170,&9C40,&5,&0
+
+case transform_path_reenters_undashed_keeping_its_other_registers
+10 PROCmode(28):DIM c% 256,l% 4096,p% 512,b% 512,m% 32,k% 16
+20 FOR s%=0 TO 2 STEP 2:P%=c%:[OPT s%
+30 STMFD R13!,{R9,R10}:LDR R9,la:LDR R10,[R9]:CMP R10,#3600:ADDLT R10,R10,#36:STRLT R10,[R9]
+40 ADDLT R9,R9,R10:ADDLT R9,R9,#4:STMLTIA R9,{R0-R8}:LDMFD R13!,{R9,R10}:MOV PC,R14
+50 .la EQUD l%:]:NEXT
+60 PROCp(p%,"2,0,0,8,25600,0,8,25600,25600,5"):m%!0=&20000:m%!4=0:m%!8=0:m%!12=&20000:m%!16=256:m%!20=512
+70 SYS "OS_Claim",&20,c%,0
+80 !l%=-36:SYS "XDraw_TransformPath",p%,0,m%,0,7,9,k%,11 TO r0%;f%:PROCr("inplace",FNe(r0%,f%)):PROClog
+90 !b%=0:b%!4=400:!l%=-36:SYS "XDraw_TransformPath",p%,b%,m%,0,7,9,k%,11 TO r0%;f%:PROCr("buffer",FNe(r0%,f%)):PROClog
+100 SYS "OS_Release",&20,c%,0
+110 FOR i%=0 TO 11:PROCr(" p"+STR$i%,p%!(4*i%)):PROCr(" b"+STR$i%,b%!(4*i%)):NEXT
+120 GOTO 9000
+130 DEFPROClog:LOCAL j%,i%,v%:IF !l%<0 THEN ENDPROC
+140 FOR j%=0 TO !l% STEP 36:FOR i%=0 TO 8:v%=l%!(4+j%+4*i%):IF v%=p% THEN v%=-2 ELSE IF v%=b% THEN v%=-3 ELSE IF v%=m% THEN v%=-4 ELSE IF v%=k% THEN v%=-5
+150 PROCr(" r"+STR$i%,v%):NEXT:NEXT:ENDPROC
+160 DEFPROCp(a%,s$):LOCAL i%,v$:i%=0:WHILE s$<>"":v$=s$:IF INSTR(s$,",") THEN v$=LEFT$(s$,INSTR(s$,",")-1):s$=MID$(s$,INSTR(s$,",")+1) ELSE s$=""
+170 a%!i%=VAL v$:i%+=4:ENDWHILE:a%!i%=0:a%!(i%+4)=256:ENDPROC

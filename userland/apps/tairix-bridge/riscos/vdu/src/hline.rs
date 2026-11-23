@@ -7,7 +7,7 @@ use tairix_riscos_kernel::os::{Fail, Os, Regs};
 
 use crate::canvas::Block;
 use crate::plot::{ink_block, Ink};
-use crate::state::with;
+use crate::spans::plot;
 
 /// The routine.
 pub(crate) fn routine(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
@@ -23,10 +23,5 @@ pub(crate) fn routine(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         regs.r[1].cast_signed(),
         regs.r[2].cast_signed(),
     );
-    with(os, |vdu, os| {
-        if !vdu.format().graphic() {
-            return Ok(());
-        }
-        vdu.draw_spans(os, [(y, left.min(right), left.max(right))], &block)
-    })
+    plot(os, [(y, left.min(right), left.max(right))], &block)
 }

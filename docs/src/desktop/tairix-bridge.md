@@ -1862,7 +1862,8 @@ The screen corpus, `vdu/tests/riscos5/screens.txt`, is BASIC programs genuine
 RISC OS 5.30 ran on its screen for the reference harness, each defining the
 whole character set from the first-party font first, so no RISC OS glyph is
 in any screen; `drawn.txt` holds what each read and every line of the screen
-it drew, which the replay holds the drivers to byte for byte.
+it drew, which the replay holds the drivers to byte for byte. Its session
+has Draw, which SpriteExtend's matrix plots call, as every session does.
 
 ## Sprites
 
@@ -1920,10 +1921,19 @@ module that describes the mode.
   (55, 56) draws a pixel whose centre lies strictly past the image's lower
   edges and on or within its upper ones, sampling the source on each row's
   centre line at a grid anchored to the image of the source rectangle's top
-  left, columns stepped in 16.16; no matrix is the identity, and points are
-  from the graphics origin. The parallelogram form maps the rectangle's first
-  corner to its first point, the whole sprite's first corner being its top
-  left. Translation tables are read as bytes onto a palettised destination,
+  left, columns stepped in 16.16, points from the graphics origin. The
+  parallelogram form maps the rectangle's first corner to its first point,
+  the whole sprite's first corner being its top left. The matrix form plots
+  the parallelogram Draw makes: the rectangle, each corner held to the
+  sprite, its first corner and the two beside it moved in place by
+  `Draw_TransformPath` as a path of three moves below SpriteExtend's stack.
+  R4 is the sprite's row in words, in bits where a source rectangle is
+  named; R5 the plot's action, 8 for a mask plot; R7 the table it plots
+  through, none for one that maps a sprite of the destination's depth to
+  itself. A claimant of `DrawV` sees the corners and may move them, Draw's
+  refusal — an overflow among them (&98A) — is the plot's, and with Draw
+  gone the plot fails as its unknown SWI does (&1E6). No matrix leaves the
+  corners where they are. Translation tables are read as bytes onto a palettised destination,
   wide or not; onto a deep one a narrow table gives colours in their
   colour-number form, and flag bit 4 lets a palette naming every pixel value
   stand for it; a deep sprite reaches a palettised destination only through
@@ -2108,6 +2118,116 @@ Known differences from RISC OS 5, each deliberate:
   first. RISC OS 5 writes `*ColourTransMapColo`, with the sizes in the
   table's order.
 
+## Draw and DrawFile
+
+The `userland/apps/tairix-bridge/riscos/draw` crate is RISC OS 5.30's Draw
+1.22 and DrawFile 1.62.
+
+- **The vector.** Each Draw SWI calls `DrawV` with R8 its index, the
+  caller's R8 kept; one past the sixteen names is out of range (&110)
+  without a call. The vector's default takes each index. The convenience
+  calls re-enter `DrawV` as `Draw_ProcessPath` with the registers RISC OS
+  gives it — a fill, and a path transformed, undashed — so a claimant sees
+  what RISC OS's does. The floating-point calls refuse (&9FF).
+- **Processing.** A path is read through its continuations and passes RISC
+  OS's stages in their order: subpaths closed, curves flattened by RISC OS's
+  recorded bisection, dashed, thickened, flattened again, transformed. Each
+  stage hands on what it makes as it makes it, so an error leaves what went
+  before it written, as RISC OS's does. Refusals: reserved flags &982, a code
+  past the last or a loop of continuations &984, an element out of order
+  &985, a call that could change the path's length in place &986, a full
+  buffer &987, a curve unflattened &988, a cap or join past its kinds &989,
+  a point transformed out of a word &98A.
+- **Destinations.** An output buffer: its room at +4, the end element apart,
+  each element written while it fits and the end element always after the
+  last. A count: the bytes, the end element's included. A box, where R7's top
+  bit is set: from the extremes, R0 the last point's x. The path in place:
+  each point transformed, the client bits and the end element kept. The fill.
+- **The fill** scan-converts to RISC OS's four pixel classes — interior, its
+  boundary, the exterior's boundary, exterior — by R1's style, non-zero or
+  even-odd, a subpath at a time or all at once. It may make a clip, or plot
+  within the one made. R0 is &7FFFFFFF on exit, &80000000 where the exterior
+  is asked for. The segments it holds are bounded by the memory policy.
+- **Dashing.** The start offset is walked through the pattern, whose lengths
+  are unsigned, a count of nought acting as one and an odd count alternating
+  on and off. The pattern starts afresh with each subpath and carries on
+  across corners and through gaps. A run ending where a segment does hands on
+  a piece of no length, and the closing segment's last run becomes the
+  close.
+- **Thickening.** Every shape winds anticlockwise. Joins are mitred to the
+  limit, round or bevelled, and caps butt, round, square or triangular, the
+  cap and join block read only as each field is used. A subpath of no length
+  with round caps is a circle.
+- **Steps.** Each element read, each element reaching a destination and each
+  row the fill scans is a step of work toward the host's word, so the host
+  can stop a call a small path makes endless: a line the coordinate range
+  long dashed a unit at a time.
+- **DrawFile** checks a file whole before drawing anything. A header
+  refusal is &20C00, a later major version &20C01, sizes &20C05 to &20C07 at
+  the last object accepted, a second font table &20C02, and a font no table
+  names &20C03. Then each object is rendered:
+  - paths through `Draw_Fill` and `Draw_Stroke`, each after
+    `ColourTrans_SetGCOL`;
+  - sprites through `OS_SpriteOp` 40, `ColourTrans_SelectTable` and 56;
+  - JPEGs through `JPEG_PlotTransformed`;
+  - text in the system font a character at a time through a work sprite,
+    as RISC OS 5.30 draws it with no Font Manager, which leaves it unseen;
+  - text areas' colours through `Font_SetFontColours`, refused with no Font
+    Manager (&1E6);
+  - with flag bit 0, each object's box, dotted.
+
+  An object of an unknown type is passed over. Rendering goes on past an
+  error, the first returned once it is done, and every register is kept.
+- **Nesting.** Each walk of a file's groups and tagged objects runs on the
+  supervisor stack, as genuine DrawFile's does, and overflows it as RISC OS
+  5.30's did called from BASIC: the check every call makes past 162 groups
+  or 176 tagged objects, `DrawFile_DeclareFonts`' walk past 156 or 162, and
+  `DrawFile_Render`'s past 131 or 140. Each level takes its kind's share of
+  the stack, so a mixed chain overflows between the two, and the overflow
+  aborts as RISC OS's does.
+- **`DrawFile_BBox`** gives the header's box through the matrix.
+  **`DrawFile_DeclareFonts`** calls `PDriver_DeclareFont` for each font in
+  the table, and each a text area's `\F` names.
+- **`*Render`** reads `file/A,a,b,c,d,e,f,bbox/S,suppress/S,flatness/K`, the
+  matrix's scale in units and its translation and the flatness in OS units,
+  loads the file into the RMA and renders it.
+
+The corpus `draw/tests/riscos5/screens.txt` holds Draw's screens to RISC OS
+5.30's, but the dashes along a slant, thick lines' widths and long mitres'
+tips, which the crate's own tests hold to the cases recorded for them:
+57 dashings, 205 thickenings and 16 Draw files.
+
+Known differences from RISC OS 5:
+
+- a thick line's edge, a long mitre's tip and a width of three units or
+  less differ in low bits: 142 of the 205 recorded thickenings are exact,
+  the rest within six units and a 20000th of the distance from the origin
+  (accepted);
+- a dash along a slant drifts up to six units from RISC OS 5's;
+- a mitre on a line 2^20 units wide is tested without the overflow RISC OS
+  5's limit test meets, so it mitres or bevels where RISC OS 5 does not;
+- a pattern whose lengths sum to nought leaves the path undashed, where
+  RISC OS 5 never returns;
+- a loop of continuations is refused (&984), where RISC OS 5 follows it for
+  ever;
+- `Draw_FillClippedFP` and `Draw_StrokeClippedFP` refuse as floating point
+  (&9FF);
+- a fill that plots nothing leaves R0 as one that plots does, where RISC OS
+  5 leaves other values;
+- a Draw file object whose size is smaller than its header or not whole
+  words is refused as too big (&20C05 to &20C07), where RISC OS 5 misreads
+  what follows;
+- `*Render`'s fractions are rounded to the nearest unit, and a transformed
+  text object's characters are plotted through its own matrix composed with
+  the render's; neither is pinned to RISC OS 5;
+- a font a file names and the Font Manager finds is not used: the text is
+  drawn in the system font, until the Font Manager (RO25) answers;
+- SpriteExtend's R4 and R7 handed to Draw follow rules read from a handful
+  of observations;
+- nesting overflows at the depths RISC OS 5.30 overflowed at from BASIC with
+  a path innermost, where RISC OS's own depend on what its stack already
+  holds and on what the innermost object calls.
+
 ## The reference harness
 
 `cargo xtask riscos --reference <dir>` records each crate's corpus —
@@ -2160,6 +2280,13 @@ directory the machine boots from (`*Configure FileSystem HostFS`,
   by the kind the calibration shows it to be (`riscos/session.rs`). The
   formats are the crate's `corpus` module's, so the harness and the replays
   read them alike.
+- **Screens.** Then BASIC V runs each screen case, the VDU drivers'
+  (`vdu/tests/riscos5/screens.txt`) and then the Draw modules'
+  (`draw/tests/riscos5/screens.txt`), numbered on from them, each framed as
+  `tairix_riscos_vdu::corpus` frames it; what each read and the screen it
+  left go to its corpus's `drawn.txt` (`tools/xtask/src/commands/riscos/screens.rs`).
+  A case prints a pointer only as a token for what it points at, so neither
+  its place in the run nor what the machine holds moves a reading.
 - **Running.** Where `<dir>` holds RPCEmu, it runs headless, as one of the
   command's own children, until the harness, once done, saves a byte to a
   named pipe (HostFS opens none to write it a byte at a time), the emulator

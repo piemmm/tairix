@@ -2933,3 +2933,57 @@ case sprite_blends_onto_32_bit_colour
 90 PROCs("h",16,200,&8):PROCs("h",64,200,&8008):PROCs("h",112,200,&4008)
 100 GOTO 9000
 110 DEFPROCs(s$,x%,y%,f%):SYS "XOS_SpriteOp",256+52,A%,s$,x%,y%,f%,S%,0 TO r%;f%:PROCr(s$,FNe(r%,f%)):ENDPROC
+
+case output_switched_to_a_sprite_invalidates_colourtrans_through_colourv
+10 PROCmode(28):DIM c% 512,l% 4096,a% 4096
+20 FOR s%=0 TO 2 STEP 2:FOR v%=0 TO 1:P%=c%+v%*256:[OPT s%
+30 STMFD R13!,{R9-R11}:LDR R9,la:LDR R10,[R9]:CMP R10,#3600:ADDLT R10,R10,#20:STRLT R10,[R9]:ADDLT R9,R9,R10:ADDLT R9,R9,#4
+40 MOVLT R11,#v%:STRLT R11,[R9],#4:STMLTIA R9,{R0,R3,R8}:LDMFD R13!,{R9-R11}:MOV PC,R14
+50 .la EQUD l%:]:NEXT:NEXT
+60 !a%=4096:a%!4=0:a%!8=16:a%!12=16:SYS "OS_SpriteOp",&10F,a%,"t",1,8,8,0:SYS "OS_SpriteOp",&11D,a%,"t"
+70 SYS "OS_SpriteOp",&118,a%,"t" TO ,,p%
+80 FOR k%=0 TO 1:SYS "OS_Claim",&22,c%,0:SYS "OS_Claim",&1F,c%+256,0:!l%=-20
+90 SYS "OS_SpriteOp",&23C+k%,a%,p%,0 TO r0%,r1%,r2%,r3%:SYS "OS_SpriteOp",r0%,r1%,r2%,r3%
+100 SYS "OS_Release",&22,c%,0:SYS "OS_Release",&1F,c%+256,0
+110 FOR j%=0 TO !l% STEP 20:IF l%!(4+j%)=0 THEN PROCr("colourv",l%!(16+j%)) ELSE PROCr("spritev",l%!(8+j%)):PROCr(" r3",l%!(12+j%))
+120 NEXT:NEXT
+130 GOTO 9000
+
+case sprite_transformed_hands_draw_its_corners
+10 PROCmode(28):DIM c% 512,l% 4096,a% 4096,m% 32,g% 32,t% 256,u% 256,e% 64
+20 e%!0=&ABC:$(e%+4)="Refused":FOR i%=0 TO 255:t%?i%=255-i%:u%?i%=i%:NEXT
+30 FOR s%=0 TO 2 STEP 2:P%=c%:[OPT s%
+40 STMFD R13!,{R0-R12,R14}:LDR R9,la:LDR R10,[R9]:CMP R10,#3600:BGE dn:ADD R10,R10,#80:STR R10,[R9]:ADD R9,R9,R10:ADD R9,R9,#4:STMIA R9!,{R0-R8}
+50 CMP R8,#10:CMPNE R8,#0:BNE dn:MOV R11,#10
+60 .cp LDR R12,[R0],#4:STR R12,[R9],#4:SUBS R11,R11,#1:BNE cp
+70 .dn LDR R11,md:CMP R11,#0:BEQ ps:LDR R8,[R13,#32]:CMP R8,#10:BNE ps:CMP R11,#2:BNE nm
+80 LDR R0,[R13]:MOV R1,#300*256:STR R1,[R0,#4]:STR R1,[R0,#8]:MOV R2,#332*256:STR R2,[R0,#16]:STR R1,[R0,#20]:STR R1,[R0,#28]:STR R2,[R0,#32]
+90 .nm CMP R11,#3:BEQ er:LDMFD R13!,{R0-R12,R14}:LDMFD R13!,{PC}
+100 .er LDMFD R13!,{R0-R12,R14}:LDR R0,eb:MSR CPSR_f,#&10000000:LDMFD R13!,{PC}
+110 .ps LDMFD R13!,{R0-R12,R14}:MOV PC,R14
+120 .la EQUD l%:.md EQUD 0:.eb EQUD e%:]:NEXT
+130 !a%=4096:a%!4=0:a%!8=16:a%!12=16:SYS "OS_SpriteOp",&10F,a%,"s",0,8,8,28:SYS "OS_SpriteOp",&11D,a%,"s"
+140 SYS "OS_SpriteOp",&118,a%,"s" TO ,,p%:i%=p%+p%!32:FOR j%=0 TO 63:i%?j%=255-j%:NEXT
+150 GCOL 0,128+12
+160 PROCm(&20000,0,0,&20000,100,100):PROCt("matrix",&238,0,0,0,m%,0,0)
+170 PROCt("moved",&238,0,0,0,m%,0,2)
+180 PROCt("refused",&238,0,0,0,m%,0,3)
+190 PROCm(&20000,0,0,&20000,&7FFFFF,100):PROCt("overflow",&238,0,0,0,m%,0,0)
+200 g%!0=-4:g%!4=-4:g%!8=20:g%!12=20:PROCm(&20000,0,0,&20000,200,100):PROCt("held",&238,2,g%,0,m%,0,0)
+210 g%!0=6:g%!4=7:g%!8=2:g%!12=1:PROCm(&20000,0,0,&20000,400,100):PROCt("backward",&238,2,g%,0,m%,0,0)
+220 PROCm(&10000,0,0,&10000,100,300):PROCt("table",&238,0,0,0,m%,t%,0)
+230 PROCm(&10000,0,0,&10000,160,300):PROCt("identity",&238,0,0,8,m%,u%,0)
+240 PROCt("unmoved",&238,0,0,0,0,0,0)
+250 PROCm(&18000,&8000,-&8000,&18000,500,300):PROCt("mask",&237,0,0,0,m%,0,0)
+260 SYS "XOS_CLI","RMKill Draw" TO r0%;f%:PROCr("kill",FNe(r0%,f%))
+270 PROCm(&20000,0,0,&20000,500,100):PROCt("drawless",&238,0,0,0,m%,0,0)
+280 SYS "XOS_CLI","RMReInit Draw" TO r0%;f%:PROCr("reinit",FNe(r0%,f%))
+290 PROCt("again",&238,0,0,0,m%,0,0)
+300 GOTO 9000
+310 DEFPROCm(a%,b%,c%,d%,x%,y%):m%!0=a%:m%!4=b%:m%!8=c%:m%!12=d%:m%!16=x%*256:m%!20=y%*256:ENDPROC
+320 DEFPROCt(n$,o%,f%,r%,x%,q%,w%,k%):LOCAL r0%,g%,j%,i%,v%
+330 !md=k%:!l%=-80:SYS "OS_Claim",&20,c%,0:SYS "XOS_SpriteOp",o%,a%,p%,f%,r%,x%,q%,w% TO r0%;g%:SYS "OS_Release",&20,c%,0:!md=0
+340 PROCr(n$,FNe(r0%,g%)):IF !l%<0 THEN ENDPROC
+350 FOR j%=0 TO !l% STEP 80:FOR i%=1 TO 8:v%=l%!(4+j%+4*i%):IF v%=m% THEN v%=-2 ELSE IF v%=t% OR v%=u% THEN v%=-3
+360 PROCr(" r"+STR$i%,v%):NEXT:IF l%!(36+j%)=10 THEN FOR i%=0 TO 9:PROCr(" w"+STR$i%,l%!(40+j%+4*i%)):NEXT
+370 NEXT:ENDPROC

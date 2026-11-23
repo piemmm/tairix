@@ -17,14 +17,17 @@ use tairix_fsmeta::preset::acorn::latin1_char;
 use tairix_softfloat::from_fpa_words;
 use tairix_util::fallible::{self, try_push};
 
+use super::format::{int, word, Misframed, Object, Objects};
+use super::format::{
+    CAP_BUTT, CAP_ROUND, CAP_SQUARE, CAP_TRIANGLE, CLOSE, CLOSE_WITH_GAP, CODE, CURVE, DASHED, END,
+    END_CAP_SHIFT, FONT_NUMBER, FONT_TABLE, GAP, GROUP, GROUP_NAME, HEADER, JOIN_BEVEL, JOIN_MITRE,
+    JOIN_ROUND, JPEG, LINE, MAJOR_VERSION, MATRIX, MOVE, OBJECT_HEADER, OPTIONS, PATH, SPRITE,
+    START_CAP_SHIFT, TAG, TAGGED, TEXT, TEXT_AREA, TEXT_COLUMN, TRANSFORMED_SPRITE,
+    TRANSFORMED_TEXT, TRIANGLE_LENGTH_SHIFT, TRIANGLE_SIZE, TRIANGLE_WIDTH_SHIFT, WINDING_EVEN_ODD,
+};
 use super::{
-    a_paper, colour_of, face_of, Face, CAP_BUTT, CAP_ROUND, CAP_SQUARE, CAP_TRIANGLE, CLOSE,
-    CLOSE_WITH_GAP, CODE, CURVE, DASHED, END, END_CAP_SHIFT, FIXED_ONE, FONT_NUMBER, FONT_TABLE,
-    GAP, GROUP, GROUP_NAME, HEADER, JOIN_BEVEL, JOIN_MITRE, JOIN_ROUND, JPEG, LANDSCAPE, LINE,
-    MAJOR_VERSION, MATRIX, MITRE_LIMIT, MONOSPACE, MOVE, OBJECT_HEADER, OPTIONS, PATH,
-    RIGHT_TO_LEFT, SPRITE, START_CAP_SHIFT, TAG, TAGGED, TEXT, TEXT_AREA, TEXT_COLUMN,
-    TRANSFORMED_SPRITE, TRANSFORMED_TEXT, TRIANGLE_LENGTH_SHIFT, TRIANGLE_SIZE, TRIANGLE_UNIT,
-    TRIANGLE_WIDTH_SHIFT, UNITS_PER_PIXEL, WINDING_EVEN_ODD,
+    a_paper, colour_of, face_of, Face, FIXED_ONE, LANDSCAPE, MITRE_LIMIT, MONOSPACE, RIGHT_TO_LEFT,
+    TRIANGLE_UNIT, UNITS_PER_PIXEL,
 };
 use crate::children::Children;
 use crate::drawing::{Drawing, Grid, Page, Unit, PAPER};
@@ -65,7 +68,7 @@ pub fn read(bytes: &[u8], ids: &mut Ids) -> Result<Read, ReadError> {
     let body = &bytes[HEADER..];
     let mut names = fallible::filled(FONT_NUMBERS, None).ok_or(ReadError::OutOfMemory)?;
     let mut setting = None;
-    for object in Objects(body) {
+    for object in Objects::new(body, HEADER) {
         let object = object?;
         match object.kind {
             FONT_TABLE => font_table(object.bytes, &mut names)?,
@@ -87,7 +90,7 @@ pub fn read(bytes: &[u8], ids: &mut Ids) -> Result<Read, ReadError> {
         pictures: Pictures::new(),
     };
     let mut nodes = Vec::new();
-    reader.objects(body, 0, &mut nodes)?;
+    reader.objects(body, HEADER, 0, &mut nodes)?;
     let layer = Node::new(
         reader.ids.issue(),
         Kind::Group {
@@ -109,36 +112,9 @@ pub fn read(bytes: &[u8], ids: &mut Ids) -> Result<Read, ReadError> {
     })
 }
 
-/// One object of a file: its type and all its bytes, header and all.
-#[derive(Copy, Clone)]
-struct Object<'a> {
-    kind: u32,
-    bytes: &'a [u8],
-}
-
-/// The objects one after another in a run of bytes, each held to the run.
-struct Objects<'a>(&'a [u8]);
-
-impl<'a> Iterator for Objects<'a> {
-    type Item = Result<Object<'a>, ReadError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.0.is_empty() {
-            return None;
-        }
-        let framed = word(self.0, 0)
-            .zip(word(self.0, 4))
-            .and_then(|(kind, size)| {
-                let size = usize::try_from(size).ok()?;
-                (size >= 8 && size % 4 == 0 && size <= self.0.len()).then_some((kind, size))
-            });
-        let Some((kind, size)) = framed else {
-            self.0 = &[];
-            return Some(Err(ReadError::Malformed));
-        };
-        let (bytes, rest) = self.0.split_at(size);
-        self.0 = rest;
-        Some(Ok(Object { kind, bytes }))
+impl From<Misframed> for ReadError {
+    fn from(_: Misframed) -> Self {
+        Self::Malformed
     }
 }
 
@@ -229,10 +205,11 @@ impl<'a> Reader<'a, '_> {
     fn objects(
         &mut self,
         bytes: &'a [u8],
+        at: usize,
         depth: usize,
         out: &mut Vec<Arc<Node>>,
     ) -> Result<(), ReadError> {
-        for object in Objects(bytes) {
+        for object in Objects::new(bytes, at) {
             if let Some(node) = self.object(object?, depth)? {
                 try_push(out, try_arc(node)?)?;
             }
@@ -247,8 +224,8 @@ impl<'a> Reader<'a, '_> {
             TEXT => Some(self.text(bytes)?),
             TRANSFORMED_TEXT => Some(self.transformed_text(bytes)?),
             PATH => Some(self.path(bytes)?),
-            GROUP => Some(self.group(bytes, depth)?),
-            TAGGED => self.tagged(bytes, depth)?,
+            GROUP => Some(self.group(object, depth)?),
+            TAGGED => self.tagged(object, depth)?,
             // These set the drawing up rather than draw in it, and a text
             // column stands only within a text area.
             FONT_TABLE | OPTIONS | TEXT_COLUMN => None,
@@ -427,13 +404,19 @@ impl<'a> Reader<'a, '_> {
         Ok(Some(node.with_transform(transform)?))
     }
 
-    fn group(&mut self, bytes: &'a [u8], depth: usize) -> Result<Node, ReadError> {
+    fn group(&mut self, group: Object<'a>, depth: usize) -> Result<Node, ReadError> {
+        let bytes = group.bytes;
         let content = OBJECT_HEADER + GROUP_NAME;
         let name = bytes
             .get(OBJECT_HEADER..content)
             .ok_or(ReadError::Malformed)?;
         let mut children = Vec::new();
-        self.objects(&bytes[content..], deeper(depth)?, &mut children)?;
+        self.objects(
+            &bytes[content..],
+            group.at + content,
+            deeper(depth)?,
+            &mut children,
+        )?;
         let node = Node::new(
             self.ids.issue(),
             Kind::Group {
@@ -447,9 +430,14 @@ impl<'a> Reader<'a, '_> {
     /// The object a tagged object wraps; its tag and the data after it say
     /// something of the object to the program that tagged it, which the
     /// drawing cannot keep.
-    fn tagged(&mut self, bytes: &'a [u8], depth: usize) -> Result<Option<Node>, ReadError> {
-        let wrapped = bytes.get(OBJECT_HEADER + 4..).ok_or(ReadError::Malformed)?;
-        let object = Objects(wrapped).next().ok_or(ReadError::Malformed)??;
+    fn tagged(&mut self, tagged: Object<'a>, depth: usize) -> Result<Option<Node>, ReadError> {
+        let wrapped = tagged
+            .bytes
+            .get(OBJECT_HEADER + 4..)
+            .ok_or(ReadError::Malformed)?;
+        let object = Objects::new(wrapped, tagged.at + OBJECT_HEADER + 4)
+            .next()
+            .ok_or(ReadError::Malformed)??;
         self.unkept.insert(Lost::Annotations);
         self.object(object, deeper(depth)?)
     }
@@ -961,15 +949,4 @@ fn terminated(bytes: &[u8], from: usize) -> Result<&[u8], ReadError> {
         .position(|&byte| byte == 0)
         .ok_or(ReadError::Malformed)?;
     Ok(&rest[..end])
-}
-
-/// The little-endian word at `at` of `bytes`.
-fn word(bytes: &[u8], at: usize) -> Option<u32> {
-    let quad = bytes.get(at..at.checked_add(4)?)?;
-    Some(u32::from_le_bytes(quad.try_into().ok()?))
-}
-
-/// The little-endian signed word at `at` of `bytes`.
-fn int(bytes: &[u8], at: usize) -> Option<i32> {
-    word(bytes, at).map(|word| i32::from_le_bytes(word.to_le_bytes()))
 }

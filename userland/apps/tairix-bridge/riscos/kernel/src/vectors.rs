@@ -77,6 +77,8 @@ pub const UPCALL: Vector = Vector(0x1D);
 pub const CHANGE_ENVIRONMENT: Vector = Vector(0x1E);
 /// `SpriteV`: `OS_SpriteOp`.
 pub const SPRITE: Vector = Vector(0x1F);
+/// `DrawV`: every Draw SWI, its index in R8.
+pub const DRAW: Vector = Vector(0x20);
 /// `ColourV`: every ColourTrans SWI, its offset in R8.
 pub const COLOUR: Vector = Vector(0x22);
 /// `PaletteV`: the palette read and written for the VDU drivers.

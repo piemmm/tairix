@@ -27,6 +27,7 @@ mod verify;
 
 use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
+use tairix_riscos_kernel::swi::sprite_op;
 
 use crate::canvas::Block;
 use crate::palette::EIGHT_BIT_COLOURS;
@@ -74,7 +75,7 @@ pub(crate) mod reason {
     /// to hold 256 entries.
     pub(crate) const PALETTE_FULL: u32 = 1 << 31;
     pub(crate) const ALPHA: u32 = 38;
-    pub(crate) const INFO: u32 = 40;
+    pub(crate) const INFO: u32 = super::sprite_op::READ_INFO;
     pub(crate) const READ_PIXEL: u32 = 41;
     pub(crate) const WRITE_PIXEL: u32 = 42;
     pub(crate) const READ_MASK: u32 = 43;
@@ -90,11 +91,11 @@ pub(crate) mod reason {
     pub(crate) const PUT_GREY_SCALED: u32 = 53;
     pub(crate) const REMOVE_WASTAGE: u32 = 54;
     pub(crate) const PLOT_MASK_TRANSFORMED: u32 = 55;
-    pub(crate) const PUT_TRANSFORMED: u32 = 56;
+    pub(crate) const PUT_TRANSFORMED: u32 = super::sprite_op::PUT_TRANSFORMED;
     pub(crate) const ROWS: u32 = 57;
     pub(crate) const COLUMNS: u32 = 58;
     pub(crate) const SWITCH_TO_SPRITE: u32 = 60;
-    pub(crate) const SWITCH_TO_MASK: u32 = 61;
+    pub(crate) const SWITCH_TO_MASK: u32 = super::sprite_op::SWITCH_TO_MASK;
     pub(crate) const SAVE_AREA_SIZE: u32 = 62;
     pub(crate) const TILE: u32 = 65;
 }
@@ -257,7 +258,7 @@ pub(crate) fn kernel(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let Some(naming) = Naming::of(regs.r[0]) else {
         return Err(os.error(UNKNOWN_REASON));
     };
-    match regs.r[0] & 0xFF {
+    match regs.r[0] & sprite_op::REASON {
         reason::SCREEN_SAVE => dump::save(os, regs),
         reason::SCREEN_LOAD => dump::load(os, regs),
         reason::READ_AREA => create::read_area(os, naming, regs),

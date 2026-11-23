@@ -937,7 +937,7 @@ impl Os<'_> {
 
     /// The SWI's call nests past the bound: the supervisor stack overflows,
     /// which aborts at its guard page.
-    pub(crate) fn overflowed(&mut self) -> Unwind {
+    pub fn overflowed(&mut self) -> Unwind {
         let guard = self.memory.layout().stacks.supervisor.start - 4;
         match self.aborted(guard) {
             Fail::Unwind(unwind) => unwind,

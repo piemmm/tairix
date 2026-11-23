@@ -4,17 +4,21 @@
 
 #![allow(
     dead_code,
+    unused_imports,
     reason = "each test crate including this uses the helpers its own tests need"
 )]
 
+use std::ops::Range;
 use std::sync::LazyLock;
 
 use tairix_fscopy::fixture::Tree;
 use tairix_riscos_filing::session::{modules_with, session, Session, Setup, DISC, SLOT_BYTES};
+use tairix_riscos_kernel::memory::layout::ZERO_PAGE_SIZE;
 use tairix_riscos_kernel::module::Builtin;
 use tairix_riscos_kernel::os::{Fail, Regs};
 use tairix_riscos_kernel::swi::os::{
-    screen_mode, CLI, MODULE, READ_MODE_VARIABLE, SCREEN_MODE, SPRITE_OP, WRITE_C,
+    screen_mode, CLI, MODULE, READ_DYNAMIC_AREA, READ_MODE_VARIABLE, SCREEN_MODE, SPRITE_OP,
+    WRITE_C,
 };
 
 /// `OS_Module`'s reasons to claim a block and insert a module there.
@@ -28,14 +32,29 @@ pub const SELECTOR_AT: u32 = 0x9000;
 pub const COMMAND_AT: u32 = 0xA000;
 /// The values `OS_SpriteOp`'s R0 adds to a reason: a user area's sprite by
 /// name, and a sprite by its address.
-pub const USER: u32 = 256;
-pub const BY_POINTER: u32 = 512;
+pub use tairix_riscos_kernel::swi::sprite_op::{BY_NAME as USER, BY_POINTER};
 
-/// A session with the drivers and their module, `keys` to type.
+/// The modules a drivers' session has besides the filing system's: theirs,
+/// and Draw's, which SpriteExtend's transformed plots call.
+static DRIVERS: LazyLock<Vec<&'static Builtin>> = LazyLock::new(|| {
+    [
+        &tairix_riscos_vdu::MODULES[..],
+        &tairix_riscos_draw::MODULES[..],
+    ]
+    .concat()
+});
+
+/// A session with the drivers, their modules and Draw, `keys` to type.
 pub fn drivers(keys: &[u8]) -> Session {
+    drivers_with(DRIVERS.as_slice(), keys)
+}
+
+/// A session with the drivers and `modules`, `keys` to type: for a crate
+/// whose modules draw through the drivers.
+pub fn drivers_with(modules: &'static [&'static Builtin], keys: &[u8]) -> Session {
     session(&Setup {
         vdu: Some(tairix_riscos_vdu::DRIVERS),
-        modules: &tairix_riscos_vdu::MODULES,
+        modules,
         bytes: SLOT_BYTES,
         keys,
         disc: None,
@@ -116,6 +135,44 @@ pub fn rma_free(session: &mut Session) -> u32 {
     call(session, MODULE, &[5]).expect("described").r[3]
 }
 
+/// The host's words a hostile call may run on for: enough for any call that
+/// ends soon, while one asked for endless work is stopped.
+pub const HOSTILE_CALL_WORDS: u32 = 4;
+
+/// The RMA's bytes in use: grown as claims need, it keeps what it grew by.
+pub fn rma_used(session: &mut Session) -> u32 {
+    let free = rma_free(session);
+    call(session, READ_DYNAMIC_AREA, &[1]).expect("the RMA").r[1] - free
+}
+
+/// The kernel's own memory: zero page, the RMA, the system heap, the stacks
+/// and the host pages. A call writes where its caller points, there too as
+/// on RISC OS, so a harness that judges what the modules give back keeps
+/// its hostile pointers out of it.
+pub struct KernelMemory(Vec<Range<u32>>);
+
+impl KernelMemory {
+    /// `session`'s.
+    pub fn of(session: &mut Session) -> Self {
+        let mut os = session.kernel.os();
+        let zero_page = os.vector_base();
+        let layout = os.layout();
+        let mut areas = vec![
+            zero_page..zero_page + ZERO_PAGE_SIZE,
+            layout.rma.clone(),
+            layout.system_heap.clone(),
+            layout.host.clone(),
+        ];
+        areas.extend(layout.stacks.all().into_iter().cloned());
+        Self(areas)
+    }
+
+    /// Whether `address` lies in it.
+    pub fn holds(&self, address: u32) -> bool {
+        self.0.iter().any(|area| area.contains(&address))
+    }
+}
+
 /// A sprite area at `area` holding one 8 by 8 sprite of `mode` named as
 /// the string at `name`, given its mode's palette where `palette`: the
 /// sprite's address.
@@ -186,7 +243,7 @@ pub fn insert_module(session: &mut Session, image: &[u8]) -> Result<u32, Fail> {
 
 /// The drivers' modules with the filing system's.
 pub static MODULES: LazyLock<Vec<&'static Builtin>> =
-    LazyLock::new(|| modules_with(&[&tairix_riscos_vdu::MODULES]));
+    LazyLock::new(|| modules_with(&[DRIVERS.as_slice()]));
 
 /// A session with [`MODULES`] and a disc holding `files`, each a leaf name
 /// and its bytes.

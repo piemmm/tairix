@@ -46,6 +46,11 @@ impl Checked<'_> {
         (self.width as u64) << self.pixels.log2_field
     }
 
+    /// The words each of its rows is held in.
+    pub(crate) const fn row_words(&self) -> u32 {
+        self.sprite.words_less_one.wrapping_add(1)
+    }
+
     /// The sprite with its rows `rows`, from the top, read, its palette not:
     /// those rows the plot shows.
     pub(crate) fn read(&self, os: &mut Os<'_>, rows: Range<u32>) -> Result<Source, Fail> {

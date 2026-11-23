@@ -36,11 +36,13 @@ pub const DISC: &str = "/disc";
 pub const SLOT_BYTES: u32 = 0x10_0000;
 
 /// A host whose clock moves on as the guest waits, whose keyboard types the
-/// keys a test gives, which stops a wait with nothing left to type, and
-/// which serves HostFS where a test gives it a disc.
+/// keys a test gives, which stops a wait with nothing left to type, which
+/// stops work once the words a test allows are spent, and which serves
+/// HostFS where a test gives it a disc.
 struct ScriptHost {
     clock: Rc<Cell<u64>>,
     keys: Rc<RefCell<VecDeque<u8>>>,
+    words: Rc<Cell<Option<u32>>>,
     disc: Option<Server<Handle>>,
 }
 
@@ -54,7 +56,14 @@ impl Host for ScriptHost {
     }
 
     fn pulse(&mut self) -> Pulse {
-        Pulse::Continue
+        match self.words.get() {
+            None => Pulse::Continue,
+            Some(0) => Pulse::Stop,
+            Some(left) => {
+                self.words.set(Some(left - 1));
+                Pulse::Continue
+            }
+        }
     }
 
     fn wait(&mut self, until: Option<u64>, ending: Ending) -> Pulse {
@@ -99,14 +108,21 @@ pub struct Setup<'a> {
     pub disc: Option<&'a Tree>,
 }
 
-/// A test's session: its kernel, and the clock its host keeps.
+/// A test's session: its kernel, and the clock and words its host keeps.
 pub struct Session {
     /// Its kernel.
     pub kernel: Kernel,
     clock: Rc<Cell<u64>>,
+    words: Rc<Cell<Option<u32>>>,
 }
 
 impl Session {
+    /// Lets work go on for `words` more of the host's words, each after a
+    /// slice of work, before the host stops it; `None` never stops it.
+    pub fn allow_words(&self, words: Option<u32>) {
+        self.words.set(words);
+    }
+
     /// Runs the session for at most `budget` instructions a turn, a turn
     /// that leaves it waiting for the clock taken again once the clock is
     /// moved on to then: its outcome otherwise.
@@ -126,6 +142,7 @@ impl Session {
 #[must_use]
 pub fn session(setup: &Setup<'_>) -> Session {
     let clock = Rc::new(Cell::new(0));
+    let words = Rc::new(Cell::new(None));
     let keys = Rc::new(RefCell::new(setup.keys.iter().copied().collect()));
     let disc = setup.disc.map(|tree| {
         let given = Given {
@@ -142,6 +159,7 @@ pub fn session(setup: &Setup<'_>) -> Session {
         host: Box::new(ScriptHost {
             clock: Rc::clone(&clock),
             keys,
+            words: Rc::clone(&words),
             disc,
         }),
         vdu: setup.vdu,
@@ -152,7 +170,11 @@ pub fn session(setup: &Setup<'_>) -> Session {
     };
     let mut kernel = Kernel::new(config).expect("a kernel");
     application_slot(&mut kernel, setup.bytes);
-    Session { kernel, clock }
+    Session {
+        kernel,
+        clock,
+        words,
+    }
 }
 
 /// An application slot of `bytes` made current in `kernel`, the memory

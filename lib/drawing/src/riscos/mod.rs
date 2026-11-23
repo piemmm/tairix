@@ -10,6 +10,7 @@
 //! Programmer's Reference Manual sets out (volume 4, appendix E), its paths
 //! read as the Draw module strokes and fills them (volume 3, chapter 63).
 
+pub mod format;
 mod read;
 mod write;
 
@@ -21,85 +22,14 @@ use tairix_colour::{Rgb, Rgba};
 use crate::drawing::{Paper, PAPER};
 use crate::ReadError;
 
+use format::{MAGIC, NO_COLOUR};
+
 pub use read::read;
 pub use write::{write, Dropped, Written};
 
 /// Draw units to the drawing's pixel: 640 to the point, 72 points and 96
 /// pixels to the inch.
 const UNITS_PER_PIXEL: f64 = 480.0;
-
-/// What every Draw file begins with.
-const MAGIC: &[u8; 4] = b"Draw";
-
-/// The format's major version, the one RISC OS writes and reads.
-const MAJOR_VERSION: u32 = 201;
-
-/// The header's length, in bytes: the magic, the two versions, the program's
-/// name and the drawing's bounds.
-const HEADER: usize = 40;
-
-/// An object's header, in bytes: its type, its size and its bounds.
-const OBJECT_HEADER: usize = 24;
-
-/// A transformed object's matrix, in bytes: four entries of sixteen bits of
-/// fraction, then a translation in draw units.
-const MATRIX: usize = 24;
-
-/// The colour word that stands for no colour at all.
-const NO_COLOUR: u32 = 0xFFFF_FFFF;
-
-/// Object types.
-const FONT_TABLE: u32 = 0;
-const TEXT: u32 = 1;
-const PATH: u32 = 2;
-const SPRITE: u32 = 5;
-const GROUP: u32 = 6;
-const TAGGED: u32 = 7;
-const TEXT_AREA: u32 = 9;
-const TEXT_COLUMN: u32 = 10;
-const OPTIONS: u32 = 11;
-const TRANSFORMED_TEXT: u32 = 12;
-const TRANSFORMED_SPRITE: u32 = 13;
-const JPEG: u32 = 16;
-
-/// Path components, by the tag in a component word's low byte.
-const END: u32 = 0;
-const MOVE: u32 = 2;
-/// The sub-path closed, its closing edge left undrawn.
-const CLOSE_WITH_GAP: u32 = 4;
-const CLOSE: u32 = 5;
-const CURVE: u32 = 6;
-/// A segment edging a fill that a stroke leaves undrawn.
-const GAP: u32 = 7;
-const LINE: u32 = 8;
-
-/// The bits of a component word its tag is in.
-const TAG: u32 = 0xFF;
-
-/// The two bits a path style holds a join or a cap in.
-const CODE: u32 = 0b11;
-
-/// Joins, as a path style's low two bits hold them.
-const JOIN_MITRE: u32 = 0;
-const JOIN_ROUND: u32 = 1;
-const JOIN_BEVEL: u32 = 2;
-
-/// Caps, as a path style holds each end's.
-const CAP_BUTT: u32 = 0;
-const CAP_ROUND: u32 = 1;
-const CAP_SQUARE: u32 = 2;
-const CAP_TRIANGLE: u32 = 3;
-
-/// Where a path style holds each of its fields.
-const END_CAP_SHIFT: u32 = 2;
-const START_CAP_SHIFT: u32 = 4;
-const WINDING_EVEN_ODD: u32 = 1 << 6;
-const DASHED: u32 = 1 << 7;
-const TRIANGLE_WIDTH_SHIFT: u32 = 16;
-const TRIANGLE_LENGTH_SHIFT: u32 = 24;
-
-/// The bits a path style holds each of a triangle cap's sizes in.
-const TRIANGLE_SIZE: u32 = 0xFF;
 
 /// A triangle cap is measured in sixteenths of its line's width, its breadth
 /// on each side of the line.
@@ -109,14 +39,8 @@ const TRIANGLE_UNIT: f64 = 16.0;
 /// which the format fixes.
 const MITRE_LIMIT: f64 = 10.0;
 
-/// A group's name, padded with spaces, in bytes.
-const GROUP_NAME: usize = 12;
-
 /// One in a transformed text's matrix, which holds sixteen bits of fraction.
 const FIXED_ONE: f64 = 65536.0;
-
-/// The bits of a text style its font number is in.
-const FONT_NUMBER: u32 = 0xFF;
 
 /// A transformed text set from right to left.
 const RIGHT_TO_LEFT: u32 = 1 << 1;

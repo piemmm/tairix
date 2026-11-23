@@ -136,8 +136,7 @@ struct Corpora {
     assembler: Vec<tairix_riscos_basic::corpus::assembler::Line>,
     session_text: String,
     sessions: Vec<tairix_riscos_basic::corpus::session::Session>,
-    screens_text: String,
-    screens: Vec<tairix_riscos_vdu::corpus::Case>,
+    screens: screens::Screens,
     numbers: Vec<(&'static str, Vec<u8>)>,
 }
 
@@ -151,20 +150,18 @@ impl Corpora {
         let language_text = read(language::PROGRAMS)?;
         let assembler_text = read(assembler::LINES)?;
         let session_text = read(session::SESSIONS)?;
-        let screens_text = read(screens::CASES)?;
         Ok(Self {
             cases: read(obey::CASES)?,
             programs: basic::programs(&programs_text)?,
             language: language::programs(&language_text)?,
             assembler: assembler::lines(&assembler_text)?,
             sessions: session::sessions(&session_text)?,
-            screens: screens::cases(&screens_text)?,
+            screens: screens::Screens::read(&ctx.workspace_root)?,
             numbers: numbers::staged(),
             programs_text,
             language_text,
             assembler_text,
             session_text,
-            screens_text,
         })
     }
 
@@ -265,14 +262,16 @@ fn import(
     let assembled = assembler::answers(&provenance, &corpora.assembler, &hostfs)?;
     let typed = session::answers(&provenance, &corpora.sessions, &hostfs)?;
     let (drawn, readings) = screens::answers(&provenance, &corpora.screens, &hostfs)?;
-    let texts = [
+    let texts: Vec<&str> = [
         corpora.cases.as_str(),
         &corpora.programs_text,
         &corpora.language_text,
         &corpora.assembler_text,
         &corpora.session_text,
-        &corpora.screens_text,
-    ];
+    ]
+    .into_iter()
+    .chain(corpora.screens.texts())
+    .collect();
     let held = held_runs(groups, &texts, &corpora.numbers);
     let mut streams = vec![
         observed.as_bytes().to_vec(),
@@ -305,8 +304,10 @@ fn import(
         (language::ANSWERS, printed),
         (assembler::ANSWERS, assembled),
         (session::ANSWERS, typed),
-        (screens::ANSWERS, drawn),
-    ] {
+    ]
+    .into_iter()
+    .chain(drawn)
+    {
         let path = ctx.workspace_root.join(path);
         std::fs::write(&path, text).map_err(|e| format!("riscos: {}: {e}", path.display()))?;
     }

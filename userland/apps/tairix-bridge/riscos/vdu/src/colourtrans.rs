@@ -351,10 +351,7 @@ fn vector(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
             give_signed(regs, &models::cmyk_to_rgb(signed(regs, 0)));
             Ok(())
         }
-        swi::INVALIDATE_CACHE => {
-            make_stale(os);
-            Ok(())
-        }
+        swi::INVALIDATE_CACHE => invalidate_cache(os),
         swi::MISC_OP => misc_op(os, regs),
         swi::WRITE_LOADINGS_TO_FILE => write_loadings(os, regs.r[1]),
         _ => Err(os.error_with(SWI_OUT_OF_RANGE, &[COLOUR_TRANS.title.as_bytes()])),
@@ -465,6 +462,36 @@ fn screen_calibration(os: &mut Os<'_>) -> Option<Rc<Calibration>> {
     })
 }
 
+/// `ColourTrans_InvalidateCache`: the colours made stale, and, while output
+/// goes to a sprite, whether it has a palette read again, as RISC OS 5
+/// reads it through `OS_SpriteOp` 37.
+fn invalidate_cache(os: &mut Os<'_>) -> Result<(), Fail> {
+    make_stale(os);
+    let Some([_, _, sprite, _]) = crate::state::read(os, |vdu, _| vdu.context.0) else {
+        return Ok(());
+    };
+    if sprite == 0 {
+        return Ok(());
+    }
+    let read_palette = crate::sprite::Naming::Pointer.value() | crate::sprite::reason::PALETTE;
+    let mut read = Regs::new([
+        read_palette,
+        sprite,
+        sprite,
+        u32::MAX,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ]);
+    os.perform(X | tairix_riscos_kernel::swi::os::SPRITE_OP, &mut read)
+}
+
 /// The current mode's colours made stale, to be read again when next
 /// wanted.
 fn make_stale(os: &mut Os<'_>) {
@@ -559,12 +586,19 @@ fn parameters(os: &mut Os<'_>, mut at: u32, values: &mut [u32]) -> Result<(), Fa
     Ok(())
 }
 
-/// Its services: a mode change, or output switched to or from a sprite,
-/// makes the current mode's colours stale; a saved desktop is given the
-/// calibration and the loadings.
+/// Its services: a mode change makes the current mode's colours stale, and
+/// output switched to or from a sprite calls `InvalidateCache`, through
+/// `ColourV` as RISC OS 5's does; a saved desktop is given the calibration
+/// and the loadings.
 fn serve(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Unwind> {
     match regs.r[1] {
-        service::MODE_CHANGE | service::SWITCHING_OUTPUT_TO_SPRITE => make_stale(os),
+        service::MODE_CHANGE => make_stale(os),
+        service::SWITCHING_OUTPUT_TO_SPRITE => {
+            match os.perform(X | swi::INVALIDATE_CACHE, &mut Regs::default()) {
+                Ok(()) | Err(Fail::Error(_)) => {}
+                Err(Fail::Unwind(unwind)) => return Err(unwind),
+            }
+        }
         service::WIMP_SAVE_DESKTOP => {
             let saved = calibration::write_commands(os, regs.r[2], false)
                 .and_then(|_| write_loadings(os, regs.r[2]));

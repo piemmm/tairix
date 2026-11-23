@@ -42,12 +42,15 @@ pub(crate) use transformed::{plot_mask_transformed, put_transformed, scaling_of}
 pub(crate) struct PlotFlags(pub(crate) u32);
 
 impl PlotFlags {
+    /// The bit plotting through the sprite's mask.
+    pub(crate) const MASKED: u32 = 8;
+
     pub(crate) const fn action(self) -> u32 {
         self.0 & 7
     }
 
     pub(crate) const fn masked(self) -> bool {
-        self.0 & 8 != 0
+        self.0 & Self::MASKED != 0
     }
 
     pub(crate) const fn table_ignorable(self) -> bool {

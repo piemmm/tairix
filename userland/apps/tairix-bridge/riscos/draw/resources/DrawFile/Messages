@@ -1,0 +1,13 @@
+# DrawFile's messages, in TAIRiX Bridge's own words.
+NotDraw:This is not a Draw file
+Version:The file is version %0 of the Draw format, later than DrawFile reads
+FontTables:The file holds a second font table (at &%0 in the file)
+NoFont:Font number %0 is missing from the file's font table (at &%1 in the file)
+TooBig:An object is larger than the file
+TooBigAt:An object is larger than the file (after &%0 in the file)
+TooBigGroup:An object is larger than its group (after &%0 in the file)
+TooBigTagged:An object is larger than its tagged object (after &%0 in the file)
+AreaCommand:The text area holds \%0, which is no command
+AreaFont:The text area changes to font number %0 before defining it
+AreaVersion:The text area is version %0, which DrawFile does not read
+AreaNoVersion:The text area does not begin with its version
