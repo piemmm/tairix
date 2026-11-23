@@ -60,7 +60,7 @@ pub(crate) fn name_of(os: &mut Os<'_>, kind: u32) -> Result<[u8; NAME], Fail> {
             name[4..].copy_from_slice(&service.r[3].to_le_bytes());
         } else {
             name[0] = b'&';
-            name[1..4].copy_from_slice(&variable_of(kind)[10..]);
+            name[1..4].copy_from_slice(&tairix_riscos_kernel::filing::filetype::digits(kind));
         }
     }
     Ok(name)

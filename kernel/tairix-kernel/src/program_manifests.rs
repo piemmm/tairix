@@ -1300,6 +1300,16 @@ mod tests {
         CapabilityId::FS_ACCESS,
     ];
 
+    // `gpucheck` (plans/GPU.md GP11.2) runs work on each served GPU: the
+    // device channel, the region its bytes cross, its report and its own
+    // Help/ documents.
+    const GPUCHECK_REQUEST: &[CapabilityId] = &[
+        CapabilityId::GPU,
+        CapabilityId::SHM,
+        CapabilityId::CONSOLE_WRITE,
+        CapabilityId::FS_ACCESS,
+    ];
+
     // The device-inventory listing tools `lspci` and `lsusb`
     // (plans/DEVICES.md DEVICE1): the pure-tool request plus
     // `CAP_SYSINFO_HW` for the `HARDWARE_TREE` query they render. Not
@@ -1738,6 +1748,7 @@ mod tests {
         ("flock", ProgramKind::Command, LOCK_RUNNER_REQUEST),
         ("fontd", ProgramKind::Service, FONTD_MANIFEST),
         ("fstree", ProgramKind::Command, SANDBOXED_FILE_TOOL_REQUEST),
+        ("gpucheck", ProgramKind::Command, GPUCHECK_REQUEST),
         ("greeter", ProgramKind::Service, GREETER_REQUEST),
         ("groupadd", ProgramKind::Command, ADMIN_TOOL_REQUEST),
         ("groupdel", ProgramKind::Command, ADMIN_TOOL_REQUEST),

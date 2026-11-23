@@ -316,3 +316,67 @@ fn a_blend_onto_fewer_colours_takes_the_plain_nearest_the_last_of_equally_near()
     // plain squares, though not by the default loadings.
     assert_eq!(blending.pixel(0, 1, 0xFF, OPAQUE / 2), Some(4));
 }
+
+#[test]
+fn stepped_columns_take_the_column_each_destination_column_takes() {
+    let factors = [
+        (1, 1),
+        (3, 7),
+        (7, 3),
+        (5, 5),
+        (12_345, 678),
+        (1, 0x7FFF_FFFF),
+        (0x7FFF_FFFF, 1),
+        (0x7FFF_FFFF, 0x7FFF_FFFE),
+    ];
+    for (mul, div) in factors {
+        let scale = Scale::of((mul, 1), (div, 1)).expect("factors");
+        for start in [0, 1, mul - 1, mul, div, 1 << 28, u32::MAX - 300] {
+            let stepped: Vec<u32> = scale.columns_from(start).take(300).collect();
+            let each: Vec<u32> = (start..start + 300).map(|i| scale.column(i)).collect();
+            assert_eq!(stepped, each, "{mul}/{div} from column {start}");
+        }
+    }
+}
+
+#[test]
+fn a_tile_starts_its_columns_again_at_each_edge() {
+    let cases = [
+        (
+            (-7, 3),
+            Scale::of((3, 2), (2, 3)).expect("factors"),
+            (5, 4),
+            (-20, 40),
+        ),
+        (
+            (100, 0),
+            Scale::of((1, 1), (3, 1)).expect("factors"),
+            (10, 2),
+            (0, 130),
+        ),
+        (
+            (5, -9),
+            Scale::of((7, 1), (1, 1)).expect("factors"),
+            (10, 3),
+            (60, 90),
+        ),
+    ];
+    for (at, scale, (columns, rows), (left, right)) in cases {
+        let (width, height) = scale.size(columns, rows);
+        let mut tiled = Tiled {
+            tile: Scaled::new(at, scale, rows),
+            size: (i64::from(width), i64::from(height)),
+            across: 0,
+        };
+        for y in -4..6 {
+            assert_eq!(tiled.row(y, left, right), Some((left, right)));
+            let j = (i64::from(y) - i64::from(at.1)).rem_euclid(i64::from(height));
+            let row = rows - 1 - scale.row(u32::try_from(j).unwrap());
+            for x in left..=right {
+                let i = (i64::from(x) - i64::from(at.0)).rem_euclid(i64::from(width));
+                let column = scale.column(u32::try_from(i).unwrap());
+                assert_eq!(tiled.next(), (column, row), "at {at:?}, pixel ({x}, {y})");
+            }
+        }
+    }
+}

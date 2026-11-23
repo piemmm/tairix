@@ -87,16 +87,11 @@ fn equally_near_colours_take_the_first_but_a_colour_s_own_cell_its_last() {
 
 #[test]
 fn the_default_256_colour_palette_s_cells_are_its_nearest_by_the_default_loadings() {
-    let default: Vec<Rgb> = (0..=u8::MAX)
-        .map(|pixel| {
-            let [r, g, b] = default_256(pixel);
-            Rgb::new(r, g, b)
-        })
-        .collect();
+    let default = crate::palette::default_colours(3, 256);
     let built = table(&default).expect("room");
     for (cell, &number) in built.iter().enumerate() {
         let [r, g, b] =
-            [0, 5, 10].map(|shift| eight_of_five(len32((cell >> shift) & 31)).to_le_bytes()[0]);
+            [0, 5, 10].map(|shift| replicated(len32((cell >> shift) & 31), 5).to_le_bytes()[0]);
         let nearest = search(
             &default,
             Rgb::new(r, g, b),
@@ -127,4 +122,11 @@ fn a_kept_table_is_built_again_only_once_its_colours_differ() {
         *other == super::table(&second).expect("room"),
         "the second colours' table"
     );
+}
+
+#[test]
+fn a_cell_holds_each_channel_s_top_five_bits_red_lowest() {
+    assert_eq!(fifteen(Rgb::new(0xFF, 0x00, 0x08)), 0x1F | (1 << 10));
+    assert_eq!(fifteen(Rgb::new(0x07, 0xF8, 0x00)), 0x1F << 5);
+    assert_eq!(cell([1, 2, 3]), 1 | (2 << 5) | (3 << 10));
 }

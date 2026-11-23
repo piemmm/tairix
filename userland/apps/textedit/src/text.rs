@@ -42,7 +42,7 @@ impl Glyph {
         };
         match self {
             Self::Control(byte) | Self::Invalid(byte) => {
-                let [high, low] = crate::hex::hex_pair(byte);
+                let [high, low] = tairix_util::hex::upper_digits(byte);
                 for b in [b'[', b'x', high, low, b']'] {
                     put(b);
                 }
@@ -61,8 +61,10 @@ impl Glyph {
                 } else {
                     4
                 };
-                for shift in (0..digits).rev() {
-                    put(crate::hex::HEX_DIGITS[((code >> (shift * 4)) & 0xf) as usize]);
+                let mut spelt = [0; 6];
+                tairix_util::hex::fill_upper(&mut spelt[..digits], code.into());
+                for &digit in &spelt[..digits] {
+                    put(digit);
                 }
                 put(b']');
             }

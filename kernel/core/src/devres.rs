@@ -35,7 +35,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::driver::DmaReach;
+use tairix_abi::driver::{DmaReach, RegionCaching};
 use tairix_abi::hwtree::{FramebufferMemory, HwResource, HwResourceKind};
 use tairix_abi::{DmaCoherence, Errno, MsiAllocation, PortValue, PortWidth};
 use tairix_collections::HashMap;
@@ -44,45 +44,62 @@ use tairix_kernel_mem::{DmaCustodian, DmaCustody, DmaError, FrameBlock, Retire, 
 
 /// The memory type a mapped device window is given.
 ///
-/// The grant's [`HwResourceKind`] decides this before the mapping is
-/// installed: a register block is [`Self::Device`], while a scan-out surface
-/// is [`Self::FramebufferWriteBack`] or [`Self::FramebufferWriteCombine`]
-/// according to its discovered backing. The distinction is both correctness
-/// and performance policy.
+/// Decided before the mapping is installed: a register block is
+/// [`Self::Device`], a scan-out surface [`Self::WriteBack`] or
+/// [`Self::WriteCombine`] according to its discovered backing, and a part of
+/// a device's memory region whatever caching the device states for it. The
+/// distinction is both correctness and performance policy.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum MmioMemoryKind {
     /// Device / strongly-ordered registers, caching disabled. The memory a
     /// [`HwResourceKind::Mmio`] / [`HwResourceKind::BusWindow`] grant names:
     /// every access is a distinct, ordered hardware transaction.
     Device,
-    /// A framebuffer backed by ordinary coherent RAM, mapped write-back.
-    FramebufferWriteBack,
-    /// A write-mostly display aperture, mapped write-combining.
-    FramebufferWriteCombine,
+    /// Memory the device keeps coherent with the CPU, mapped write-back: a
+    /// framebuffer in ordinary RAM, or a cached part of a memory region.
+    WriteBack,
+    /// A write-mostly display aperture, or a write-combining part of a memory
+    /// region, mapped write-combining.
+    WriteCombine,
 }
 
 impl MmioMemoryKind {
-    /// Derive the mapping kind from a validated hardware-tree resource.
+    /// The mapping kind of a window of a validated hardware-tree resource
+    /// mapped with `caching`: what the grant names, or for a memory region
+    /// the caching the driver states, which no other grant takes.
+    ///
+    /// Uncached memory is mapped as device memory, as the region's device
+    /// owns its ordering.
     ///
     /// # Errors
     ///
-    /// Returns [`Errno::OutOfRange`] for a non-window resource or an unknown
-    /// framebuffer policy, and [`Errno::BadMagic`] for corrupt reserved flag
-    /// bits.
-    pub fn from_resource(resource: &HwResource) -> Result<Self, Errno> {
-        match resource.kind() {
-            Some(HwResourceKind::Framebuffer) => match resource.framebuffer_memory()? {
-                FramebufferMemory::WriteBack => Ok(Self::FramebufferWriteBack),
-                FramebufferMemory::WriteCombine => Ok(Self::FramebufferWriteCombine),
+    /// Returns [`Errno::NotSupported`] for a memory region mapped with no
+    /// caching or another grant mapped with one, [`Errno::OutOfRange`] for a
+    /// non-window resource or an unknown framebuffer policy, and
+    /// [`Errno::BadMagic`] for corrupt reserved flag bits.
+    pub fn of_mapping(
+        resource: &HwResource,
+        caching: Option<RegionCaching>,
+    ) -> Result<Self, Errno> {
+        match (resource.kind(), caching) {
+            (Some(HwResourceKind::MemoryRegion), Some(caching)) => Ok(match caching {
+                RegionCaching::WriteBack => Self::WriteBack,
+                RegionCaching::WriteCombine => Self::WriteCombine,
+                RegionCaching::Uncached => Self::Device,
+            }),
+            (Some(HwResourceKind::MemoryRegion), None) | (_, Some(_)) => Err(Errno::NotSupported),
+            (Some(HwResourceKind::Framebuffer), None) => match resource.framebuffer_memory()? {
+                FramebufferMemory::WriteBack => Ok(Self::WriteBack),
+                FramebufferMemory::WriteCombine => Ok(Self::WriteCombine),
             },
-            Some(HwResourceKind::Mmio | HwResourceKind::BusWindow) => Ok(Self::Device),
+            (Some(HwResourceKind::Mmio | HwResourceKind::BusWindow), None) => Ok(Self::Device),
             _ => Err(Errno::OutOfRange),
         }
     }
 }
 
 /// The kernel-side producer that maps a validated device window into the
-/// caller's own live address space.
+/// caller's own live address space, and takes one back.
 ///
 /// Implemented by the architecture-port-installed producer. The handler
 /// has already resolved + validated the grant (caller ownership, resource
@@ -114,6 +131,17 @@ pub trait MmioMapFacility: Sync {
     /// platform reports. The default producer ([`NullMmioMapFacility`])
     /// returns [`Errno::NotImplemented`] to mark an inert interface.
     fn map_window(&self, phys_base: u64, len: usize, kind: MmioMemoryKind) -> Result<u64, Errno>;
+
+    /// Unmap the window based at `base` from the caller's own address space,
+    /// returning how many pages it held; no CPU reaches it once this returns.
+    /// The pages are the device's, so nothing is freed.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] for a `base` that is not where a live window of the
+    /// caller begins, which unmaps nothing; another stable code the platform
+    /// reports; [`Errno::NotImplemented`] from the default producer.
+    fn unmap_window(&self, base: u64) -> Result<u64, Errno>;
 }
 
 /// A DMA buffer the [`DmaAllocFacility`] carved for a driver.
@@ -312,6 +340,10 @@ impl MmioMapFacility for NullMmioMapFacility {
         _len: usize,
         _kind: MmioMemoryKind,
     ) -> Result<u64, Errno> {
+        Err(Errno::NotImplemented)
+    }
+
+    fn unmap_window(&self, _base: u64) -> Result<u64, Errno> {
         Err(Errno::NotImplemented)
     }
 }
@@ -764,14 +796,12 @@ pub static NULL_SHARED_MEM_FACILITY: NullSharedMemFacility = NullSharedMemFacili
 /// as a pure function so it is exercised directly by unit tests
 /// (validate every input):
 ///
-/// * the resource must be an MMIO register window
-///   ([`HwResourceKind::Mmio`]), an outbound bus window
-///   ([`HwResourceKind::BusWindow`]), or a linear scan-out surface
-///   ([`HwResourceKind::Framebuffer`]) — the kinds whose far side is a
-///   memory-mapped block. A [`HwResourceKind::Port`] (x86 I/O ports),
-///   [`HwResourceKind::Irq`], or [`HwResourceKind::Dma`] grant is **not** a
-///   mappable window and is refused with [`Errno::OutOfRange`], even though
-///   its required capability may also be `CAP_MMIO_MAP`;
+/// * the resource must be a window ([`HwResourceKind::is_window`]) — a kind
+///   whose far side is a memory-mapped block. A [`HwResourceKind::Port`]
+///   (x86 I/O ports), [`HwResourceKind::Irq`], or [`HwResourceKind::Dma`]
+///   grant is **not** a mappable window and is refused with
+///   [`Errno::OutOfRange`], even though its required capability may also be
+///   `CAP_MMIO_MAP`;
 /// * `len` must be non-zero and fit in `usize` on the target;
 /// * `[offset, offset + len)` must lie **wholly inside** the granted
 ///   window (`offset + len <= resource.length()`) — a driver maps a
@@ -793,11 +823,10 @@ pub fn mappable_subwindow(
     offset: u64,
     len: usize,
 ) -> Result<(u64, usize), Errno> {
-    match resource.kind() {
-        Some(HwResourceKind::Mmio | HwResourceKind::BusWindow | HwResourceKind::Framebuffer) => {}
-        // A known-but-non-window kind, or an unknown discriminant, is the
-        // wrong shape for `mmio_map`; refuse rather than mapping it.
-        _ => return Err(Errno::OutOfRange),
+    // A known-but-non-window kind, or an unknown discriminant, is the wrong
+    // shape for `mmio_map`; refuse rather than mapping it.
+    if !resource.kind().is_some_and(HwResourceKind::is_window) {
+        return Err(Errno::OutOfRange);
     }
     if len == 0 {
         return Err(Errno::LengthOutOfRange);
@@ -956,11 +985,15 @@ mod tests {
             Err(Errno::NotImplemented)
         );
         assert_eq!(
-            NullMmioMapFacility.map_window(0, 0x1000, MmioMemoryKind::FramebufferWriteBack,),
+            NullMmioMapFacility.map_window(0, 0x1000, MmioMemoryKind::WriteBack),
             Err(Errno::NotImplemented)
         );
         assert_eq!(
-            NullMmioMapFacility.map_window(0, 0x1000, MmioMemoryKind::FramebufferWriteCombine,),
+            NullMmioMapFacility.map_window(0, 0x1000, MmioMemoryKind::WriteCombine),
+            Err(Errno::NotImplemented)
+        );
+        assert_eq!(
+            NULL_MMIO_MAP_FACILITY.unmap_window(0x4000_0000),
             Err(Errno::NotImplemented)
         );
     }

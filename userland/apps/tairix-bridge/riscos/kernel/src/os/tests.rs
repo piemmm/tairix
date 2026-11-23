@@ -586,7 +586,9 @@ fn guest_code_has_its_stacks_before_any_application_starts() {
     let mut s = crate::testkit::boot(&RISC_OS_5);
     let memory = s.kernel.memory();
     let slot = memory.create_slot(Bits::Bit32).expect("a slot");
-    memory.set_slot_size(slot, 0x1_0000).expect("its memory");
+    memory
+        .set_slot_size(slot, crate::testkit::SLOT_BYTES)
+        .expect("its memory");
     memory.switch_slot(slot).expect("made current");
     // A claimant that keeps R14 on the stack round an erring SWI, then claims.
     s.poke(
@@ -637,7 +639,7 @@ fn a_read_into_host_memory_aborts_before_the_host_grants_room_no_guest_memory_ba
     let mut grown = b"xy".to_vec();
     os.read_onto(&mut grown, DATA + 2, 3).expect("appended");
     assert_eq!(grown, b"xycde");
-    let end = APPLICATION + 0x1_0000;
+    let end = APPLICATION + crate::testkit::SLOT_BYTES;
     let refused = os.read_vec(end - 4, usize::MAX);
     assert!(
         matches!(refused, Err(Fail::Unwind(_))),
@@ -667,4 +669,59 @@ fn a_range_is_writable_only_where_every_page_takes_a_privileged_write() {
         !os.writable(0xFFFF_FFF0, 0x1_0000_0010),
         "past the top of memory"
     );
+}
+
+#[test]
+fn bytes_cross_a_page_at_every_alignment_and_leave_their_neighbours_alone() {
+    let mut s = session();
+    let boundary = DATA + tairix_riscos_arm::mmu::PAGE_SIZE;
+    for start in boundary - 9..boundary + 2 {
+        for length in 0..14 {
+            s.write(boundary - 16, &[0xEE; 40]);
+            let bytes: alloc::vec::Vec<u8> = (0..length).map(|n| 0x40 + n).collect();
+            let mut os = s.kernel.os();
+            os.write_bytes(start, &bytes).expect("written");
+            let mut back = alloc::vec![0; usize::from(length)];
+            os.read_bytes(start, &mut back).expect("read");
+            assert_eq!(back, bytes, "{start:#x} {length}");
+            let around = s.read(boundary - 16, 40);
+            let first = (start - (boundary - 16)) as usize;
+            for (n, &value) in around.iter().enumerate() {
+                if !(first..first + usize::from(length)).contains(&n) {
+                    assert_eq!(value, 0xEE, "{start:#x} {length}: byte {n} kept");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_string_is_read_across_pages_to_its_end_or_the_byte_after_the_most() {
+    let mut s = session();
+    let boundary = DATA + tairix_riscos_arm::mmu::PAGE_SIZE;
+    s.write(boundary - 3, b"abcdef\0");
+    let mut os = s.kernel.os();
+    let zero = |b: u8| b == 0;
+    assert_eq!(
+        os.read_until(boundary - 3, 100, zero).expect("read"),
+        (b"abcdef".to_vec(), true)
+    );
+    assert_eq!(
+        os.read_until(boundary - 3, 6, zero).expect("read"),
+        (b"abcdef".to_vec(), true),
+        "the terminator just past the most still ends it"
+    );
+    assert_eq!(
+        os.read_until(boundary - 3, 4, zero).expect("read"),
+        (b"abcd".to_vec(), false)
+    );
+    assert_eq!(
+        os.read_until(boundary - 3, 0, zero).expect("read"),
+        (alloc::vec::Vec::new(), false)
+    );
+    let end = APPLICATION + crate::testkit::SLOT_BYTES;
+    s.write(end - 2, b"xy");
+    let mut os = s.kernel.os();
+    assert!(os.read_until(end - 2, 100, zero).is_err());
+    assert_eq!(os.world.last_abort.address, end, "at the first page past");
 }

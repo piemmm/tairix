@@ -47,9 +47,10 @@ grants and:
 
 ## Design
 
-- `no_std`, **allocation-free** — the grant table is a fixed `MAX_GRANTS`
-  array, so a driver process works before the userland heap is available
-  (`plans/SPAWN.md` `SP5b`).
+- `no_std`; the grant table is a fixed `MAX_GRANTS` array. The one allocation
+  is the record a DMA carve's free goes through, shared by every slab carved:
+  a slab reaches nothing of the host, so the host may move, be borrowed
+  mutably or drop, and the slab drop on another thread.
 - **Not a privileged path** (§5.4): the host adds no authority. It only names
   the grant handle the kernel already minted and issues the syscall; every
   capability check and bound is enforced kernel-side, and a forged or another
@@ -60,10 +61,13 @@ grants and:
   an error — never a fabricated pointer or a panic.
 - **Platform-neutral** (§2.20): the non-coherent cache-maintenance shim is
   supplied by the (architecture-aware) driver process, never synthesised here.
-- **One mapping per window**: each grant is mapped at most once; later requests
-  into the same window reuse the cached base (§2.16).
-- **Testable** (§7): the two syscalls live behind `GrantSyscalls`, so the
-  resolution and translation logic is unit-tested on the host without a kernel.
+- **One mapping per register window**: a sub-region is mapped at most once,
+  later requests for it reusing the cached base (§2.16). A memory region's
+  parts are mapped afresh and handed back (`MemoryMapper`), since each is its
+  caller's to unmap.
+- **Testable** (§7): the syscalls live behind `GrantSyscalls` and a carve's
+  free behind `DmaRelease`, so the resolution and translation logic is
+  unit-tested on the host without a kernel.
 
 ## Stability
 

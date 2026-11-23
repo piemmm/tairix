@@ -10,8 +10,10 @@ use tairix_riscos_kernel::os::{Fail, Os, Regs};
 use crate::state::with;
 
 /// The most bytes across and lines down a shape takes.
-const MOST_WIDTH: u8 = 8;
-const MOST_HEIGHT: u8 = 32;
+pub(crate) const MOST_WIDTH: u8 = 8;
+pub(crate) const MOST_HEIGHT: u8 = 32;
+/// A shape's pixels to a byte, two bits each.
+pub(crate) const PIXELS_PER_BYTE: u32 = 4;
 
 /// A pointer shape.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
@@ -103,14 +105,15 @@ pub(crate) fn word_21(os: &mut Os<'_>, reason: u8, block: u32) -> Result<(), Fai
             let (x, y) = os.read_coordinates(block.wrapping_add(1))?;
             with(os, |vdu, _| {
                 let origin = vdu.graphics.origin;
-                vdu.pointer.position = (x + origin.0, y + origin.1);
+                vdu.pointer.position = (x.wrapping_add(origin.0), y.wrapping_add(origin.1));
                 Ok(())
             })
         }
         6 => {
             let (x, y) = with(os, |vdu, os| {
                 let (x, y) = vdu.pointer.at(os);
-                Ok((x - vdu.graphics.origin.0, y - vdu.graphics.origin.1))
+                let origin = vdu.graphics.origin;
+                Ok((x.wrapping_sub(origin.0), y.wrapping_sub(origin.1)))
             })?;
             os.write_coordinates(block.wrapping_add(1), (x, y))
         }

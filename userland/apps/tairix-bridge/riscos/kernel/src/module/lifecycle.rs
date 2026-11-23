@@ -155,8 +155,9 @@ impl Os<'_> {
         }
     }
 
-    /// Frees `block` of the RMA, if it is one.
-    pub(crate) fn free_rma_quietly(&mut self, block: u32) {
+    /// Frees `block` of the RMA, if it is one: for a block a module gives
+    /// back of its own, which the guest may have freed already.
+    pub fn free_rma_quietly(&mut self, block: u32) {
         let _ = self.heap_free(KernelHeap::Rma, block);
     }
 

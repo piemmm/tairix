@@ -1,5 +1,6 @@
 //! Compute pipelines on the software device: made, refused, and dispatched.
 
+use crate::device::as_software;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -335,7 +336,7 @@ fn a_pipeline_s_working_memory_goes_back_as_the_last_work_holding_it_completes()
         .expect("a context");
     let _small = rig(&context, &sized([4, 1, 1], 4, 4), 256, &[]).expect("a pipeline");
     let held = rig(&context, &sized([64, 1, 1], 3000, 4), 256, &[]).expect("a pipeline");
-    let heap = || context.shared.model.lock().work_heap_taken();
+    let heap = || as_software(&context.host).model.lock().work_heap_taken();
     let gate = context.create_timeline(0).expect("a timeline");
     let mut commands = context.command_buffer();
     commands
@@ -417,7 +418,7 @@ fn a_pipeline_is_charged_all_it_keeps_before_its_working_memory_is_made() {
         specialization: &[],
     };
     let (admitted, state) = {
-        let model = context.shared.model.lock();
+        let model = as_software(&context.host).model.lock();
         let live = model.live(context.key).expect("live");
         let admitted = live.shader_modules.get(module.key).cloned();
         let state = live.pipeline_layouts.get(layout.key).cloned();
@@ -440,18 +441,17 @@ fn a_pipeline_is_charged_all_it_keeps_before_its_working_memory_is_made() {
     let held =
         crate::model::shared_bytes::<super::ComputePipelineState<crate::software::Software>>()
             .saturating_add(prepared.held);
-    let (planned, released) =
-        context
-            .shared
-            .model
-            .lock()
-            .plan_pipeline((context.key, super::computes), need, held);
+    let (planned, released) = as_software(&context.host).model.lock().plan_pipeline(
+        (context.key, super::computes),
+        need,
+        held,
+    );
     drop(released);
     let (plan, charge) = planned.expect("planned");
     let made = plan.make().expect("made");
     // The heap filled between the two phases, as another context's work may.
     let _full = crate::device_tests::fill_heap(&device);
-    let (filed, released) = context.shared.model.lock().create_pipeline(
+    let (filed, released) = as_software(&context.host).model.lock().create_pipeline(
         (context.key, super::computes),
         (program, state, need),
         (made, charge),
@@ -470,8 +470,7 @@ fn a_released_pipeline_hands_out_its_program_only_as_its_last_holder() {
     let objects = || context.memory_used().objects;
     let before = crate::fair::held::drops_under();
     let idle = rig(&context, &sized([4, 1, 1], 4, 4), 256, &[]).expect("a pipeline");
-    let released = context
-        .shared
+    let released = as_software(&context.host)
         .model
         .lock()
         .destroy_compute_pipeline(idle.pipeline.context, idle.pipeline.key);
@@ -498,8 +497,7 @@ fn a_released_pipeline_hands_out_its_program_only_as_its_last_holder() {
             deadline: tairix_abi::Duration64::from_secs(1),
         })
         .expect("admitted");
-    let released = context
-        .shared
+    let released = as_software(&context.host)
         .model
         .lock()
         .destroy_compute_pipeline(used.pipeline.context, used.pipeline.key);
@@ -578,7 +576,7 @@ fn a_refused_pipeline_leaves_the_working_memory_as_it_was() {
             memory_limit: Some(total - 1),
         })
         .expect("a context");
-    let heap = || tight.shared.model.lock().work_heap_taken();
+    let heap = || as_software(&tight.host).model.lock().work_heap_taken();
     let before = heap();
     let held = made(&tight).expect("what it is made from fits");
     assert_eq!(held.3.err(), Some(Error::OverLimit));

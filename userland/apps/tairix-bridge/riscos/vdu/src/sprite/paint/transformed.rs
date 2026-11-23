@@ -23,13 +23,14 @@
 
 use tairix_riscos_kernel::os::{Fail, Os};
 use tairix_riscos_kernel::output::workspace;
+use tairix_util::divisor::gcd;
 
-use super::super::format::variable;
+use super::super::format;
 use super::super::header::Sprite;
-use super::colours::Converted;
+use super::colours::{converted_first, mapped};
 use super::scaled::{paint, plot_block};
-use super::source::Source;
-use super::{read, Destination, Mapping, PlotFlags};
+use super::source::{Checked, Source};
+use super::{Destination, Mapping, PlotFlags};
 use crate::changed::Rect;
 use crate::state;
 
@@ -55,14 +56,20 @@ pub(crate) fn put_transformed(
     shape: u32,
     table: u32,
 ) -> Result<(), Fail> {
-    let source = read(os, sprite)?;
+    let checked = Source::check(os, sprite)?;
     let destination = Destination::now(os)?;
-    let converted = Converted::of(os, &source, &destination.format, flags, table)?;
-    let Some(mut transform) =
-        Transform::read(os, sprite, &source, &destination, form, rectangle, shape)?
+    let (mut source, converted, destination) =
+        converted_first(os, &checked, &destination, flags, table)?;
+    if !converted.draws() {
+        return Ok(());
+    }
+    let Some(mut transform) = Transform::read(os, &checked, &destination, form, rectangle, shape)?
     else {
         return Ok(());
     };
+    if !mapped(&checked.pixels, flags) {
+        checked.read_rows(os, &mut source, transform.source_rows())?;
+    }
     let bounds = transform.bounds;
     paint(
         os,
@@ -84,13 +91,13 @@ pub(crate) fn plot_mask_transformed(
     rectangle: u32,
     shape: u32,
 ) -> Result<(), Fail> {
-    let source = read(os, sprite)?;
+    let checked = Source::check(os, sprite)?;
     let destination = Destination::now(os)?;
-    let Some(mut transform) =
-        Transform::read(os, sprite, &source, &destination, form, rectangle, shape)?
+    let Some(mut transform) = Transform::read(os, &checked, &destination, form, rectangle, shape)?
     else {
         return Ok(());
     };
+    let source = checked.read(os, transform.source_rows())?;
     let bounds = transform.bounds;
     let solid = |(x, row): (u32, u32)| source.alpha(x, row) != 0;
     plot_block(
@@ -121,31 +128,32 @@ pub(crate) fn scaling_of(
         Ok((vdu.format().x_eig(), vdu.format().y_eig()))
     })?;
     let pixel = (256u32 << eig.0, 256u32 << eig.1);
+    // A matrix scales OS units, and a picture's pixel is the standard screen's.
+    let picture = 256u32 << format::STANDARD_EIG;
     let positive = |v: i32| u32::try_from(v).ok().filter(|&v| v > 0);
     let found = if parallelogram {
         let [x0, y0, x1, y1, _, _, x3, y3] = words;
         let across = x1.checked_sub(x0).and_then(positive);
         let down = y0.checked_sub(y3).and_then(positive);
         match (across, down) {
-            (Some(across), Some(down)) if y1 == y0 && x3 == x0 => Some((
-                (x3, y3),
-                super::Scale::of(
-                    (across, down),
-                    (
-                        size.0.saturating_mul(pixel.0),
-                        size.1.saturating_mul(pixel.1),
-                    ),
+            (Some(across), Some(down)) if y1 == y0 && x3 == x0 => super::Scale::of(
+                (across, down),
+                (
+                    size.0.saturating_mul(pixel.0),
+                    size.1.saturating_mul(pixel.1),
                 ),
-            )),
+            )
+            .map(|scale| ((x3, y3), scale)),
             _ => None,
         }
     } else {
         let [x_across, y_across, x_down, y_down, shift_x, shift_y, _, _] = words;
         match (positive(x_across), positive(y_down)) {
-            (Some(across), Some(down)) if y_across == 0 && x_down == 0 => Some((
-                (shift_x, shift_y),
-                super::Scale::of((across, down), (pixel.0 << 7, pixel.1 << 7)),
-            )),
+            (Some(across), Some(down)) if y_across == 0 && x_down == 0 => super::Scale::of(
+                (across, down),
+                ((pixel.0 << 16) / picture, (pixel.1 << 16) / picture),
+            )
+            .map(|scale| ((shift_x, shift_y), scale)),
             _ => None,
         }
     };
@@ -166,13 +174,17 @@ fn floor_div(n: i128, d: i128) -> Option<i128> {
     n.checked_div_euclid(d)
 }
 
-/// The greatest common divisor of `a` and `b`, at least one.
-fn gcd(a: i128, b: i128) -> Option<i128> {
-    let (mut a, mut b) = (a.unsigned_abs(), b.unsigned_abs());
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    i128::try_from(a.max(1)).ok()
+/// The greatest common divisor of the magnitudes of `values`, at least one.
+fn common_factor(values: &[i128]) -> Option<i128> {
+    let factor = values
+        .iter()
+        .fold(0, |factor, value| gcd(factor, value.unsigned_abs()));
+    i128::try_from(factor.max(1)).ok()
+}
+
+/// `value` carried to `bits` fraction bits; none where that does not fit.
+fn fixed(value: i128, bits: u32) -> Option<i128> {
+    value.checked_mul(1 << bits)
 }
 
 /// `n / d` rounded to the nearest, halves up.
@@ -201,7 +213,7 @@ impl Inverse {
         if den == 0 {
             return None;
         }
-        let common = gcd(gcd(x, y)?, den)? * den.signum();
+        let common = common_factor(&[x, y, den])? * den.signum();
         Some(Self {
             base,
             x: x / common,
@@ -225,7 +237,7 @@ impl Exact {
         if d == 0 {
             return None;
         }
-        let common = gcd(n, d)? * d.signum();
+        let common = common_factor(&[n, d])? * d.signum();
         Some(Self {
             n: n / common,
             d: d / common,
@@ -387,6 +399,8 @@ struct Transform {
     pixel: (i128, i128),
     /// The image of the rectangle's top left.
     reference: (Exact, Exact),
+    /// The destination column the image of the rectangle's top left lies in.
+    anchor: i128,
     /// Each column's step in the source column and in the row from the top.
     step: (i128, i128),
     /// The pixels the plot can reach.
@@ -400,14 +414,13 @@ impl Transform {
     /// The geometry R3, R4 and R6 give, if it draws anything.
     fn read(
         os: &mut Os<'_>,
-        sprite: &Sprite,
-        source: &Source,
+        checked: &Checked<'_>,
         destination: &Destination,
         form: u32,
         rectangle: u32,
         shape: u32,
     ) -> Result<Option<Self>, Fail> {
-        let (width, height) = (i128::from(source.width), i128::from(source.height));
+        let (width, height) = (i128::from(checked.width), i128::from(checked.height));
         let corners = if form & SOURCE_RECTANGLE == 0 {
             [0, height, width, 0]
         } else {
@@ -436,11 +449,8 @@ impl Transform {
             let along = if i % 2 == 0 { origin.0 } else { origin.1 };
             *word += i128::from(along) << 8;
         }
-        let eig = |var| variable(sprite.mode, var).map_or(1, i128::from);
-        let eig = (
-            eig(tairix_vdu::mode::var::X_EIG),
-            eig(tairix_vdu::mode::var::Y_EIG),
-        );
+        let eig = checked.pixels.shown.eig;
+        let eig = (i128::from(eig.0), i128::from(eig.1));
         let format = destination.format;
         let pixel = (256i128 << format.x_eig(), 256i128 << format.y_eig());
         Ok(Self::of(
@@ -452,6 +462,14 @@ impl Transform {
             pixel,
             destination.window,
         ))
+    }
+
+    /// The rows, from the top, of the sprite it reads: the source
+    /// rectangle's.
+    fn source_rows(&self) -> core::ops::Range<u32> {
+        let height = i128::from(self.height);
+        let row = |r: i128| u32::try_from(r).unwrap_or(0);
+        row(height - self.top)..row(height - self.bottom)
     }
 
     /// The geometry of the rectangle `corners` through `words`, a matrix or
@@ -486,10 +504,14 @@ impl Transform {
         let reference = forward.image(corner.0, corner.1)?;
         let bounds = covered(&images, pixel, window)?;
         let step = |inverse: &Inverse| {
-            nearest_div(pixel.0.checked_mul(inverse.x)? << STEP_BITS, inverse.den)
-                .map(|s| s << (ROW_BITS - STEP_BITS))
+            let step = nearest_div(
+                fixed(pixel.0.checked_mul(inverse.x)?, STEP_BITS)?,
+                inverse.den,
+            )?;
+            fixed(step, ROW_BITS - STEP_BITS)
         };
         let step = (step(&u)?, step(&v)?.checked_neg()?);
+        let anchor = floor_div(reference.0.n, reference.0.d.checked_mul(pixel.0)?)?;
         Some(Self {
             u,
             v,
@@ -502,6 +524,7 @@ impl Transform {
             height: u32::try_from(size.1).ok()?,
             pixel,
             reference,
+            anchor,
             step,
             bounds,
             at: (0, 0),
@@ -561,11 +584,11 @@ impl Transform {
             .checked_sub(reference_y.n)?;
         let along = |inverse: &Inverse| {
             floor_div(
-                inverse.y.checked_mul(rise)? << ROW_BITS,
+                fixed(inverse.y.checked_mul(rise)?, ROW_BITS)?,
                 inverse.den.checked_mul(reference_y.d)?,
             )
         };
-        let u = (self.corner.0 << ROW_BITS).checked_add(along(&self.u)?)?;
+        let u = fixed(self.corner.0, ROW_BITS)?.checked_add(along(&self.u)?)?;
         let w = along(&self.v)?.checked_neg()?;
         Some((u, w))
     }
@@ -582,9 +605,7 @@ impl Mapping for Transform {
         if first > last {
             return None;
         }
-        let (reference_x, _) = self.reference;
-        let anchor = floor_div(reference_x.n, reference_x.d.checked_mul(self.pixel.0)?)?;
-        let columns = i128::from(first).checked_sub(anchor)?;
+        let columns = i128::from(first).checked_sub(self.anchor)?;
         let (u, w) = self.row_start(y_line)?;
         self.at = (
             u.checked_add(self.step.0.checked_mul(columns)?)?,

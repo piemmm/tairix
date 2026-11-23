@@ -734,6 +734,15 @@ impl SysinfoQueryId {
     /// nothing that listing did not.
     pub const VOLUME_REMOVALS: Self = Self(54);
 
+    /// List the served GPUs: one
+    /// [`GpuDeviceDescriptor`](crate::gpu::GpuDeviceDescriptor) per device
+    /// channel a GPU's driver published, paged by a [`PageRequest`].
+    ///
+    /// Ungated and unaudited, as [`Self::AUDIO_DEVICES`] is: which GPUs a
+    /// machine has is no principal's secret, and the channel itself refuses a
+    /// caller without `CAP_GPU`.
+    pub const GPU_DEVICES: Self = Self(55);
+
     /// Inclusive upper bound on the query identifier space in `sysinfo-v1`.
     ///
     /// Sized identically to the syscall table so a future query explosion
@@ -1345,6 +1354,12 @@ pub const SYSINFO_QUERIES: &[SysinfoQuerySpec] = &[
     SysinfoQuerySpec {
         id: SysinfoQueryId::VOLUME_REMOVALS,
         name: "volume_removals",
+        required_capability: None,
+        audit: false,
+    },
+    SysinfoQuerySpec {
+        id: SysinfoQueryId::GPU_DEVICES,
+        name: "gpu_devices",
         required_capability: None,
         audit: false,
     },
@@ -7905,6 +7920,17 @@ mod tests {
             assert_eq!(spec.required_capability, gate);
             assert_eq!(spec.audit, gate.is_some());
         }
+    }
+
+    /// Which GPUs a machine serves is open to every principal, as its sound
+    /// devices are.
+    #[test]
+    fn the_gpu_listing_is_open() {
+        assert_eq!(SysinfoQueryId::GPU_DEVICES.as_u16(), 55);
+        let spec = spec_for(SysinfoQueryId::GPU_DEVICES).unwrap();
+        assert_eq!(spec.required_capability, None);
+        assert!(!spec.audit);
+        assert_eq!(spec.name, "gpu_devices");
     }
 
     /// Neighbours name other machines' hardware addresses, so they sit under

@@ -13,14 +13,15 @@ use alloc::vec::Vec;
 
 use tairix_riscos_kernel::os::{Fail, Os};
 use tairix_riscos_kernel::output::workspace;
+use tairix_util::bitfield::{field_at, set_field_at};
 
-use super::super::edit::{field_at, set_field_at};
 use super::super::format::BAD_SPRITE_MODE;
 use super::super::header::Sprite;
 use super::super::NO_MEMORY;
-use super::source::{Source, Transparency};
-use super::{changed, read, Destination};
-use crate::canvas::{mask_between, Block};
+use super::source::{Checked, Source, Transparency};
+use super::{Destination, Scale};
+use crate::canvas::{mask_between, word_bit, Block};
+use crate::colour::combine;
 use crate::raster::Point;
 
 /// What a blit lays down.
@@ -36,15 +37,15 @@ enum Ink {
 /// bits and the mask asked for by bit 3; an alpha channel is copied with the
 /// colours, the mask asked for or not.
 pub(crate) fn put(os: &mut Os<'_>, sprite: &Sprite, at: Point, plot: u32) -> Result<(), Fail> {
-    let source = read(os, sprite)?;
+    let checked = Source::check(os, sprite)?;
     let masked = plot & 8 != 0;
-    if masked && source.transparency == Transparency::Wide {
+    if masked && checked.transparency == Transparency::Wide {
         return Err(os.error(BAD_SPRITE_MODE));
     }
-    let masked = masked && source.transparency == Transparency::Binary;
+    let masked = masked && checked.transparency == Transparency::Binary;
     blit(
         os,
-        &source,
+        &checked,
         at,
         Ink::Sprite {
             action: plot & 7,
@@ -68,14 +69,14 @@ pub(crate) fn plot_shape(
     at: Point,
     block: Block,
 ) -> Result<(), Fail> {
-    let source = read(os, sprite)?;
-    match source.transparency {
-        Transparency::Binary => return blit(os, &source, at, Ink::Colour(block)),
+    let checked = Source::check(os, sprite)?;
+    match checked.transparency {
+        Transparency::Binary => return blit(os, &checked, at, Ink::Colour(block)),
         Transparency::Wide => return Err(os.error(BAD_SPRITE_MODE)),
         Transparency::None | Transparency::Channel(_) => {}
     }
     let destination = Destination::now(os)?;
-    let Some(rect) = destination.visible(at, source.width, source.height) else {
+    let Some(rect) = destination.visible(at, checked.width, checked.height) else {
         return Ok(());
     };
     let canvas = destination.canvas;
@@ -91,17 +92,20 @@ pub(crate) fn plot_shape(
             eor,
         )?;
     }
-    changed(os, rect)
+    crate::changed::cover(os, rect)
 }
 
-/// Lays `source`'s rows on the destination from `at`.
-fn blit(os: &mut Os<'_>, source: &Source, at: Point, ink: Ink) -> Result<(), Fail> {
+/// Lays the sprite's rows on the destination from `at`, reading those it
+/// shows.
+fn blit(os: &mut Os<'_>, checked: &Checked<'_>, at: Point, ink: Ink) -> Result<(), Fail> {
     let destination = Destination::now(os)?;
     let log2_bpc = destination.format.log2_bpc();
-    let covered = u32::try_from(source.row_bits.div_ceil(1 << log2_bpc)).unwrap_or(u32::MAX);
-    let Some(visible) = destination.visible(at, covered, source.height) else {
+    let covered = u32::try_from(checked.row_bits().div_ceil(1 << log2_bpc)).unwrap_or(u32::MAX);
+    let Some(visible) = destination.visible(at, covered, checked.height) else {
         return Ok(());
     };
+    let rows = Scale::UNIT.rows_shown(checked.height, at.1, visible);
+    let source = checked.read(os, rows)?;
     let origin = i64::from(at.0) << log2_bpc;
     let low = (i64::from(visible.left) << log2_bpc).max(origin);
     let high = ((i64::from(visible.right) + 1) << log2_bpc)
@@ -123,7 +127,8 @@ fn blit(os: &mut Os<'_>, source: &Source, at: Point, ink: Ink) -> Result<(), Fai
     for y in visible.bottom..=visible.top {
         let row = source.height - 1 - (y - at.1).cast_unsigned();
         let screen_row = canvas.row_of(y);
-        os.read_bytes(canvas.address(screen_row, first_byte), &mut line)?;
+        let line_at = canvas.address(screen_row, first_byte);
+        os.read_bytes(line_at, &mut line)?;
         let block = match ink {
             Ink::Colour(block) => block.for_line(screen_row),
             Ink::Sprite { .. } => (0, 0),
@@ -149,7 +154,7 @@ fn blit(os: &mut Os<'_>, source: &Source, at: Point, ink: Ink) -> Result<(), Fai
                 Ink::Colour(_) => {
                     let (ora, eor) = block;
                     let rotation =
-                        u32::try_from((u64::from(first_byte) * 8 + at_line) % 32).unwrap_or(0);
+                        u32::try_from((u64::from(word_bit(line_at)) + at_line) % 32).unwrap_or(0);
                     let (ora, eor) = (ora.rotate_right(rotation), eor.rotate_right(rotation));
                     (old | ora) ^ eor
                 }
@@ -162,22 +167,7 @@ fn blit(os: &mut Os<'_>, source: &Source, at: Point, ink: Ink) -> Result<(), Fai
             );
             done += u64::from(bits);
         }
-        os.write_bytes(canvas.address(screen_row, first_byte), &line)?;
+        os.write_bytes(line_at, &line)?;
     }
-    changed(os, visible)
-}
-
-/// `new` from destination bits `old` and source bits `bits` by GCOL action
-/// `action`.
-pub(crate) const fn combine(action: u32, old: u32, bits: u32) -> u32 {
-    match action & 7 {
-        0 => bits,
-        1 => old | bits,
-        2 => old & bits,
-        3 => old ^ bits,
-        4 => !old,
-        5 => old,
-        6 => old & !bits,
-        _ => old | !bits,
-    }
+    crate::changed::cover(os, visible)
 }

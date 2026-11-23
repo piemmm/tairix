@@ -83,6 +83,10 @@ const DESCRIPTOR: u32 = 32;
 /// The largest file a lookup reads: a containment bound on the host's copy
 /// of a file the guest describes, not a capacity.
 pub(crate) const FILE_MOST: u32 = 16 << 20;
+/// How much of a guest-held file or buffer is handled at once: a value's
+/// length is found a piece at a time, and a walk through a file starts from a
+/// piece and doubles it only while it needs more.
+const PIECE: usize = 512;
 /// A file smaller than this is not worth indexing, nor one of fewer tokens.
 const INDEX_LEAST_BYTES: u32 = 80;
 const INDEX_LEAST_TOKENS: usize = 8;
@@ -681,29 +685,61 @@ impl Os<'_> {
                 Ok(length.map(|length| (file.data.wrapping_add(at), length)))
             }
             None => {
-                let bytes = self.file_bytes(file)?;
-                Ok(scan::find(&bytes, token).and_then(|at| {
-                    let length = scan::value_length(&bytes, at)?;
-                    Some((file.data.wrapping_add(len32(at)), len32(length)))
-                }))
+                let (found, _) = self.walk_growing(file, 0, |bytes, _| {
+                    let at = scan::find(bytes, token)?;
+                    Some((at, scan::value_length(bytes, at)?))
+                })?;
+                Ok(found.map(|(at, length)| (file.data.wrapping_add(len32(at)), len32(length))))
             }
+        }
+    }
+
+    /// What `walk` finds in `file` from `from`, given a growing piece of it
+    /// at a time and told whether the piece is the whole rest, and the bytes
+    /// it was given last. A walk that finds only what the whole rest gives,
+    /// never looking behind where it starts, costs what it covers rather than
+    /// the whole file.
+    fn walk_growing<T>(
+        &mut self,
+        file: Opened,
+        from: u32,
+        mut walk: impl FnMut(&[u8], bool) -> Option<T>,
+    ) -> Result<(Option<T>, Vec<u8>), Fail> {
+        let rest = file.length.saturating_sub(from);
+        let mut piece = len32(PIECE).min(rest);
+        let mut bytes = Vec::new();
+        loop {
+            let held = len32(bytes.len());
+            self.read_onto(
+                &mut bytes,
+                file.data.wrapping_add(from + held),
+                (piece - held) as usize,
+            )?;
+            let whole = piece == rest;
+            let found = walk(&bytes, whole);
+            if found.is_some() || whole {
+                return Ok((found, bytes));
+            }
+            piece = piece.saturating_mul(2).min(rest);
+            self.yield_point()?;
         }
     }
 
     /// The length of the value at `at` in `file`, read a piece at a time
     /// until its terminator; none if the file ends first.
     fn value_length_at(&mut self, file: Opened, at: u32) -> Result<Option<u32>, Fail> {
-        const PIECE: u32 = 256;
         let rest = file.length.saturating_sub(at);
+        let mut piece = [0; PIECE];
+        let mut end = scan::ValueEnd::default();
         let mut read = 0;
-        let mut bytes = Vec::new();
         while read < rest {
-            let more = PIECE.min(rest - read);
-            self.read_onto(&mut bytes, file.data.wrapping_add(at + read), more as usize)?;
-            read += more;
-            if let Some(length) = scan::value_length(&bytes, 0) {
-                return Ok(Some(len32(length)));
+            let more = &mut piece[..(rest - read).min(len32(PIECE)) as usize];
+            self.read_bytes(file.data.wrapping_add(at + read), more)?;
+            if let Some(n) = end.find(more) {
+                return Ok(Some(read + len32(n)));
             }
+            read += len32(more.len());
+            self.yield_point()?;
         }
         Ok(None)
     }
@@ -762,8 +798,7 @@ impl Os<'_> {
         let mut parameters: Parameters = [None, None, None, None];
         for (slot, &address) in parameters.iter_mut().zip(&regs.r[4..8]) {
             if address != 0 {
-                let (text, _) =
-                    self.read_until(address, PARAMETER_MOST, |b| matches!(b, 0 | b'\n' | b'\r'))?;
+                let (text, _) = self.read_until(address, PARAMETER_MOST, scan::ends_value)?;
                 *slot = Some(text);
             }
         }
@@ -809,14 +844,25 @@ impl Os<'_> {
         let Some(room) = size.checked_sub(1) else {
             return Ok(0);
         };
-        let mut out = Vec::new();
-        out.try_reserve_exact(room as usize)
-            .map_err(|_| self.no_memory())?;
-        out.resize(room as usize, 0);
-        let length = expansion.expand(&value, &mut out);
-        self.write_bytes(buffer, &out[..length])?;
-        self.write_byte(buffer.wrapping_add(len32(length)), 0)?;
-        Ok(len32(length))
+        let mut sink = IntoBuffer {
+            os: self,
+            buffer,
+            room,
+            written: 0,
+            piece: [0; PIECE],
+            held: 0,
+            fault: None,
+        };
+        expansion.expand(&value, &mut sink);
+        if sink.fault.is_none() {
+            sink.flush();
+        }
+        let IntoBuffer { written, fault, .. } = sink;
+        if let Some(fail) = fault {
+            return Err(fail);
+        }
+        self.write_byte(buffer.wrapping_add(written), 0)?;
+        Ok(written)
     }
 
     /// The token `token` looked up in the descriptor at `descriptor` and
@@ -837,13 +883,28 @@ impl Os<'_> {
             parameters: [0, 1, 2, 3].map(|n| parameters[n].as_deref()),
             dictionary: &[],
         };
-        let mut out = Vec::new();
-        out.try_reserve_exact(most as usize)
-            .map_err(|_| self.no_memory())?;
-        out.resize(most as usize, 0);
-        let length = expansion.expand(&value, &mut out);
-        out.truncate(length);
-        Ok(Some(out))
+        let mut out = scan::Held::new(most as usize).map_err(|_| self.no_memory())?;
+        expansion.expand(&value, &mut out);
+        Ok(Some(out.bytes))
+    }
+
+    /// The first token `pattern` names at or after `from` in `file`, and
+    /// where the walk goes on from: a token found with the walk's next place
+    /// inside the piece read is the one the whole file gives.
+    fn token_after(
+        &mut self,
+        file: Opened,
+        pattern: &[u8],
+        from: u32,
+    ) -> Result<Option<(Vec<u8>, u32)>, Fail> {
+        let (found, mut bytes) = self.walk_growing(file, from, |bytes, whole| {
+            scan::next_token(bytes, pattern, 0).filter(|&(_, next)| whole || next < bytes.len())
+        })?;
+        Ok(found.map(|(token, next)| {
+            bytes.truncate(token.end);
+            bytes.drain(..token.start);
+            (bytes, from + len32(next))
+        }))
     }
 
     /// `MessageTrans_OpenFile`: the file `name` names opened through the
@@ -1246,28 +1307,75 @@ fn gs_lookup(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 /// R4 on, copied into R2's buffer with the pattern's terminator; R2 zero when
 /// there are no more.
 fn enumerate_tokens(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    let (pattern, _) = os.read_until(regs.r[1], crate::error::TEXT, |b| {
-        b <= b' ' || b == b',' || b == b')' || b == b':'
-    })?;
+    let (pattern, _) = os.read_until(regs.r[1], crate::error::TEXT, scan::ends_token)?;
     let terminator = os.read_byte(regs.r[1].wrapping_add(len32(pattern.len())))?;
     if scan::pattern_misplaced_star(&pattern) {
         return Err(os.message_trans_error(SYNTAX, &pattern));
     }
     let file = os.opened(regs.r[0])?;
-    let bytes = os.file_bytes(file)?;
-    let Some((range, next)) = scan::next_token(&bytes, &pattern, regs.r[4] as usize) else {
+    let Some((token, next)) = os.token_after(file, &pattern, regs.r[4])? else {
         regs.r[2] = 0;
         return Ok(());
     };
-    let token = &bytes[range];
     if regs.r[3] <= len32(token.len()) {
         return Err(os.message_trans_global_error(BUFFER_OVERFLOW, b""));
     }
-    os.write_bytes(regs.r[2], token)?;
+    os.write_bytes(regs.r[2], &token)?;
     os.write_byte(regs.r[2].wrapping_add(len32(token.len())), terminator)?;
     regs.r[3] = len32(token.len());
-    regs.r[4] = len32(next);
+    regs.r[4] = next;
     Ok(())
+}
+
+/// An expansion written into the caller's buffer a piece at a time, so the
+/// host holds no more of it than a piece whatever room the caller names.
+struct IntoBuffer<'o, 'w> {
+    os: &'o mut Os<'w>,
+    buffer: u32,
+    room: u32,
+    written: u32,
+    piece: [u8; PIECE],
+    held: usize,
+    /// The abort a write took, or the unwind a yield met: the expansion
+    /// stops there.
+    fault: Option<Fail>,
+}
+
+impl IntoBuffer<'_, '_> {
+    /// Writes what is held to the buffer: false where that fails.
+    fn flush(&mut self) -> bool {
+        let at = self.buffer.wrapping_add(self.written);
+        let done = self
+            .os
+            .write_bytes(at, &self.piece[..self.held])
+            .and_then(|()| self.os.yield_point().map_err(Fail::from));
+        if let Err(fail) = done {
+            self.fault = Some(fail);
+            return false;
+        }
+        self.written += len32(self.held);
+        self.held = 0;
+        true
+    }
+}
+
+impl scan::Sink for IntoBuffer<'_, '_> {
+    fn take(&mut self, mut bytes: &[u8]) -> bool {
+        while !bytes.is_empty() {
+            let left = (self.room - self.written) as usize - self.held;
+            if left == 0 {
+                return false;
+            }
+            let n = bytes.len().min(left).min(PIECE - self.held);
+            self.piece[self.held..self.held + n].copy_from_slice(&bytes[..n]);
+            self.held += n;
+            bytes = &bytes[n..];
+            if self.held == PIECE && !self.flush() {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// `MessageTrans_Dictionary`: R0 MessageTrans's dictionary, which genuine
@@ -1291,6 +1399,10 @@ pub struct Own {
 
 /// The room a module's workspace gives an own file's request.
 const REQUEST: u32 = 256;
+/// The room a lookup a module makes itself is answered in, at
+/// [`Own::reply`].
+pub(crate) const REPLY_ROOM: u32 = 120;
+const _: () = assert!(REPLY_ROOM <= REQUEST / 2, "the reply fits its half");
 /// An own file's descriptor.
 const OWN_DESCRIPTOR: u32 = 16;
 
@@ -1440,6 +1552,29 @@ impl Os<'_> {
             os.perform(X | LOOKUP, &mut regs)?;
             os.read_vec(regs.r[2], regs.r[3].min(BUFFER) as usize)
         })
+    }
+
+    /// `token` from the module's own file `own` looked up into `buffer` of
+    /// `room` bytes: the length of the text there, which a MessageTrans
+    /// answering past the room cannot stretch.
+    ///
+    /// # Errors
+    ///
+    /// MessageTrans's, where the file cannot be opened or holds no such
+    /// token; "Buffer overflow" where `token` does not fit its request.
+    pub(crate) fn own_lookup(
+        &mut self,
+        own: OwnOf,
+        token: &[u8],
+        buffer: u32,
+        room: u32,
+    ) -> Result<u32, Fail> {
+        let file = self.own_open(own)?;
+        self.write_terminated(file.request, token, 0, (REQUEST / 2) as usize)?;
+        let mut regs = Regs::default();
+        regs.r[..4].copy_from_slice(&[file.descriptor, file.request, buffer, room]);
+        self.perform(X | LOOKUP, &mut regs)?;
+        Ok(regs.r[3].min(room.saturating_sub(1)))
     }
 
     /// `error` from the global file, `%0` onwards `parameters`, the request

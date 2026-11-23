@@ -229,13 +229,10 @@ pub fn bring_up_virtio_mmio<P: MmioFloorPort>(
         None => pool,
     };
     let waiter: &'static IrqParkWaiter = Box::leak(Box::new(armed.waiter(audit)));
-    let host: &'static FloorHost<P::Space> = Box::leak(Box::new(KernelVirtioHost::new(
-        pool,
-        caller,
-        audit,
-        PoolId::fresh(),
-        waiter,
-    )));
+    // SAFETY: the host is leaked to `'static`, so it never moves or drops.
+    let host: &'static FloorHost<P::Space> = Box::leak(Box::new(unsafe {
+        KernelVirtioHost::new(pool, caller, audit, PoolId::fresh(), waiter)
+    }));
     Ok(FloorDevice {
         transport: provision.transport,
         host,

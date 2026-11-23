@@ -7,8 +7,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::sprite::tests::{
-    area, limits, one, ro35, ro5, Sprite as Fixture, FLAG_ALPHA, FLAG_RGB_ORDER, MODE_16, MODE_2,
-    MODE_256, MODE_4,
+    area, limits, one, ro35, ro5, Sprite as Fixture, COLOURS_16, COLOURS_2, COLOURS_256, COLOURS_4,
+    FLAG_ALPHA, FLAG_RGB_ORDER,
 };
 use crate::{
     desktop_palette, encode_sprite_area, EncodeError, IndexDepth, Picture, Pixels, Rgba8,
@@ -124,7 +124,12 @@ fn a_known_sprite_is_written_exactly_as_risc_os_lays_it_out() {
 
 #[test]
 fn every_numbered_depth_is_written_back_byte_for_byte() {
-    for (mode, bits) in [(MODE_2, 1), (MODE_4, 2), (MODE_16, 4), (MODE_256, 8)] {
+    for (mode, bits) in [
+        (COLOURS_2, 1),
+        (COLOURS_4, 2),
+        (COLOURS_16, 4),
+        (COLOURS_256, 8),
+    ] {
         let pixels = values(12, bits, 0);
         same_after_rewrite(&one(Fixture::new(mode, bits, 6, 2).pixels(&pixels)));
         same_after_rewrite(&one(Fixture::new(mode, bits, 6, 2)
@@ -149,8 +154,22 @@ fn every_numbered_depth_is_written_back_byte_for_byte() {
 /// eight-bit fields, each colour repeated across, as RISC OS 5 holds it.
 #[test]
 fn a_doubling_modes_sprite_is_written_back_in_its_wide_fields() {
-    same_after_rewrite(&one(Fixture::new(2, 8, 5, 2)
+    picture_after_rewrite(&one(Fixture::new(2, 8, 5, 2)
         .pixels(&[0x55, 0xFF, 0x33, 0xBB, 0x00, 0x11, 0x22, 0x44, 0x88, 0xCC])));
+}
+
+#[test]
+fn every_doubling_modes_sprite_is_written_back_in_its_wide_fields() {
+    for (mode, field, pixels) in [
+        (4, 2, [0b11, 0b00, 0b11, 0b00, 0b00, 0b11]),
+        (5, 4, [0x5, 0xF, 0xA, 0x0, 0x5, 0xA]),
+        (10, 16, [0x0101, 0xFFFF, 0x2A2A, 0x0000, 0x8080, 0x7F7F]),
+    ] {
+        picture_after_rewrite(&one(Fixture::new(mode, field, 3, 2).pixels(&pixels)));
+        picture_after_rewrite(&one(Fixture::new(mode, field, 3, 2)
+            .pixels(&pixels)
+            .mask_image(&[true, false, true, false, false, true])));
+    }
 }
 
 #[test]
@@ -160,7 +179,7 @@ fn a_short_vidc_palette_is_kept_as_the_file_held_it() {
         let colours: Vec<[u8; 3]> = (0..entries)
             .map(|i: u8| [i.wrapping_mul(16), 0x20, 0xF0 - i])
             .collect();
-        same_after_rewrite(&one(Fixture::new(MODE_256, 8, 4, 2)
+        same_after_rewrite(&one(Fixture::new(COLOURS_256, 8, 4, 2)
             .palette(&colours)
             .pixels(&pixels)));
     }
@@ -232,10 +251,10 @@ fn a_risc_os_five_word_keeps_its_channel_order_and_alpha() {
 #[test]
 fn an_area_holding_a_sprite_that_cannot_be_read_goes_back_unchanged() {
     let bytes = area(&[
-        Fixture::new(MODE_16, 4, 4, 1).pixels(&[1, 2, 3, 4]),
+        Fixture::new(COLOURS_16, 4, 4, 1).pixels(&[1, 2, 3, 4]),
         Fixture::new(ro35(9, false), 32, 2, 1).pixels(&[0x1234_5678, 0x9ABC_DEF0]),
         Fixture::new(7, 4, 2, 1),
-        Fixture::new(MODE_2, 1, 8, 1).pixels(&[1, 0, 1, 1, 0, 0, 1, 0]),
+        Fixture::new(COLOURS_2, 1, 8, 1).pixels(&[1, 0, 1, 1, 0, 0, 1, 0]),
     ]);
     let read = entries(&bytes);
     assert!(matches!(read[1], SpriteEntry::Opaque(_)));
@@ -247,7 +266,7 @@ fn an_area_holding_a_sprite_that_cannot_be_read_goes_back_unchanged() {
 fn a_kept_sprite_is_written_back_exactly() {
     // Declared a word short of its own image, so it cannot be read — and any
     // padding appended to it would make it readable.
-    let short = one(Fixture::new(MODE_16, 4, 8, 1).pixels(&[1; 8]).length(44));
+    let short = one(Fixture::new(COLOURS_16, 4, 8, 1).pixels(&[1; 8]).length(44));
     let [SpriteEntry::Opaque(kept)] = &entries(&short)[..] else {
         panic!("a sprite short of its own image is kept as bytes");
     };
@@ -262,7 +281,7 @@ fn a_kept_sprite_is_written_back_exactly() {
 
 #[test]
 fn a_kept_sprite_off_a_word_is_refused_rather_than_misplacing_those_after_it() {
-    let short = one(Fixture::new(MODE_16, 4, 8, 1).pixels(&[1; 8]).length(46));
+    let short = one(Fixture::new(COLOURS_16, 4, 8, 1).pixels(&[1; 8]).length(46));
     let [SpriteEntry::Opaque(kept)] = &entries(&short)[..] else {
         panic!("a sprite short of its own image is kept as bytes");
     };
@@ -376,16 +395,16 @@ fn sixteen(mask: Option<Vec<u8>>) -> Picture {
 fn a_picture_of_the_wrong_kind_for_its_mode_is_refused() {
     let rgba = Picture::rgba(1, 1, vec![1, 2, 3, 255]).expect("valid");
     assert_eq!(
-        encode_one(MODE_16, &SpritePalette::Implied, false, &rgba),
+        encode_one(COLOURS_16, &SpritePalette::Implied, false, &rgba),
         Err(EncodeError::SpriteLayoutMismatch)
     );
     assert_eq!(
-        encode_one(MODE_4, &SpritePalette::Implied, false, &sixteen(None)),
+        encode_one(COLOURS_4, &SpritePalette::Implied, false, &sixteen(None)),
         Err(EncodeError::SpriteLayoutMismatch),
         "a sixteen-colour picture under a four-colour mode"
     );
     assert_eq!(
-        encode_one(MODE_16, &SpritePalette::Implied, true, &sixteen(None)),
+        encode_one(COLOURS_16, &SpritePalette::Implied, true, &sixteen(None)),
         Err(EncodeError::SpriteLayoutMismatch),
         "a mask asked for that the picture does not carry"
     );
@@ -403,12 +422,12 @@ fn a_palette_that_is_not_the_pixels_colours_is_refused() {
     let recoloured =
         Picture::indexed(2, 1, IndexDepth::Four, palette, vec![0, 1], None).expect("valid");
     assert_eq!(
-        encode_one(MODE_16, &SpritePalette::Implied, false, &recoloured),
+        encode_one(COLOURS_16, &SpritePalette::Implied, false, &recoloured),
         Err(EncodeError::SpritePaletteMismatch)
     );
     assert_eq!(
         encode_one(
-            MODE_16,
+            COLOURS_16,
             &SpritePalette::Stored(vec![0; 16 * 8]),
             false,
             &recoloured
@@ -417,7 +436,7 @@ fn a_palette_that_is_not_the_pixels_colours_is_refused() {
     );
     assert_eq!(
         encode_one(
-            MODE_16,
+            COLOURS_16,
             &SpritePalette::Stored(vec![0; 13]),
             false,
             &recoloured
@@ -425,7 +444,7 @@ fn a_palette_that_is_not_the_pixels_colours_is_refused() {
         Err(EncodeError::SpritePaletteMismatch),
         "a stored palette that is not whole entries"
     );
-    assert!(encode_one(MODE_16, &SpritePalette::Full, false, &recoloured).is_ok());
+    assert!(encode_one(COLOURS_16, &SpritePalette::Full, false, &recoloured).is_ok());
 }
 
 #[test]
@@ -435,7 +454,7 @@ fn a_translucent_palette_entry_is_refused() {
     let picture =
         Picture::indexed(2, 1, IndexDepth::Four, palette, vec![0, 1], None).expect("valid");
     assert_eq!(
-        encode_one(MODE_16, &SpritePalette::Full, false, &picture),
+        encode_one(COLOURS_16, &SpritePalette::Full, false, &picture),
         Err(EncodeError::SpritePaletteAlpha)
     );
 }
@@ -444,7 +463,7 @@ fn a_translucent_palette_entry_is_refused() {
 fn a_partial_mask_under_a_binary_mask_form_is_refused() {
     let partial = sixteen(Some(vec![255, 100]));
     assert_eq!(
-        encode_one(MODE_16, &SpritePalette::Implied, true, &partial),
+        encode_one(COLOURS_16, &SpritePalette::Implied, true, &partial),
         Err(EncodeError::SpriteMaskNotBinary),
         "a numbered mode's mask is on or off"
     );

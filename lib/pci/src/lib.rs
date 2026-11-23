@@ -43,7 +43,7 @@
 use tairix_abi::driver::bus::{Bus, BusDevice};
 use tairix_abi::driver::msix::MsixBus;
 use tairix_abi::driver::pci::PciBus;
-use tairix_abi::driver::virtio_pci::VirtioPciBus;
+use tairix_abi::driver::virtio_pci::{VirtioPciBus, VirtioSharedMemory};
 use tairix_abi::{DriverError, HwNode, MmioMapper, MsiMessage, PortIo, RegisterWindow};
 
 use crate::topology::PciTopology;
@@ -218,6 +218,14 @@ impl<C: ConfigSpace> VirtioPciBus for Pci<C> {
 
     fn notify_off_multiplier(&self, bdf: u64) -> Result<u32, DriverError> {
         self.virtio_notify_off_multiplier(bdf)
+    }
+
+    fn virtio_shared_memory(
+        &self,
+        bdf: u64,
+        out: &mut [VirtioSharedMemory],
+    ) -> Result<usize, DriverError> {
+        Pci::virtio_shared_memory(self, bdf, out)
     }
 }
 

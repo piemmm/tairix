@@ -421,3 +421,21 @@ fn a_sprite_palette_past_its_pixels_colours_is_read_as_its_mode_s() {
     .expect("sized");
     assert_eq!(blend.r[..3], [0x10, 0x10, 0x100], "BlendTable's colours");
 }
+
+#[test]
+fn an_eight_bit_mode_s_flags_say_whether_it_writes_its_palette_in_groups() {
+    let mut session = common::drivers(b"");
+    common::select(
+        &mut session,
+        &[1, 640, 480, 3, u32::MAX, 0, 0x80, 3, 63, u32::MAX],
+    )
+    .expect("flagged full, counting 63 colours");
+    let default_17 = reported(&mut session, 17);
+    common::vdu(&mut session, &[19, 1, 16, 0x10, 0x20, 0x30]).expect("entry 1 set");
+    assert_eq!(reported(&mut session, 1)[0] & !0xFF, 0x3020_1000);
+    assert_eq!(
+        reported(&mut session, 17),
+        default_17,
+        "an entry of its own, no group"
+    );
+}

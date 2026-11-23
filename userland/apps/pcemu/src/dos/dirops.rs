@@ -842,7 +842,7 @@ pub fn caller_path(k: &mut Kernel<'_, '_>, at: Far) -> ([u8; 128], usize) {
 fn temp_name(seed: u16, tries: u16) -> [u8; 8] {
     let value = u32::from(seed) << 16 | u32::from(tries.wrapping_mul(0x9E37) ^ seed.rotate_left(7));
     let mut out = [0u8; 8];
-    super::message::hex(value, &mut out);
+    tairix_util::hex::fill_upper(&mut out, u64::from(value));
     out
 }
 

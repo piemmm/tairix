@@ -193,8 +193,9 @@ pub use picture::{
 pub use png::defilter_row as defilter_png_row;
 pub use sprite::{
     area as sprite_area, control as sprite_control, decode_named, decode_sprite, desktop_palette,
-    dpi_of_eig as sprite_dpi_of_eig, eig_of_dpi as sprite_eig_of_dpi, find_named,
-    mask_stride as sprite_mask_stride, opaque_sprite_writes_back, sprite_type, LoneSprite,
+    direct_fields as sprite_direct_fields, dpi_of_eig as sprite_dpi_of_eig,
+    eig_of_dpi as sprite_eig_of_dpi, find_named, mask_stride as sprite_mask_stride,
+    opaque_sprite_writes_back, sprite_type, LoneSprite, MaskDepth as SpriteMaskDepth,
     ModeWord as SpriteModeWord, NamedSprite, OpaqueSprite, Sprite, SpriteAreaReader, SpriteEntry,
     SpriteLayout, SpriteMode, SpriteName, SpritePalette, MAX_EIG as MAX_SPRITE_EIG,
     PALETTE_ENTRY_LEN as SPRITE_PALETTE_ENTRY_LEN, SPRITE_HEADER_LEN,

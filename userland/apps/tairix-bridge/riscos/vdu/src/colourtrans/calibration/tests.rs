@@ -131,3 +131,50 @@ fn a_table_s_commands_give_its_sizes_blue_first_and_its_pairs_last_first() {
         b"ColourTransMapSize &2 &2 &3\nColourTransMap &FF0000FF &0 &FF00FF &0 &FF0000FF &20402080 &10101000\n"
     );
 }
+
+#[test]
+fn a_table_of_the_most_pairs_is_saved_on_lines_a_command_line_holds_and_read_back_whole() {
+    let mut words = alloc::vec![MOST_PAIRS; 3];
+    for shift in [8, 16, 24] {
+        words.extend((0..=255u32).map(|level| level << shift | level));
+    }
+    Calibration::of_words(words.clone()).expect("a good table");
+    let text = commands(&words).expect("room");
+    let lines: alloc::vec::Vec<&[u8]> = text
+        .split(|&b| b == b'\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert!(lines.len() > 2, "the pairs spread over several lines");
+    let mut session =
+        tairix_riscos_filing::session::session(&tairix_riscos_filing::session::Setup {
+            vdu: Some(crate::DRIVERS),
+            modules: &crate::MODULES,
+            bytes: tairix_riscos_filing::session::SLOT_BYTES,
+            keys: &[],
+            disc: None,
+        });
+    let mut os = session.kernel.os();
+    for line in lines {
+        assert!(
+            line.len() < tairix_obey::command::MOST_LINE,
+            "a line within the limit"
+        );
+        let parameters = line.split(|&b| b == b' ').count() - 1;
+        assert!(
+            parameters <= usize::from(MAP_MOST),
+            "{parameters} parameters"
+        );
+        let mut command = line.to_vec();
+        command.push(0);
+        os.write_bytes(0x9000, &command).expect("written");
+        let mut regs =
+            tairix_riscos_kernel::os::Regs::new([0x9000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        os.perform(
+            tairix_riscos_kernel::swi::X | tairix_riscos_kernel::swi::os::CLI,
+            &mut regs,
+        )
+        .expect("run");
+    }
+    let installed = screen_calibration(&mut os).expect("a calibration set");
+    assert_eq!(installed.words(), words.as_slice());
+}

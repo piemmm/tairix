@@ -51,13 +51,13 @@ hands it out once, as one exclusive slice for the life of the process, so a
 class driver never builds its own slice over a kernel-mapped address; a second
 call is refused, and a region shorter than `least` too.
 
-`tairix_drvrt::RtDriverHost` turns that grant table into the three traits a
-bus driver's `register()` consumes:
+`tairix_drvrt::RtDriverHost` turns that grant table into the traits a bus
+driver's `register()` and a device driver's bring-up consume:
 
 - **`MmioMapper`** — `map_window(phys_base, len)` finds the grant whose window
-  covers the request, maps that grant's whole window once with `mmio_map`
-  (caching the base so a window is never mapped twice, §2.16), and returns a
-  `RegisterWindow` at the in-window offset. For an outbound
+  covers the request, maps just that sub-region with `mmio_map` (caching the
+  base per offset so a window is never mapped twice, §2.16), and returns a
+  `RegisterWindow` over it. For an outbound
   `HwResourceKind::BusWindow` grant it translates the BAR's PCIe-bus address to
   the mapped CPU window — the bridge's bus→CPU translation (§18.1), performed
   here rather than in the architecture-neutral PCI walk.
@@ -74,6 +74,14 @@ bus driver's `register()` consumes:
   supplied by the architecture-aware driver process, never synthesised here, so
   the crate stays platform-neutral (§2.20). It deliberately provides no virtio
   queue-completion wait: the host serves a polling / `irq_wait`-driven driver.
+- **`MemoryMapper`** — `map_memory(region, offset, len, caching)` maps a part
+  of a granted `HwResourceKind::MemoryRegion` with `mmio_map`, with the
+  `RegionCaching` its device states and afresh rather than through the
+  register windows' cache, since a part is its caller's to hand back, and
+  returns a `MemoryWindow` over it;
+  `unmap_memory` hands it back with `mmio_unmap`. A part the kernel will not
+  unmap comes back still mapped, so its bytes are never reused while a
+  mapping reaches them.
 Beyond the three traits it also surfaces the facts a node carried alongside
 its handles. `irq_line()` reports the granted interrupt line the driver binds
 and parks on, and `link_address()` the firmware-published link-layer address a
@@ -199,30 +207,38 @@ task's handle resolves to nothing kernel-side and is refused. The up-front
 capability check fails fast without a round trip — the kernel re-checks
 regardless (§5.4).
 
-## Fail-closed and allocation-free
+## Fail-closed and nearly allocation-free
 
-`no_std` and allocation-free (the grant table is a fixed `MAX_GRANTS` array),
-so a driver process works before the userland heap is available
-(`plans/SPAWN.md` `SP5b`). A missing capability, an unmappable request, a
-window no grant covers, an over-long grant table, or a kernel refusal returns
-an error — never a fabricated pointer or a panic (§2.9). A carve's slab frees
-itself on drop through `dma_free`, so a running driver's footprint stays
+`no_std`, and the grant table is a fixed `MAX_GRANTS` array. The one thing the
+host allocates is the record a DMA carve's free goes through — the grant it was
+carved under and the `DmaRelease` seam — made once and shared by every slab
+carved, each holding a strong reference. A slab therefore reaches nothing of
+the host that carved it: the host may be moved, borrowed mutably or dropped,
+and the slab dropped on another thread, and its free still goes out once. A
+missing capability, an unmappable request, a window no grant covers, an
+over-long grant table, a release record the heap refuses, or a kernel refusal
+returns an error — never a fabricated pointer or a panic (§2.9). A carve's slab
+frees itself on drop through `dma_free`, so a running driver's footprint stays
 bounded; a driver drops a slab only once its device can no longer reach it, and
 one it cannot prove released is withheld (`DmaSlab::withhold`) and stays mapped
 until the driver exits, when the kernel quarantines it (`LiveSpace::drop`).
 
 ## Testing seam
 
-The syscalls (`resource_grants`, `mmio_map`, `dma_alloc`, `irq_bind` /
-`irq_wait`, `ipc_call`, and `hw_emit_node`) live behind the `GrantSyscalls`
+The syscalls (`resource_grants`, `mmio_map`, `mmio_unmap`, `dma_alloc`,
+`irq_bind` / `irq_wait`, `ipc_call`, and `hw_emit_node`) live behind the
+`GrantSyscalls`
 trait, so the host's grant delivery decode, grant resolution, bus→CPU
 translation, map-once caching, node publishing, and every fail-closed path are
 unit-tested on the host without a kernel (§7). Production driver processes use
 `RtGrantSyscalls`, which forwards to the matching `tairix_rt` wrappers — the
-one syscall trap (§2.2). The trait is `unsafe` to implement: the host builds
-windows, slabs and the shared buffer from the addresses it answers, so an
-implementation promises each is a live mapping of the length asked for, this
-process's alone.
+one syscall trap (§2.2). The trait is `unsafe` to implement: a mapping call
+answers its base as a pointer the host builds windows, slabs and the shared
+buffer from, so an implementation promises each is valid for the length asked
+for, this process's alone, until it is handed back. The kernel's integer becomes
+a pointer in `RtGrantSyscalls` alone; the tests' mock answers pointers into its
+own buffers, so the miri stage interprets every window, slab and slice the host
+forms under strict provenance.
 
 ## Stability
 

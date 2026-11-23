@@ -60,21 +60,12 @@ pub fn decimal_in(n: u32, width: usize) -> Vec<u8> {
     out
 }
 
-/// `value`'s last `out.len()` hexadecimal digits, upper case, into `out`.
-pub fn hex(value: u32, out: &mut [u8]) {
-    for (place, slot) in out.iter_mut().rev().enumerate() {
-        let shift = u32::try_from(place * 4).unwrap_or(u32::MAX);
-        let digit = value.checked_shr(shift).unwrap_or(0) & 0xF;
-        *slot = b"0123456789ABCDEF"[usize::try_from(digit).unwrap_or(0)];
-    }
-}
-
 /// A volume's serial number as DOS shows it: `1A2B-3C4D`.
 #[must_use]
 pub fn serial_text(serial: u32) -> [u8; 9] {
     let mut out = *b"0000-0000";
-    hex(serial >> 16, &mut out[..4]);
-    hex(serial, &mut out[5..]);
+    tairix_util::hex::fill_upper(&mut out[..4], u64::from(serial >> 16));
+    tairix_util::hex::fill_upper(&mut out[5..], u64::from(serial));
     out
 }
 
@@ -92,18 +83,6 @@ pub fn serial_line(serial: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn hex_writes_the_last_digits_the_slot_holds() {
-        let mut out = [0u8; 4];
-        hex(0x1234_ABCD, &mut out);
-        assert_eq!(&out, b"ABCD");
-        let mut wide = [0u8; 10];
-        hex(0xFFFF_FFFF, &mut wide);
-        assert_eq!(&wide, b"00FFFFFFFF");
-        let mut none: [u8; 0] = [];
-        hex(1, &mut none);
-    }
 
     #[test]
     fn a_serial_number_is_two_words_of_hex() {

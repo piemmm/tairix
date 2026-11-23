@@ -32,24 +32,6 @@ fn shown(pattern: &Pattern, mode: &DisplayMode, x: u32, y: u32) -> Pixel {
 }
 
 #[test]
-fn the_command_line_takes_the_help_switches_and_nothing_else() {
-    assert_eq!(parse(&[]), Ok(Command::Run));
-    for help in ["-h", "-?", "--help"] {
-        assert_eq!(parse(&[help]), Ok(Command::Help), "{help}");
-        assert_eq!(
-            parse(&["now", help]),
-            Ok(Command::Help),
-            "{help} after an operand"
-        );
-    }
-    assert_eq!(
-        parse(&["now"]),
-        Err(BlendcheckError::ExtraOperand(String::from("now")))
-    );
-    assert!(matches!(parse(&["-q"]), Err(BlendcheckError::Option(_))));
-}
-
-#[test]
 fn the_panes_stack_down_the_screen_with_the_bare_ramp_around_each() {
     let output = screen();
     let pattern = pattern(&output).expect("a pattern");

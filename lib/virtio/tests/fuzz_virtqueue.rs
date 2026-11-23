@@ -28,6 +28,13 @@
 //!    descriptors of every held chain is exactly the queue size — no
 //!    descriptor is lost, and none is handed out twice.
 //!
+//! A second harness drives [`TicketQueue`], which carries many requests at
+//! once, through honest answers in any order mixed with arbitrary ones: every
+//! answer it accepts is exactly one outstanding request's, an answered
+//! request stays answered until retired, only an answered request retires,
+//! and the free descriptors plus those of every request still out are the
+//! queue's size.
+//!
 //! ## Wall-clock budget
 //!
 //! A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a fresh,
@@ -38,9 +45,11 @@
 
 use std::collections::BTreeMap;
 
+use tairix_abi::DriverError;
 use tairix_fuzzseed::Prng;
 use tairix_virtio::{
-    ChainSegment, Direction, DmaHost, DmaSlab, MockHost, MockTransport, SplitQueue, VirtioError,
+    ChainSegment, ChainView, Direction, DmaHost, DmaSlab, MockHost, MockTransport, SplitQueue,
+    Ticket, TicketQueue, VirtioError,
 };
 
 /// Interpreted, a sweep samples the paths for undefined behaviour rather than
@@ -166,4 +175,143 @@ fn fuzz_poll_used_is_fail_closed_against_a_hostile_device() {
 
     assert!(rejected > 0, "fuzz never exercised the reject path");
     assert!(accepted > 0, "fuzz never exercised the accept path");
+}
+
+/// One request the harness published: its ticket, its chain's length, and
+/// what the queue last said of its answer.
+struct Published {
+    ticket: Ticket,
+    descriptors: u16,
+    answered: Option<u32>,
+}
+
+/// A chain of `len` segments over `region`, its last the device's to write.
+fn chain_of(region: &DmaSlab, len: u16) -> Vec<ChainSegment> {
+    (0..len)
+        .map(|i| ChainSegment {
+            device_addr: region.device_addr(),
+            len: 8,
+            direction: if i + 1 == len {
+                Direction::DeviceWrite
+            } else {
+                Direction::DeviceRead
+            },
+        })
+        .collect()
+}
+
+/// Hold `q` to what it said of every request in `live`: an answer never
+/// changes or reverts, the requests out are exactly the unanswered ones, and
+/// every descriptor is free or in exactly one of them.
+fn assert_accounted(q: &TicketQueue, live: &mut [Published]) {
+    let mut out = 0u16;
+    let mut out_descriptors = 0u16;
+    for request in live {
+        let now = q
+            .answer(request.ticket)
+            .expect("a live ticket names its request");
+        if let Some(said) = request.answered {
+            assert_eq!(now, Some(said), "an answer never changes or reverts");
+        }
+        request.answered = now;
+        if now.is_none() {
+            out += 1;
+            out_descriptors += request.descriptors;
+        }
+    }
+    assert_eq!(
+        q.out(),
+        out,
+        "the requests out are exactly the unanswered ones"
+    );
+    assert_eq!(
+        q.free_descriptors() + out_descriptors,
+        QUEUE_SIZE,
+        "every descriptor is free or in exactly one unanswered request"
+    );
+}
+
+#[test]
+fn fuzz_ticket_answers_are_fail_closed_against_a_hostile_device() {
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "fuzz_ticket_answers_are_fail_closed_against_a_hostile_device",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let host = &MockHost::new();
+    let mut t = MockTransport::new(1, QUEUE_SIZE, 0, 0);
+    t.reach(host);
+    t.set_synchronous_notify(true);
+    t.install_holding_shim(0, Box::new(|_: &mut ChainView<'_>| Ok(None)));
+    let mut q = TicketQueue::new(
+        SplitQueue::new(&mut t, host, 0, QUEUE_SIZE, MAX_CHAIN).expect("queue setup"),
+    )
+    .expect("bookkeeping");
+    let region: DmaSlab = host.alloc_dma_zeroed(64).expect("dma");
+    let mut live: Vec<Published> = Vec::new();
+    let (mut honest, mut refused) = (0u64, 0u64);
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..SMOKE_ITERATIONS {
+            match rng.next_u64() % 4 {
+                0 => {
+                    let len = 1 + u16::try_from(rng.next_u64() % u64::from(MAX_CHAIN)).unwrap_or(0);
+                    match q.publish(&chain_of(&region, len)) {
+                        Ok(ticket) => {
+                            q.kick(&mut t);
+                            live.push(Published {
+                                ticket,
+                                descriptors: len,
+                                answered: None,
+                            });
+                        }
+                        Err(DriverError::Busy) => {}
+                        Err(other) => panic!("unexpected publish refusal {other:?}"),
+                    }
+                }
+                1 if t.held(0) > 0 => {
+                    let at = usize::try_from(rng.next_u64()).unwrap_or(0) % t.held(0);
+                    let written = rng.next_u32();
+                    // A chain the device lied about is answered again here,
+                    // which the queue must refuse or give to whoever holds
+                    // the head now.
+                    if t.answer_held(0, at, |_| written).is_ok() {
+                        honest += 1;
+                    }
+                }
+                2 => t
+                    .publish_raw_used(0, rng.next_u16(), rng.next_u32())
+                    .expect("queue programmed"),
+                _ if !live.is_empty() => {
+                    let at = usize::try_from(rng.next_u64()).unwrap_or(0) % live.len();
+                    let request = &live[at];
+                    match (q.retire(request.ticket), request.answered) {
+                        (Ok(written), Some(said)) => {
+                            assert_eq!(written, said, "a retired answer is the one it gave");
+                            live.swap_remove(at);
+                        }
+                        (Err(DriverError::Busy), None) => {}
+                        (outcome, said) => {
+                            panic!("retire answered {outcome:?} for a request answered {said:?}")
+                        }
+                    }
+                }
+                _ => {}
+            }
+            // Drain until the ring is empty: each refusal skips one bogus
+            // answer and keeps every one before it.
+            loop {
+                match q.drain() {
+                    Ok(_) => break,
+                    Err(DriverError::DeviceFault) => refused += 1,
+                    Err(other) => panic!("unexpected drain refusal {other:?}"),
+                }
+            }
+            assert_accounted(&q, &mut live);
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+    assert!(honest > 0, "fuzz never answered a request honestly");
+    assert!(refused > 0, "fuzz never exercised the refusal path");
 }

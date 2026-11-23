@@ -53,3 +53,45 @@ fn every_sprite_error_has_a_message_of_its_own() {
         );
     }
 }
+
+#[test]
+fn a_sprite_holding_256_palette_entries_or_more_has_a_full_palette() {
+    let held = |entries: u32| {
+        let image =
+            tairix_image::SPRITE_HEADER_LEN + entries * tairix_image::SPRITE_PALETTE_ENTRY_LEN;
+        header::Sprite {
+            at: 0,
+            next: image,
+            name: tairix_image::SpriteName::spelt_by(b"s"),
+            words_less_one: 0,
+            rows_less_one: 0,
+            first_bit: 0,
+            last_bit: 31,
+            image,
+            mask: image,
+            mode: 28,
+        }
+        .full_palette()
+    };
+    assert_eq!(
+        [0, 64, 255, 256, 300].map(held),
+        [false, false, false, true, true]
+    );
+}
+
+#[test]
+fn a_numbered_mode_s_sprite_is_drawn_at_its_mode_s_eigen_factors() {
+    assert_eq!(format::drawn_eig(12), (1, 2));
+    assert_eq!(format::drawn_eig(13), (2, 2));
+    assert_eq!(format::drawn_eig(28), (1, 1));
+    let hundred_dpi = 1 | 100 << 1 | 100 << 14 | 6 << 27;
+    assert_eq!(
+        format::drawn_eig(hundred_dpi),
+        (1, 1),
+        "the nearest factor not finer"
+    );
+    assert_eq!(
+        format::variable(hundred_dpi, tairix_vdu::mode::var::X_EIG),
+        None
+    );
+}

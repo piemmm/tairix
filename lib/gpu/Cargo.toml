@@ -11,6 +11,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The served device on a loopback channel, journalling what its clients send,
+# for the fuzz harness; never part of a production build.
+test-support = []
+
 [dependencies]
 # `Duration64` deadlines and the `MonotonicClock` seam they are read from.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
@@ -40,6 +45,8 @@ tairix-spirv = { path = "../spirv", version = "=0.0.0" }
 tairix-util = { path = "../util", version = "=0.0.0" }
 
 [dev-dependencies]
+# Itself with its loopback served device, which the served fuzz harness drives.
+tairix-gpu = { path = ".", version = "=0.0.0", features = ["test-support"] }
 # The host's syscall seam, through which a test sees each wake a lock or a
 # notification asks of the kernel on its thread.
 tairix-abi-trap = { path = "../abi-trap", version = "=0.0.0", features = ["host-seam"] }

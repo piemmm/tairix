@@ -6,7 +6,8 @@ use alloc::vec::Vec;
 
 use crate::backend::Backend;
 use crate::binding::{BindSet, BindSetState};
-use crate::device::{owned, CommandBuffer};
+use crate::device::CommandBuffer;
+use crate::host::owned;
 use crate::image::{BufferImageCopy, ClearValue, ImageCopy, ImageRange};
 use crate::info::{BufferUsage, DeviceInfo, QueueCapabilities};
 use crate::memory::Charge;
@@ -18,7 +19,8 @@ use crate::pass::{PassRecord, PassWork};
 use crate::pipeline::ComputePipelineState;
 use crate::resource::ImageState;
 use crate::transfer::{self, Direction};
-use crate::{Error, MAX_COPY_REGIONS, MAX_UPDATE_BYTES};
+use crate::wire::{put_key, take_key, Reader, Wire, Writer};
+use crate::{Error, MAX_COPY_REGIONS, MAX_DISPATCH_SETS, MAX_PUSH_BYTES, MAX_UPDATE_BYTES};
 
 /// One span a copy moves: `size` bytes from `src_offset` in its source buffer
 /// to `dst_offset` in its destination, each a whole number of words.
@@ -126,6 +128,92 @@ pub(crate) enum Count {
     Indirect { buffer: BufferKey, offset: u64 },
 }
 
+impl Wire for Count {
+    fn put(&self, writer: &mut Writer<'_>) -> Result<(), Error> {
+        match *self {
+            Self::Direct(groups) => {
+                false.put(writer)?;
+                groups.put(writer)
+            }
+            Self::Indirect { buffer, offset } => {
+                true.put(writer)?;
+                put_key(writer, buffer)?;
+                offset.put(writer)
+            }
+        }
+    }
+
+    fn take(reader: &mut Reader<'_>) -> Result<Self, Error> {
+        Ok(if bool::take(reader)? {
+            Self::Indirect {
+                buffer: take_key(reader)?,
+                offset: Wire::take(reader)?,
+            }
+        } else {
+            Self::Direct(Wire::take(reader)?)
+        })
+    }
+}
+
+impl DispatchRecord {
+    pub(crate) fn put(&self, writer: &mut Writer<'_>) -> Result<(), Error> {
+        put_key(writer, self.pipeline)?;
+        writer.list(&self.sets, |writer, &set| put_key(writer, set))?;
+        put_push(writer, self.push.as_deref(), self.push_bytes)?;
+        self.groups.put(writer)
+    }
+
+    pub(crate) fn take(reader: &mut Reader<'_>) -> Result<Self, Error> {
+        let pipeline = take_key(reader)?;
+        let sets = reader.list(MAX_DISPATCH_SETS, take_key)?;
+        let (push, push_bytes) = take_push(reader)?;
+        Ok(Self {
+            pipeline,
+            sets,
+            push,
+            push_bytes,
+            groups: Wire::take(reader)?,
+        })
+    }
+}
+
+/// Push constants as recorded: their length in bytes, and their whole words.
+pub(crate) fn put_push(
+    writer: &mut Writer<'_>,
+    words: Option<&Vec<u32>>,
+    bytes: usize,
+) -> Result<(), Error> {
+    u32::try_from(bytes)
+        .map_err(|_| Error::TooMany)?
+        .put(writer)?;
+    writer.list(words.map_or(&[][..], Vec::as_slice), |writer, word| {
+        word.put(writer)
+    })
+}
+
+/// Push constants as recorded: their whole words, shared by every submission
+/// of them, and their length in bytes.
+pub(crate) type Push = (Option<Arc<Vec<u32>>>, usize);
+
+/// Push constants as [`push_words`] decodes them from their bytes: the words
+/// must be every whole word of the length.
+pub(crate) fn take_push(reader: &mut Reader<'_>) -> Result<Push, Error> {
+    let bytes = usize::try_from(u32::take(reader)?).map_err(|_| Error::Malformed)?;
+    if bytes > MAX_PUSH_BYTES {
+        return Err(Error::Malformed);
+    }
+    let words = reader.list(MAX_PUSH_BYTES / 4, u32::take)?;
+    if words.len() != bytes / 4 {
+        return Err(Error::Malformed);
+    }
+    let push = if words.is_empty() {
+        None
+    } else {
+        Some(crate::shared(words)?)
+    };
+    Ok((push, bytes))
+}
+
 impl Command {
     /// The work a queue's family must run to take it.
     pub(crate) const fn needs(&self) -> QueueCapabilities {
@@ -174,7 +262,7 @@ pub(crate) fn set_keys(
     let mut keys = Vec::new();
     keys.try_reserve_exact(sets.len()).map_err(exhausted)?;
     for set in sets {
-        owned(&set.shared, set.context, &buffer.shared, buffer.context)?;
+        owned(&set.host, set.context, &buffer.host, buffer.context)?;
         keys.push(set.key);
     }
     Ok(keys)
@@ -197,11 +285,14 @@ pub(crate) fn push_words(bytes: &[u8]) -> Result<Option<Arc<Vec<u32>>>, Error> {
 }
 
 /// One span of a resolved copy, by offset into the memories themselves.
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct Span {
-    pub(crate) src: u64,
-    pub(crate) dst: u64,
-    pub(crate) len: u64,
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CopySpan {
+    /// Where it is read in the source memory.
+    pub src: u64,
+    /// Where it is written in the destination memory.
+    pub dst: u64,
+    /// Its bytes.
+    pub len: u64,
 }
 
 /// A command whose buffers resolved and whose every range was proved within
@@ -211,7 +302,7 @@ pub(crate) enum Op<B: Backend> {
     Copy {
         src: Arc<B::Memory>,
         dst: Arc<B::Memory>,
-        spans: Vec<Span>,
+        spans: Vec<CopySpan>,
     },
     Fill {
         dst: Arc<B::Memory>,
@@ -369,7 +460,7 @@ fn resolve_one<B: Backend>(
                 .try_reserve_exact(regions.len())
                 .map_err(|_| Error::OutOfMemory)?;
             for region in regions {
-                let span = Span {
+                let span = CopySpan {
                     src: within(src, region.src_offset, region.size)?,
                     dst: within(dst, region.dst_offset, region.size)?,
                     len: region.size,
@@ -532,7 +623,7 @@ fn dispatch<B: Backend>(
 /// Refuse a copy writing any byte twice, or, within one memory, writing a
 /// byte it also reads: either would make what lands depend on the order the
 /// spans run in.
-fn refuse_overlap(spans: &[Span], one_memory: bool) -> Result<(), Error> {
+fn refuse_overlap(spans: &[CopySpan], one_memory: bool) -> Result<(), Error> {
     if let [only] = spans {
         let apart = only.dst + only.len <= only.src || only.src + only.len <= only.dst;
         return if !one_memory || apart {

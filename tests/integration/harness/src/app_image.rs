@@ -1613,6 +1613,7 @@ mod tests {
         "flock",
         "fontd",
         "fstree",
+        "gpucheck",
         "greeter",
         "groupadd",
         "groupdel",

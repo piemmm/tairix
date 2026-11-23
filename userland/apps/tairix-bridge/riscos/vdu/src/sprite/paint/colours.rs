@@ -25,12 +25,14 @@ use alloc::vec::Vec;
 
 use tairix_colour::Rgb;
 use tairix_riscos_kernel::os::{Entry, Fail, Os, Regs};
+use tairix_vdu::palette::default_256;
 
 use super::super::extend::State;
+use super::super::format::Pixels;
 use super::super::{NO_MEMORY, TABLE_REQUIRED};
-use super::source::{Source, Transparency};
-use super::PlotFlags;
-use crate::colour::Direct;
+use super::source::{Checked, Source, Transparency};
+use super::{Destination, PlotFlags};
+use crate::colour::{internal, Direct};
 use crate::colourtrans::palettes;
 use crate::inverse::{self, fifteen, CELLS, GUARD};
 use crate::mode::Format;
@@ -106,7 +108,11 @@ pub(crate) struct Converted {
 }
 
 impl Converted {
-    /// A plot of `source` on `destination` with `flags` and R7 `table`.
+    /// A plot of `source` on `destination` with `flags` and R7 `table`, and
+    /// the destination as it stands after. Making it may run guest code — the
+    /// colour mapping, a claimant of `PaletteV`, a module asked about a mode —
+    /// which may move the destination, or leave it in another form, onto
+    /// which the plot draws nothing.
     ///
     /// # Errors
     ///
@@ -114,44 +120,93 @@ impl Converted {
     pub(crate) fn of(
         os: &mut Os<'_>,
         source: &Source,
-        destination: &Format,
+        destination: &Destination,
         flags: PlotFlags,
         table: u32,
-    ) -> Result<Self, Fail> {
-        let mapped = flags.mapping() && !source.pixels.paletted();
-        let palettised = if !destination.direct() && (blends(source, flags) || mapped) {
+    ) -> Result<(Self, Destination), Fail> {
+        let format = &destination.format;
+        let mapped = mapped(&source.pixels, flags);
+        let palettised = if !format.direct() && (blends(source, flags) || mapped) {
             Palettised::now(os)?
         } else {
             None
         };
-        let conversion =
-            Conversion::of(os, source, destination, palettised.as_ref(), flags, table)?;
-        Ok(Self {
-            conversion,
-            palettised,
-        })
+        let conversion = Conversion::of(os, source, format, palettised.as_ref(), flags, table)?;
+        Self::after(os, conversion, palettised, destination)
     }
 
-    /// A picture's plot on `destination`, through the colour mapping
+    /// As [`Converted::of`], a picture's plot through the colour mapping
     /// descriptor at `mapping` where one is given.
     pub(crate) fn of_picture(
         os: &mut Os<'_>,
         source: &Source,
-        destination: &Format,
+        destination: &Destination,
         mapping: Option<u32>,
-    ) -> Result<Self, Fail> {
-        let palettised = if destination.direct() {
+    ) -> Result<(Self, Destination), Fail> {
+        let format = &destination.format;
+        let palettised = if format.direct() {
             None
         } else {
             Palettised::now(os)?
         };
-        let conversion =
-            Conversion::of_picture(os, source, destination, palettised.as_ref(), mapping)?;
-        Ok(Self {
+        let conversion = Conversion::of_picture(os, source, format, palettised.as_ref(), mapping)?;
+        Self::after(os, conversion, palettised, destination)
+    }
+
+    /// `conversion` made for `before`, and the destination as it stands now:
+    /// nothing drawn where its pixels are no longer those it was made for.
+    fn after(
+        os: &mut Os<'_>,
+        conversion: Conversion,
+        palettised: Option<Palettised>,
+        before: &Destination,
+    ) -> Result<(Self, Destination), Fail> {
+        let now = Destination::now(os)?;
+        let conversion = if now.format.same_pixels(&before.format) {
+            conversion
+        } else {
+            Conversion::Nothing
+        };
+        let converted = Self {
             conversion,
             palettised,
-        })
+        };
+        Ok((converted, now))
     }
+
+    /// Whether the plot draws anything.
+    pub(crate) const fn draws(&self) -> bool {
+        !matches!(self.conversion, Conversion::Nothing)
+    }
+}
+
+/// The sprite `checked` turned into `destination`'s pixels with `flags` and
+/// R7 `table` before any of its rows are read but a mapped plot's, every one
+/// of which the mapping is given: the sprite as read, the conversion, and the
+/// destination as the guest code making it left it, which the rows to read
+/// are chosen against.
+pub(crate) fn converted_first(
+    os: &mut Os<'_>,
+    checked: &Checked<'_>,
+    destination: &Destination,
+    flags: PlotFlags,
+    table: u32,
+) -> Result<(Source, Converted, Destination), Fail> {
+    let rows = if mapped(&checked.pixels, flags) {
+        0..checked.height
+    } else {
+        0..0
+    };
+    let source = checked.coloured(os, rows)?;
+    let (converted, destination) = Converted::of(os, &source, destination, flags, table)?;
+    Ok((source, converted, destination))
+}
+
+/// Whether a plot of a sprite of `pixels` with `flags` takes its colours
+/// through the guest's colour mapping: every colour the sprite holds, so
+/// every row is read before it.
+pub(crate) const fn mapped(pixels: &Pixels, flags: PlotFlags) -> bool {
+    flags.mapping() && !pixels.paletted()
 }
 
 /// Whether a plot of `source` with `flags` blends: translucent, or alpha
@@ -177,20 +232,16 @@ pub(crate) enum Conversion {
     Bytes(Vec<u8>),
     /// The destination's pixel from a table of words.
     Words(Vec<u32>),
-    /// A deep destination's pixel from a table of colours in colour-number
-    /// form.
-    Numbers(Vec<u8>, Direct),
-    /// A deep destination's pixel from the sprite's palette.
-    Palette(Vec<[u32; 3]>, Direct),
     /// One direct-colour form's pixel as another's.
     Direct(Direct, Direct),
     /// A palettised destination's colour number from a deep pixel's five-bit
     /// channels through a 32K table.
-    ThirtyTwoK(Vec<u8>, Direct),
+    ThirtyTwoK(Rc<Vec<u8>>, Direct),
     /// The destination's pixel for each colour a deep sprite or a picture
-    /// holds, through a colour mapping or a 32K table, ordered by the
-    /// source's pixel.
-    Mapped(Vec<(u32, u32)>),
+    /// holds, through a colour mapping, ordered by the source's pixel and
+    /// keyed by the bits the second word keeps: a pixel's colour, not its
+    /// alpha or spare bits.
+    Mapped(Vec<(u32, u32)>, u32),
     /// Nothing drawn.
     Nothing,
 }
@@ -219,13 +270,22 @@ impl Conversion {
                     return Err(os.error(TABLE_REQUIRED));
                 }
                 if flags.table_ignorable() && source.palette.len() == entries {
-                    let colours = source.palette.iter().map(|&word| rgb(word)).collect();
-                    return Ok(Self::Palette(colours, direct));
+                    let mut pixels = Vec::new();
+                    if pixels.try_reserve_exact(entries).is_err() {
+                        return Err(os.error(NO_MEMORY));
+                    }
+                    pixels.extend(
+                        source
+                            .palette
+                            .iter()
+                            .map(|&word| direct.pack(Rgb::from_riscos_word(word).to_array())),
+                    );
+                    return Ok(Self::Words(pixels));
                 }
                 if flags.wide_table() {
                     return Ok(Self::Words(words(os, table, entries)?));
                 }
-                return Ok(Self::Numbers(os.read_vec(table, entries)?, direct));
+                return Ok(Self::Words(numbered(os, table, entries, direct)?));
             }
             if table == 0 {
                 return if from == to {
@@ -236,7 +296,7 @@ impl Conversion {
             }
             return Ok(Self::Bytes(os.read_vec(table, entries)?));
         }
-        if flags.mapping() {
+        if mapped(&source.pixels, flags) {
             let colours = distinct_colours(os, source)?;
             let mapped = match (palettised, destination.direct()) {
                 (Some(palettised), _) => map_colours(os, source, colours, table, |rgb| {
@@ -245,7 +305,7 @@ impl Conversion {
                 (None, true) => map_colours(os, source, colours, table, |rgb| direct.pack(rgb))?,
                 (None, false) => return Ok(Self::Nothing),
             };
-            return Ok(Self::Mapped(mapped));
+            return Ok(Self::Mapped(mapped, source.direct.colour_bits()));
         }
         if destination.direct() {
             return Ok(Self::Direct(source.direct, direct));
@@ -257,7 +317,10 @@ impl Conversion {
             return Ok(Self::Nothing);
         }
         let at = os.read_word(table.wrapping_add(4))?;
-        Ok(Self::ThirtyTwoK(os.read_vec(at, CELLS)?, source.direct))
+        Ok(Self::ThirtyTwoK(
+            Rc::new(os.read_vec(at, CELLS)?),
+            source.direct,
+        ))
     }
 
     /// The destination's pixel for colour `colour`, if one is drawn.
@@ -267,12 +330,6 @@ impl Conversion {
             Self::Raw => Some(colour),
             Self::Bytes(table) => table.get(index).map(|&b| u32::from(b)),
             Self::Words(table) => table.get(index).copied(),
-            Self::Numbers(table, direct) => {
-                table.get(index).map(|&e| direct.pack_nibbles(numbers(e)))
-            }
-            Self::Palette(colours, direct) => colours
-                .get(index)
-                .map(|&c| direct.pack(c.map(|v| v.to_le_bytes()[0]))),
             Self::Direct(from, to) => {
                 Some(to.pack(from.unpack_replicated(colour).map(|v| v.to_le_bytes()[0])))
             }
@@ -280,8 +337,8 @@ impl Conversion {
                 let [r, g, b] = from.unpack_replicated(colour).map(|v| v.to_le_bytes()[0]);
                 table.get(fifteen(Rgb::new(r, g, b))).map(|&b| u32::from(b))
             }
-            Self::Mapped(colours) => colours
-                .binary_search_by_key(&colour, |&(from, _)| from)
+            Self::Mapped(colours, kept) => colours
+                .binary_search_by_key(&(colour & kept), |&(from, _)| from)
                 .ok()
                 .and_then(|at| colours.get(at))
                 .map(|&(_, to)| to),
@@ -303,45 +360,42 @@ impl Conversion {
         mapping: Option<u32>,
     ) -> Result<Self, Fail> {
         let direct = Direct::of(destination);
-        match (palettised, destination.direct()) {
-            (None, false) => return Ok(Self::Nothing),
-            (None, true) if mapping.is_none() => return Ok(Self::Direct(source.direct, direct)),
-            _ => {}
-        }
+        let descriptor = match (palettised, destination.direct(), mapping) {
+            (None, false, _) => return Ok(Self::Nothing),
+            (None, true, None) => return Ok(Self::Direct(source.direct, direct)),
+            // Each pixel found in the 32K table as it is drawn: no colour
+            // needs gathering where no descriptor maps them first.
+            (Some(palettised), _, None) => {
+                return Ok(Self::ThirtyTwoK(
+                    Rc::clone(&palettised.table),
+                    source.direct,
+                ));
+            }
+            (_, _, Some(descriptor)) => descriptor,
+        };
         let colours = distinct_colours(os, source)?;
         let to = |rgb: [u8; 3]| match palettised {
             Some(palettised) => palettised.number(Rgb::new(rgb[0], rgb[1], rgb[2])),
             None => direct.pack(rgb),
         };
-        let colours = match mapping {
-            Some(descriptor) => map_colours(os, source, colours, descriptor, to)?,
-            None => colours
-                .into_iter()
-                .map(|(from, _)| {
-                    (
-                        from,
-                        to(source
-                            .direct
-                            .unpack_replicated(from)
-                            .map(|v| v.to_le_bytes()[0])),
-                    )
-                })
-                .collect(),
-        };
-        Ok(Self::Mapped(colours))
+        let colours = map_colours(os, source, colours, descriptor, to)?;
+        Ok(Self::Mapped(colours, source.direct.colour_bits()))
     }
 }
 
-/// Each colour `source` holds, once, in order, with room for its pixel.
+/// Each colour the rows read of `source` hold, its colour's bits alone, once,
+/// in order, with room for its pixel.
 fn distinct_colours(os: &mut Os<'_>, source: &Source) -> Result<Vec<(u32, u32)>, Fail> {
+    let kept = source.direct.colour_bits();
     let mut colours = Vec::new();
-    let count =
-        usize::try_from(u64::from(source.width) * u64::from(source.height)).unwrap_or(usize::MAX);
+    let rows = source.rows();
+    let count = usize::try_from(u64::from(source.width) * u64::from(rows.end - rows.start))
+        .unwrap_or(usize::MAX);
     if colours.try_reserve_exact(count).is_err() {
         return Err(os.error(NO_MEMORY));
     }
-    for row in 0..source.height {
-        colours.extend((0..source.width).map(|x| (source.colour(x, row), 0)));
+    for row in rows {
+        colours.extend((0..source.width).map(|x| (source.colour(x, row) & kept, 0)));
     }
     colours.sort_unstable_by_key(|&(from, _)| from);
     colours.dedup_by_key(|&mut (from, _)| from);
@@ -361,40 +415,53 @@ fn map_colours(
     let function = os.read_word(descriptor.wrapping_add(4))?;
     let bits = os.caller_bits();
     for (from, onto) in &mut colours {
-        let [r, g, b] = source.direct.unpack_replicated(*from);
+        let [r, g, b] = source
+            .direct
+            .unpack_replicated(*from)
+            .map(|v| v.to_le_bytes()[0]);
         let mut regs = Regs::default();
-        regs.r[0] = (r << 8) | (g << 16) | (b << 24);
+        regs.r[0] = Rgb::new(r, g, b).riscos_word();
         regs.r[12] = workspace;
         os.call_routine(function, bits, Entry::Supervisor, &mut regs)?;
-        *onto = to(rgb(regs.r[0]).map(|v| v.to_le_bytes()[0]));
+        *onto = to(Rgb::from_riscos_word(regs.r[0]).to_array());
     }
     Ok(colours)
 }
 
-/// The four-bit red, green and blue a colour-number-form byte names: each
-/// channel's top two bits above the shared two of tint.
-const fn numbers(e: u8) -> [u32; 3] {
-    let tint = (e & 3) as u32;
-    [
-        e as u32 & 0xF,
-        ((e >> 4) & 3) as u32 * 4 + tint,
-        ((e >> 6) & 3) as u32 * 4 + tint,
-    ]
-}
-
-/// A palette word's red, green and blue.
-const fn rgb(word: u32) -> [u32; 3] {
-    [(word >> 8) & 0xFF, (word >> 16) & 0xFF, word >> 24]
+/// The `entries` bytes at `address`, each a colour number and its tint, as
+/// `direct`'s pixels: the default 256-colour palette's colours, widened as
+/// RISC OS 5 widens a colour number's.
+fn numbered(
+    os: &mut Os<'_>,
+    address: u32,
+    entries: usize,
+    direct: Direct,
+) -> Result<Vec<u32>, Fail> {
+    let bytes = os.read_vec(address, entries)?;
+    let mut pixels = Vec::new();
+    if pixels.try_reserve_exact(entries).is_err() {
+        return Err(os.error(NO_MEMORY));
+    }
+    pixels.extend(bytes.iter().map(|&number| {
+        let pixel = internal(u32::from(number >> 2), u32::from(number & 3) << 6);
+        direct.pack_nibbles(default_256(pixel).map(|channel| u32::from(channel >> 4)))
+    }));
+    Ok(pixels)
 }
 
 /// `entries` words from `address`.
 fn words(os: &mut Os<'_>, address: u32, entries: usize) -> Result<Vec<u32>, Fail> {
+    let bytes = os.read_vec(address, 4 * entries)?;
     let mut table = Vec::new();
     if table.try_reserve_exact(entries).is_err() {
         return Err(os.error(NO_MEMORY));
     }
-    for i in 0..entries {
-        table.push(os.read_word(address.wrapping_add(4 * u32::try_from(i).unwrap_or(0)))?);
-    }
+    table.extend(
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&word| u32::from_le_bytes(word)),
+    );
     Ok(table)
 }

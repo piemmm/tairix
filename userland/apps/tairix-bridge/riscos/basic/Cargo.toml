@@ -24,6 +24,8 @@ tairix-softfloat = { path = "../../../../../lib/softfloat", version = "=0.0.0" }
 tairix-openbasic = { path = "../../../../../lib/openbasic", version = "=0.0.0" }
 # The plot codes BASIC's graphics statements give.
 tairix-vdu = { path = "../../../../../lib/vdu", version = "=0.0.0" }
+# The fallible buffers a copy of BASIC's memory is made in.
+tairix-util = { path = "../../../../../lib/util", version = "=0.0.0" }
 
 [dev-dependencies]
 # The fuzz harness's seeded generator and budget.

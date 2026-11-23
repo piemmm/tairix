@@ -25,7 +25,7 @@ impl Machine<'_, '_> {
         self.skip_spaces()?;
         let start = self.ptr;
         self.skip_line()?;
-        let rest = self.os.read_vec(start, (self.ptr - start) as usize)?;
+        let rest = self.copied(start, (self.ptr - start) as usize)?;
         match pieces(&rest).next().map(|(_, piece)| piece) {
             Some(Piece::Word(name)) => match KEYWORDS.iter().find(|topic| topic.name == name) {
                 Some(topic) => self.help_lines(topic.text)?,

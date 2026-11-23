@@ -774,9 +774,13 @@ that lets it call into the PCI driver through `&dyn VirtioPciBus`:
 |----------------------------------------------|---------------------------------------|
 | `map_virtio_window(bdf, cfg_type, mapper)`   | `CAP_MMIO_MAP` (enforced by `mapper`). |
 | `notify_off_multiplier(bdf)`                 | Driver handle.                        |
+| `virtio_shared_memory(bdf, out)`             | Driver handle.                        |
 
 The `VIRTIO_PCI_CFG_*` constants name the four `cfg_type` discriminants
-(common `1`, notify `2`, ISR `3`, device `4`) the caller maps, and
+(common `1`, notify `2`, ISR `3`, device `4`) the caller maps, and the
+shared-memory one (`8`) `virtio_shared_memory` resolves: each region the
+function declares, as its span or the reason it is no memory a driver may
+map cacheable (see [Virtio transport](../drivers/virtio.md)), and
 `VIRTIO_PCI_VENDOR_ID` (`0x1AF4`) identifies a virtio function. The
 kernel's `provision_virtio_pci` walk (see
 [Bus drivers](../drivers/bus.md#ring-0-virtio-pci-walk)) enumerates

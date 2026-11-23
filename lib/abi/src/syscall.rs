@@ -491,12 +491,13 @@ impl SyscallNumber {
     /// its length in bytes. The kernel resolves the handle **against the
     /// calling task** (handle forgery is rejected exactly as
     /// [`SyscallNumber::IRQ_WAIT`] re-checks its binding),
-    /// confirms the grant names a memory window
-    /// ([`crate::hwtree::HwResourceKind::Mmio`] / `BusWindow`), confirms
-    /// `[offset, offset + len)` lies wholly inside that granted window, and
-    /// maps **only** that sub-region — caching disabled — into the caller's
-    /// own hardware-isolated address space, returning its base user virtual
-    /// address. A driver can therefore never synthesise a pointer to
+    /// confirms the grant names a window
+    /// ([`crate::hwtree::HwResourceKind::is_window`]), confirms
+    /// `[offset, offset + len)` lies wholly inside it, and maps **only** that
+    /// sub-region into the caller's own hardware-isolated address space,
+    /// returning its base user virtual address. The memory type follows the
+    /// grant: registers caching disabled, a scan-out surface as its policy
+    /// says, and a device's memory region write-back. A driver can therefore never synthesise a pointer to
     /// arbitrary physical memory: it maps a region inside one the kernel
     /// chose to grant it, and nothing more (no ambient authority).
     /// Mapping a sub-region (not the whole grant) is what lets a driver
@@ -3403,6 +3404,21 @@ impl SyscallNumber {
     /// one acts as its grantor. A descriptor on no volume — a pipe, a
     /// resource, the storage catalog — is [`Errno::NotSupported`].
     pub const FS_VOLUME_STATS: Self = Self(174);
+    /// Release a window [`SyscallNumber::MMIO_MAP`] mapped into the calling
+    /// driver, so a region larger than the driver's device window can be
+    /// used a part at a time.
+    ///
+    /// Arguments: `base: u64` — the base user virtual address `mmio_map`
+    /// returned. Returns `0`, or `-errno`. The kernel unmaps exactly the
+    /// window it recorded at that base in the **calling task's** own device
+    /// window, and no CPU reaches it once the call returns; the device's
+    /// memory is the device's, so nothing is freed. Needs **no capability**:
+    /// it only releases the caller's own mapping (the
+    /// [`SyscallNumber::SHM_UNMAP`] posture). A `base` that is not the base
+    /// of a live window of the caller fails closed with
+    /// [`crate::Errno::NotFound`]; a build with no map facility wired with
+    /// [`crate::Errno::NotImplemented`].
+    pub const MMIO_UNMAP: Self = Self(175);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -3729,6 +3745,7 @@ mod tests {
         assert_eq!(SyscallNumber::CODE_INSTALL.as_u16(), 172);
         assert_eq!(SyscallNumber::FS_SET_TIMES.as_u16(), 173);
         assert_eq!(SyscallNumber::FS_VOLUME_STATS.as_u16(), 174);
+        assert_eq!(SyscallNumber::MMIO_UNMAP.as_u16(), 175);
     }
 
     #[test]

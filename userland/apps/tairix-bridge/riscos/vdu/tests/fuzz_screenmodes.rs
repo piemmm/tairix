@@ -17,15 +17,10 @@
 
 mod common;
 
-use std::sync::LazyLock;
-
-use common::{answers, SELECTOR_AT};
+use common::{answers, MODULES, SELECTOR_AT};
 use tairix_fscopy::fixture::Tree;
 use tairix_fuzzseed::Prng;
-use tairix_riscos_filing::session::{
-    command, modules_with, session, Session, Setup, DISC, SLOT_BYTES,
-};
-use tairix_riscos_kernel::module::Builtin;
+use tairix_riscos_filing::session::{command, session, Session, Setup, DISC, SLOT_BYTES};
 use tairix_riscos_kernel::os::{Fail, Regs};
 use tairix_riscos_kernel::service::MODE_EXTENSION;
 use tairix_riscos_kernel::swi::os::{SCREEN_MODE, SERVICE_CALL};
@@ -37,7 +32,7 @@ const SMOKE_RUNS: u64 = 2;
 const FILES: usize = 8;
 const CALLS: usize = 80;
 /// ScreenModes' SWI chunk, every offset of which is called.
-const CHUNK: u32 = 0x4_87C0;
+use tairix_riscos_kernel::swi::chunk::SCREEN_MODES as CHUNK;
 /// A block in the slot an enumeration fills.
 const BLOCK: u32 = 0x1_0000;
 const BLOCK_BYTES: u32 = 0x1000;
@@ -72,9 +67,6 @@ const HOSTILE_VALUES: [&str; 10] = [
     "96,40,8,640,8,8,9",
     "&280",
 ];
-
-static MODULES: LazyLock<Vec<&'static Builtin>> =
-    LazyLock::new(|| modules_with(&[&tairix_riscos_vdu::MODULES]));
 
 /// A hostile monitor definition file.
 fn hostile_file(rng: &mut Prng) -> Vec<u8> {
@@ -211,7 +203,10 @@ fn call(session: &mut Session, rng: &mut Prng) {
         }
     };
     if let Err(Fail::Error(block)) = result {
-        let _ = session.kernel.os().read_word(block);
+        assert!(
+            session.kernel.os().read_word(block).is_ok(),
+            "the error block at {block:#x} can be read"
+        );
     }
 }
 

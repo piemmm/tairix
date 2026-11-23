@@ -95,3 +95,18 @@ fn a_mode_is_known_by_its_number_to_53() {
     assert_eq!(pick(54), None);
     assert_eq!(pick(u32::MAX), None);
 }
+
+#[test]
+fn a_value_s_low_bits_repeat_to_fill_their_total_and_no_further_than_a_word() {
+    use super::repeated;
+    assert_eq!(repeated(1, 1, 2), 0b11, "a doubled pixel");
+    assert_eq!(
+        repeated(0b1011, 2, 8),
+        0xFF,
+        "the bits past its width dropped"
+    );
+    assert_eq!(repeated(0xAB, 8, 64), 0xABAB_ABAB, "a word at most");
+    assert_eq!(repeated(0x1234_5678, 32, 32), 0x1234_5678);
+    assert_eq!(repeated(5, 0, 32), 0, "no bits");
+    assert_eq!(repeated(3, 2, 2), 3, "a field its own width");
+}

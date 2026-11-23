@@ -19,8 +19,6 @@ use crate::inverse::GUARD;
 /// `GenerateTable`'s flags, which `SelectTable` reads only for a sprite.
 /// RISC OS 5 ignores bit 1, the current palette for a sprite with none.
 mod flag {
-    /// R1 points at the sprite rather than naming it.
-    pub(super) const SPRITE_POINTER: u32 = 1;
     /// R6 and R7 give a transfer function for each source colour.
     pub(super) const TRANSFER: u32 = 1 << 2;
     /// A deep destination is given its pixels, two or four bytes each.
@@ -46,9 +44,6 @@ pub(crate) struct ThirtyTwoK {
 pub(super) fn select_table(os: &mut Os<'_>, regs: &mut Regs, generate: bool) -> Result<(), Fail> {
     let sprite = palettes::names_sprite(os, regs.r[0])?;
     let flags = if generate || sprite { regs.r[5] } else { 0 };
-    let Some(loadings) = loadings(os) else {
-        return Ok(());
-    };
     let source = source_colours(os, regs.r[0], regs.r[1], sprite.then_some(flags))?;
     let source = match source {
         Some(colours) if flags & flag::TRANSFER != 0 => {
@@ -57,6 +52,9 @@ pub(super) fn select_table(os: &mut Os<'_>, regs: &mut Regs, generate: bool) -> 
         other => other,
     };
     let destination = destination(os, regs.r[2], regs.r[3])?;
+    let Some(loadings) = loadings(os) else {
+        return Ok(());
+    };
     let table = match (source, destination.palette()) {
         (Some(colours), _) if flags >> flag::FORM_SHIFT == PHYSICAL_PALETTE => colours
             .iter()
@@ -85,7 +83,12 @@ pub(super) fn select_table(os: &mut Os<'_>, regs: &mut Regs, generate: bool) -> 
             .map(|&c| gcol_of_number(default_256_match(c, loadings, Look::Nearest)))
             .collect(),
         (None, Some(_)) => {
-            let at = thirty_two_k(os, &destination)?;
+            // A size asked is the descriptor's: no table built for it.
+            let at = if regs.r[4] == 0 {
+                0
+            } else {
+                thirty_two_k(os, &destination)?
+            };
             [GUARD, at, GUARD]
                 .iter()
                 .flat_map(|w| w.to_le_bytes())
@@ -128,7 +131,7 @@ fn give(os: &mut Os<'_>, regs: &mut Regs, table: &[u8]) -> Result<(), Fail> {
 /// the calibration.
 fn destination(os: &mut Os<'_>, mode: u32, palette: u32) -> Result<Against, Fail> {
     if (mode, palette) == (CURRENT, CURRENT) {
-        if let Some(against) = current(os)? {
+        if let Some((against, _)) = current(os)? {
             return Ok(against.clone());
         }
     }
@@ -147,7 +150,7 @@ fn source_colours(
     let against = match sprite {
         Some(flags) => sprite_colours(os, r0, r1, flags)?,
         None if (r0, r1) == (CURRENT, CURRENT) => {
-            return Ok(current(os)?.and_then(palette_colours));
+            return Ok(current(os)?.and_then(|(against, _)| palette_colours(against)));
         }
         None => palettes::source(os, r0, r1)?,
     };
@@ -161,14 +164,12 @@ fn palette_colours(against: &Against) -> Option<Vec<Rgb>> {
 
 /// A sprite's colours: its palette's, or without one its mode's default.
 fn sprite_colours(os: &mut Os<'_>, r0: u32, r1: u32, flags: u32) -> Result<Against, Fail> {
-    let sprite = palettes::sprite_of(os, r0, r1, flags & flag::SPRITE_POINTER != 0)?;
-    if sprite.named_entries() == 0 {
+    let sprite = palettes::sprite_of(os, r0, r1, flags & super::SPRITE_POINTER != 0)?;
+    let pairs = palettes::sprite_pairs(os, &sprite)?;
+    if pairs.is_empty() {
         return palettes::named(os, sprite.mode, 0);
     }
-    let words: Vec<u32> = palettes::sprite_pairs(os, &sprite)?
-        .iter()
-        .map(|&[first, _]| first)
-        .collect();
+    let words: Vec<u32> = pairs.iter().map(|&[first, _]| first).collect();
     palettes::of_mode_words(os, sprite.mode, &words)
 }
 
@@ -196,18 +197,30 @@ fn transferred(
 }
 
 /// The 32K table for `destination`: kept from an earlier call where one
-/// matches, else built into a block of its own.
+/// matches, else built into a block of its own, the table used longest ago
+/// given up past the tables kept.
 fn thirty_two_k(os: &mut Os<'_>, destination: &Against) -> Result<u32, Fail> {
     let colours = destination
         .palette()
         .map_or(&[][..], |(_, colours)| colours);
-    let key: Vec<u32> = colours.iter().map(|c| c.riscos_word()).collect();
-    if let Some(at) = os
-        .extension::<State>()
-        .and_then(|state| state.tables.iter().find(|t| t.key == key).map(|t| t.at))
-    {
+    let words = || colours.iter().map(|c| c.riscos_word());
+    if let Some(at) = os.extension::<State>().and_then(|state| {
+        let hit = state
+            .tables
+            .iter()
+            .position(|t| t.key.iter().copied().eq(words()))?;
+        let table = state.tables.remove(hit);
+        let at = table.at;
+        state.tables.push(table);
+        Some(at)
+    }) {
         return Ok(at);
     }
+    let mut key = Vec::new();
+    if key.try_reserve_exact(colours.len()).is_err() {
+        return Err(os.no_memory());
+    }
+    key.extend(words());
     let Some(table) = destination.inverse() else {
         return Err(os.no_memory());
     };
@@ -217,7 +230,7 @@ fn thirty_two_k(os: &mut Os<'_>, destination: &Against) -> Result<u32, Fail> {
         (state.tables.len() > KEPT_32K).then(|| state.tables.remove(0))
     });
     if let Some(old) = evicted {
-        os.rma_free(old.at)?;
+        os.free_rma_quietly(old.at);
     }
     Ok(at)
 }

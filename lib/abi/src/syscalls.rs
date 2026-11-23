@@ -755,12 +755,15 @@ pub const SYSCALLS: &[SyscallSpec] = &[
     SyscallSpec {
         number: SyscallNumber::MMIO_MAP,
         name: "mmio_map",
-        arg_count: 3,
+        arg_count: 4,
         args: [
+            // The grant handle, the offset and length within the grant, then
+            // the caching (`RegionCaching::arg`): what the device states for
+            // a memory region's part, `0` for every other grant.
             AbiType::Handle,
             AbiType::Len,
             AbiType::Len,
-            AbiType::Unit,
+            AbiType::U32,
             AbiType::Unit,
             AbiType::Unit,
         ],
@@ -4184,6 +4187,24 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // As `fs_stat`: the descriptor's backing decides the authority, a
         // descriptor the caller opened asking `CAP_FS_ACCESS` in the handler.
         // A pure observer, not audited.
+        required_capability: None,
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::MMIO_UNMAP,
+        name: "mmio_unmap",
+        arg_count: 1,
+        args: [
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The release half of `mmio_map`, in the `shm_unmap` posture: it only
+        // takes back a window of the caller's own and confers nothing.
         required_capability: None,
         audit: false,
     },

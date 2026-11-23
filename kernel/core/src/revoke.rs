@@ -148,9 +148,7 @@ impl Revoker<'_> {
                     let kept = self.withdraw_region(holder, space, resource.base());
                     outcome = outcome.and_then(|all| kept.map(|kept| all && kept));
                 }
-                Some(
-                    HwResourceKind::Mmio | HwResourceKind::BusWindow | HwResourceKind::Framebuffer,
-                ) => windows = true,
+                Some(kind) if kind.is_window() => windows = true,
                 _ => {}
             }
         }

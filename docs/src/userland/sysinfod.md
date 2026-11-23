@@ -91,6 +91,9 @@ ledger registry. See [Reported cache ledgers](#reported-cache-ledgers).
 | `GLOBAL_AUDIO_STREAMS`   | `CAP_SYSINFO_GLOBAL` | yes     | packed `StreamDescriptor`s          |
 | `NET_NEIGHBORS`          | `CAP_SYSINFO_HW`     | yes     | packed `NetNeighborRecord`s         |
 | `NET_ROUTES`             | `CAP_SYSINFO_GLOBAL` | yes     | packed `NetRouteRecord`s            |
+| `PLATFORM_COMPATIBLE`    | none                 | no      | `PlatformCompatible`                |
+| `VOLUME_REMOVALS`        | none                 | no      | packed `VolumeRemovalRecord`s       |
+| `GPU_DEVICES`            | none                 | no      | packed `GpuDeviceDescriptor`s       |
 
 `MEMORY_PRESSURE_BAND` and `MEMORY_TOTAL` are the two ungated, unaudited
 self-regulation reads a process makes about its own resource use: the
@@ -145,6 +148,13 @@ not the caller. It reads every stream under its own
 `CAP_SYSINFO_INTROSPECT` and keeps the caller's own for `SELF_AUDIO_STREAMS`,
 so the scope is decided here, once; `GLOBAL_AUDIO_STREAMS` hands over all of
 them to a caller holding `CAP_SYSINFO_GLOBAL`.
+
+`GPU_DEVICES` is read from the hardware tree the broker snapshots under its own
+`CAP_SYSINFO_HW`: one `GpuDeviceDescriptor` per node publishing the GPU
+channel, kept only where its endpoint is the GPU block's for the node it sits
+under — the one channel the kernel lets that node's driver bind — so no node
+lists another's endpoint. It is ungated because the channel is gated on
+`CAP_GPU` itself.
 
 The mount table is scoped here too. A volume another principal attached
 presented to itself alone (`MountRecord::private`) is listed

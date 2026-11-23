@@ -166,10 +166,14 @@ pub(crate) fn boot_with(
     }
 }
 
-/// A session on `layout` with a 64 KiB application slot of `bits` current.
+/// The bytes of a test's application slot.
+pub(crate) const SLOT_BYTES: u32 = 0x1_0000;
+
+/// A session on `layout` with an application slot of [`SLOT_BYTES`] of
+/// `bits` current.
 pub(crate) fn with_application(layout: &'static Layout, bits: Bits) -> Session {
     let mut session = boot(layout);
-    session.application(bits, 0x1_0000);
+    session.application(bits, SLOT_BYTES);
     session
 }
 

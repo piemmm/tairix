@@ -1,2 +1,2 @@
 # BlendTable's messages, in TAIRiX Bridge's own words.
-BadTranslucency:A translucency must lie between 0 and 255
+BadTranslucency:A translucency must lie between 0 and 256

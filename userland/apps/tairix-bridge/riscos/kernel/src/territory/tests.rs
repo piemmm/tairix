@@ -57,7 +57,7 @@ fn zone(name: &str) -> Zone<'static> {
 fn session_in(name: &str, (year, month, day, hour, minute): (u32, u32, u32, u32, u32)) -> Session {
     let time = calendar::time_of([0, 0, minute, hour, day, month, year]).expect("a time");
     let mut s = boot_in(&RISC_OS_5, zone(name), (time - MILLENNIUM) / 100);
-    s.application(Bits::Bit32, 0x1_0000);
+    s.application(Bits::Bit32, crate::testkit::SLOT_BYTES);
     s.capture_output();
     s
 }

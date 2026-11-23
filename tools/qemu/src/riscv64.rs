@@ -683,6 +683,7 @@ mod tests {
         spec.devices.display = crate::Display::VirtioGpu {
             width: 1024,
             height: 768,
+            venus: false,
         };
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         let pos = argv

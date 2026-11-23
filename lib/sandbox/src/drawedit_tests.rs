@@ -650,6 +650,29 @@ fn a_picture_to_place_comes_across_with_the_size_it_states() {
 }
 
 #[test]
+fn a_jpeg_to_place_comes_across_with_its_frame_as_it_states_it() {
+    let mut sandbox: TestSandbox = loopback();
+    let picture = tairix_image::Picture::rgba(6, 4, vec![0x80; 6 * 4 * 4]).expect("a picture");
+    let options = tairix_image::JpegOptions::new(85, [0, 0, 0]).expect("options");
+    let mut bytes = tairix_image::encode_jpeg(&picture, options).expect("a jpeg");
+    let sof = bytes
+        .windows(2)
+        .position(|w| w == [0xFF, 0xC0])
+        .expect("a frame header");
+    bytes[sof + 1] = 0xC1;
+    send_document(&mut sandbox, &bytes).expect("handed over");
+    let placed = read_placed(&mut sandbox, bytes.len() as u64).expect("a picture");
+    let in_place = tairix_drawing::decode_placed(&bytes).expect("decodes");
+    assert_eq!(placed.source, in_place.source, "the frame kept as it came");
+    match placed.source.map(|source| source.encoding) {
+        Some(tairix_drawing::Encoding::Jpeg(frame)) => {
+            assert_eq!(frame.process, tairix_image::JpegProcess::Extended);
+        }
+        other => panic!("a JPEG's frame, not {other:?}"),
+    }
+}
+
+#[test]
 fn a_record_refused_room_partway_is_answered_for_want_of_memory() {
     // A name is made before the fields after it are read.
     let named = record(|w| {

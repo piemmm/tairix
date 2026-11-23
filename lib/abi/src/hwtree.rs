@@ -669,6 +669,13 @@ pub enum HwResourceKind {
     /// and offers the filesystem on it, and nothing past the volume's extent.
     /// Recovered through [`HwResource::volume_id`].
     Volume = 17,
+    /// A **memory region** the device shares with its driver: `base`..`base +
+    /// len` of physical address space backed by memory, not registers, each
+    /// part mapped with the caching the device states for it — a virtio
+    /// shared-memory region (virtio 1.2 §2.10). `xlate` holds the region's id
+    /// among the device's own. Recovered through
+    /// [`HwResource::memory_region_id`].
+    MemoryRegion = 18,
 }
 
 /// What a [`HwResourceKind::Property`] states.
@@ -841,6 +848,7 @@ impl NodeEndpointBlock {
         crate::driver::net_channel::NET_CHANNEL_ENDPOINTS,
         crate::driver::thermal::THERMAL_SENSOR_ENDPOINTS,
         crate::driver::gpio::GPIO_HEADER_ENDPOINTS,
+        crate::gpu::GPU_CHANNEL_ENDPOINTS,
     ];
 
     /// The blocks of device channels: each id is served by the driver loaded
@@ -850,6 +858,7 @@ impl NodeEndpointBlock {
         crate::driver::net_channel::NET_CHANNEL_ENDPOINTS,
         crate::driver::thermal::THERMAL_SENSOR_ENDPOINTS,
         crate::driver::gpio::GPIO_HEADER_ENDPOINTS,
+        crate::gpu::GPU_CHANNEL_ENDPOINTS,
     ];
 
     /// The node whose device channel `id` is, or [`None`] for an id in no
@@ -947,6 +956,7 @@ impl HwResourceKind {
         Self::IommuGroup,
         Self::MsiDoorbell,
         Self::Volume,
+        Self::MemoryRegion,
     ];
 
     /// Raw on-wire discriminant.
@@ -977,8 +987,20 @@ impl HwResourceKind {
             15 => Some(Self::IommuGroup),
             16 => Some(Self::MsiDoorbell),
             17 => Some(Self::Volume),
+            18 => Some(Self::MemoryRegion),
             _ => None,
         }
+    }
+
+    /// Whether `mmio_map` maps a resource of this kind into its holder: a
+    /// register, scan-out or bus window, or a device's memory region. The
+    /// kernel's map, revocation and sweep paths all ask this one question.
+    #[must_use]
+    pub const fn is_window(self) -> bool {
+        matches!(
+            self,
+            Self::Mmio | Self::BusWindow | Self::Framebuffer | Self::MemoryRegion
+        )
     }
 
     /// The capability a driver must hold to use this resource (resources are
@@ -989,9 +1011,12 @@ impl HwResourceKind {
     pub const fn required_capability(self) -> Option<CapabilityId> {
         Some(match self {
             // A register/framebuffer window (plain or geometry-carrying),
-            // an x86 I/O port range, and an outbound bus window are all
-            // mapped through the kernel's MMIO-map facility.
-            Self::Mmio | Self::Port | Self::BusWindow | Self::Framebuffer => CapabilityId::MMIO_MAP,
+            // an x86 I/O port range, an outbound bus window and a device's
+            // memory region are all mapped through the kernel's MMIO-map
+            // facility.
+            Self::Mmio | Self::Port | Self::BusWindow | Self::Framebuffer | Self::MemoryRegion => {
+                CapabilityId::MMIO_MAP
+            }
             Self::Irq => CapabilityId::IRQ_BIND,
             Self::Dma => CapabilityId::MEM_DMA,
             // Submitting to a grant-restricted call endpoint is gated by the
@@ -1789,6 +1814,25 @@ impl HwResource {
             && self.flags == 0
             && self.xlate == 0)
             .then_some(self.base)
+    }
+
+    /// The memory region `id` a device shares with its driver over
+    /// `[base, base + len)` ([`HwResourceKind::MemoryRegion`]).
+    #[must_use]
+    pub fn memory_region(base: u64, len: u64, id: u8) -> Self {
+        Self::new_xlate(HwResourceKind::MemoryRegion, base, len, 0, u64::from(id))
+    }
+
+    /// The id among its device's regions of a
+    /// [`HwResourceKind::MemoryRegion`], or [`None`] for another kind or one
+    /// [`Self::memory_region`] would not make.
+    #[must_use]
+    pub fn memory_region_id(&self) -> Option<u8> {
+        if self.kind() != Some(HwResourceKind::MemoryRegion) || self.flags != 0 || self.len == 0 {
+            return None;
+        }
+        self.base.checked_add(self.len)?;
+        u8::try_from(self.xlate).ok()
     }
 
     /// The fact that a node's interrupt messages are written to the doorbell
@@ -4414,10 +4458,50 @@ mod tests {
             (HwResourceKind::Endpoint, Some(CapabilityId::IPC_ENDPOINT)),
             (HwResourceKind::Shared, Some(CapabilityId::SHM)),
             (HwResourceKind::Framebuffer, Some(CapabilityId::MMIO_MAP)),
+            (HwResourceKind::MemoryRegion, Some(CapabilityId::MMIO_MAP)),
             // A discovered fact, not a handle: nothing gates observing it.
             (HwResourceKind::LinkAddress, None),
         ] {
             assert_eq!(kind.required_capability(), expected, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn the_windows_mmio_map_maps_are_one_set() {
+        let windows = [
+            HwResourceKind::Mmio,
+            HwResourceKind::BusWindow,
+            HwResourceKind::Framebuffer,
+            HwResourceKind::MemoryRegion,
+        ];
+        for kind in HwResourceKind::ALL {
+            assert_eq!(kind.is_window(), windows.contains(kind), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_memory_region_carries_its_id_and_nothing_else_reads_as_one() {
+        let region = HwResource::memory_region(0x80_0000_0000, 0x400_0000, 1);
+        assert_eq!(region.kind(), Some(HwResourceKind::MemoryRegion));
+        assert_eq!(
+            (region.base(), region.length()),
+            (0x80_0000_0000, 0x400_0000)
+        );
+        assert_eq!(region.memory_region_id(), Some(1));
+        assert_eq!(
+            region.required_capability(),
+            Ok(Some(CapabilityId::MMIO_MAP))
+        );
+        let round = HwResource::from_bytes(&region.to_le_bytes()).expect("decodes");
+        assert_eq!(round.memory_region_id(), Some(1));
+        for other in [
+            HwResource::mmio(0x80_0000_0000, 0x400_0000),
+            HwResource::memory_region(0x1000, 0, 1),
+            HwResource::memory_region(u64::MAX, 2, 1),
+            HwResource::new_xlate(HwResourceKind::MemoryRegion, 0x1000, 0x1000, 1, 1),
+            HwResource::new_xlate(HwResourceKind::MemoryRegion, 0x1000, 0x1000, 0, 0x100),
+        ] {
+            assert_eq!(other.memory_region_id(), None, "{other:?}");
         }
     }
 

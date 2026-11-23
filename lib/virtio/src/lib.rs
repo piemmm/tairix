@@ -24,6 +24,8 @@
 //!   (virtio 1.1 §2.6).
 //! * [`RequestQueue`] — one request at a time on a split virtqueue, each
 //!   completion attributed to its own chain.
+//! * [`TicketQueue`] — many requests on a split virtqueue at once, each named
+//!   by a [`Ticket`] and answered in its own time.
 //! * [`PackedQueue`] — packed-virtqueue single-ring management
 //!   (virtio 1.1 §2.7).
 //! * [`VirtioHost`] — the DMA-allocation seam (re-exported from
@@ -58,6 +60,8 @@ pub mod host;
 pub mod packed;
 pub mod queue;
 pub mod request;
+pub mod shared_memory;
+pub mod ticket;
 pub mod transport;
 pub mod transport_mmio;
 pub mod transport_pci;
@@ -70,15 +74,17 @@ mod tests;
 pub use dma::{scrub, BounceBuffer, DmaSlab, PoolId, SlabEnd, SlabFreeFn};
 pub use host::{CompletionSignal, DmaHost, VirtioHost};
 #[cfg(any(test, feature = "mock"))]
-pub use host::{MockHost, MockWait};
+pub use host::{MockHost, MockRegion, MockWait};
 pub use packed::PackedQueue;
 pub use queue::{ChainSegment, SplitQueue, UsedToken};
 pub use request::{RequestQueue, MAX_COMPLETION_WAKES};
+pub use shared_memory::{Part, SharedMemory};
+pub use ticket::{Ticket, TicketQueue};
 pub use transport::{
     negotiate, Direction, Negotiated, PciTransportWindows, Status, Transport, VirtioError,
     TRANSPORT_FEATURES, VIRTIO_F_ACCESS_PLATFORM, VIRTIO_F_VERSION_1,
 };
 #[cfg(any(test, feature = "mock"))]
-pub use transport::{ChainView, ConfigResponder, DeviceShim, MockTransport};
+pub use transport::{ChainView, ConfigResponder, DeviceShim, HoldingShim, MockTransport};
 pub use transport_mmio::MmioTransport;
 pub use transport_pci::{PciTransport, VIRTIO_MSI_NO_VECTOR};

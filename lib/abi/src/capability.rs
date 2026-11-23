@@ -844,6 +844,21 @@ impl CapabilityId {
     /// page executable at all.
     pub const JIT_MAP_EXEC: Self = Self(54);
 
+    /// Call a served GPU's device channel: make contexts on the device, and
+    /// memory, objects and work within them.
+    ///
+    /// It guards a class of resources — every served GPU's memory, its
+    /// engines and the DMA its submissions drive — rather than one object.
+    /// A GPU's driver binds its channel as a restricted-sender endpoint
+    /// requiring it, so the kernel refuses a call from a task without it
+    /// before the driver reads a byte. Every session holds it: a context
+    /// reaches only what it was given and is charged for what it makes.
+    ///
+    /// Not covered by an existing capability: `CAP_SHM` shares memory but
+    /// submits nothing to a device, and `CAP_DRV_LOAD` is the driver's, not
+    /// its clients'.
+    pub const GPU: Self = Self(55);
+
     /// Every capability assigned a canonical name in `abi-v1`, paired with
     /// that name.
     ///
@@ -908,6 +923,7 @@ impl CapabilityId {
         (Self::GPIO, "CAP_GPIO"),
         (Self::FS_SERVE, "CAP_FS_SERVE"),
         (Self::JIT_MAP_EXEC, "CAP_JIT_MAP_EXEC"),
+        (Self::GPU, "CAP_GPU"),
     ];
 
     /// The canonical `CAP_*` name of this capability, or [`None`] for an
@@ -1058,6 +1074,7 @@ mod tests {
         assert_eq!(CapabilityId::GPIO.as_u16(), 52);
         assert_eq!(CapabilityId::FS_SERVE.as_u16(), 53);
         assert_eq!(CapabilityId::JIT_MAP_EXEC.as_u16(), 54);
+        assert_eq!(CapabilityId::GPU.as_u16(), 55);
     }
 
     #[test]
@@ -1112,6 +1129,7 @@ mod tests {
         assert_eq!(CapabilityId::GPIO.name(), Some("CAP_GPIO"));
         assert_eq!(CapabilityId::FS_SERVE.name(), Some("CAP_FS_SERVE"));
         assert_eq!(CapabilityId::JIT_MAP_EXEC.name(), Some("CAP_JIT_MAP_EXEC"));
+        assert_eq!(CapabilityId::GPU.name(), Some("CAP_GPU"));
 
         // Every named id round-trips name -> id -> name.
         for &(cap, name) in CapabilityId::NAMED {
@@ -1122,15 +1140,15 @@ mod tests {
 
     #[test]
     fn every_assigned_id_has_a_name() {
-        // Capabilities 1..=54 are assigned in abi-v1; each must carry a
+        // Capabilities 1..=55 are assigned in abi-v1; each must carry a
         // canonical name so `getcap`/`setcap` can render and accept it.
-        for raw in 1..=54 {
+        for raw in 1..=55 {
             let cap = CapabilityId::from_raw(raw).expect("in range");
             assert!(cap.name().is_some(), "capability {raw} has no name");
         }
         // …and the assigned range stops there: the next id is free, so a new
         // capability cannot silently reuse one.
-        assert_eq!(CapabilityId::from_raw(55).expect("in range").name(), None);
+        assert_eq!(CapabilityId::from_raw(56).expect("in range").name(), None);
     }
 
     #[test]

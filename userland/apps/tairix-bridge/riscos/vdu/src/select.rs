@@ -7,6 +7,8 @@
 //! type 3, a numbered mode it lacks becomes the 640 by 480 mode of the same
 //! depth where that keeps the mode's eigen factors and flags, and otherwise a
 //! 640 by 480 selector keeping its depth, colours, flags and eigen factors.
+//! A file's monitor, type 7, has no numbered mode of its own: one is traded
+//! for the mode a module offers by `Service_ModeTranslation`.
 
 use alloc::vec::Vec;
 
@@ -107,7 +109,7 @@ impl Selector {
 
     /// Its words as a copy holds them, written into `out`: the five, the
     /// pairs, the end.
-    fn bytes<'b>(&self, out: &'b mut [u8; SELECTOR_BYTES as usize]) -> &'b [u8] {
+    pub(crate) fn bytes<'b>(&self, out: &'b mut [u8; SELECTOR_BYTES as usize]) -> &'b [u8] {
         let words = [1, self.width, self.height, self.log2_bpp, self.frame_rate]
             .into_iter()
             .chain(
@@ -286,7 +288,7 @@ pub(crate) fn resolve(os: &mut Os<'_>, spec: &Spec, monitor: u32) -> Result<Outc
             let shadow = n & 0x80 != 0;
             let mode = n & 0x7F;
             if let Some(m) = tairix_vdu::mode::numbered(mode) {
-                if shown_on(mode, monitor) || monitor == 7 {
+                if shown_on(mode, monitor) {
                     return Ok(Outcome::Valid(Resolved {
                         format: Format::numbered(m),
                         spec: Spec::Number(mode),
@@ -487,8 +489,12 @@ pub(crate) fn select(os: &mut Os<'_>, spec: &Spec) -> Result<(), Fail> {
     };
     let shadow = resolved.shadow || with(os, |vdu, _| Ok(vdu.shadow))?;
     let banks = if shadow { 2 } else { 1 };
-    let needed = (resolved.format.screen_bytes() * banks)
-        .next_multiple_of(tairix_riscos_arm::mmu::PAGE_SIZE);
+    let needed = resolved
+        .format
+        .screen_bytes()
+        .checked_mul(banks)
+        .and_then(|bytes| bytes.checked_next_multiple_of(tairix_riscos_arm::mmu::PAGE_SIZE))
+        .ok_or_else(|| os.error(BAD_MODE))?;
     let size = with(os, |vdu, _| Ok(vdu.screen.size))?;
     if needed > size {
         let mut grow = Regs::new([screen::AREA, needed - size, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -628,7 +634,12 @@ pub(crate) fn check_mode_valid(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), F
         Outcome::Valid(resolved) => {
             let size = with(os, |vdu, _| Ok(vdu.screen.size))?;
             let banks = if resolved.shadow { 2 } else { 1 };
-            if resolved.format.screen_bytes() * banks > size {
+            let fits = resolved
+                .format
+                .screen_bytes()
+                .checked_mul(banks)
+                .is_some_and(|bytes| bytes <= size);
+            if !fits {
                 regs.r[0] = 0xFFFF_FFFE;
                 regs.set_flag(psr::C, true);
                 return Ok(());

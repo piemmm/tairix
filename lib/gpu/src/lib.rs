@@ -55,37 +55,22 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-/// A handle to an object a context files: its device, its context and its
-/// key, the object released from the context's `table` when it is dropped.
+/// A handle to an object a context files: its device's host, its context and
+/// its key, the object let go as `$object` when the handle is dropped.
 macro_rules! handle {
-    ($(#[$meta:meta])* $name:ident, $key:ident, $table:ident) => {
-        handle!(@shape $(#[$meta])* $name, $key);
-
-        impl Drop for $name {
-            fn drop(&mut self) {
-                self.shared
-                    .release(self.context, |context| &mut context.$table, self.key);
-            }
-        }
-    };
-    // A handle whose release answers what was let go, to be dropped without
-    // the device's lock.
-    ($(#[$meta:meta])* $name:ident, $key:ident, $destroy:ident, releasing) => {
-        handle!(@shape $(#[$meta])* $name, $key);
-
-        impl Drop for $name {
-            fn drop(&mut self) {
-                let released = self.shared.model.lock().$destroy(self.context, self.key);
-                drop(released);
-            }
-        }
-    };
-    (@shape $(#[$meta:meta])* $name:ident, $key:ident) => {
+    ($(#[$meta:meta])* $name:ident, $key:ident, $object:ident) => {
         $(#[$meta])*
         pub struct $name {
-            pub(crate) shared: alloc::sync::Arc<crate::device::SoftwareShared>,
+            pub(crate) host: alloc::sync::Arc<dyn crate::host::Host>,
             pub(crate) context: crate::model::ContextKey,
             pub(crate) key: crate::model::$key,
+        }
+
+        impl Drop for $name {
+            fn drop(&mut self) {
+                self.host
+                    .release(self.context, crate::host::Object::$object(self.key));
+            }
         }
 
         impl core::fmt::Debug for $name {
@@ -103,6 +88,8 @@ mod device;
 mod error;
 mod fair;
 mod format;
+mod hardware;
+mod host;
 mod image;
 mod info;
 mod memory;
@@ -110,24 +97,31 @@ mod model;
 mod objects;
 mod pass;
 mod pipeline;
+mod remote;
 mod render;
 mod resource;
 mod room;
+mod rt;
 mod sampler;
+mod serve;
 mod software;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
 mod transfer;
+mod wire;
 
 pub use binding::{
     BindSet, BindSetEntry, BindSetLayout, LayoutBinding, PipelineLayout, PushConstants, Resource,
     ShaderModule,
 };
-pub use command::CopyRegion;
+pub use command::{CopyRegion, CopySpan};
 pub use device::{
     Allocation, AllocationDesc, Buffer, BufferDesc, CommandBuffer, Context, ContextDesc, Device,
     Export, Fence, Queue, Submission, Timeline,
 };
 pub use error::{Error, Loss, SubmitError};
 pub use format::{Aspects, Format, FormatFeatures};
+pub use hardware::{Commands, Hardware, Job, JobCommand};
 pub use image::{
     level_extent, BufferImageCopy, BufferViewDesc, ClearValue, Extent3d, ImageCopy, ImageDesc,
     ImageDimension, ImageRange, ImageSubresource, ImageUsage, ImageViewDesc, Origin3d,
@@ -153,6 +147,7 @@ pub use render::{
     MAX_VERTEX_ATTRIBUTES,
 };
 pub use resource::MemoryRequirements;
+pub use rt::{serve, MAX_SERVE_WORKERS};
 pub use sampler::{AddressMode, BorderColor, CompareOp, Filter, SamplerDesc, MAX_LOD_BIAS};
 pub use software::{NoThreads, RuntimeThreads, SoftwareDesc, Spawn, DEFAULT_SUBGROUP_SIZE};
 

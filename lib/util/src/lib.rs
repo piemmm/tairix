@@ -8,6 +8,8 @@
 //! * [`argv`] — a word argument (`--total=auto`) resolved to its one choice
 //!   or refused with the valid ones listed.
 //! * [`banner`] — the `==> name <==` banner before each of several sources.
+//! * [`bitfield`] — fields of bits packed along a byte row, as packed pixels
+//!   lie.
 //! * [`cfloat`] — C-locale `printf(3)` floating-point rendering.
 //! * [`cnum`] — C-locale `strtod(3)` scanning: decimal and hexadecimal floats,
 //!   `inf`/`nan`, and longest-prefix `endptr` semantics.
@@ -18,6 +20,7 @@
 //! * [`defer`] — handing slow work off an interactive loop: `JobDesk`,
 //!   latest-wins with at most one job in flight, and `JobQueue`, every request
 //!   answered in turn.
+//! * [`divisor`] — the greatest common divisor of two unsigned integers.
 //! * [`fallible`] — reserving a data-sized buffer before filling it, so
 //!   exhaustion is a refusal rather than an allocation abort.
 //! * [`flags!`] — a set of bit flags over one unsigned integer, as a field
@@ -69,11 +72,13 @@ extern crate alloc;
 
 pub mod argv;
 pub mod banner;
+pub mod bitfield;
 pub mod cfloat;
 pub mod cnum;
 pub mod conf;
 pub mod count;
 pub mod defer;
+pub mod divisor;
 pub mod fallible;
 mod flags;
 pub mod fmt;

@@ -1,22 +1,9 @@
 use super::*;
-use tairix_vdu::palette::default_256;
-
-fn default_256_colours() -> Vec<Rgb> {
-    (0..=u8::MAX)
-        .map(|pixel| {
-            let [r, g, b] = default_256(pixel);
-            Rgb::new(r, g, b)
-        })
-        .collect()
-}
+use crate::palette::default_colours;
 
 /// Mode 12's default colours, its flashing ones in their first state.
 fn sixteen() -> Vec<Rgb> {
-    let eight = [0, 1, 2, 3, 4, 5, 6, 7].map(|i: u8| {
-        let level = |bit: u8| if i & bit != 0 { 255 } else { 0 };
-        Rgb::new(level(1), level(2), level(4))
-    });
-    eight.iter().chain(&eight).copied().collect()
+    default_colours(2, 16)
 }
 
 #[test]
@@ -32,7 +19,7 @@ fn a_table_onto_sixteen_colours_is_risc_os_5_s() {
     // Every 37th entry of the table RISC OS 5's BlendTable built for the
     // default 256-colour palette over mode 12's at half translucency: the
     // destination's colours outermost, each blend its last nearest.
-    let table = blended(&default_256_colours(), &sixteen(), 128).expect("room");
+    let table = blended(&default_colours(3, 256), &sixteen(), None, 128).expect("room");
     assert_eq!(table.len(), 4096);
     let sampled: Vec<u8> = (0..32).map(|i| table[i * 37]).collect();
     assert_eq!(
@@ -68,7 +55,7 @@ fn a_table_onto_a_custom_palette_matches_by_plain_squares() {
     // Entries of the tables RISC OS 5's BlendTable built for these colours
     // over themselves: every 7th at 128, every 11th at 80.
     let colours = custom_sixteen();
-    let half = blended(&colours, &colours, 128).expect("room");
+    let half = blended(&colours, &colours, None, 128).expect("room");
     let sampled: Vec<u8> = half.iter().step_by(7).copied().collect();
     assert_eq!(
         sampled,
@@ -77,7 +64,7 @@ fn a_table_onto_a_custom_palette_matches_by_plain_squares() {
             6, 9, 11, 2, 4, 14, 12, 14, 4, 4
         ]
     );
-    let lighter = blended(&colours, &colours, 80).expect("room");
+    let lighter = blended(&colours, &colours, None, 80).expect("room");
     let sampled: Vec<u8> = lighter.iter().step_by(11).copied().collect();
     assert_eq!(
         sampled,

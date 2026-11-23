@@ -227,12 +227,11 @@ fn descriptors(
     start: u64,
     stamp: [u8; 12],
 ) -> Result<Vec<Vec<u8>>, DriverError> {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = Vec::new();
     let serial: Vec<u8> = options
         .serial
         .iter()
-        .flat_map(|&byte| [HEX[usize::from(byte >> 4)], HEX[usize::from(byte & 0xF)]])
+        .flat_map(|&byte| tairix_util::hex::upper_digits(byte))
         .collect();
     let set = core::str::from_utf8(&serial).map_err(|_| DriverError::OutOfRange)?;
     let mut set_identifier = alloc::string::String::from(set);

@@ -24,6 +24,8 @@ mod session;
 mod statements;
 mod vars;
 
+use alloc::vec::Vec;
+
 use tairix_riscos_kernel::os::{Fail, Os, Unwind};
 
 use crate::messages::Error;
@@ -293,6 +295,14 @@ impl<'o, 'a> Machine<'o, 'a> {
     /// The byte at `at`.
     pub(crate) fn byte_at(&mut self, at: u32) -> Step<u8> {
         Ok(self.os.read_byte(at)?)
+    }
+
+    /// `length` bytes of memory from `at`, copied for the interpreter to
+    /// read: BASIC's own "No room" where the host cannot hold them.
+    pub(crate) fn copied(&mut self, at: u32, length: usize) -> Step<Vec<u8>> {
+        let mut bytes = tairix_util::fallible::zeroed(length).ok_or(Error::NoRoom)?;
+        self.os.read_bytes(at, &mut bytes)?;
+        Ok(bytes)
     }
 
     /// The byte at the program pointer.

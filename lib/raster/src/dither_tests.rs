@@ -127,3 +127,16 @@ fn the_no_dither_tile_rounds_every_lane_to_nearest() {
         [ROUND_NEAREST; DitherRow::PERIOD]
     );
 }
+
+#[test]
+fn the_four_by_four_order_is_bayer_s_every_rank_once() {
+    assert_eq!(
+        super::BAYER_4,
+        [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]]
+    );
+    let mut seen = [false; 16];
+    for rank in super::BAYER_4.iter().flatten() {
+        seen[usize::from(*rank)] = true;
+    }
+    assert!(seen.iter().all(|&s| s));
+}

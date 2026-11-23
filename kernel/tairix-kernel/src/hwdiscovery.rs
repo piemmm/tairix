@@ -22,13 +22,14 @@ use tairix_abi::driver::pci::{PciAddress, CLASS_HD_AUDIO, CLASS_OFFSET, CLASS_US
 use tairix_abi::driver::virtio::VIRTIO_GPU_DEVICE_ID;
 use tairix_abi::driver::virtio_mmio::VirtioMmioBus;
 use tairix_abi::driver::virtio_pci::{
-    virtio_pci_window_resource, VirtioPciBus, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE,
-    VIRTIO_PCI_CFG_ISR, VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_VENDOR_ID,
+    virtio_pci_window_resource, VirtioPciBus, VirtioSharedMemory, VIRTIO_PCI_CFG_COMMON,
+    VIRTIO_PCI_CFG_DEVICE, VIRTIO_PCI_CFG_ISR, VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_VENDOR_ID,
 };
 use tairix_abi::driver::MmioMapper;
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::{
-    DmaCoherence, DriverError, HwDeviceClass, HwMatchKey, HwNode, IommuStreams, HW_NODE_ROOT_ID,
+    DmaCoherence, DriverError, HwDeviceClass, HwMatchKey, HwNode, IommuStreams,
+    HW_NODE_MAX_RESOURCES, HW_NODE_ROOT_ID,
 };
 use tairix_arch_api::{DiscoveryError, HwNodeSink};
 use tairix_drv_audio_virtio_snd::VIRTIO_SND_DEVICE_ID;
@@ -972,11 +973,71 @@ fn observe_virtio_pci_devices(
             .all(|resource| node.push_resource(resource).is_ok())
             && function.describe(&mut node)
         {
+            grant_shared_memory(bus, bdf, &mut node, log);
             sink.emit(node)
                 .map_err(|_: DiscoveryError| DriverError::BufferTooSmall)?;
         }
     }
     Ok(())
+}
+
+/// A virtio function's shared-memory region the kernel did not grant.
+const SHARED_MEMORY_REFUSED: EventId = EventId(4253);
+
+/// Give `node` each shared-memory region the function at `bdf` declares
+/// that is memory its driver may map, recording each one refused and why.
+///
+/// A region is optional to its device, so one refused — malformed, or past
+/// what the node can hold — leaves the node published without it.
+fn grant_shared_memory(bus: &dyn VirtioPciBus, bdf: u64, node: &mut HwNode, log: &dyn Sink) {
+    let mut regions = [VirtioSharedMemory {
+        id: 0,
+        region: Err(DriverError::NotFound),
+    }; HW_NODE_MAX_RESOURCES];
+    let declared = match bus.virtio_shared_memory(bdf, &mut regions) {
+        Ok(declared) => &regions[..declared],
+        Err(reason) => {
+            log_shared_memory_refused(log, bdf, None, reason);
+            return;
+        }
+    };
+    for shared in declared {
+        let granted = shared.region.and_then(|(base, len)| {
+            node.push_resource(HwResource::memory_region(base, len, shared.id))
+                .map_err(|_| DriverError::NoSpace)
+        });
+        if let Err(reason) = granted {
+            log_shared_memory_refused(log, bdf, Some(shared.id), reason);
+        }
+    }
+}
+
+fn log_shared_memory_refused(log: &dyn Sink, bdf: u64, id: Option<u8>, reason: DriverError) {
+    let mut bdf_buf = [0u8; 16];
+    tairix_log::log(
+        log,
+        &Event {
+            level: Level::Warn,
+            id: SHARED_MEMORY_REFUSED,
+            message: "virtio-pci shared-memory region not granted",
+            fields: &[
+                Field {
+                    key: "bdf",
+                    value: FieldValue::Str(format_hex_u64(bdf, &mut bdf_buf)),
+                },
+                Field {
+                    key: "region",
+                    value: id.map_or(FieldValue::Null, |id| {
+                        FieldValue::UnsignedInt(u64::from(id))
+                    }),
+                },
+                Field {
+                    key: "reason",
+                    value: FieldValue::Error(reason.as_errno()),
+                },
+            ],
+        },
+    );
 }
 
 /// Give each translation unit among `nodes` that is a virtio-iommu function
@@ -1611,6 +1672,8 @@ mod tests {
         functions: alloc::vec::Vec<BusDevice>,
         /// The features every function offers.
         offered: u64,
+        /// The shared-memory regions every function declares.
+        shared_memory: alloc::vec::Vec<VirtioSharedMemory>,
     }
 
     impl FakePciBus {
@@ -1630,6 +1693,7 @@ mod tests {
                     })
                     .collect(),
                 offered: tairix_virtio::TRANSPORT_FEATURES,
+                shared_memory: alloc::vec::Vec::new(),
             }
         }
     }
@@ -1665,6 +1729,18 @@ mod tests {
 
         fn notify_off_multiplier(&self, _bdf: u64) -> Result<u32, DriverError> {
             Ok(TEST_NOTIFY_MULTIPLIER)
+        }
+
+        fn virtio_shared_memory(
+            &self,
+            _bdf: u64,
+            out: &mut [VirtioSharedMemory],
+        ) -> Result<usize, DriverError> {
+            let into = out
+                .get_mut(..self.shared_memory.len())
+                .ok_or(DriverError::BufferTooSmall)?;
+            into.copy_from_slice(&self.shared_memory);
+            Ok(into.len())
         }
 
         fn offered_features(
@@ -1778,6 +1854,14 @@ mod tests {
 
         fn notify_off_multiplier(&self, _: u64) -> Result<u32, DriverError> {
             Err(DriverError::NotFound)
+        }
+
+        fn virtio_shared_memory(
+            &self,
+            _bdf: u64,
+            _out: &mut [VirtioSharedMemory],
+        ) -> Result<usize, DriverError> {
+            Ok(0)
         }
     }
 
@@ -2132,6 +2216,46 @@ mod tests {
     }
 
     #[test]
+    fn a_gpu_s_memory_region_rides_its_node_and_a_refused_one_is_recorded() {
+        let mut bus = FakePciBus::with(&[(0x1050, 0x0000_0900)]);
+        bus.shared_memory = alloc::vec![
+            VirtioSharedMemory {
+                id: 1,
+                region: Ok((0x1_0000_0000, 64 << 20)),
+            },
+            VirtioSharedMemory {
+                id: 2,
+                region: Err(DriverError::Busy),
+            },
+        ];
+        let mut sink = CollectingSink::default();
+        let log = IdLog::default();
+        observe_virtio_pci_display_devices(
+            &walk_of(&bus, SEGMENT, &|_| None),
+            &|_| {
+                Some(DeviceInterrupt::line(HwResource::message_irq(
+                    u64::from(TEST_PCI_INTID),
+                    0,
+                )))
+            },
+            &mut sink,
+            &log,
+        )
+        .expect("enumerate");
+        let regions: alloc::vec::Vec<_> = sink.nodes[0]
+            .resources()
+            .iter()
+            .filter(|resource| resource.kind() == Some(tairix_abi::HwResourceKind::MemoryRegion))
+            .copied()
+            .collect();
+        assert_eq!(
+            regions,
+            [HwResource::memory_region(0x1_0000_0000, 64 << 20, 1)]
+        );
+        assert!(log.0.borrow().contains(&SHARED_MEMORY_REFUSED));
+    }
+
+    #[test]
     fn a_virtio_net_pci_function_without_an_irq_is_skipped_fail_closed() {
         // The driver parks on its interrupt, so a function whose line the
         // arch resolver cannot route is left undiscovered rather than
@@ -2333,6 +2457,14 @@ mod tests {
         fn notify_off_multiplier(&self, _bdf: u64) -> Result<u32, DriverError> {
             Ok(TEST_NOTIFY_MULTIPLIER)
         }
+
+        fn virtio_shared_memory(
+            &self,
+            _bdf: u64,
+            _out: &mut [VirtioSharedMemory],
+        ) -> Result<usize, DriverError> {
+            Ok(0)
+        }
     }
 
     impl MmioMapper for CommonConfig {
@@ -2492,6 +2624,7 @@ mod tests {
                 address: 0x0000_0800,
             }],
             offered: tairix_virtio::TRANSPORT_FEATURES,
+            shared_memory: alloc::vec::Vec::new(),
         };
         let mut sink = CollectingSink::default();
         observe_virtio_pci_block_devices(&walk_of(&bus, SEGMENT, &|_| None), &mut sink, &NullSink)

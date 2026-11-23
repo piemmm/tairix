@@ -81,6 +81,20 @@ impl Os<'_> {
         }
     }
 
+    /// Dynamic area `number`'s base and size now, the area named by its plain
+    /// number: none of `OS_ReadDynamicArea`'s other spellings of one.
+    ///
+    /// # Errors
+    ///
+    /// As `OS_ReadDynamicArea` refuses an area that does not exist.
+    pub fn area_extent(&mut self, number: u32) -> Result<(u32, u32), Fail> {
+        let read = self
+            .memory
+            .read_area(number.cast_signed())
+            .map_err(|error| self.fail_area(error))?;
+        Ok((read.start, clamped(read.size)))
+    }
+
     /// Watches area `number`'s pages for the display: see
     /// [`crate::memory::Memory::watch_area_for_display`].
     ///

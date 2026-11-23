@@ -16,6 +16,8 @@ nothing from here: the rule for a hidden character it needs is `lib/visible`'s.
   listed (`BadWord`).
 * `banner` — the `==> name <==` banner before each of several sources, its
   name shown as the output shows names.
+* `bitfield` — fields of bits packed along a byte row as packed pixels lie,
+  at any bit and up to a word wide (`field_at`, `set_field_at`, `mask`).
 * `cfloat` — C-locale `printf(3)` floating-point rendering (`FloatDirective`:
   flags, width, precision, `efga`/`EFGA` conversions, rendered exactly as C
   prints a `double`).
@@ -31,6 +33,7 @@ nothing from here: the rule for a hidden character it needs is `lib/visible`'s.
 * `defer` — handing slow work off an interactive loop (`JobDesk`: one request
   waiting, one in flight, one answer landed, latest-wins, the displaced
   request handed back; `JobQueue`: every request answered, in turn).
+* `divisor` — the greatest common divisor of two unsigned integers (`gcd`).
 * `fallible` — reserving a data-sized buffer before filling it (`filled`,
   `collected`, `grow_to`, `reserve`, `read_snapshot`), so an allocation the
   machine refuses is a typed refusal rather than an abort; `zeroed` asks for
@@ -49,9 +52,13 @@ nothing from here: the rule for a hidden character it needs is `lib/visible`'s.
   first), and an argument it cannot read refused in GNU's words (`Refusal`).
 * `fmt` — numeric formatters that allocate nothing, for structured-log field
   values.
-* `hex` — two lowercase hex digits a byte (`digits`), and the bytes a hex
-  string spells written straight into the caller's buffer (`decode_into`), so
-  a key is never staged where its holder cannot erase it.
+* `hex` — a nibble or a byte as hex digits in either case (`digit`,
+  `upper_digit`, `digits`, `upper_digits`),
+  bytes as lowercase text (`encode`), the bytes a hex string in either case
+  spells written straight into the caller's buffer (`decode_into`), so a key
+  is never staged where its holder cannot erase it, and a number's low
+  nibbles at a fixed width (`fill`, `fill_upper`) or its digit count with its
+  leading noughts dropped (`significant`).
 * `hexdump` — the canonical offset/hex/ASCII dump row.
 * `join` — one bounded line from a list: every item when they all fit, else
   the longest run of whole items that leaves room for `, and N more`.

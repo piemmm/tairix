@@ -12,18 +12,18 @@
 //! written starts its destination afresh even when the destination left was
 //! kept in it, as RISC OS 5 has it; the drivers' own always holds one.
 
-use tairix_image::{sprite_dpi_of_eig, sprite_eig_of_dpi, sprite_type, SpriteModeWord};
+use tairix_image::{sprite_dpi_of_eig, sprite_type, SpriteModeWord};
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
-use tairix_vdu::mode::{var, Flags};
+use tairix_vdu::mode::Flags;
 
 use super::area::{Area, Naming};
 use super::create::Target;
 use super::edit;
-use super::format::{self, Pixels};
+use super::format::Pixels;
 use super::header::Sprite;
-use super::{reason, FULL_PALETTE, UNRECOGNISED};
+use super::{reason, UNRECOGNISED};
 use crate::canvas::Canvas;
-use crate::mode::{Drawn, Format};
+use crate::mode::{Drawn, Format, MOST_EIG};
 use crate::output::{Context, Output, KERNEL_SAVE_AREA, NO_SAVE_AREA};
 use crate::saved::{Saved, SAVE_AREA_BYTES};
 use crate::state;
@@ -113,13 +113,13 @@ fn recall(os: &mut Os<'_>, save_area: u32) -> Result<Option<Saved>, Fail> {
 /// `sprite`'s image, or its mask where `mask`, as output switched to it draws
 /// on it; a sprite without a mask is drawn on in its image either way.
 fn redirected(os: &mut Os<'_>, sprite: &Sprite, mask: bool) -> Result<Output, Fail> {
-    let pixels = sprite.pixels(os)?;
-    sprite.whole(os, &pixels)?;
+    let pixels = sprite.pixels_kept(os)?;
+    let extents = sprite.whole(os, &pixels)?;
     let (width, height) = (sprite.width(&pixels), sprite.rows());
-    if width == 0 || height == 0 {
+    let reach = crate::plot::REACH.cast_unsigned();
+    if width == 0 || height == 0 || width > reach || height > reach {
         return Err(os.error(UNRECOGNISED));
     }
-    let word = SpriteModeWord::of(sprite.mode);
     let mask = mask && sprite.masked();
     let (drawn, start, word) = if mask && !pixels.old_format {
         let wide = pixels.wide_mask;
@@ -129,16 +129,17 @@ fn redirected(os: &mut Os<'_>, sprite: &Sprite, mask: bool) -> Result<Output, Fa
         } else {
             (0, 1, 0, sprite_type::PALETTED_1)
         };
-        let eig = eig_of(word);
-        let dpi = (sprite_dpi_of_eig(eig.0), sprite_dpi_of_eig(eig.1));
+        let eig = pixels.shown.eig;
+        let dpi = |eig: u32| sprite_dpi_of_eig(eig.min(MOST_EIG).to_le_bytes()[0]);
+        let dpi = (dpi(eig.0), dpi(eig.1));
         let drawn = Drawn {
             flags: flags | Flags::HARD_SCROLL_DISABLED.bits(),
             ncolour,
-            eig: (u32::from(eig.0), u32::from(eig.1)),
+            eig,
             y_shift: 0,
             log2_bpp,
             log2_bpc: log2_bpp,
-            line_length: line_length(os, sprite.mask_stride(&pixels))?,
+            line_length: line_length(os, extents.mask_stride)?,
             width,
             height,
         };
@@ -146,10 +147,10 @@ fn redirected(os: &mut Os<'_>, sprite: &Sprite, mask: bool) -> Result<Output, Fa
         (drawn, sprite.mask, word)
     } else {
         let drawn = Drawn {
-            line_length: line_length(os, sprite.stride())?,
+            line_length: line_length(os, extents.stride)?,
             width,
             height,
-            ..image_drawn(sprite, &pixels, word)
+            ..image_drawn(sprite, &pixels)
         };
         (
             drawn,
@@ -175,70 +176,34 @@ fn line_length(os: &mut Os<'_>, stride: u64) -> Result<u32, Fail> {
     u32::try_from(stride).map_err(|_| os.error(UNRECOGNISED))
 }
 
-/// How a sprite's image is drawn as a screen, its geometry apart: a numbered
-/// mode's own variables, else its type's, eight bits of colour the full
-/// palette a palette of 256 entries gives.
-fn image_drawn(sprite: &Sprite, pixels: &Pixels, word: SpriteModeWord) -> Drawn {
-    let full_palette = pixels.log2_bpp == 3 && sprite.palette_entries() == FULL_PALETTE;
-    let palette_flags = if full_palette {
-        Flags::FULL_PALETTE.bits()
-    } else {
-        0
-    };
-    let base = Drawn {
-        flags: 0,
-        ncolour: 0,
-        eig: (0, 0),
-        y_shift: 0,
+/// How a sprite's image is drawn on as output, its geometry apart: as it
+/// shows as a screen, never hardware scrolled.
+fn image_drawn(sprite: &Sprite, pixels: &Pixels) -> Drawn {
+    let drawn = shown_as_screen(sprite, pixels);
+    Drawn {
+        flags: drawn.flags | Flags::HARD_SCROLL_DISABLED.bits(),
+        ..drawn
+    }
+}
+
+/// How a sprite's image shows as a screen, its geometry apart: as its pixels
+/// show, eight bits of colour the full palette a palette of 256 entries gives.
+pub(crate) fn shown_as_screen(sprite: &Sprite, pixels: &Pixels) -> Drawn {
+    let full_palette = pixels.log2_bpp == 3 && sprite.full_palette();
+    let shown = pixels.shown;
+    Drawn {
+        flags: if full_palette {
+            shown.flags | Flags::FULL_PALETTE.bits()
+        } else {
+            shown.flags
+        },
+        ncolour: if full_palette { 0xFF } else { shown.ncolour },
+        eig: shown.eig,
+        y_shift: shown.y_shift,
         log2_bpp: pixels.log2_bpp,
         log2_bpc: pixels.log2_field,
         line_length: 0,
         width: 0,
         height: 0,
-    };
-    let numbered = match word {
-        SpriteModeWord::Number(number) => tairix_vdu::mode::numbered(u32::from(number)),
-        _ => None,
-    };
-    let drawn = if let Some(mode) = numbered {
-        let mode = Format::numbered(mode);
-        Drawn {
-            flags: mode.flags(),
-            ncolour: mode.ncolour(),
-            eig: (mode.x_eig(), mode.y_eig()),
-            y_shift: mode.var(var::Y_SHIFT).unwrap_or(0),
-            ..base
-        }
-    } else {
-        let eig = eig_of(word);
-        Drawn {
-            flags: format::variable(sprite.mode, var::MODE_FLAGS).unwrap_or(0),
-            ncolour: match pixels.log2_bpp {
-                0 => 1,
-                1 => 3,
-                2 => 15,
-                3 => 63,
-                _ => format::variable(sprite.mode, var::N_COLOUR).unwrap_or(u32::MAX),
-            },
-            eig: (u32::from(eig.0), u32::from(eig.1)),
-            ..base
-        }
-    };
-    Drawn {
-        flags: drawn.flags | palette_flags | Flags::HARD_SCROLL_DISABLED.bits(),
-        ncolour: if full_palette { 0xFF } else { drawn.ncolour },
-        ..drawn
-    }
-}
-
-/// The eigen factors a new-format word states.
-fn eig_of(word: SpriteModeWord) -> (u8, u8) {
-    match word {
-        SpriteModeWord::Dpi { dpi, .. } => (
-            sprite_eig_of_dpi(u32::from(dpi.0)),
-            sprite_eig_of_dpi(u32::from(dpi.1)),
-        ),
-        SpriteModeWord::Eig { eig, .. } => eig,
-        SpriteModeWord::Number(_) | SpriteModeWord::Selector => (1, 1),
     }
 }

@@ -9,7 +9,10 @@
 //!   translation table, the sprite's palette or its colour channels
 //!   ([`scaled`], [`transformed`], [`colours`]).
 //!
-//! Every plot is held to the graphics window, and reads the sprite once.
+//! Every plot is held to the graphics window, and reads each row it needs
+//! once: a blit or a scaled plot only those it shows, chosen once any guest
+//! code turning its colours has run; a plot through a colour mapping, a tile
+//! whose window holds a tile's edge and a transformed plot all of them.
 
 mod blit;
 mod colours;
@@ -18,15 +21,15 @@ mod scaled;
 mod source;
 mod transformed;
 
+use core::ops::Range;
+
 use tairix_riscos_kernel::os::{Fail, Os};
 
-use super::header::Sprite;
 use crate::canvas::Canvas;
 use crate::changed::Rect;
 use crate::mode::Format;
 use crate::raster::Point;
 use crate::state;
-use source::Source;
 
 pub(crate) use blit::{plot_mask, plot_shape, put};
 pub(crate) use pointer::set_pointer;
@@ -81,9 +84,14 @@ impl Scale {
         div: (1, 1),
     };
 
-    /// `mul.0 / div.0` across and `mul.1 / div.1` down.
-    pub(crate) const fn of(mul: (u32, u32), div: (u32, u32)) -> Self {
-        Self { mul, div }
+    /// `mul.0 / div.0` across and `mul.1 / div.1` down; none where a factor
+    /// is nought, as no plot divides by one.
+    pub(crate) const fn of(mul: (u32, u32), div: (u32, u32)) -> Option<Self> {
+        if mul.0 == 0 || mul.1 == 0 || div.0 == 0 || div.1 == 0 {
+            None
+        } else {
+            Some(Self { mul, div })
+        }
     }
 
     /// The factors at `address`, one to one where it is nought; any factor of
@@ -131,10 +139,39 @@ impl Scale {
         Self::source(i, self.mul.0, self.div.0)
     }
 
+    /// The source columns destination columns from `i` on take, in turn.
+    pub(crate) fn columns_from(self, i: u32) -> Columns {
+        let (mul, div) = (u64::from(self.mul.0), u64::from(self.div.0));
+        let far = (u64::from(i) + 1) * div;
+        Columns {
+            quotient: far / mul,
+            remainder: far % mul,
+            mul,
+            step: (div / mul, div % mul),
+        }
+    }
+
     /// The source row, from the bottom, destination row `j` from the bottom
     /// takes.
     pub(crate) fn row(self, j: u32) -> u32 {
         Self::source(j, self.mul.1, self.div.1)
+    }
+
+    /// The rows, from the top, of a sprite of `height` rows plotted from row
+    /// `at_y` that the destination's rows of `bounds` take.
+    pub(crate) fn rows_shown(self, height: u32, at_y: i32, bounds: Rect) -> Range<u32> {
+        self.rows_taken(
+            height,
+            bounds.bottom.abs_diff(at_y),
+            bounds.top.abs_diff(at_y),
+        )
+    }
+
+    /// The rows, from the top, of a sprite of `height` rows that destination
+    /// rows `low..=high` up from its bottom take.
+    pub(crate) fn rows_taken(self, height: u32, low: u32, high: u32) -> Range<u32> {
+        height.saturating_sub(self.row(high).saturating_add(1))
+            ..height.saturating_sub(self.row(low))
     }
 }
 
@@ -187,9 +224,29 @@ pub(crate) fn cursor(os: &mut Os<'_>) -> Result<Point, Fail> {
     state::with(os, |vdu, _| Ok(vdu.graphics.cursor_pixels))
 }
 
-/// Notes the pixels a plot changed in the changed box.
-fn changed(os: &mut Os<'_>, rect: Rect) -> Result<(), Fail> {
-    crate::changed::cover(os, rect)
+/// The source columns successive destination columns take, as
+/// [`Scale::column`] gives each: its far edge's span stepped on by a column's
+/// share of the source each time, so a row costs no division a pixel.
+pub(crate) struct Columns {
+    quotient: u64,
+    remainder: u64,
+    mul: u64,
+    step: (u64, u64),
+}
+
+impl Iterator for Columns {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
+        let source = self.quotient + u64::from(self.remainder != 0) - 1;
+        self.quotient += self.step.0;
+        self.remainder += self.step.1;
+        if self.remainder >= self.mul {
+            self.remainder -= self.mul;
+            self.quotient += 1;
+        }
+        Some(u32::try_from(source).unwrap_or(u32::MAX))
+    }
 }
 
 /// Where each destination pixel of a scaled or transformed plot takes its
@@ -202,9 +259,4 @@ pub(crate) trait Mapping {
     /// The source pixel the row's next column takes, from its first: a
     /// column and a row from the top.
     fn next(&mut self) -> (u32, u32);
-}
-
-/// The sprite a plot draws, read whole.
-fn read(os: &mut Os<'_>, sprite: &Sprite) -> Result<Source, Fail> {
-    Source::read(os, sprite)
 }

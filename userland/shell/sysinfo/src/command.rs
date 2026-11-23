@@ -39,6 +39,8 @@ pub enum Command<'a> {
         /// Request every stream rather than the caller's own.
         all: bool,
     },
+    /// List the served GPUs (`GPU_DEVICES`, ungated).
+    Gpu,
     /// Read kernel memory statistics (`KERNEL_MEMORY_STATS`).
     Memory,
     /// Read the detected hardware tree (`HARDWARE_TREE`).
@@ -173,6 +175,7 @@ pub enum Command<'a> {
 /// | `storage`, `io`       | [`Command::Storage`]             |
 /// | `raid`, `arrays`      | [`Command::Raid`]                |
 /// | `dma`, `iommu`        | [`Command::Dma`]                 |
+/// | `gpu`                 | [`Command::Gpu`]                 |
 /// | `show <ref>`          | [`Command::Show`]                |
 /// | `describe <ref>`      | [`Command::Describe`]            |
 ///
@@ -210,6 +213,7 @@ pub fn parse<'a>(args: &[&'a str]) -> Result<Command<'a>, SysinfoError> {
         "storage" | "io" => no_more(rest).map(|()| Command::Storage),
         "raid" | "arrays" => no_more(rest).map(|()| Command::Raid),
         "dma" | "iommu" => no_more(rest).map(|()| Command::Dma),
+        "gpu" => no_more(rest).map(|()| Command::Gpu),
         "audio" | "sound" => match all_switches(rest)? {
             0 => Ok(Command::Audio { all: false }),
             1 => Ok(Command::Audio { all: true }),
@@ -321,6 +325,8 @@ mod tests {
         assert_eq!(parse(&["dma"]), Ok(Command::Dma));
         assert_eq!(parse(&["iommu"]), Ok(Command::Dma));
         assert_eq!(parse(&["dma", "nodes"]), Err(SysinfoError::Usage));
+        assert_eq!(parse(&["gpu"]), Ok(Command::Gpu));
+        assert_eq!(parse(&["gpu", "0"]), Err(SysinfoError::Usage));
         assert_eq!(parse(&["audio"]), Ok(Command::Audio { all: false }));
         assert_eq!(parse(&["sound", "-a"]), Ok(Command::Audio { all: true }));
         assert_eq!(parse(&["audio", "--all"]), Ok(Command::Audio { all: true }));

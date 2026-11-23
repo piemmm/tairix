@@ -298,3 +298,48 @@ fn the_extras_at_80_to_9f_are_table_d_s_and_latin2_s_past_the_prm() {
         }
     }
 }
+
+#[test]
+fn a_name_another_module_answers_is_read_no_further_than_the_room_it_was_given() {
+    let mut s = session();
+    assert!(s.kernel.os().world.cmos.write(crate::cmos::COUNTRY, 99));
+    crate::module::tests::answer_service(
+        &mut s,
+        INTERNATIONAL,
+        crate::service::international::COUNTRY_NAME,
+        0xFFFF_FF00,
+    );
+    let _ = s.output();
+    let status = written(&mut s, "Status Country");
+    assert!(status.starts_with(b"Country    "), "{status:?}");
+    assert_eq!(status.len(), b"Country    ".len() + 15 + 2, "{status:?}");
+}
+
+#[test]
+fn a_listing_s_names_go_no_further_than_the_room_each_was_given() {
+    let mut s = session();
+    crate::module::tests::answer_service(
+        &mut s,
+        INTERNATIONAL,
+        crate::service::international::COUNTRY_NAME,
+        0xFFFF_FF00,
+    );
+    let _ = s.output();
+    written(&mut s, "Countries");
+    let request = s.kernel.os().world.international.own.request();
+    assert_eq!(
+        s.read(request, 17),
+        b"CountriesHeading\0",
+        "the room below the listing as the heading's lookup left it"
+    );
+}
+
+#[test]
+fn a_lookup_answered_past_its_room_is_read_no_further_than_the_room() {
+    let mut s = session();
+    crate::module::tests::answer_swis(&mut s, crate::msgtrans::CHUNK, 0x10_0000);
+    let _ = s.output();
+    let heading = written(&mut s, "Alphabets");
+    let reply = usize::try_from(crate::msgtrans::REPLY_ROOM).expect("a room");
+    assert!(heading.len() < reply + 0x400, "{} bytes", heading.len());
+}

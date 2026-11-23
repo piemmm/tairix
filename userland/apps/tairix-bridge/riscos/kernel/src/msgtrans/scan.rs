@@ -8,6 +8,8 @@
 //!
 //! The file is untrusted data: every walk is bounded by its length.
 
+use alloc::collections::TryReserveError;
+use alloc::vec::Vec;
 use core::ops::Range;
 
 use crate::dictionary::ESCAPE;
@@ -17,12 +19,12 @@ use crate::dictionary::ESCAPE;
 const NESTING: u32 = 8;
 
 /// Whether `byte` ends a caller's token.
-const fn ends_token(byte: u8) -> bool {
+pub(crate) const fn ends_token(byte: u8) -> bool {
     byte <= b' ' || byte == b',' || byte == b')' || byte == b':'
 }
 
 /// Whether `byte` ends a value.
-const fn ends_value(byte: u8) -> bool {
+pub(crate) const fn ends_value(byte: u8) -> bool {
     matches!(byte, b'\n' | b'\r' | 0)
 }
 
@@ -125,16 +127,30 @@ pub(crate) fn find(data: &[u8], token: &[u8]) -> Option<usize> {
 /// The length of the value at `at`: the bytes before its line feed, return
 /// or zero, an escape and its byte counted; none if the file ends first.
 pub(crate) fn value_length(data: &[u8], at: usize) -> Option<usize> {
-    let mut end = at;
-    loop {
-        let byte = *data.get(end)?;
-        if byte == ESCAPE {
-            end += 2;
-        } else if ends_value(byte) {
-            return Some(end - at);
-        } else {
-            end += 1;
+    ValueEnd::default().find(data.get(at..)?)
+}
+
+/// A value's end found a piece at a time: an escape's byte is passed over
+/// even where the escape ends a piece.
+#[derive(Default)]
+pub(crate) struct ValueEnd {
+    escaped: bool,
+}
+
+impl ValueEnd {
+    /// Where in `piece` the value ends, if it ends there.
+    pub(crate) fn find(&mut self, piece: &[u8]) -> Option<usize> {
+        for (n, &byte) in piece.iter().enumerate() {
+            if core::mem::take(&mut self.escaped) {
+                continue;
+            }
+            if byte == ESCAPE {
+                self.escaped = true;
+            } else if ends_value(byte) {
+                return Some(n);
+            }
         }
+        None
     }
 }
 
@@ -238,22 +254,73 @@ pub(crate) struct Expansion<'a> {
     pub(crate) dictionary: &'a [u8],
 }
 
-impl Expansion<'_> {
-    /// Expands `value` into `out`, cut short at its end: the length of what
-    /// it holds.
-    pub(crate) fn expand(&self, value: &[u8], out: &mut [u8]) -> usize {
-        let mut length = 0;
-        self.expand_into(value, out, &mut length, 0);
-        length
-    }
+/// Where an expansion goes.
+pub(crate) trait Sink {
+    /// Takes as much of `bytes` as there is room for: false once it is full.
+    fn take(&mut self, bytes: &[u8]) -> bool;
+}
 
-    fn put(out: &mut [u8], length: &mut usize, bytes: &[u8]) {
-        for &byte in bytes {
-            if let Some(slot) = out.get_mut(*length) {
-                *slot = byte;
-                *length += 1;
-            }
-        }
+/// A sink of host memory holding at most the room it was made with.
+pub(crate) struct Held {
+    pub(crate) bytes: Vec<u8>,
+    room: usize,
+}
+
+impl Held {
+    /// An empty sink of `room` bytes, the room reserved.
+    pub(crate) fn new(room: usize) -> Result<Self, TryReserveError> {
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(room)?;
+        Ok(Self { bytes, room })
+    }
+}
+
+impl Sink for Held {
+    fn take(&mut self, bytes: &[u8]) -> bool {
+        let n = bytes.len().min(self.room - self.bytes.len());
+        self.bytes.extend_from_slice(&bytes[..n]);
+        self.bytes.len() < self.room
+    }
+}
+
+/// A sink that only counts the bytes an expansion gives.
+#[derive(Default)]
+pub(crate) struct Measured(pub(crate) usize);
+
+impl Sink for Measured {
+    fn take(&mut self, bytes: &[u8]) -> bool {
+        self.0 = self.0.saturating_add(bytes.len());
+        true
+    }
+}
+
+/// A sink of a slice: what it holds is its first `length` bytes.
+pub(crate) struct Filled<'a> {
+    out: &'a mut [u8],
+    pub(crate) length: usize,
+}
+
+impl<'a> Filled<'a> {
+    /// An empty sink of `out`.
+    pub(crate) const fn new(out: &'a mut [u8]) -> Self {
+        Self { out, length: 0 }
+    }
+}
+
+impl Sink for Filled<'_> {
+    fn take(&mut self, bytes: &[u8]) -> bool {
+        let n = bytes.len().min(self.out.len() - self.length);
+        self.out[self.length..self.length + n].copy_from_slice(&bytes[..n]);
+        self.length += n;
+        self.length < self.out.len()
+    }
+}
+
+impl Expansion<'_> {
+    /// Expands `value` into `sink`, until the value ends or the sink is
+    /// full.
+    pub(crate) fn expand(&self, value: &[u8], sink: &mut impl Sink) {
+        self.expand_into(value, sink, 0);
     }
 
     fn parameter(text: &[u8]) -> &[u8] {
@@ -263,46 +330,50 @@ impl Expansion<'_> {
             .unwrap_or(text.len())]
     }
 
-    fn expand_into(&self, value: &[u8], out: &mut [u8], length: &mut usize, depth: u32) {
+    /// Expands `value` into `sink`: false once the sink is full.
+    fn expand_into(&self, value: &[u8], sink: &mut impl Sink, depth: u32) -> bool {
         let mut at = 0;
         while let Some(&byte) = value.get(at) {
             if ends_value(byte) {
-                return;
+                return true;
             }
             at += 1;
-            match byte {
+            let room = match byte {
                 b'%' => match value.get(at) {
                     Some(&digit @ b'0'..=b'3') => {
                         at += 1;
                         match self.parameters[usize::from(digit - b'0')] {
-                            Some(text) => Self::put(out, length, Self::parameter(text)),
-                            None => Self::put(out, length, &[b'%', digit]),
+                            Some(text) => sink.take(Self::parameter(text)),
+                            None => sink.take(&[b'%', digit]),
                         }
                     }
                     Some(b'%') => {
                         at += 1;
-                        Self::put(out, length, b"%");
+                        sink.take(b"%")
                     }
-                    _ => Self::put(out, length, b"%"),
+                    _ => sink.take(b"%"),
                 },
                 ESCAPE => {
                     let Some(&n) = value.get(at) else {
-                        return;
+                        return true;
                     };
                     at += 1;
                     if n == 0 {
-                        if let Some(text) = self.parameters[0] {
-                            Self::put(out, length, Self::parameter(text));
-                        }
+                        self.parameters[0].is_none_or(|text| sink.take(Self::parameter(text)))
                     } else if depth < NESTING {
-                        if let Some(word) = dictionary_word(self.dictionary, n) {
-                            self.expand_into(word, out, length, depth + 1);
-                        }
+                        dictionary_word(self.dictionary, n)
+                            .is_none_or(|word| self.expand_into(word, sink, depth + 1))
+                    } else {
+                        true
                     }
                 }
-                _ => Self::put(out, length, &[byte]),
+                _ => sink.take(&[byte]),
+            };
+            if !room {
+                return false;
             }
         }
+        true
     }
 }
 

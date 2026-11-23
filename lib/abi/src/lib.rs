@@ -38,6 +38,7 @@ pub mod filelock;
 pub mod font_ipc;
 pub mod fs;
 pub mod fsserve;
+pub mod gpu;
 pub(crate) mod hex;
 pub mod home;
 pub mod hwlink;

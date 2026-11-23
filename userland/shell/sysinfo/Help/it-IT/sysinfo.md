@@ -106,6 +106,9 @@ Le interrogazioni:
   suo gruppo, la generazione e lo stato del suo proprietario, i suoi flussi,
   e le mappature del suo dominio con i byte che coprono (richiede
   `CAP_SYSINFO_HW`).
+- `gpu` — le GPU servite: una riga per GPU che un driver serve — il nodo
+  del suo dispositivo nell'albero hardware e il canale da cui un programma
+  la apre.
 - `audio`, `sound` — i dispositivi audio: una riga per uscita e per
   ingresso — il suo identificativo, se è il predefinito della sua
   direzione, il livello e l'esclusione, la frequenza misurata del suo

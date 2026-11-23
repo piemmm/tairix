@@ -149,7 +149,7 @@ fn shown(format: u8, byte: u8, out: &mut Vec<u8>) {
         out.push(b'<');
         if format & HEXADECIMAL != 0 {
             out.push(b'&');
-            out.extend_from_slice(&hex2(byte));
+            out.extend_from_slice(&tairix_util::hex::upper_digits(byte));
         } else {
             out.extend_from_slice(Decimal::of(i32::from(byte)).as_bytes());
         }
@@ -181,12 +181,6 @@ fn line_number(line: u32, out: &mut Vec<u8>) {
     out.resize(out.len() + 4usize.saturating_sub(digits.len()), b' ');
     out.extend_from_slice(digits);
     out.push(b' ');
-}
-
-/// `byte` in two hexadecimal digits.
-fn hex2(byte: u8) -> [u8; 2] {
-    use tairix_util::hex::upper_digit;
-    [upper_digit(byte >> 4), upper_digit(byte)]
 }
 
 /// How `*Dump` lays out a line.
@@ -223,7 +217,9 @@ impl Dump {
         out.extend_from_slice(title);
         for column in 0..self.per_line {
             out.push(b' ');
-            out.extend_from_slice(&hex2(address.wrapping_add(column).to_le_bytes()[0]));
+            out.extend_from_slice(&tairix_util::hex::upper_digits(
+                address.wrapping_add(column).to_le_bytes()[0],
+            ));
         }
         if self.per_line >= 11 {
             out.extend_from_slice(b" : ");
@@ -243,7 +239,7 @@ impl Dump {
             match bytes.get(column) {
                 Some(&byte) => {
                     out.push(b' ');
-                    out.extend_from_slice(&hex2(byte));
+                    out.extend_from_slice(&tairix_util::hex::upper_digits(byte));
                 }
                 None => out.extend_from_slice(b"   "),
             }

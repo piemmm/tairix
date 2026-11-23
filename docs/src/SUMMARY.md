@@ -299,6 +299,7 @@
 - [Datagram socket ABI (`netsock-v1`)](./abi/net-sockets.md)
 - [Serving a filesystem (`fsserve-v1`)](./abi/fsserve.md)
 - [Network shares (`netshare-v1`)](./abi/netshare.md)
+- [GPU channel (`gpu-v1`)](./abi/gpu.md)
 - [C development header (`abi-v1`)](./abi/c-abi.md)
 - [Calling TAIRiX from C (worked example)](./abi/calling-from-c.md)
 

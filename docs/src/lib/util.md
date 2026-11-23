@@ -184,6 +184,17 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   (`tairix_window::docapp`, which TextEdit and Paint run in), Paint's decode
   queue, the Date & Time, Music and `netmap` work queues, and WinterSun's
   terrain desk.
+* `bitfield` — a field of up to a word's bits at any bit of a byte row, the
+  first byte's lowest bit first, as packed pixels lie: `field_at` reads one
+  (bits past the row read as nought), `set_field_at` writes one (bits past it
+  are dropped), touching only the bytes the field spans so successive pixels
+  never stall on each other's stores; `mask` is a field's width as a mask. A
+  sprite's rows (`lib/image`), as decoded and encoded, and TAIRiX Bridge's
+  screen memory and sprites read and write their pixels through it.
+* `divisor` — `gcd`, Euclid's greatest common divisor over any unsigned
+  width (`Unsigned`), so a resampler's rate ratio, a density in lowest terms
+  and a seeded sweep's stride reduce by one definition. A signed value
+  passes its magnitude: its divisor has no one sign.
 * `banner` — the `==> name <==` banner `head` and `tail` set before each of
   several sources: `Banners` writes a blank line before every banner but the
   first, names standard input as GNU does, and shows a file's name as the
@@ -298,12 +309,17 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   `-n -N` elide modes and `tail`'s `-c N` / `-n N` last-N modes are two
   policies over one mechanism whose memory cost is N, never the input
   size — a 100 TB+ file is a constant-memory read.
-* `hex` — hexadecimal text for byte strings: `digits` spells a byte as two
-  lowercase digits, and `decode_into` reads a string in either case straight
-  into the caller's buffer, answering whether it spelled exactly that many
-  bytes, so a key is never staged where its holder cannot erase it. The
+* `hex` — hexadecimal text: `digits` and `upper_digits` spell a byte as two
+  digits in either case, and `decode_into` reads a string in either case
+  straight into the caller's buffer, answering whether it spelled exactly
+  that many bytes, so a key is never staged where its holder cannot erase
+  it; `fill` and `fill_upper` write a number's low nibbles at a fixed width,
+  and `significant` counts its digits with its leading noughts dropped. The
   build's signing key set, `mkimage`'s root key file, `tools/cc`'s checksum
-  pins and the zone-store compiler's source pins read the one definition.
+  pins and the zone-store compiler's source pins read the one definition, and
+  the path parser's staging names, the UDF formatter's volume set and TAIRiX
+  Bridge's numbers are spelt by it. `lib/abi`, which this crate depends on,
+  and the fatal report, which links no allocator, keep digits of their own.
 * `hexdump` — the classic hex dump's shape as every hex view draws it:
   `BYTES_PER_ROW` bytes a row, an offset column `offset_digits` wide (never
   narrower than eight digits, wider only past 4 GiB), and `ascii_of`, which

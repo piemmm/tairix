@@ -8,19 +8,21 @@
 use tairix_image::{
     sprite_area as block, SpriteModeWord, SpriteName, SPRITE_HEADER_LEN, SPRITE_PALETTE_ENTRY_LEN,
 };
-use tairix_riscos_kernel::os::{Entry, Fail, Os, Regs};
+use tairix_riscos_kernel::os::{len32, Entry, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::{screen_mode, SCREEN_MODE};
 use tairix_riscos_kernel::swi::X;
 use tairix_vdu::mode::var;
 
 use super::area::{Area, Naming};
 use super::file;
-use super::format::{self, variable};
+use super::format;
 use super::get::Grab;
 use super::header::Sprite;
+use super::output::shown_as_screen;
 use super::paint;
 use super::NO_MEMORY;
 use crate::palette::{kind, reason as palette_reason, PALETTE_V};
+use crate::select::{Selector, SELECTOR_BYTES};
 use crate::state;
 
 /// The name a screen dump's sprite takes.
@@ -112,32 +114,28 @@ fn adopt_mode(os: &mut Os<'_>, sprite: &Sprite) -> Result<(), Fail> {
 }
 
 /// Selects a mode of `sprite`'s pixels, eigen factors and colours as wide
-/// and high as it is, through a selector below the supervisor stack.
+/// and high as it is, through a selector below the supervisor stack: its
+/// colours as it shows them, a full palette's among them.
 fn select_like(os: &mut Os<'_>, sprite: &Sprite, regs: &mut Regs) -> Result<(), Fail> {
     let pixels = sprite.pixels(os)?;
-    let read = |v| variable(sprite.mode, v).unwrap_or(0);
-    let selector = [
-        1,
+    let shown = shown_as_screen(sprite, &pixels);
+    let selector = Selector::new(
         sprite.width(&pixels),
         sprite.rows(),
         pixels.log2_bpp,
         u32::MAX,
-        var::X_EIG,
-        read(var::X_EIG),
-        var::Y_EIG,
-        read(var::Y_EIG),
-        var::MODE_FLAGS,
-        read(var::MODE_FLAGS),
-        var::N_COLOUR,
-        read(var::N_COLOUR),
-        u32::MAX,
-    ];
-    let mut bytes = [0u8; 4 * 14];
-    for (chunk, word) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(selector) {
-        *chunk = word.to_le_bytes();
-    }
-    os.below_supervisor_stack(u32::try_from(bytes.len()).unwrap_or(u32::MAX), |os, at| {
-        os.write_bytes(at, &bytes)?;
+    )
+    .with([
+        (var::X_EIG, shown.eig.0),
+        (var::Y_EIG, shown.eig.1),
+        (var::MODE_FLAGS, shown.flags),
+        (var::N_COLOUR, shown.ncolour),
+    ])
+    .ok_or_else(|| os.error(format::UNKNOWN_MODE))?;
+    let mut buffer = [0; SELECTOR_BYTES as usize];
+    let bytes = selector.bytes(&mut buffer);
+    os.below_supervisor_stack(len32(bytes.len()), |os, at| {
+        os.write_bytes(at, bytes)?;
         regs.r[1] = at;
         os.perform(X | SCREEN_MODE, regs)
     })
@@ -146,7 +144,7 @@ fn select_like(os: &mut Os<'_>, sprite: &Sprite, regs: &mut Regs) -> Result<(), 
 /// Sets each palette entry `sprite` holds as the screen's, both flash
 /// colours as it gives them.
 fn adopt_palette(os: &mut Os<'_>, sprite: &Sprite) -> Result<(), Fail> {
-    for entry in 0..sprite.named_entries() {
+    for entry in 0..sprite.named_entries(os)? {
         let at = sprite.address(SPRITE_HEADER_LEN + entry * SPRITE_PALETTE_ENTRY_LEN);
         let (first, second) = (os.read_word(at)?, os.read_word(at.wrapping_add(4))?);
         let mut set = Regs::new([

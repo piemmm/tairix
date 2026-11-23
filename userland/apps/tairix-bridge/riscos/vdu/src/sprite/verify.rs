@@ -58,20 +58,27 @@ fn sound(os: &mut Os<'_>, area: Area) -> Result<bool, Fail> {
 /// sum taken round the word: an image starting past the sprite's end
 /// passes it.
 fn sprite_sound(sprite: &Sprite) -> bool {
-    if sprite.first_bit > 31 || sprite.last_bit > 31 || !format::verifiable(sprite.mode) {
+    if !format::verifiable(sprite.mode) {
         return false;
     }
     let pixels = Pixels::verified(sprite.mode);
-    if !pixels.old_format && sprite.first_bit != 0 {
+    if !sprite.bits_sound(&pixels) {
         return false;
     }
     let image_room = sprite.next.wrapping_sub(sprite.image);
-    if u64::from(image_room) < sprite.image_bytes() {
+    if sprite
+        .image_bytes()
+        .is_none_or(|bytes| u64::from(image_room) < bytes)
+    {
         return false;
     }
     if sprite.masked() {
-        let mask_end = u64::from(sprite.mask) + sprite.mask_bytes(&pixels);
-        if sprite.image.min(sprite.mask) < SPRITE_HEADER_LEN || mask_end > u64::from(sprite.next) {
+        let mask_end = sprite
+            .mask_bytes(&pixels)
+            .and_then(|bytes| u64::from(sprite.mask).checked_add(bytes));
+        if sprite.image.min(sprite.mask) < SPRITE_HEADER_LEN
+            || mask_end.is_none_or(|end| end > u64::from(sprite.next))
+        {
             return false;
         }
     }

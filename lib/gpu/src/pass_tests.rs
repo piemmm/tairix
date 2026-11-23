@@ -4,6 +4,7 @@
 //! draw's buffers, viewport and bindings as its pipeline needs, and nothing a
 //! draw binds overlapping what the pass writes.
 
+use crate::device::as_software;
 use tairix_spirv::{Access, BindingKind, Component, ImageShape, Stages};
 
 use crate::device_tests::{context, queue, submit};
@@ -946,8 +947,8 @@ fn nothing_is_made_under_the_devices_lock() {
             .expect("a compute pipeline");
     assert_eq!(makings_under(), before, "each made with the lock let go");
     // The note counts what is made under the lock.
-    let held = context.shared.model.lock();
-    let made = context.shared.image_form(rendered.image.desc());
+    let held = as_software(&context.host).model.lock();
+    let made = as_software(&context.host).image_form(rendered.image.desc());
     drop(held);
     assert!(made.is_ok());
     assert_eq!(makings_under(), before + 1, "and so would catch one");

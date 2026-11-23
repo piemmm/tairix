@@ -25,8 +25,9 @@ pub(crate) struct FakeLive {
     pub(crate) anon_reserves_at: Vec<(u64, u64)>,
     pub(crate) anon_unmaps: Vec<(u64, u64)>,
     pub(crate) device_maps: Vec<(u64, usize)>,
-    pub(crate) writeback_framebuffer_maps: Vec<(u64, usize)>,
-    pub(crate) framebuffer_maps: Vec<(u64, usize)>,
+    pub(crate) writeback_maps: Vec<(u64, usize)>,
+    pub(crate) write_combining_maps: Vec<(u64, usize)>,
+    pub(crate) window_unmaps: Vec<u64>,
     pub(crate) dma_allocs: Vec<(usize, u64, u32, u64)>,
     pub(crate) dma_frees: Vec<u64>,
     pub(crate) file_reserves: Vec<u64>,
@@ -168,27 +169,31 @@ impl LiveUserSpace for FakeLive {
         }
     }
 
-    fn map_framebuffer_window(
+    fn map_write_combining_window(
         &mut self,
         phys_base: u64,
         len: usize,
     ) -> Result<u64, LiveSpaceError> {
-        self.framebuffer_maps.push((phys_base, len));
+        self.write_combining_maps.push((phys_base, len));
         match self.next.take() {
             Some(err) => Err(err),
             None => Ok(0x9000_2000),
         }
     }
 
-    fn map_writeback_framebuffer_window(
-        &mut self,
-        phys_base: u64,
-        len: usize,
-    ) -> Result<u64, LiveSpaceError> {
-        self.writeback_framebuffer_maps.push((phys_base, len));
+    fn map_writeback_window(&mut self, phys_base: u64, len: usize) -> Result<u64, LiveSpaceError> {
+        self.writeback_maps.push((phys_base, len));
         match self.next.take() {
             Some(err) => Err(err),
             None => Ok(0x9000_3000),
+        }
+    }
+
+    fn unmap_device_window(&mut self, base_va: u64) -> Result<u64, LiveSpaceError> {
+        self.window_unmaps.push(base_va);
+        match self.next.take() {
+            Some(err) => Err(err),
+            None => Ok(1),
         }
     }
 

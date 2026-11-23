@@ -15,6 +15,10 @@ pub use tairix_abi::driver::{CompletionSignal, DmaHost, VirtioHost};
 #[cfg(any(test, feature = "mock"))]
 mod mock;
 #[cfg(any(test, feature = "mock"))]
+mod region;
+#[cfg(any(test, feature = "mock"))]
 pub(crate) use mock::MockMemory;
 #[cfg(any(test, feature = "mock"))]
 pub use mock::{MockHost, MockWait};
+#[cfg(any(test, feature = "mock"))]
+pub use region::MockRegion;

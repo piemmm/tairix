@@ -1,6 +1,6 @@
 [package]
 name = "tairix-drv-display-gpu-virtio"
-description = "TAIRiX virtio-gpu display driver: the 2D device as the seat's display, its frames the backings of device resources so a present copies no pixel, its pointer the device's cursor, and the kernel console the node hosts shown on it; its BIND_KEYS identity and the autoloaded user-space Run process serving DISPLAY_ENDPOINT."
+description = "TAIRiX virtio-gpu display driver: the device as the seat's display, its frames the backings of device resources so a present copies no pixel, its pointer the device's cursor, and the kernel console the node hosts shown on it; where the device offers Venus, its contexts, host blobs mapped into the host-visible region and command streams, each answered in its own time, served as a GPU on its node's channel; its BIND_KEYS identity and the autoloaded user-space Run process serving DISPLAY_ENDPOINT."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,10 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# The Venus reply builders and the rounds `tests/fuzz_venus_replies.rs` runs.
+test-support = []
 
 # The host-testable engine (`VirtioGpu`), the `BIND_KEYS` match table and the
 # `register` entry are the `lib` target, co-located in the driver because a
@@ -30,16 +34,24 @@ tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
 tairix-edid = { path = "../../../lib/edid", version = "=0.0.0" }
 # Bounded containers: the buffers, a batch's commands and chains.
 tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
+# The generational tables a context's and a blob's handles name.
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
+# The GPU seam a Venus context serves: the model its jobs are checked and
+# ordered by, the hardware backend it drives, and the runtime serving it.
+tairix-gpu = { path = "../../../lib/gpu", version = "=0.0.0" }
+# The rounding a host's viewport bounds are stated with.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The bus-agnostic virtio split-virtqueue protocol.
 tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
+# `_start`, the console it hosts, the interrupt it parks on, and the lock and
+# condition variable the GPU's threads and the display loop meet under.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 
 [target.'cfg(target_os = "none")'.dependencies]
 # The one display-service loop, and the device memory frames are carved in.
 tairix-display = { path = "../../../lib/display", version = "=0.0.0", features = ["service"] }
 # Every decision recorded with a stable event id.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
-# `_start`, the console it hosts, the interrupt it parks on.
-tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
 
 [dev-dependencies]
 # Heap regions standing in for device memory.
@@ -49,6 +61,10 @@ tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0", features = ["t
 # A sink's EDID, built for the test.
 tairix-edid = { path = "../../../lib/edid", version = "=0.0.0", features = ["test-support"] }
 tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0", features = ["mock"] }
+# The seeded generator and budget the answer-decoding fuzz harnesses run on.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
+# The Venus reply rounds, for the harness that drives them.
+tairix-drv-display-gpu-virtio = { path = ".", version = "=0.0.0", features = ["test-support"] }
 
 [build-dependencies]
 tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

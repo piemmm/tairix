@@ -100,6 +100,9 @@ Yr ymholiadau:
   gyfieithu ar ran perchennog — ei uned a'i grŵp, cenhedlaeth a chyflwr ei
   berchennog, ei ffrydiau, a mapiadau ei barth a'r beitiau y maent yn eu
   mapio (angen `CAP_SYSINFO_HW`).
+- `gpu` — y GPUau a wasanaethir: un rhes i bob GPU y mae gyrrwr yn ei
+  wasanaethu — nod ei ddyfais yn y goeden galedwedd, a'r sianel y mae rhaglen
+  yn ei agor drwyddi.
 - `audio`, `sound` — y dyfeisiau sain: un rhes i bob allbwn a mewnbwn — ei
   ddynodwr, ai dyma ddewis diofyn ei gyfeiriad, ei lefel a'i fudo, cyfradd
   fesuredig ei gloc wrth chwarae, y fframiau a gollodd, ei leoliad a'i enw

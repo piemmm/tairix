@@ -77,7 +77,7 @@ fn read_sys_info_names_the_release_and_refuses_the_reasons_it_has_not() {
 #[test]
 fn read_sys_info_13_reads_a_key_handler_s_flags_only_where_it_has_them() {
     let mut s = session();
-    let top = APPLICATION + 0x1_0000;
+    let top = APPLICATION + crate::testkit::SLOT_BYTES;
     let header = top - 8;
     s.poke(header, &[0, 0x70]);
     let regs = call(&mut s, READ_SYS_INFO, &[13, header]);

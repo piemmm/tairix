@@ -91,10 +91,7 @@ impl Area {
     pub(crate) fn block(self, os: &mut Os<'_>) -> Result<Block, Fail> {
         let mut words = [0u8; block::LEN as usize];
         os.read_bytes(self.base, &mut words)?;
-        let word = |offset: u32| {
-            let at = offset as usize;
-            u32::from_le_bytes([words[at], words[at + 1], words[at + 2], words[at + 3]])
-        };
+        let word = |offset| super::header::word_at(&words, offset);
         Ok(Block {
             size: word(block::SIZE),
             count: word(block::COUNT),
@@ -227,6 +224,9 @@ impl Area {
         if !os.writable(self.address(offset), end) {
             return Err(os.error(UNRECOGNISED));
         }
+        if bytes == 0 {
+            return Ok(());
+        }
         os.copy_bytes(
             self.address(offset),
             self.address(offset + bytes),
@@ -253,6 +253,9 @@ impl Area {
             u64::from(self.base) + u64::from(block.free),
         ) {
             return Err(os.error(UNRECOGNISED));
+        }
+        if bytes == 0 {
+            return Ok(());
         }
         os.copy_bytes(
             self.address(offset + bytes),

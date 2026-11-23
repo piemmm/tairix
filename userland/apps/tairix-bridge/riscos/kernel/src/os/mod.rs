@@ -404,11 +404,7 @@ impl Kernel {
         })?;
         let rom_resources = crate::resources::install(&mut memory, &builtins)?;
         let dictionaries = crate::dictionary::install(&mut memory)?;
-        let bits = if config.layout.admits_26bit {
-            Bits::Bit26
-        } else {
-            Bits::Bit32
-        };
+        let bits = config.layout.kernel_bits();
         let placeholder = crate::env::Buffers {
             error: 0,
             dump: 0,

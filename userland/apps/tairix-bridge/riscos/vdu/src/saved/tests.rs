@@ -87,6 +87,22 @@ fn no_word_a_program_writes_reaches_the_drivers_unchecked() {
                         "word {i}"
                     );
                     assert!(read.text.cursor.appearance <= 3, "word {i}");
+                    let graphics = &read.graphics;
+                    let reach = -crate::plot::REACH..=crate::plot::REACH;
+                    for (x, y) in [
+                        graphics.cursor_pixels,
+                        graphics.old,
+                        graphics.older,
+                        graphics.new_point,
+                        read.colours.ecf_origin,
+                    ] {
+                        assert!(reach.contains(&x) && reach.contains(&y), "word {i}");
+                    }
+                    let (x, y) = graphics.origin;
+                    assert!(
+                        i16::try_from(x).is_ok() && i16::try_from(y).is_ok(),
+                        "word {i}"
+                    );
                 }
             }
             os.write_word(at, kept).expect("restored");

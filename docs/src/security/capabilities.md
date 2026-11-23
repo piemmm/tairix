@@ -186,12 +186,19 @@ Every account that may start an interactive session is granted at least
 `CAP_FS_ACCESS`, `CAP_PROC_SPAWN`, `CAP_CONSOLE_READ`,
 `CAP_CONSOLE_WRITE`, `CAP_NET` (ordinary transport traffic through the
 socket surface; the coarser `CAP_NET_ADMIN` and `CAP_NET_RAW` are not
-baseline), `CAP_LOG_EMIT`, `CAP_JIT_MAP_EXEC`, and the graphical-session
-class — `CAP_DISPLAY`, `CAP_INPUT_READ`, `CAP_SHM`, and `CAP_DESKTOP_LAYER`,
-so a graphical login is an ordinary session, not an administrative act; real
-reach stays per-inode, per-descriptor, and per-lease (the kernel
-owner-gates every seat acquire, input drain, and present against the live
-lease, and every shared-memory region against its owner).
+baseline), `CAP_LOG_EMIT`, `CAP_JIT_MAP_EXEC`, `CAP_GPU`, and the
+graphical-session class — `CAP_DISPLAY`, `CAP_INPUT_READ`, `CAP_SHM`, and
+`CAP_DESKTOP_LAYER`, so a graphical login is an ordinary session, not an
+administrative act; real reach stays per-inode, per-descriptor, and per-lease
+(the kernel owner-gates every seat acquire, input drain, and present against
+the live lease, and every shared-memory region against its owner).
+
+`CAP_GPU` is the right to call a GPU's device channel ([`gpu-v1`](../abi/gpu.md)):
+its driver binds the channel restricted-sender on it, so the kernel refuses a
+caller without it at dispatch. It is baseline for the reason drawing a window
+is: a context reaches only what it was given, is charged for what it makes,
+and holds at most half the device's memory, so using the GPU is no more an
+administrator's act than using the display.
 
 `CAP_DESKTOP_LAYER` is presence on the desktop *outside a window of one's
 own*: a small undecorated surface placed in screen coordinates, stacked

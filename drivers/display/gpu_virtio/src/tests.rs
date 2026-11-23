@@ -17,16 +17,24 @@ use super::*;
 
 const OK_NODATA: u32 = 0x1100;
 const OK_DISPLAY_INFO: u32 = 0x1101;
+const OK_CAPSET_INFO: u32 = 0x1102;
+const OK_CAPSET: u32 = 0x1103;
 const OK_EDID: u32 = 0x1104;
+const OK_MAP_INFO: u32 = 0x1106;
 const ERR_UNSPEC: u32 = 0x1200;
 const ERR_OUT_OF_MEMORY: u32 = 0x1201;
 const ERR_INVALID_RESOURCE_ID: u32 = 0x1203;
+const ERR_INVALID_CONTEXT_ID: u32 = 0x1204;
 const ERR_INVALID_PARAMETER: u32 = 0x1205;
 
 const GET_DISPLAY_INFO: u32 = 0x0100;
 const CREATE_2D: u32 = 0x0101;
 const UNREF: u32 = 0x0102;
 const SET_SCANOUT: u32 = 0x0103;
+const CTX_CREATE: u32 = 0x0200;
+const SUBMIT_3D: u32 = 0x0207;
+const MAP_BLOB: u32 = 0x0208;
+const UNMAP_BLOB: u32 = 0x0209;
 const UPDATE_CURSOR: u32 = 0x0300;
 const MOVE_CURSOR: u32 = 0x0301;
 
@@ -69,6 +77,34 @@ struct Cursor {
     hot: (u32, u32),
 }
 
+/// A capset the model device lists: its id, highest version, and bytes.
+#[derive(Clone, Debug)]
+struct Capset {
+    id: u32,
+    version: u32,
+    data: Vec<u8>,
+}
+
+/// A blob the model device made of host memory: the context that made it,
+/// its blob id, size and flags, and where it is mapped.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct HostBlob {
+    context: u32,
+    blob_id: u64,
+    size: u64,
+    flags: u32,
+    mapped: Option<u64>,
+}
+
+/// A command stream the model device took: its context, the ring its fence
+/// was placed on, and its bytes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Submitted {
+    context: u32,
+    ring: Option<u8>,
+    stream: Vec<u8>,
+}
+
 /// The device's state, and what it was told.
 #[derive(Default)]
 struct Model {
@@ -90,10 +126,25 @@ struct Model {
     fences: Vec<Option<u64>>,
     /// The device answers without echoing a command's fence.
     drops_fences: bool,
+    /// The capsets it lists.
+    capsets: Vec<Capset>,
+    /// How many capsets it was asked to describe.
+    capset_infos_asked: usize,
+    /// Its contexts: the capset each was made for, and its name.
+    contexts: BTreeMap<u32, (u32, Vec<u8>)>,
+    blobs: BTreeMap<u32, HostBlob>,
+    /// The caching a map answers with.
+    map_cache: u32,
+    /// The device holds a submission's answer until the test answers it.
+    hold_submits: bool,
+    submitted: Vec<Submitted>,
+    /// The device answers commands of this type writing what it always does
+    /// but saying it wrote this many bytes.
+    short_answers: Option<(u32, u32)>,
 }
 
 impl Model {
-    fn apply(&mut self, request: &[u8], response: &mut [u8]) -> u32 {
+    fn apply(&mut self, request: &[u8], stream: Option<&[u8]>, response: &mut [u8]) -> u32 {
         let kind = word(request, 0);
         self.commands.push(kind);
         if let Some((refused, error)) = self.refuse {
@@ -114,8 +165,118 @@ impl Model {
             0x0105 => self.transfer(request),
             0x0106 => self.attach(request),
             0x0107 => self.detach(word(request, 24)),
+            0x0108 => self.capset_info(word(request, 24), response),
+            0x0109 => self.capset(word(request, 24), response),
+            0x010C => self.create_blob(request),
+            CTX_CREATE => self.ctx_create(request),
+            0x0201 => self.ctx_destroy(word(request, 16)),
+            SUBMIT_3D => self.submit(request, stream.unwrap_or(&[])),
+            MAP_BLOB => self.map_blob(request, response),
+            UNMAP_BLOB => self.unmap_blob(word(request, 24)),
             _ => ERR_UNSPEC,
         }
+    }
+
+    fn capset_info(&mut self, index: u32, response: &mut [u8]) -> u32 {
+        self.capset_infos_asked += 1;
+        if let Some(capset) = self.capsets.get(index as usize) {
+            let len = u32::try_from(capset.data.len()).expect("small");
+            for (at, value) in [(24, capset.id), (28, capset.version), (32, len)] {
+                response[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            }
+        }
+        OK_CAPSET_INFO
+    }
+
+    fn capset(&self, id: u32, response: &mut [u8]) -> u32 {
+        let Some(capset) = self.capsets.iter().find(|capset| capset.id == id) else {
+            return ERR_INVALID_PARAMETER;
+        };
+        response[24..24 + capset.data.len()].copy_from_slice(&capset.data);
+        OK_CAPSET
+    }
+
+    fn ctx_create(&mut self, request: &[u8]) -> u32 {
+        let context = word(request, 16);
+        if context == 0 || self.contexts.contains_key(&context) {
+            return ERR_UNSPEC;
+        }
+        let name = request[32..32 + word(request, 24) as usize].to_vec();
+        self.contexts
+            .insert(context, (word(request, 28) & 0xff, name));
+        OK_NODATA
+    }
+
+    fn ctx_destroy(&mut self, context: u32) -> u32 {
+        if self.contexts.remove(&context).is_none() {
+            return ERR_INVALID_CONTEXT_ID;
+        }
+        OK_NODATA
+    }
+
+    fn create_blob(&mut self, request: &[u8]) -> u32 {
+        let (context, id) = (word(request, 16), word(request, 24));
+        if !self.contexts.contains_key(&context) {
+            return ERR_INVALID_CONTEXT_ID;
+        }
+        if id == 0 || self.resources.contains_key(&id) || self.blobs.contains_key(&id) {
+            return ERR_INVALID_RESOURCE_ID;
+        }
+        if word(request, 28) != 2 {
+            return ERR_INVALID_PARAMETER;
+        }
+        let at64 = |at: usize| u64::from_le_bytes(request[at..at + 8].try_into().expect("a word"));
+        self.blobs.insert(
+            id,
+            HostBlob {
+                context,
+                blob_id: at64(40),
+                size: at64(48),
+                flags: word(request, 32),
+                mapped: None,
+            },
+        );
+        OK_NODATA
+    }
+
+    fn map_blob(&mut self, request: &[u8], response: &mut [u8]) -> u32 {
+        let offset = u64::from_le_bytes(request[32..40].try_into().expect("an offset"));
+        match self.blobs.get_mut(&word(request, 24)) {
+            Some(blob) if blob.flags & 1 != 0 && blob.mapped.is_none() => {
+                blob.mapped = Some(offset);
+                response[24..28].copy_from_slice(&self.map_cache.to_le_bytes());
+                OK_MAP_INFO
+            }
+            Some(_) => ERR_INVALID_PARAMETER,
+            None => ERR_INVALID_RESOURCE_ID,
+        }
+    }
+
+    fn unmap_blob(&mut self, id: u32) -> u32 {
+        match self.blobs.get_mut(&id) {
+            Some(blob) if blob.mapped.is_some() => {
+                blob.mapped = None;
+                OK_NODATA
+            }
+            Some(_) => ERR_INVALID_PARAMETER,
+            None => ERR_INVALID_RESOURCE_ID,
+        }
+    }
+
+    fn submit(&mut self, request: &[u8], stream: &[u8]) -> u32 {
+        let context = word(request, 16);
+        if !self.contexts.contains_key(&context) {
+            return ERR_INVALID_CONTEXT_ID;
+        }
+        if word(request, 24) as usize != stream.len() {
+            return ERR_INVALID_PARAMETER;
+        }
+        self.submitted.push(Submitted {
+            context,
+            ring: (word(request, 4) & 2 != 0).then_some(request[20]),
+            stream: stream.to_vec(),
+        });
+        OK_NODATA
     }
 
     fn display_info(&self, response: &mut [u8]) -> u32 {
@@ -154,7 +315,7 @@ impl Model {
     }
 
     fn unref(&mut self, id: u32) -> u32 {
-        if self.resources.remove(&id).is_none() {
+        if self.resources.remove(&id).is_none() && self.blobs.remove(&id).is_none() {
             return ERR_INVALID_RESOURCE_ID;
         }
         self.scanned.retain(|_, (shown, _)| *shown != id);
@@ -225,13 +386,44 @@ impl Model {
 
 type Shared = Rc<RefCell<Model>>;
 
-/// A transport over the model, answering at each notify.
-fn transport(model: &Shared, host: &MockHost, features: u64) -> Rc<RefCell<MockTransport>> {
-    let mut transport = MockTransport::new(2, 64, features, 16);
+/// Write the answer `kind` to a request fenced with `fence`, echoing the
+/// fence unless the model drops fences.
+fn answer(response: &mut [u8], kind: u32, fence: Option<u64>, drops_fences: bool) -> u32 {
+    response[..4].copy_from_slice(&kind.to_le_bytes());
+    if let Some(fence) = fence.filter(|_| !drops_fences) {
+        response[4..8].copy_from_slice(&1u32.to_le_bytes());
+        response[8..16].copy_from_slice(&fence.to_le_bytes());
+    }
+    u32::try_from(response.len()).expect("small")
+}
+
+/// The fence the request whose header opens `request` carries, if any.
+fn fence_of(request: &[u8]) -> Option<u64> {
+    (word(request, 4) & 1 != 0)
+        .then(|| u64::from_le_bytes(request[8..16].try_into().expect("a fence")))
+}
+
+/// Answer a held submission done, as the device does once its fence lands.
+fn answer_done(chain: &mut ChainView<'_>) -> u32 {
+    let fence = fence_of(chain.device_read[0]);
+    answer(chain.device_write[0], OK_NODATA, fence, false)
+}
+
+/// A transport over the model with queues `queue_max` descriptors deep,
+/// listing `capsets` capsets, answering at each notify.
+fn transport(
+    model: &Shared,
+    host: &MockHost,
+    features: u64,
+    queue_max: u16,
+    capsets: u32,
+) -> Rc<RefCell<MockTransport>> {
+    let mut transport = MockTransport::new(2, queue_max, features, 16);
     transport.reach(host);
     transport.set_synchronous_notify(true);
+    transport.set_config(wire::CONFIG_NUM_CAPSETS, &capsets.to_le_bytes());
     let control = Rc::clone(model);
-    transport.install_shim(
+    transport.install_holding_shim(
         wire::CONTROL_QUEUE,
         Box::new(move |chain: &mut ChainView<'_>| {
             let mut model = control.borrow_mut();
@@ -240,6 +432,7 @@ fn transport(model: &Shared, host: &MockHost, features: u64) -> Rc<RefCell<MockT
                 .first()
                 .copied()
                 .ok_or(VirtioError::DeviceFault)?;
+            let stream = chain.device_read.get(1).copied();
             let kind = word(request, 0);
             if model.fall_silent_at.take_if(|at| *at == kind).is_some() {
                 model.mute = true;
@@ -252,16 +445,17 @@ fn transport(model: &Shared, host: &MockHost, features: u64) -> Rc<RefCell<MockT
                 .first_mut()
                 .ok_or(VirtioError::DeviceFault)?;
             response.fill(0);
-            let kind = model.apply(request, response);
-            response[..4].copy_from_slice(&kind.to_le_bytes());
-            let fence = (word(request, 4) & 1 != 0)
-                .then(|| u64::from_le_bytes(request[8..16].try_into().expect("a fence")));
+            let answered = model.apply(request, stream, response);
+            let fence = fence_of(request);
             model.fences.push(fence);
-            if let Some(fence) = fence.filter(|_| !model.drops_fences) {
-                response[4..8].copy_from_slice(&1u32.to_le_bytes());
-                response[8..16].copy_from_slice(&fence.to_le_bytes());
+            if kind == SUBMIT_3D && model.hold_submits {
+                return Ok(None);
             }
-            u32::try_from(response.len()).map_err(|_| VirtioError::DeviceFault)
+            let written = answer(response, answered, fence, model.drops_fences);
+            Ok(Some(match model.short_answers {
+                Some((short, said)) if short == kind => said,
+                _ => written,
+            }))
         }),
     );
     let cursor = Rc::clone(model);
@@ -350,6 +544,12 @@ struct Rig {
     console: Console,
     records: Records<Record>,
     features: u64,
+    /// How deep the device lets each queue be.
+    queue_max: u16,
+    /// How many capsets its configuration says it lists.
+    capsets: u32,
+    /// Bytes of the host-visible region the node holds.
+    host_visible: Option<u64>,
 }
 
 impl Rig {
@@ -366,17 +566,27 @@ impl Rig {
             console: Console::default(),
             records: Records::default(),
             features: TRANSPORT_FEATURES,
+            queue_max: 64,
+            capsets: 0,
+            host_visible: None,
         }
     }
 
     fn open(&self) -> (Gpu<'_>, Rc<RefCell<MockTransport>>) {
-        let transport = transport(&self.model, &self.host, self.features);
+        let transport = transport(
+            &self.model,
+            &self.host,
+            self.features,
+            self.queue_max,
+            self.capsets,
+        );
         let gpu = VirtioGpu::open(
             Rc::clone(&transport),
             &self.host,
             self.memory.clone(),
             Some(self.console.clone()),
             self.records.clone(),
+            self.host_visible,
         )
         .expect("opened");
         (gpu, transport)
@@ -440,10 +650,15 @@ fn the_output_is_the_first_enabled_scanout_and_the_console_is_shown_on_it() {
     assert_eq!(rig.console.0.borrow().adopted, vec![(1280, 800)]);
     assert_eq!(
         rig.records.all(),
-        vec![Record::ConsoleShown {
-            width: 1280,
-            height: 800
-        }]
+        vec![
+            Record::ConsoleShown {
+                width: 1280,
+                height: 800
+            },
+            Record::NoVenus {
+                why: NoVenus::Features
+            }
+        ]
     );
     let model = rig.model.borrow();
     let (&console, resource) = model
@@ -674,6 +889,25 @@ fn every_control_command_is_fenced_with_a_fence_of_its_own() {
     assert!(
         ids.windows(2).all(|pair| pair[0] < pair[1]),
         "each command its own fence: {ids:?}"
+    );
+}
+
+#[test]
+fn an_answer_is_read_no_further_than_the_device_says_it_wrote() {
+    let rig = Rig::new();
+    let (mut gpu, _) = rig.open();
+    let frame = gpu.alloc_buffer(1280, 800).expect("a frame");
+    let header = u32::try_from(wire::HEADER_LEN).expect("small");
+    rig.model().short_answers = Some((CREATE_2D, header - 1));
+    assert_eq!(
+        gpu.present(frame.id, &[whole(1280, 800)]),
+        Err(DriverError::DeviceFault),
+        "the answer's bytes past what the device says it wrote are not its answer"
+    );
+    rig.model().short_answers = None;
+    assert_eq!(
+        gpu.present(frame.id, &[whole(1280, 800)]),
+        Ok(Presented::Shown)
     );
 }
 
@@ -984,9 +1218,14 @@ fn a_console_that_cannot_be_hosted_leaves_the_screen_dark_and_is_recorded() {
     assert_eq!(rig.scanned(), None);
     assert_eq!(
         rig.records.all(),
-        vec![Record::ConsoleUnhosted {
-            reason: DriverError::LengthOutOfRange
-        }]
+        vec![
+            Record::ConsoleUnhosted {
+                reason: DriverError::LengthOutOfRange
+            },
+            Record::NoVenus {
+                why: NoVenus::Features
+            }
+        ]
     );
     gpu.released(ReleaseSurface::Text);
     assert_eq!(rig.scanned(), None, "no console to show");
@@ -1014,9 +1253,14 @@ fn a_console_the_device_refused_goes_back_and_is_hosted_once_the_output_moves() 
     assert_eq!(rig.scanned(), None);
     assert_eq!(
         rig.records.all(),
-        vec![Record::ConsoleUnhosted {
-            reason: DriverError::OutOfMemory
-        }]
+        vec![
+            Record::ConsoleUnhosted {
+                reason: DriverError::OutOfMemory
+            },
+            Record::NoVenus {
+                why: NoVenus::Features
+            }
+        ]
     );
     assert_eq!(
         rig.console.0.borrow().relinquished,
@@ -1047,7 +1291,12 @@ fn a_console_whose_making_went_unanswered_keeps_its_memory_until_the_device_answ
     let (mut gpu, transport) = rig.open();
     assert!(matches!(
         rig.records.all()[..],
-        [Record::ConsoleUnhosted { .. }]
+        [
+            Record::ConsoleUnhosted { .. },
+            Record::NoVenus {
+                why: NoVenus::Features
+            }
+        ]
     ));
     assert_eq!(
         rig.console.0.borrow().relinquished,
@@ -1365,3 +1614,6 @@ fn dropping_the_engine_resets_the_device_before_its_memory_goes() {
     drop(gpu);
     assert_eq!(transport.borrow().status().bits(), 0, "reset");
 }
+
+#[path = "three_d_tests.rs"]
+mod three_d;

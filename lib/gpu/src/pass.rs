@@ -7,17 +7,21 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use tairix_collections::{Key, SlotKey};
+
 use crate::backend::Backend;
 use crate::binding::{identity, BindSet, BindSetState, Touched};
-use crate::command::{buffer, push_words, set_keys, Command, Op, Refused};
-use crate::device::{owned, Buffer, CommandBuffer};
+use crate::command::{buffer, push_words, put_push, set_keys, take_push, Command, Op, Refused};
+use crate::device::{Buffer, CommandBuffer};
 use crate::format::{Aspects, Format, FormatFeatures};
+use crate::host::owned;
 use crate::image::{ClearValue, ImageUsage, ViewDimension};
 use crate::info::{BufferUsage, DeviceInfo};
 use crate::model::{BindSetKey, BufferKey, ContextState, RenderPipelineKey, ViewKey};
 use crate::objects::ImageView;
 use crate::render::{FixedFunction, RenderPipeline, RenderPipelineState};
 use crate::resource::ViewState;
+use crate::wire::{put_key, take_key, Reader, Wire, Writer};
 use crate::{Error, MAX_DISPATCH_SETS, MAX_PUSH_BYTES, MAX_SUBMISSION_COMMANDS};
 
 /// The most colour attachments one pass records: past every device's.
@@ -300,6 +304,192 @@ pub(crate) struct PassRecord {
     pub(crate) draws: Vec<DrawRecord>,
 }
 
+impl PassRecord {
+    /// Its draws, in order.
+    pub(crate) fn draws(&self) -> &[DrawRecord] {
+        &self.draws
+    }
+
+    /// Append `draws`, uploaded after the pass they continue.
+    pub(crate) fn extend(&mut self, draws: &mut Vec<DrawRecord>) -> Result<(), Error> {
+        self.draws
+            .try_reserve(draws.len())
+            .map_err(|_| Error::OutOfMemory)?;
+        self.draws.append(draws);
+        Ok(())
+    }
+
+    /// Write it with only its first `draws` draws.
+    pub(crate) fn put_first(&self, writer: &mut Writer<'_>, draws: usize) -> Result<(), Error> {
+        self.put_head(writer)?;
+        writer.list(
+            self.draws.get(..draws).ok_or(Error::Malformed)?,
+            |writer, draw| draw.put(writer),
+        )
+    }
+
+    pub(crate) fn put(&self, writer: &mut Writer<'_>) -> Result<(), Error> {
+        self.put_first(writer, self.draws.len())
+    }
+
+    fn put_head(&self, writer: &mut Writer<'_>) -> Result<(), Error> {
+        writer.list(&self.colour, |writer, attachment| {
+            put_key(writer, attachment.view)?;
+            attachment
+                .resolve
+                .map(|view| view.slot().to_bits())
+                .put(writer)?;
+            attachment.load.put(writer)
+        })?;
+        match &self.depth_stencil {
+            None => false.put(writer)?,
+            Some(attachment) => {
+                true.put(writer)?;
+                put_key(writer, attachment.view)?;
+                attachment.depth.put(writer)?;
+                attachment.stencil.put(writer)?;
+            }
+        }
+        self.area.put(writer)
+    }
+
+    /// A pass whose draws, with the pass itself, count as at most `room`
+    /// commands.
+    pub(crate) fn take(reader: &mut Reader<'_>, room: usize) -> Result<Self, Error> {
+        let colour = reader.list(MAX_PASS_ATTACHMENTS, |reader| {
+            Ok(AttachmentRecord {
+                view: take_key(reader)?,
+                resolve: <Option<u64> as Wire>::take(reader)?
+                    .map(|bits| {
+                        SlotKey::from_bits(bits)
+                            .map(ViewKey::from_slot)
+                            .ok_or(Error::Malformed)
+                    })
+                    .transpose()?,
+                load: Wire::take(reader)?,
+            })
+        })?;
+        let depth_stencil = if bool::take(reader)? {
+            Some(DepthStencilRecord {
+                view: take_key(reader)?,
+                depth: Wire::take(reader)?,
+                stencil: Wire::take(reader)?,
+            })
+        } else {
+            None
+        };
+        let area = Wire::take(reader)?;
+        let draws = take_draws(reader, room.saturating_sub(1))?;
+        Ok(Self {
+            colour,
+            depth_stencil,
+            area,
+            draws,
+        })
+    }
+}
+
+/// Draws, at most `room` of them.
+pub(crate) fn take_draws(reader: &mut Reader<'_>, room: usize) -> Result<Vec<DrawRecord>, Error> {
+    reader.list(room, DrawRecord::take)
+}
+
+impl DrawRecord {
+    pub(crate) fn put(&self, writer: &mut Writer<'_>) -> Result<(), Error> {
+        put_key(writer, self.pipeline)?;
+        writer.list(&self.sets, |writer, &set| put_key(writer, set))?;
+        put_push(writer, self.push.as_deref(), self.push_bytes)?;
+        writer.list(&self.vertex_buffers, |writer, &(buffer, offset)| {
+            put_key(writer, buffer)?;
+            offset.put(writer)
+        })?;
+        match self.index {
+            None => false.put(writer)?,
+            Some((buffer, offset, format)) => {
+                true.put(writer)?;
+                put_key(writer, buffer)?;
+                offset.put(writer)?;
+                format.put(writer)?;
+            }
+        }
+        self.viewport.put(writer)?;
+        self.scissor.put(writer)?;
+        self.stencil_reference.put(writer)?;
+        self.blend_constant.put(writer)?;
+        match &self.count {
+            Count::Direct {
+                positions,
+                base_vertex,
+                instances,
+            } => {
+                false.put(writer)?;
+                positions.start.put(writer)?;
+                positions.end.put(writer)?;
+                base_vertex.put(writer)?;
+                instances.start.put(writer)?;
+                instances.end.put(writer)
+            }
+            &Count::Indirect {
+                buffer,
+                offset,
+                count,
+                stride,
+            } => {
+                true.put(writer)?;
+                put_key(writer, buffer)?;
+                offset.put(writer)?;
+                count.put(writer)?;
+                stride.put(writer)
+            }
+        }
+    }
+
+    fn take(reader: &mut Reader<'_>) -> Result<Self, Error> {
+        let pipeline = take_key(reader)?;
+        let sets = reader.list(MAX_DISPATCH_SETS, take_key)?;
+        let (push, push_bytes) = take_push(reader)?;
+        let vertex_buffers = reader.list(MAX_DRAW_VERTEX_BUFFERS, |reader| {
+            Ok((take_key(reader)?, u64::take(reader)?))
+        })?;
+        let index = if bool::take(reader)? {
+            Some((take_key(reader)?, u64::take(reader)?, Wire::take(reader)?))
+        } else {
+            None
+        };
+        let viewport = Wire::take(reader)?;
+        let scissor = Wire::take(reader)?;
+        let stencil_reference = Wire::take(reader)?;
+        let blend_constant = Wire::take(reader)?;
+        let count = if bool::take(reader)? {
+            Count::Indirect {
+                buffer: take_key(reader)?,
+                offset: Wire::take(reader)?,
+                count: Wire::take(reader)?,
+                stride: Wire::take(reader)?,
+            }
+        } else {
+            Count::Direct {
+                positions: u32::take(reader)?..u32::take(reader)?,
+                base_vertex: Wire::take(reader)?,
+                instances: u32::take(reader)?..u32::take(reader)?,
+            }
+        };
+        Ok(Self {
+            pipeline,
+            sets,
+            push,
+            push_bytes,
+            vertex_buffers,
+            index,
+            viewport,
+            scissor,
+            stencil_reference,
+            blend_constant,
+            count,
+        })
+    }
+}
+
 /// What records a pass's draws, each counting as a command.
 pub struct Drawer<'p> {
     buffer: &'p CommandBuffer,
@@ -374,7 +564,7 @@ impl CommandBuffer {
     }
 
     fn named_view(&self, view: &ImageView) -> Result<ViewKey, Error> {
-        owned(&view.shared, view.context, &self.shared, self.context)?;
+        owned(&view.host, view.context, &self.host, self.context)?;
         Ok(view.key)
     }
 }
@@ -489,9 +679,9 @@ impl Drawer<'_> {
     ) -> Result<(), Error> {
         let buffer = self.buffer;
         owned(
-            &draw.pipeline.shared,
+            &draw.pipeline.host,
             draw.pipeline.context,
-            &buffer.shared,
+            &buffer.host,
             buffer.context,
         )?;
         if self.room == 0

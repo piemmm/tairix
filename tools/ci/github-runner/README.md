@@ -95,14 +95,26 @@ soaks, just register the `soak`-labelled instance there.
   so its build-time dependencies must already be present on the host. On
   Debian/Ubuntu, once:
   ```sh
-  sudo apt-get install -y build-essential ninja-build meson python3-venv \
+  sudo apt-get install -y build-essential ninja-build meson python3-venv git \
     pkg-config libglib2.0-dev libpixman-1-dev nettle-dev zlib1g-dev \
-    libfdt-dev libgtk-3-dev libslirp-dev flex bison
+    libfdt-dev libgtk-3-dev libslirp-dev flex bison \
+    libepoxy-dev libgbm-dev libdrm-dev
   ```
   The build lands once in the persistent cache and every later run reuses it;
   `install-qemu.sh` fails closed with the exact missing packages if a
   prerequisite is absent. The pinned QEMU version is the single `QEMU_VERSION`
-  line in that script — bump it there to move QEMU.
+  line in that script — bump it there to move QEMU — and the virglrenderer
+  it is built against (the Venus GPU vertical's renderer) is pinned beside it
+  by release commit.
+- **The Venus GPU vertical's host.** QEMU's OpenGL GPU runs under its
+  headless EGL display, which opens a DRM render node (`/dev/dri/renderD*`,
+  any GPU's, readable by the runner user), and renders Venus work through
+  Mesa's software Vulkan driver, so the run draws the same on every host:
+  ```sh
+  sudo apt-get install -y mesa-vulkan-drivers
+  ```
+  The runner refuses the vertical with the missing driver named if its
+  manifest is not installed.
 
 ## Register the runner
 

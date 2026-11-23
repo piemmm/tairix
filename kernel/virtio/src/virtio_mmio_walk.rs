@@ -155,7 +155,7 @@ fn slots<R>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::cell::RefCell;
+    use crate::test_mapper::RecordingMapper;
     use tairix_abi::driver::mmio::MmioMapError;
     use tairix_abi::RegisterWindow;
 
@@ -171,40 +171,6 @@ mod tests {
     /// without depending on a `drivers/bus/*` crate.
     fn keep_window() -> impl FnOnce(RegisterWindow) -> Result<RegisterWindow, VirtioError> {
         |window| Ok(window)
-    }
-
-    /// Mapper that hands out a window over freshly-leaked, aligned
-    /// backing storage, recording the `(phys, len)` it was asked for.
-    struct RecordingMapper {
-        grant: bool,
-        requests: RefCell<alloc::vec::Vec<(u64, usize)>>,
-    }
-
-    impl RecordingMapper {
-        fn new(grant: bool) -> Self {
-            Self {
-                grant,
-                requests: RefCell::new(alloc::vec::Vec::new()),
-            }
-        }
-    }
-
-    impl MmioMapper for RecordingMapper {
-        fn map_window(&self, phys_base: u64, len: usize) -> Result<RegisterWindow, MmioMapError> {
-            if !self.grant {
-                return Err(MmioMapError::CapabilityMissing);
-            }
-            self.requests.borrow_mut().push((phys_base, len));
-            let words = len.div_ceil(8).max(1);
-            let boxed = alloc::vec![0u64; words].into_boxed_slice();
-            let raw = alloc::boxed::Box::leak(boxed);
-            let base = core::ptr::NonNull::new(raw.as_mut_ptr().cast::<u8>()).expect("non-null");
-            // SAFETY: `base` covers `len` bytes of leaked storage that
-            // lives for the rest of the test process; nothing else
-            // aliases it and the window only performs volatile access.
-            let window = unsafe { RegisterWindow::from_mapping(phys_base, base, len) };
-            Ok(window)
-        }
     }
 
     /// Fake MMIO bus enumerating `slots` and resolving a window for the

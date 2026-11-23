@@ -18,6 +18,7 @@ use tairix_util::fallible;
 use crate::backend::{Backend, Grown, Lease, Need, Plan, Pool};
 use crate::binding::{BindSetLayoutState, BindSetState, PipelineLayoutState};
 use crate::command::{resolve, Command, Op};
+use crate::device::AllocationDesc;
 use crate::info::{
     BufferUsage, DeviceInfo, MemoryProperties, QueueCapabilities, MAX_MEMORY_HEAPS,
     MAX_QUEUE_FAMILIES,
@@ -65,7 +66,30 @@ key!(
     RenderPipelineKey,
     TimelineKey,
     JobKey,
+    ExportEntryKey,
 );
+
+/// An export: the context that made it, and its entry there.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ExportKey {
+    pub(crate) context: ContextKey,
+    pub(crate) entry: ExportEntryKey,
+}
+
+/// Memory an export names, filed in the context that imported it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Imported {
+    pub(crate) allocation: AllocationKey,
+    pub(crate) desc: AllocationDesc,
+}
+
+/// What is told each time a timeline advances or a context ends: a server
+/// answering waits it holds for its clients.
+pub(crate) trait Watch: Send + Sync {
+    /// `timeline` of `context` advanced, or, for `None`, the context was lost
+    /// or destroyed. Told under the device's lock: it must only note it.
+    fn moved(&self, context: ContextKey, timeline: Option<TimelineKey>);
+}
 
 /// The condition variables of the timelines one completion advanced: its
 /// signals and its queue's fence.
@@ -108,6 +132,14 @@ pub(crate) struct AllocationState<B: Backend> {
     pub(crate) memory: Arc<B::Memory>,
     pub(crate) memory_type: u32,
     pub(crate) size: u64,
+}
+
+/// An allocation's memory on its way to another context: an object of the
+/// context that exported it, held until imported or let go.
+pub(crate) struct ExportState<B: Backend> {
+    memory: Arc<B::Memory>,
+    desc: AllocationDesc,
+    _charge: Charge,
 }
 
 #[derive(Debug)]
@@ -208,6 +240,8 @@ pub(crate) struct QueueState {
 /// of object it makes, its queued and running jobs, and its queues.
 pub(crate) struct ContextState<B: Backend> {
     pub(crate) budget: Arc<Budget>,
+    /// The context as the device holds it.
+    pub(crate) device: Arc<B::Context>,
     lost: Option<Loss>,
     pub(crate) allocations: Table<AllocationKey, AllocationState<B>>,
     /// Allocations charged and not yet filed, whose entries `allocations`
@@ -224,6 +258,7 @@ pub(crate) struct ContextState<B: Backend> {
     pub(crate) shader_modules: Table<ShaderModuleKey, Arc<crate::binding::ShaderModuleState>>,
     pub(crate) compute_pipelines: Pipelines<ComputePipelineKey, Arc<ComputePipelineState<B>>>,
     pub(crate) render_pipelines: Pipelines<RenderPipelineKey, Arc<RenderPipelineState<B>>>,
+    exports: Table<ExportEntryKey, ExportState<B>>,
     timelines: Table<TimelineKey, TimelineState>,
     jobs: Table<JobKey, Job<B>>,
     queues: Vec<QueueState>,
@@ -343,6 +378,10 @@ struct Engine {
 pub(crate) struct Dispatch<B: Backend> {
     pub(crate) engine: usize,
     pub(crate) job: JobId,
+    /// The context it runs in, as the device holds it, and the queue of the
+    /// context it was submitted to.
+    pub(crate) context: Arc<B::Context>,
+    pub(crate) queue: usize,
     pub(crate) ops: Arc<Work<B>>,
     pub(crate) deadline: u64,
     /// What it borrows of the pool, given back when it is done.
@@ -375,6 +414,7 @@ pub(crate) struct Model<B: Backend> {
     /// The queued jobs of contexts lost meanwhile, to be let go once the
     /// device's lock is: a job may hold the last of a memory.
     discarded: Vec<Job<B>>,
+    watch: Option<Arc<dyn Watch>>,
 }
 
 /// A table or queue a job joins, as the room it needs is made.
@@ -424,7 +464,19 @@ impl<B: Backend> Model<B> {
             contexts: Charged::new(SlotMap::new(), none()?)?,
             pool,
             discarded: Vec::new(),
+            watch: None,
         })
+    }
+
+    /// Tell `watch` of every timeline that advances and context that ends.
+    pub(crate) fn watch(&mut self, watch: Arc<dyn Watch>) {
+        self.watch = Some(watch);
+    }
+
+    fn tell(&self, context: ContextKey, timeline: Option<TimelineKey>) {
+        if let Some(watch) = &self.watch {
+            watch.moved(context, timeline);
+        }
     }
 
     /// The queued jobs losses discarded, for the caller to let go without
@@ -667,7 +719,7 @@ impl<B: Backend> Model<B> {
     }
 
     /// What the heap working memory is drawn from has given.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn work_heap_taken(&self) -> u64 {
         self.heaps.first().map_or(0, |heap| heap.taken())
     }
@@ -718,7 +770,11 @@ impl<B: Backend> Model<B> {
     /// queues — is charged to the heap, and stays as long as the device
     /// does, shrinking as the contexts it was made for go; its budget is
     /// charged to the heap for as long as anything charged to it is held.
-    pub(crate) fn create_context(&mut self, limit: Option<u64>) -> Result<ContextKey, Error> {
+    pub(crate) fn create_context(
+        &mut self,
+        limit: Option<u64>,
+        device: B::Context,
+    ) -> Result<ContextKey, Error> {
         let limit = limit.unwrap_or_else(|| {
             self.info
                 .heaps
@@ -740,7 +796,8 @@ impl<B: Backend> Model<B> {
         queues.try_reserve_exact(count).map_err(exhausted)?;
         let own = (fences.held_bytes() as u64)
             .saturating_add(fallible::held(&queues))
-            .saturating_add(size_of::<ContextState<B>>() as u64);
+            .saturating_add(size_of::<ContextState<B>>() as u64)
+            .saturating_add(shared_bytes::<B::Context>());
         let wakes = (count as u64).saturating_mul(shared_bytes::<Condvar>());
         let state_bytes = shared_bytes::<Budget>()
             .saturating_add(wakes)
@@ -779,7 +836,9 @@ impl<B: Backend> Model<B> {
         }
         let mut state = self.take(&[&budget, &heap], own, Held::Host)?;
         let fences_room = state.split(fences.held_bytes() as u64);
+        let device = crate::shared(device)?;
         let context = Box::try_new(ContextState {
+            device,
             lost: None,
             allocations: Charged::new(SlotMap::new(), none()?)?,
             allocating: 0,
@@ -800,6 +859,7 @@ impl<B: Backend> Model<B> {
                 table: Charged::new(SlotMap::new(), none()?)?,
                 planning: 0,
             },
+            exports: Charged::new(SlotMap::new(), none()?)?,
             timelines: Charged::new(fences, fences_room)?,
             jobs: Charged::new(SlotMap::new(), none()?)?,
             queues,
@@ -821,6 +881,7 @@ impl<B: Backend> Model<B> {
     /// on an engine is let finish and then discarded.
     pub(crate) fn destroy_context(&mut self, key: ContextKey) -> Option<Box<ContextState<B>>> {
         let context = self.contexts.remove(key)?;
+        self.tell(key, None);
         for engine in &mut self.engines {
             engine.runnable.retain(|&(owner, _)| owner != key);
             engine.spared.retain(|&(owner, _)| owner != key);
@@ -851,6 +912,11 @@ impl<B: Backend> Model<B> {
             .get_mut(key)
             .map(Box::as_mut)
             .ok_or(Error::Destroyed)
+    }
+
+    /// The context as the device holds it.
+    pub(crate) fn device(&self, key: ContextKey) -> Result<Arc<B::Context>, Error> {
+        Ok(Arc::clone(&self.live(key)?.device))
     }
 
     pub(crate) fn live(&self, key: ContextKey) -> Result<&ContextState<B>, Error> {
@@ -957,19 +1023,69 @@ impl<B: Backend> Model<B> {
             .and_then(|context| pick(context).remove(item))
     }
 
-    /// The memory behind the allocation, for another context of this device
-    /// to import.
+    /// An export of the allocation's memory, filed in the context, for
+    /// another context of this device to import.
     pub(crate) fn export(
-        &self,
+        &mut self,
         key: ContextKey,
         allocation: AllocationKey,
-    ) -> Result<(Arc<B::Memory>, u32, u64), Error> {
+    ) -> Result<ExportKey, Error> {
         let held = self
             .live(key)?
             .allocations
             .get(allocation)
             .ok_or(Error::Stale)?;
-        Ok((Arc::clone(&held.memory), held.memory_type, held.size))
+        let memory = Arc::clone(&held.memory);
+        let desc = AllocationDesc {
+            size: held.size,
+            memory_type: held.memory_type,
+        };
+        let bytes = size_of::<ExportState<B>>() as u64;
+        // The allocation still holds the memory, so a refusal dropping this
+        // clone under the lock lets nothing go.
+        let entry = self.file_charged(
+            key,
+            |context| &mut context.exports,
+            bytes,
+            |charge| {
+                Ok(ExportState {
+                    memory,
+                    desc,
+                    _charge: charge,
+                })
+            },
+        )?;
+        Ok(ExportKey {
+            context: key,
+            entry,
+        })
+    }
+
+    /// Spend `export`, filing its memory in the context; answers the export,
+    /// to be let go without the device's lock, as it may hold the last of
+    /// its memory.
+    pub(crate) fn import(
+        &mut self,
+        key: ContextKey,
+        export: ExportKey,
+    ) -> (Result<Imported, Error>, Option<ExportState<B>>) {
+        let Some(state) = self.drop_export(export) else {
+            return (Err(Error::Stale), None);
+        };
+        let desc = state.desc;
+        let filed = self.file_memory(key, Arc::clone(&state.memory), desc.memory_type, desc.size);
+        let imported = filed
+            .map(|allocation| Imported { allocation, desc })
+            .map_err(|(error, _clone)| error);
+        (imported, Some(state))
+    }
+
+    /// Take `export` out of the context that made it, for the caller to let
+    /// go without the device's lock.
+    pub(crate) fn drop_export(&mut self, export: ExportKey) -> Option<ExportState<B>> {
+        self.existing_mut(export.context)
+            .ok()
+            .and_then(|context| context.exports.remove(export.entry))
     }
 
     /// File memory the context allocated, or another context of the device
@@ -1140,6 +1256,7 @@ impl<B: Backend> Model<B> {
         held.value = value;
         let wake = held.waited().cloned();
         self.list_ready(key);
+        self.tell(key, Some(timeline));
         Ok(wake)
     }
 
@@ -1376,6 +1493,8 @@ impl<B: Backend> Model<B> {
             let dispatch = Dispatch {
                 engine: engine_index,
                 job: id,
+                context: Arc::clone(&context.device),
+                queue: queue_index,
                 ops: Arc::clone(&job.ops),
                 deadline,
                 lease,
@@ -1394,8 +1513,15 @@ impl<B: Backend> Model<B> {
             contexts,
             engines,
             discarded,
+            watch,
             ..
         } = self;
+        let watch = watch.as_deref();
+        let tell = |timeline| {
+            if let Some(watch) = watch {
+                watch.moved(id.context, timeline);
+            }
+        };
         if let Some(engine) = engines.get_mut(engine) {
             engine.in_flight.retain(|&running| running != id);
         }
@@ -1408,13 +1534,17 @@ impl<B: Backend> Model<B> {
         leave_queue(context, &job, id.job);
         if let Some(loss) = lost {
             lose((context, id.context), loss, engines, discarded);
+            tell(None);
         } else if context.lost.is_none() {
             for &(timeline, value) in &job.signals {
                 let Some(held) = context.timelines.get_mut(timeline) else {
                     continue;
                 };
-                if let (true, Some(wake)) = (held.land(value), held.waited()) {
-                    let _ = woken.try_push(Arc::clone(wake));
+                if held.land(value) {
+                    if let Some(wake) = held.waited() {
+                        let _ = woken.try_push(Arc::clone(wake));
+                    }
+                    tell(Some(timeline));
                 }
             }
         }
@@ -1422,6 +1552,37 @@ impl<B: Backend> Model<B> {
         context.release(&job.signals);
         self.list_ready(id.context);
         woken
+    }
+
+    /// When the soonest running job's deadline falls, where the backend's
+    /// work is watched from outside.
+    pub(crate) fn earliest_deadline(&self) -> Option<u64> {
+        if !B::WATCHED {
+            return None;
+        }
+        self.engines
+            .iter()
+            .flat_map(|engine| engine.in_flight.iter())
+            .filter_map(|id| self.contexts.get(id.context)?.jobs.get(id.job)?.deadline)
+            .min()
+    }
+
+    /// Answer one running job past its deadline at `now` as overran, losing
+    /// its context, and answer that context as the device holds it: no
+    /// device that needs watching can stop its work, so its own answer, when
+    /// it comes, finds nothing to complete.
+    pub(crate) fn expire_one(&mut self, now: u64) -> Option<Arc<B::Context>> {
+        let (engine, id, device) = self.engines.iter().enumerate().find_map(|(engine, held)| {
+            held.in_flight.iter().find_map(|&id| {
+                let context = self.contexts.get(id.context)?;
+                let due = context.jobs.get(id.job)?.deadline? <= now;
+                due.then(|| (engine, id, Arc::clone(&context.device)))
+            })
+        })?;
+        // A lost context's waiters are woken as it is lost, so nothing else
+        // is left to rouse.
+        let _woken = self.complete(engine, id, Some(Loss::Overran));
+        Some(device)
     }
 
     /// The engine was reset because a job on it overran: of the jobs
@@ -1434,8 +1595,15 @@ impl<B: Backend> Model<B> {
             contexts,
             engines,
             discarded,
+            watch,
             ..
         } = self;
+        let watch = watch.as_deref();
+        let tell = |context| {
+            if let Some(watch) = watch {
+                watch.moved(context, None);
+            }
+        };
         let Some(engine) = engines.get_mut(engine_index) else {
             return;
         };
@@ -1445,11 +1613,13 @@ impl<B: Backend> Model<B> {
         for &id in &in_flight {
             if let Some((context, true)) = begun(contexts, id, now, started) {
                 lose((context, id.context), Loss::Overran, engines, discarded);
+                tell(id.context);
             }
         }
         for &id in &in_flight {
             if let Some((context, _)) = begun(contexts, id, now, started) {
                 lose((context, id.context), Loss::Reset, engines, discarded);
+                tell(id.context);
             }
         }
         // In reverse, each ahead of the last: ahead too of any an earlier

@@ -49,6 +49,9 @@ pub mod kernel_mmio;
 pub mod virtio_mmio_walk;
 pub mod virtio_pci_walk;
 
+#[cfg(test)]
+mod test_mapper;
+
 pub use kernel_host::KernelVirtioHost;
 pub use kernel_mmio::KernelMmioMapper;
 pub use virtio_mmio_walk::{

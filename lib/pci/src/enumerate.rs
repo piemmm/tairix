@@ -16,11 +16,13 @@ use tairix_abi::driver::pci::{
     Quiesced, BUS_MASTER_ENABLE, COMMAND_OFFSET, INTERRUPT_DISABLE, IO_SPACE_ENABLE,
     MEMORY_SPACE_ENABLE, PCI_DEVICES, PCI_FUNCTIONS,
 };
-use tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_NOTIFY;
+use tairix_abi::driver::virtio_pci::{
+    VirtioSharedMemory, VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_CFG_SHARED_MEMORY,
+};
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::{
     DriverError, HwDeviceClass, HwMatchKey, HwNode, MmioMapError, MmioMapper, MsiMessage,
-    RegisterWindow, WindowError,
+    RegisterWindow, WindowError, PAGE_SIZE,
 };
 
 use crate::aperture::Apertures;
@@ -36,6 +38,13 @@ use crate::topology::{
 
 /// The PCI Express capability's id (PCI Express Base 5.0 §7.5.3).
 const CAP_ID_EXPRESS: u8 = 0x10;
+
+/// Bytes in virtio's capability layouts (virtio 1.2 §4.1.4): `struct
+/// virtio_pci_cap`, `struct virtio_pci_notify_cap` and `struct
+/// virtio_pci_cap64`.
+const VIRTIO_PCI_CAP_LEN: u8 = 16;
+const VIRTIO_PCI_NOTIFY_CAP_LEN: u8 = 20;
+pub(crate) const VIRTIO_PCI_CAP64_LEN: u8 = 24;
 
 /// Byte offsets within the PCI Express capability (PCI Express Base 5.0
 /// §7.5.3): the Device Control, Slot Capabilities and Device Control 2
@@ -1041,6 +1050,110 @@ impl<C: ConfigSpace> Pci<C> {
             .ok_or(DriverError::NotFound)
     }
 
+    /// Every shared-memory region function `bdf` declares, written into
+    /// `out`, and how many it declares — each resolved to its CPU-physical
+    /// span or refused for the reason
+    /// [`VirtioPciBus::virtio_shared_memory`](tairix_abi::driver::virtio_pci::VirtioPciBus::virtio_shared_memory)
+    /// names.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::BufferTooSmall`] where `out` cannot hold every region,
+    /// and the capability walk's own errors.
+    pub fn virtio_shared_memory(
+        &self,
+        bdf: u64,
+        out: &mut [VirtioSharedMemory],
+    ) -> Result<usize, DriverError> {
+        let mut caps = [Capability::Other { offset: 0, id: 0 }; CAP_LIST_HARD_LIMIT];
+        let found = self.capabilities(bdf, &mut caps)?;
+        let caps = &caps[..found];
+        let mut count = 0usize;
+        for cap in caps {
+            let Capability::VirtioSharedMemory {
+                id,
+                bar,
+                bar_offset,
+                length,
+                ..
+            } = *cap
+            else {
+                continue;
+            };
+            if let Some(slot) = out.get_mut(count) {
+                *slot = VirtioSharedMemory {
+                    id,
+                    region: self.shared_memory_span(bdf, caps, (id, bar), bar_offset, length),
+                };
+            }
+            count += 1;
+        }
+        if count > out.len() {
+            return Err(DriverError::BufferTooSmall);
+        }
+        Ok(count)
+    }
+
+    /// The CPU-physical span of region `id`, `length` bytes at `bar_offset`
+    /// into `bar`, among the function's capabilities `caps`.
+    fn shared_memory_span(
+        &self,
+        bdf: u64,
+        caps: &[Capability],
+        (id, bar): (u8, u8),
+        bar_offset: u64,
+        length: u64,
+    ) -> Result<(u64, u64), DriverError> {
+        let claims = caps
+            .iter()
+            .filter(|cap| matches!(cap, Capability::VirtioSharedMemory { id: other, .. } if *other == id))
+            .count();
+        if claims > 1 {
+            return Err(DriverError::DeviceFault);
+        }
+        if length == 0 {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        // A part is mapped a page at a time, so a region ending or starting
+        // inside a page would hand the driver whatever shares that page.
+        let page = PAGE_SIZE as u64;
+        if !bar_offset.is_multiple_of(page) || !length.is_multiple_of(page) {
+            return Err(DriverError::Unsupported);
+        }
+        let shares_bar = caps.iter().any(|cap| match *cap {
+            Capability::Virtio {
+                cfg_type,
+                bar: other,
+                ..
+            } => cfg_type != VIRTIO_PCI_CFG_PCI && other == bar,
+            Capability::VirtioNotify { bar: other, .. } => other == bar,
+            Capability::MsiX {
+                table_bar, pba_bar, ..
+            } => table_bar == bar || pba_bar == bar,
+            _ => false,
+        });
+        if shares_bar {
+            return Err(DriverError::Busy);
+        }
+        let descriptor = self.resolve_bar(bdf, bar)?;
+        // Only a prefetchable memory BAR promises reads without side effects,
+        // which a cacheable mapping's speculation and line fills assume.
+        if descriptor.kind == BarKind::Io || !descriptor.prefetchable {
+            return Err(DriverError::Unsupported);
+        }
+        let end = bar_offset
+            .checked_add(length)
+            .ok_or(DriverError::OutOfRange)?;
+        if end > descriptor.size {
+            return Err(DriverError::OutOfRange);
+        }
+        let base = descriptor
+            .base
+            .checked_add(bar_offset)
+            .ok_or(DriverError::OutOfRange)?;
+        Ok((base, length))
+    }
+
     /// Program MSI-X table `entry` of function `bdf` with `message`,
     /// unmask the entry, and enable MSI-X on the function.
     ///
@@ -1351,6 +1464,9 @@ impl<C: ConfigSpace> Pci<C> {
     /// checked on every resolution: a memory BAR outside them, or over
     /// memory, is refused.
     fn resolve_bar(&self, bdf: u64, bar_index: u8) -> Result<BarDescriptor, DriverError> {
+        if bar_index >= DEVICE_BAR_SLOTS {
+            return Err(DriverError::NotFound);
+        }
         let addr = unpack_bdf(bdf, 0);
         self.type_zero(addr)?;
         // A slot holding a 64-bit BAR's upper half begins no BAR.
@@ -1363,7 +1479,7 @@ impl<C: ConfigSpace> Pci<C> {
                 1
             };
         }
-        if slot != bar_index || slot >= DEVICE_BAR_SLOTS {
+        if slot != bar_index {
             return Err(DriverError::NotFound);
         }
         let (mut bar, _) = self
@@ -1743,43 +1859,52 @@ fn decode_msix<C: ConfigSpace>(
     })
 }
 
-/// A function's virtio configuration-access capability: its `bar`, `offset`
-/// and `length` fields aim a four-byte data window at a BAR region, which a
-/// configuration access then reads or writes (virtio 1.2 §4.1.4.9).
+/// One of a function's virtio vendor capabilities: where a configuration
+/// structure, the notification area or a shared-memory region lies (virtio 1.2
+/// §4.1.4), or [`None`] for one too short to say.
 fn decode_virtio<C: ConfigSpace>(
     this: &Pci<C>,
     base: ConfigAddress,
     offset: u8,
     msg_ctrl: u16,
 ) -> Option<Capability> {
-    // The virtio cap header reuses the vendor-specific layout: the
-    // upper half of the header dword (`msg_ctrl`) carries `cap_len`
-    // in its low byte and `cfg_type` in its high byte (virtio 1.x
-    // §4.1.4). Mask + cast of an 8-bit field is lossless.
-    let cfg_type = (msg_ctrl >> 8) as u8;
+    let [cap_len, cfg_type] = msg_ctrl.to_le_bytes();
+    let layout_len = match cfg_type {
+        VIRTIO_PCI_CFG_NOTIFY => VIRTIO_PCI_NOTIFY_CAP_LEN,
+        VIRTIO_PCI_CFG_SHARED_MEMORY => VIRTIO_PCI_CAP64_LEN,
+        _ => VIRTIO_PCI_CAP_LEN,
+    };
+    // A field past `cap_len` is whatever follows the capability.
+    if cap_len < layout_len {
+        return None;
+    }
     let read = |at: u8| capability_field(base, offset, at).map(|field| this.config.read32(field));
-    // `bar` is byte 4 of the capability (dword 1, low byte).
-    let bar = (read(4)? & 0x7) as u8;
-    // `offset`/`length` are dwords 2 and 3 of the capability.
+    // The whole byte names the BAR: a reserved value must name none, not
+    // alias one of the six.
+    let [bar, id, ..] = read(4)?.to_le_bytes();
     let bar_offset = read(8)?;
     let length = read(12)?;
-    Some(if cfg_type == VIRTIO_PCI_CFG_NOTIFY {
-        // The notification structure appends `notify_off_multiplier`
-        // as dword 4 of the capability (virtio 1.x §4.1.4.4).
-        Capability::VirtioNotify {
+    Some(match cfg_type {
+        VIRTIO_PCI_CFG_NOTIFY => Capability::VirtioNotify {
             offset,
             bar,
             bar_offset,
             length,
             notify_off_multiplier: read(16)?,
-        }
-    } else {
-        Capability::Virtio {
+        },
+        VIRTIO_PCI_CFG_SHARED_MEMORY => Capability::VirtioSharedMemory {
+            offset,
+            id,
+            bar,
+            bar_offset: u64::from(bar_offset) | u64::from(read(16)?) << 32,
+            length: u64::from(length) | u64::from(read(20)?) << 32,
+        },
+        _ => Capability::Virtio {
             offset,
             cfg_type,
             bar,
             bar_offset,
             length,
-        }
+        },
     })
 }

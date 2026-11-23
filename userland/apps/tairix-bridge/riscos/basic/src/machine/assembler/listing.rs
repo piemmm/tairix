@@ -10,7 +10,7 @@
 
 use super::Statement;
 use crate::machine::program::spelt;
-use crate::machine::{len32, Machine, Step};
+use crate::machine::{Machine, Step};
 
 /// The label field's width.
 const LABEL_FIELD: usize = 10;
@@ -27,7 +27,7 @@ impl Machine<'_, '_> {
     ) -> Step {
         self.write_raw(&head(address, bytes))?;
         let length = end.saturating_sub(statement.start);
-        let text = self.os.read_vec(statement.start, length as usize)?;
+        let text = self.copied(statement.start, length as usize)?;
         if statement.field && text.first() == Some(&b'.') {
             let word = text.iter().position(|&b| b == b' ').unwrap_or(text.len());
             let label = spelt(&text[..word])?;
@@ -49,24 +49,10 @@ impl Machine<'_, '_> {
 /// number where there are four at most, each field followed by a space.
 fn head(address: u32, bytes: &[u8]) -> [u8; 18] {
     let mut head = [b' '; 18];
-    hex(&mut head[..8], u64::from(address));
+    tairix_util::hex::fill_upper(&mut head[..8], u64::from(address));
     if (1..=4).contains(&bytes.len()) {
         let value = bytes.iter().rev().fold(0u64, |v, &b| v << 8 | u64::from(b));
-        hex(&mut head[9..9 + 2 * bytes.len()], value);
+        tairix_util::hex::fill_upper(&mut head[9..9 + 2 * bytes.len()], value);
     }
     head
-}
-
-/// `value` in upper-case hexadecimal filling `out`.
-fn hex(out: &mut [u8], value: u64) {
-    let digits = len32(out.len());
-    for (i, slot) in out.iter_mut().enumerate() {
-        let shift = 4 * (digits - 1 - len32(i));
-        let digit = (value >> shift & 0xF) as u8;
-        *slot = if digit < 10 {
-            b'0' + digit
-        } else {
-            b'A' + digit - 10
-        };
-    }
 }

@@ -36,6 +36,7 @@ use tairix_spirv::enumerant::{Dim, ImageFormat};
 use tairix_spirv::{Access, BindingKind, Component, ImageShape, Stages};
 
 use super::buffers::{self, Recorded, Shape};
+use super::common::Make;
 use super::{below, index_of, shaders};
 
 /// Rounds per sweep. Miri interprets every operation, so it drives one.
@@ -234,8 +235,8 @@ fn set_layouts(context: &Context) -> (BindSetLayout, BindSetLayout) {
 }
 
 impl World {
-    fn new(runner: Arc<dyn tairix_parallel::JobRunner + Send>) -> Self {
-        let device = super::device(runner);
+    fn new(runner: Arc<dyn tairix_parallel::JobRunner + Send>, make: Make<'_>) -> Self {
+        let device = make(runner);
         let context = device
             .create_context(&ContextDesc::default())
             .expect("a context");
@@ -320,7 +321,8 @@ impl World {
 
 /// The two worlds, kept while their contexts live: made again after one is
 /// lost; and what the sweep has exercised.
-pub(super) struct Worlds {
+pub(super) struct Worlds<'a> {
+    make: Make<'a>,
     pair: Option<[World; 2]>,
     tally: Tally,
 }
@@ -338,9 +340,10 @@ pub(super) struct Tally {
     sets_refused: usize,
 }
 
-impl Worlds {
-    pub(super) fn new() -> Self {
+impl<'a> Worlds<'a> {
+    pub(super) fn new(make: Make<'a>) -> Self {
         Self {
+            make,
             pair: None,
             tally: Tally::default(),
         }
@@ -349,7 +352,7 @@ impl Worlds {
     /// Every verdict a round forces was reached.
     pub(super) fn exercised(&self) {
         let tally = &self.tally;
-        std::println!("[fuzz_gpu] work exercised: {tally:?}");
+        std::println!("work exercised: {tally:?}");
         assert!(
             tally.refused > 0
                 && tally.admitted > 0
@@ -362,10 +365,11 @@ impl Worlds {
     }
 
     pub(super) fn run_round(&mut self, rng: &mut Prng) {
+        let make = self.make;
         let pair = self.pair.get_or_insert_with(|| {
             [
-                World::new(Arc::new(tairix_parallel::Serial)),
-                World::new(Arc::new(tairix_parallel::Threaded::new(3))),
+                World::new(Arc::new(tairix_parallel::Serial), make),
+                World::new(Arc::new(tairix_parallel::Threaded::new(3)), make),
             ]
         });
         let tally = &mut self.tally;

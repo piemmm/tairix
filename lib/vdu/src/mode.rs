@@ -211,12 +211,21 @@ pub fn numbered(number: u32) -> Option<&'static Mode> {
     MODES.get(usize::try_from(number).ok()?)
 }
 
-/// The low `width` bits of `value` repeated until `total` bits are filled:
-/// how screen memory holds a pixel a mode doubles across its wider field,
-/// and how a colour fills a word of pixels.
+/// The low `width` bits of `value` repeated until `total` bits, a word at
+/// most, are filled: how screen memory holds a pixel a mode doubles across
+/// its wider field, and how a colour fills a word of pixels. No bits repeat
+/// as nought.
 #[must_use]
 pub const fn repeated(value: u32, width: u32, total: u32) -> u32 {
-    let mut out = value;
+    if width == 0 {
+        return 0;
+    }
+    let total = if total < u32::BITS { total } else { u32::BITS };
+    let mut out = if width < u32::BITS {
+        value & ((1 << width) - 1)
+    } else {
+        value
+    };
     let mut filled = width;
     while filled < total {
         out |= out << filled;

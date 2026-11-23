@@ -178,28 +178,39 @@ impl Device {
         runner: Arc<dyn JobRunner + Send>,
         threads: &dyn Spawn,
     ) -> Result<Self, Error> {
-        let mut pool = dispatch::Workspaces::new()?;
-        pool.set_width(runner.width());
-        let model = Model::new(info, &[1], pool)?;
-        let wake = crate::shared(Wake::new())?;
-        let shared = crate::shared(Shared {
-            info: model.info().clone(),
-            model: Fair::new(model),
-            clock,
-            backend: Software {
-                runner,
-                srgb: Srgb::new(),
-                wake: Arc::clone(&wake),
-            },
-        })?;
-        let device = Arc::downgrade(&shared);
-        let parked = Arc::clone(&wake);
-        let body = Box::try_new(move || work(&device, &parked)).map_err(|_| Error::OutOfMemory)?;
-        if threads.spawn(body) {
-            wake.running.store(true, Ordering::Release);
-        }
-        Ok(Self { shared })
+        software_shared(info, clock, runner, threads).map(Self::local)
     }
+}
+
+/// The software device stating `info`, as [`Device::software_stating`] makes
+/// it, held as itself.
+pub(crate) fn software_shared(
+    info: DeviceInfo,
+    clock: Arc<dyn MonotonicClock + Send + Sync>,
+    runner: Arc<dyn JobRunner + Send>,
+    threads: &dyn Spawn,
+) -> Result<Arc<Shared<Software>>, Error> {
+    let mut pool = dispatch::Workspaces::new()?;
+    pool.set_width(runner.width());
+    let model = Model::new(info, &[1], pool)?;
+    let wake = crate::shared(Wake::new())?;
+    let shared = crate::shared(Shared {
+        info: model.info().clone(),
+        model: Fair::new(model),
+        clock,
+        backend: Software {
+            runner,
+            srgb: Srgb::new(),
+            wake: Arc::clone(&wake),
+        },
+    })?;
+    let device = Arc::downgrade(&shared);
+    let parked = Arc::clone(&wake);
+    let body = Box::try_new(move || work(&device, &parked)).map_err(|_| Error::OutOfMemory)?;
+    if threads.spawn(body) {
+        wake.running.store(true, Ordering::Release);
+    }
+    Ok(shared)
 }
 
 /// The software backend: the CPU running every engine's work, on a worker of
@@ -218,6 +229,7 @@ impl Drop for Software {
 }
 
 impl Backend for Software {
+    type Context = ();
     type Memory = Memory;
     type Image = ImageLayout;
     type Set = dispatch::SetMemories;
@@ -225,13 +237,26 @@ impl Backend for Software {
     type Render = pipeline::Render;
     type Pool = dispatch::Workspaces;
 
+    const WATCHED: bool = false;
+
     fn overhead(size: u64) -> u64 {
         Memory::overhead(size)
     }
 
-    fn allocate(&self, size: u64, [bytes, besides]: [Charge; 2]) -> Result<Memory, Error> {
+    fn create_context(&self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn allocate(
+        &self,
+        _: &Arc<()>,
+        (_, size): (u32, u64),
+        [bytes, besides]: [Charge; 2],
+    ) -> Result<Memory, Error> {
         Memory::zeroed(size, bytes, besides)
     }
+
+    fn lost(&self, _: &Arc<()>) {}
 
     fn write(&self, memory: &Memory, offset: u64, data: &[u8]) -> Result<(), Error> {
         let start = usize::try_from(offset).map_err(|_| Error::OutOfRange)?;

@@ -48,6 +48,10 @@ pub mod chunk {
     pub const INVERSE_TABLE: u32 = 0x4_BF40;
     /// `BlendTable`.
     pub const BLEND_TABLE: u32 = 0x5_6280;
+    /// `ScreenModes`.
+    pub const SCREEN_MODES: u32 = 0x4_87C0;
+    /// SpriteExtend's JPEG SWIs.
+    pub const SPRITE_EXTEND: u32 = 0x4_9980;
 }
 
 /// The Font Manager's SWIs ColourTrans calls.
@@ -426,7 +430,8 @@ pub mod os {
         pub use crate::env::ABEX;
     }
 
-    /// `OS_ScreenMode`'s reasons that callers outside the VDU drivers make.
+    /// `OS_ScreenMode`'s reasons more than the VDU drivers name: the mode
+    /// selections.
     pub mod screen_mode {
         /// Select the mode a number or a specifier names.
         pub const SELECT: u32 = 0;

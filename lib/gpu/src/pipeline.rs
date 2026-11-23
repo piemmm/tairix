@@ -10,7 +10,8 @@ use tairix_spirv::{Admitted, EntryPoint, SpecError, SpecValue, Specialized, Stag
 use crate::backend::{Backend, Grown, Hold, Need, Pool};
 use crate::binding::{BindSet, PipelineLayout, PipelineLayoutState, ShaderModule};
 use crate::command::{push_words, set_keys, Command, Count, DispatchRecord};
-use crate::device::{owned, Buffer, CommandBuffer, Context, Shared};
+use crate::device::{Buffer, CommandBuffer, Context, Shared};
+use crate::host::owned;
 use crate::info::Limits;
 use crate::memory::Charge;
 use crate::model::{
@@ -175,25 +176,15 @@ impl Context {
         &self,
         desc: &ComputePipelineDesc<'_>,
     ) -> Result<ComputePipeline, Error> {
-        owned(
-            &desc.module.shared,
-            desc.module.context,
-            &self.shared,
-            self.key,
-        )?;
-        owned(
-            &desc.layout.shared,
-            desc.layout.context,
-            &self.shared,
-            self.key,
-        )?;
-        let key = self.shared.create_compute_pipeline(
+        owned(&desc.module.host, desc.module.context, &self.host, self.key)?;
+        owned(&desc.layout.host, desc.layout.context, &self.host, self.key)?;
+        let key = self.host.create_compute_pipeline(
             self.key,
             (desc.module.key, desc.entry_point, desc.specialization),
             desc.layout.key,
         )?;
         Ok(ComputePipeline {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             key,
         })
@@ -389,8 +380,7 @@ handle!(
     /// to dispatch.
     ComputePipeline,
     ComputePipelineKey,
-    destroy_compute_pipeline,
-    releasing
+    ComputePipeline
 );
 
 /// The most bind sets one dispatch names.
@@ -449,12 +439,7 @@ impl CommandBuffer {
         push_constants: &[u8],
         groups: Count,
     ) -> Result<(), Error> {
-        owned(
-            &pipeline.shared,
-            pipeline.context,
-            &self.shared,
-            self.context,
-        )?;
+        owned(&pipeline.host, pipeline.context, &self.host, self.context)?;
         if sets.len() > MAX_DISPATCH_SETS || push_constants.len() > MAX_PUSH_BYTES {
             return Err(Error::TooMany);
         }

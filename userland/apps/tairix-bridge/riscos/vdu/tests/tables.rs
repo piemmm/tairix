@@ -205,3 +205,13 @@ fn a_reinitialised_inverse_table_or_blend_table_gives_back_all_it_held() {
     let first = cycle(&mut session);
     assert_eq!(cycle(&mut session), first, "the RMA as it was");
 }
+
+#[test]
+fn a_locked_blend_table_the_guest_freed_is_given_back_quietly() {
+    use tairix_riscos_kernel::swi::os::MODULE;
+    let mut session = common::drivers(b"");
+    mode(&mut session, 15);
+    let locked = call(&mut session, BLEND_TABLE, &[4, 15, 0, 15, 0, 128, 0]).expect("locked");
+    call(&mut session, MODULE, &[7, 0, locked.r[6]]).expect("freed by the guest");
+    common::command(&mut session, "RMReInit BlendTable").expect("reinitialised");
+}

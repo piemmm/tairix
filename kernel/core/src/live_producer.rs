@@ -296,13 +296,18 @@ where
         let cpu = self.arch.current_cpu();
         with_current_live_space(cpu, |space| match kind {
             MmioMemoryKind::Device => space.map_device_window(phys_base, len),
-            MmioMemoryKind::FramebufferWriteBack => {
-                space.map_writeback_framebuffer_window(phys_base, len)
-            }
-            MmioMemoryKind::FramebufferWriteCombine => space.map_framebuffer_window(phys_base, len),
+            MmioMemoryKind::WriteBack => space.map_writeback_window(phys_base, len),
+            MmioMemoryKind::WriteCombine => space.map_write_combining_window(phys_base, len),
         })
         .ok_or(Errno::NotImplemented)?
         .map_err(live_errno)
+    }
+
+    fn unmap_window(&self, base: u64) -> Result<u64, Errno> {
+        let cpu = self.arch.current_cpu();
+        with_current_live_space(cpu, |space| space.unmap_device_window(base))
+            .ok_or(Errno::NotImplemented)?
+            .map_err(live_errno)
     }
 }
 
@@ -855,8 +860,9 @@ mod tests {
         // SAFETY: see above.
         let recorded = unsafe { &*ptr };
         assert_eq!(recorded.device_maps, std::vec![(0xFE98_0000, 0x4000)]);
-        // A device window never takes either framebuffer path.
-        assert!(recorded.framebuffer_maps.is_empty());
+        // A device window never takes either memory path.
+        assert!(recorded.write_combining_maps.is_empty());
+        assert!(recorded.writeback_maps.is_empty());
     }
 
     #[test]
@@ -866,21 +872,46 @@ mod tests {
         let _guard = publish_live_space_for_test(cpu, fake);
 
         let producer = LiveMmioMap::new(arch_at(cpu));
-        let va = producer.map_window(
-            0x8000_0000,
-            0x30_0000,
-            MmioMemoryKind::FramebufferWriteCombine,
-        );
+        let va = producer.map_window(0x8000_0000, 0x30_0000, MmioMemoryKind::WriteCombine);
         assert_eq!(va, Ok(0x9000_2000));
         // SAFETY: the producer's `&mut` has ended; single-threaded read.
         let recorded = unsafe { &*ptr };
         // A framebuffer grant takes the scan-out (Normal-NC) path, never the
         // strongly-ordered device path.
         assert_eq!(
-            recorded.framebuffer_maps,
+            recorded.write_combining_maps,
             std::vec![(0x8000_0000, 0x30_0000)]
         );
         assert!(recorded.device_maps.is_empty());
+    }
+
+    #[test]
+    fn mmio_map_routes_a_memory_region_to_the_write_back_path_and_unmaps_it() {
+        let cpu = crate::test_boot::claim_cpu();
+        let (fake, ptr) = shared_fake();
+        let _guard = publish_live_space_for_test(cpu, fake);
+
+        let producer = LiveMmioMap::new(arch_at(cpu));
+        let va = producer.map_window(0x1_0000_0000, 0x2000, MmioMemoryKind::WriteBack);
+        assert_eq!(va, Ok(0x9000_3000));
+        assert_eq!(producer.unmap_window(0x9000_3000), Ok(1));
+        // SAFETY: the producer's `&mut` has ended; single-threaded read.
+        let recorded = unsafe { &*ptr };
+        assert_eq!(recorded.writeback_maps, std::vec![(0x1_0000_0000, 0x2000)]);
+        assert_eq!(recorded.window_unmaps, std::vec![0x9000_3000]);
+        assert!(recorded.device_maps.is_empty());
+    }
+
+    #[test]
+    fn mmio_unmap_folds_a_window_that_was_never_mapped_to_not_found() {
+        let cpu = crate::test_boot::claim_cpu();
+        let (fake, _ptr) = shared_fake_with(FakeLive {
+            next: Some(LiveSpaceError::Mmio(MmioError::UnknownRegion)),
+            ..FakeLive::default()
+        });
+        let _guard = publish_live_space_for_test(cpu, fake);
+        let producer = LiveMmioMap::new(arch_at(cpu));
+        assert_eq!(producer.unmap_window(0x9000_3000), Err(Errno::NotFound));
     }
 
     #[test]

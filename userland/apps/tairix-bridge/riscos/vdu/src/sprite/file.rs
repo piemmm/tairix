@@ -176,7 +176,7 @@ fn saved_area(
 /// sprites a file sprite names removed.
 fn merge_file(os: &mut Os<'_>, area: Area, name: u32, length: u32) -> Result<(), Fail> {
     let block = area.block(os)?;
-    if block.free > block.size || block.first < block::LEN {
+    if block.free > block.size || block.first < block::LEN || block.free < block.first {
         return Err(os.error(UNRECOGNISED));
     }
     let end = u64::from(block.free) + u64::from(length);
@@ -213,16 +213,27 @@ fn merge_file(os: &mut Os<'_>, area: Area, name: u32, length: u32) -> Result<(),
     let names = file_names(os, area, block.free, file.count)?;
     let mut walk_left = block.count;
     let mut offset = block.first;
-    while walk_left > 0 {
+    // The area's own sprites end where the file's begin, the end moving down
+    // as each is removed: a count past them never reaches the file's.
+    let mut own_end = block.free;
+    while walk_left > 0 && offset < own_end {
         let sprite = Sprite::read(os, area.address(offset))?;
+        let inside = sprite.next >= SPRITE_HEADER_LEN
+            && sprite.next.is_multiple_of(4)
+            && u64::from(offset) + u64::from(sprite.next) <= u64::from(own_end);
+        if !inside {
+            break;
+        }
         walk_left -= 1;
+        let lowered = sprite.name.lowered();
         if names
-            .binary_search_by(|held| held.as_bytes().cmp(sprite.name.lowered().as_bytes()))
+            .binary_search_by(|held| held.as_bytes().cmp(lowered.as_bytes()))
             .is_ok()
         {
             area.remove(os, &sprite)?;
+            own_end -= sprite.next;
         } else {
-            offset = offset.wrapping_add(sprite.next);
+            offset += sprite.next;
         }
         os.yield_point()?;
     }

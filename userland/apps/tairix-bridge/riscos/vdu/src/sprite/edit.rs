@@ -8,33 +8,45 @@ use alloc::vec::Vec;
 
 use tairix_image::{SPRITE_HEADER_LEN, SPRITE_PALETTE_ENTRY_LEN};
 use tairix_riscos_kernel::error::Error;
-use tairix_riscos_kernel::os::{Fail, Os, Regs};
+use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
+use tairix_util::bitfield::{field_at, set_field_at};
 
-use super::create::{new_palette_entries, Target};
+use super::create::{new_palette_entries, Shape, Target};
 use super::format::Pixels;
-use super::header::{advanced, Sprite};
-use super::{FULL_PALETTE, NO_DEEP_PALETTE, NO_MEMORY, NO_ROOM_TO_GROW, OUTSIDE};
+use super::header::{advanced, Extents, Sprite};
+use super::{FULL_PALETTE, NO_DEEP_PALETTE, NO_MEMORY, NO_ROOM_TO_GROW, OUTSIDE, UNRECOGNISED};
 use crate::palette::{default_words, grouped_colours, GROUP_BASES};
 
 /// A palette word's low byte, the form a colour set for both flash states
 /// takes, as RISC OS 5 writes every palette entry it makes.
 const BOTH_STATES: u32 = 0x10;
 
-/// A row's bytes, borrowed from the heap fallibly.
+/// `bytes` zero bytes for a row, borrowed from the heap fallibly: "Not
+/// enough memory" where the host has no room for them.
 pub(crate) fn row_buffer(os: &mut Os<'_>, bytes: u64) -> Result<Vec<u8>, Fail> {
-    let length = usize::try_from(bytes).map_err(|_| os.error(NO_MEMORY))?;
-    let mut row = Vec::new();
-    if row.try_reserve_exact(length).is_err() {
-        return Err(os.error(NO_MEMORY));
-    }
-    row.resize(length, 0);
-    Ok(row)
+    usize::try_from(bytes)
+        .ok()
+        .and_then(tairix_util::fallible::zeroed)
+        .ok_or_else(|| os.error(NO_MEMORY))
+}
+
+/// The first `bytes` of `buffer`, which was made at least that long.
+pub(crate) fn first_bytes(buffer: &mut [u8], bytes: u64) -> &mut [u8] {
+    let length = usize::try_from(bytes).map_or(buffer.len(), |bytes| bytes.min(buffer.len()));
+    &mut buffer[..length]
 }
 
 /// `count` as a byte count within a word; "Not enough memory" where it is
 /// not.
 pub(crate) fn bytes32(os: &mut Os<'_>, count: u64) -> Result<u32, Fail> {
     u32::try_from(count).map_err(|_| os.error(NO_MEMORY))
+}
+
+/// A block of a sprite a change rewrites.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Block {
+    Image,
+    Mask,
 }
 
 impl Target {
@@ -60,66 +72,98 @@ impl Target {
         Ok(())
     }
 
-    /// The sprite checked whole within its area and within itself, with its
-    /// pixels, before a change to its shape.
-    pub(crate) fn reshapeable(&self, os: &mut Os<'_>) -> Result<Pixels, Fail> {
+    /// The sprite checked whole within its area and within itself, memory
+    /// backing all of it and taking a change to it: its pixels and extents,
+    /// before a change to its shape.
+    pub(crate) fn reshapeable(&self, os: &mut Os<'_>) -> Result<(Pixels, Extents), Fail> {
+        let pixels = self.sprite.pixels_kept(os)?;
         self.area.holds(os, &self.sprite)?;
-        let pixels = self.sprite.pixels(os)?;
-        self.sprite.whole(os, &pixels)?;
-        Ok(pixels)
+        let extents = self.sprite.changeable(os, &pixels)?;
+        Ok((pixels, extents))
     }
 
-    /// Rewrites the block of `rows` rows of `old` bytes each at the sprite's
-    /// byte `at` as rows of `new` bytes, each made by `make` from the old,
-    /// the difference opened or closed at the block's end, and whichever of
-    /// the image and mask lie past the block moved with it.
-    fn restride(
-        &mut self,
-        os: &mut Os<'_>,
-        at: u32,
-        rows: u32,
-        (old, new): (u64, u64),
-        mut make: impl FnMut(&[u8], &mut [u8]),
-    ) -> Result<(), Fail> {
-        let mut from = row_buffer(os, old)?;
-        let mut to = row_buffer(os, new)?;
-        let end = u64::from(at) + old * u64::from(rows);
-        let mut each = |os: &mut Os<'_>, row: u32, sprite: &Sprite| -> Result<(), Fail> {
-            let base = sprite.address(at);
-            os.read_bytes(advanced(base, old * u64::from(row)), &mut from)?;
-            to.fill(0);
-            make(&from, &mut to);
-            os.write_bytes(advanced(base, new * u64::from(row)), &to)
-        };
-        if new > old {
-            let grown = bytes32(os, (new - old) * u64::from(rows))?;
-            let end = bytes32(os, end)?;
-            self.open(os, end, grown, NO_ROOM_TO_GROW)?;
-            self.past(end, |offset| offset.wrapping_add(grown));
-            for row in (0..rows).rev() {
-                each(os, row, &self.sprite)?;
-            }
-        } else {
-            let shrunk = bytes32(os, (old - new) * u64::from(rows))?;
-            for row in 0..rows {
-                each(os, row, &self.sprite)?;
-            }
-            let kept = bytes32(os, new * u64::from(rows) + u64::from(at))?;
-            self.close(os, kept, shrunk)?;
-            self.past(kept + shrunk, |offset| offset.wrapping_sub(shrunk));
+    /// Checks the area holds `bytes` more and memory takes a change from the
+    /// sprite to the end of what the area would then hold: what a change
+    /// opening room at or past the sprite, perhaps in more than one step,
+    /// checks first, so that a refusal leaves everything as it was.
+    pub(crate) fn can_grow(&self, os: &mut Os<'_>, bytes: u64, no_room: Error) -> Result<(), Fail> {
+        let block = self.area.block(os)?;
+        let free = u64::from(block.free).saturating_add(bytes);
+        if free > u64::from(block.size) {
+            return Err(os.error(no_room));
+        }
+        if !os.writable(self.sprite.at, u64::from(self.area.address(0)) + free) {
+            return Err(os.error(UNRECOGNISED));
         }
         Ok(())
     }
 
-    /// Moves the image and mask offsets at or past `from` by `moved`.
-    pub(crate) fn past(&mut self, from: u32, moved: impl Fn(u32) -> u32) {
+    /// Rewrites the block of `rows` rows of `old` bytes each at the sprite's
+    /// byte `at` as rows of `new` bytes, each made by `make` from the old in
+    /// `from` and `to`, buffers of `old` and `new` bytes; the difference
+    /// opened or closed at the block's end, and whichever of the image and
+    /// mask lie past the block moved with it. Its caller has checked the area
+    /// holds the change, so only the host stopping it leaves it part made.
+    fn restride(
+        &mut self,
+        os: &mut Os<'_>,
+        block: Block,
+        rows: u32,
+        (old, new): (u64, u64),
+        (from, to): (&mut [u8], &mut [u8]),
+        mut make: impl FnMut(&[u8], &mut [u8]),
+    ) -> Result<(), Fail> {
+        if rows == 0 {
+            return Ok(());
+        }
+        let at = match block {
+            Block::Image => self.sprite.image,
+            Block::Mask => self.sprite.mask,
+        };
+        let rows64 = u64::from(rows);
+        let old_bytes = old * rows64;
+        let new_bytes = new
+            .checked_mul(rows64)
+            .ok_or_else(|| os.error(NO_ROOM_TO_GROW))?;
+        let mut each = |os: &mut Os<'_>, row: u32, sprite: &Sprite| -> Result<(), Fail> {
+            let base = sprite.address(at);
+            os.read_bytes(advanced(base, old * u64::from(row)), from)?;
+            to.fill(0);
+            make(from, to);
+            os.write_bytes(advanced(base, new * u64::from(row)), to)?;
+            Ok(os.yield_point()?)
+        };
+        let end = bytes32(os, u64::from(at) + old_bytes)?;
+        if new > old {
+            let grown = bytes32(os, new_bytes - old_bytes)?;
+            self.open(os, end, grown, NO_ROOM_TO_GROW)?;
+            self.past(end, block, |offset| offset.wrapping_add(grown));
+            for row in (0..rows).rev() {
+                each(os, row, &self.sprite)?;
+            }
+        } else {
+            let shrunk = bytes32(os, old_bytes - new_bytes)?;
+            for row in 0..rows {
+                each(os, row, &self.sprite)?;
+            }
+            let kept = end - shrunk;
+            self.close(os, kept, shrunk)?;
+            self.past(end, block, |offset| offset.wrapping_sub(shrunk));
+        }
+        Ok(())
+    }
+
+    /// Moves the image and mask offsets at or past `from` by `moved`, but for
+    /// that of `changed`, the block rewritten where it lies: one of no bytes
+    /// ends where it starts.
+    pub(crate) fn past(&mut self, from: u32, changed: Block, moved: impl Fn(u32) -> u32) {
         let masked = self.sprite.masked();
-        if self.sprite.image >= from {
+        if changed != Block::Image && self.sprite.image >= from {
             self.sprite.image = moved(self.sprite.image);
         }
         if !masked {
             self.sprite.mask = self.sprite.image;
-        } else if self.sprite.mask >= from {
+        } else if changed != Block::Mask && self.sprite.mask >= from {
             self.sprite.mask = moved(self.sprite.mask);
         }
     }
@@ -129,9 +173,15 @@ impl Target {
         self.sprite.write(os)
     }
 
-    /// Gives the sprite a mask of `bytes` after its image, every bit set.
-    pub(crate) fn add_mask(&mut self, os: &mut Os<'_>, bytes: u32) -> Result<(), Fail> {
-        let at = bytes32(os, u64::from(self.sprite.image) + self.sprite.image_bytes())?;
+    /// Gives the sprite a mask of `bytes` after its image of `image_bytes`,
+    /// every bit set.
+    pub(crate) fn add_mask(
+        &mut self,
+        os: &mut Os<'_>,
+        image_bytes: u64,
+        bytes: u32,
+    ) -> Result<(), Fail> {
+        let at = bytes32(os, u64::from(self.sprite.image) + image_bytes)?;
         self.open(os, at, bytes, NO_MEMORY)?;
         if self.sprite.image >= at {
             self.sprite.image = self.sprite.image.wrapping_add(bytes);
@@ -156,12 +206,12 @@ impl Target {
 /// mask made opaque throughout.
 pub(crate) fn create_mask(os: &mut Os<'_>, target: &Target) -> Result<(), Fail> {
     let mut target = *target;
-    let pixels = target.reshapeable(os)?;
-    let bytes = bytes32(os, target.sprite.mask_bytes(&pixels))?;
+    let (_, extents) = target.reshapeable(os)?;
+    let bytes = bytes32(os, extents.mask_bytes)?;
     if target.sprite.masked() {
         return os.fill(target.sprite.address(target.sprite.mask), bytes, 0xFF);
     }
-    target.add_mask(os, bytes)?;
+    target.add_mask(os, extents.image_bytes, bytes)?;
     target.finish(os)
 }
 
@@ -171,8 +221,8 @@ pub(crate) fn remove_mask(os: &mut Os<'_>, target: &Target) -> Result<(), Fail> 
     if !target.sprite.masked() {
         return Ok(());
     }
-    let pixels = target.reshapeable(os)?;
-    let bytes = bytes32(os, target.sprite.mask_bytes(&pixels))?;
+    let (_, extents) = target.reshapeable(os)?;
+    let bytes = bytes32(os, extents.mask_bytes)?;
     target.drop_mask(os, bytes)?;
     target.finish(os)
 }
@@ -180,39 +230,58 @@ pub(crate) fn remove_mask(os: &mut Os<'_>, target: &Target) -> Result<(), Fail> 
 /// `OS_SpriteOp` 33: upside down, the mask with it.
 pub(crate) fn flip_rows(os: &mut Os<'_>, target: &Target) -> Result<(), Fail> {
     let sprite = &target.sprite;
-    let pixels = sprite.pixels(os)?;
-    sprite.whole(os, &pixels)?;
-    flip_block(
-        os,
-        sprite.address(sprite.image),
-        sprite.rows(),
-        sprite.stride(),
-    )?;
-    if sprite.masked() {
+    let pixels = sprite.pixels_kept(os)?;
+    let extents = sprite.changeable(os, &pixels)?;
+    let rows = sprite.rows();
+    if rows < 2 {
+        return Ok(());
+    }
+    let mask_stride = if sprite.masked() {
+        extents.mask_stride
+    } else {
+        0
+    };
+    let widest = extents.stride.max(mask_stride);
+    let mut top = row_buffer(os, widest)?;
+    let mut bottom = row_buffer(os, widest)?;
+    let mut flip = |os: &mut Os<'_>, start: u32, stride: u64| {
         flip_block(
             os,
-            sprite.address(sprite.mask),
-            sprite.rows(),
-            sprite.mask_stride(&pixels),
-        )?;
+            sprite.address(start),
+            rows,
+            stride,
+            (
+                first_bytes(&mut top, stride),
+                first_bytes(&mut bottom, stride),
+            ),
+        )
+    };
+    flip(os, sprite.image, extents.stride)?;
+    if sprite.masked() {
+        flip(os, sprite.mask, mask_stride)?;
     }
     Ok(())
 }
 
 /// Exchanges the first and last of `rows` rows of `stride` bytes at
-/// `address`, and so on inwards.
-fn flip_block(os: &mut Os<'_>, address: u32, rows: u32, stride: u64) -> Result<(), Fail> {
-    let mut top = row_buffer(os, stride)?;
-    let mut bottom = row_buffer(os, stride)?;
+/// `address`, and so on inwards, through `top` and `bottom`, each a row.
+fn flip_block(
+    os: &mut Os<'_>,
+    address: u32,
+    rows: u32,
+    stride: u64,
+    (top, bottom): (&mut [u8], &mut [u8]),
+) -> Result<(), Fail> {
     for row in 0..rows / 2 {
         let (upper, lower) = (
             advanced(address, stride * u64::from(row)),
             advanced(address, stride * u64::from(rows - 1 - row)),
         );
-        os.read_bytes(upper, &mut top)?;
-        os.read_bytes(lower, &mut bottom)?;
-        os.write_bytes(upper, &bottom)?;
-        os.write_bytes(lower, &top)?;
+        os.read_bytes(upper, top)?;
+        os.read_bytes(lower, bottom)?;
+        os.write_bytes(upper, bottom)?;
+        os.write_bytes(lower, top)?;
+        os.yield_point()?;
     }
     Ok(())
 }
@@ -225,8 +294,8 @@ fn flip_block(os: &mut Os<'_>, address: u32, rows: u32, stride: u64) -> Result<(
 pub(crate) fn flip_columns(os: &mut Os<'_>, target: &Target) -> Result<(), Fail> {
     let mut target = *target;
     let sprite = target.sprite;
-    let pixels = sprite.pixels(os)?;
-    sprite.whole(os, &pixels)?;
+    let pixels = sprite.pixels_kept(os)?;
+    let extents = sprite.changeable(os, &pixels)?;
     let field = pixels.field_bits();
     let image = if pixels.old_format {
         Mirror::Fields {
@@ -241,16 +310,39 @@ pub(crate) fn flip_columns(os: &mut Os<'_>, target: &Target) -> Result<(), Fail>
             clear_rest: true,
         }
     };
-    mirror_block(os, &sprite, sprite.image, sprite.stride(), image)?;
-    if sprite.masked() {
-        let mask = if pixels.old_format {
-            image
+    let mask = if pixels.old_format {
+        image
+    } else {
+        Mirror::Bits {
+            used: (u64::from(sprite.width(&pixels)) * u64::from(pixels.mask_bits()))
+                .min(extents.mask_stride.saturating_mul(8)),
+        }
+    };
+    if sprite.rows() > 0 {
+        let mask_stride = if sprite.masked() {
+            extents.mask_stride
         } else {
-            Mirror::Bits {
-                used: u64::from(sprite.width(&pixels)) * u64::from(pixels.mask_bits()),
-            }
+            0
         };
-        mirror_block(os, &sprite, sprite.mask, sprite.mask_stride(&pixels), mask)?;
+        let mut row = row_buffer(os, extents.stride.max(mask_stride))?;
+        let reversed_bytes = match mask {
+            Mirror::Bits { used } if sprite.masked() => used.div_ceil(8),
+            _ => 0,
+        };
+        let mut reversed = row_buffer(os, reversed_bytes)?;
+        let mut mirror = |os: &mut Os<'_>, at: u32, stride: u64, how: Mirror| {
+            mirror_block(
+                os,
+                &sprite,
+                at,
+                how,
+                (first_bytes(&mut row, stride), &mut reversed),
+            )
+        };
+        mirror(os, sprite.image, extents.stride, image)?;
+        if sprite.masked() {
+            mirror(os, sprite.mask, mask_stride, mask)?;
+        }
     }
     if pixels.old_format {
         target.sprite.first_bit = 31u32.wrapping_sub(sprite.last_bit) & 31;
@@ -270,27 +362,30 @@ enum Mirror {
         bits: u32,
         clear_rest: bool,
     },
-    /// Their first `used` bits, each bit a field, every bit past them cleared.
+    /// Their first `used` bits, each bit a field, every bit past them cleared;
+    /// no more than a row holds.
     Bits { used: u64 },
 }
 
-/// Mirrors every row of the block at the sprite's byte `at`.
+/// Mirrors every row of the block at the sprite's byte `at`, each read into
+/// `row`, the block's rows' length, `reversed` room for a mirrored row's used
+/// bits.
 fn mirror_block(
     os: &mut Os<'_>,
     sprite: &Sprite,
     at: u32,
-    stride: u64,
     mirror: Mirror,
+    (row, reversed): (&mut [u8], &mut [u8]),
 ) -> Result<(), Fail> {
-    let mut row = row_buffer(os, stride)?;
+    let stride = row.len() as u64;
     let bits_used = match mirror {
-        Mirror::Bits { used } => used.min(stride.saturating_mul(8)),
+        Mirror::Bits { used } => used,
         Mirror::Fields { .. } => 0,
     };
-    let mut reversed = row_buffer(os, bits_used.div_ceil(8))?;
+    let reversed = &mut reversed[..usize::try_from(bits_used.div_ceil(8)).unwrap_or(0)];
     for index in 0..sprite.rows() {
         let address = advanced(sprite.address(at), stride * u64::from(index));
-        os.read_bytes(address, &mut row)?;
+        os.read_bytes(address, row)?;
         match mirror {
             Mirror::Fields {
                 count,
@@ -299,17 +394,18 @@ fn mirror_block(
             } => {
                 for p in 0..count / 2 {
                     let q = count - 1 - p;
-                    let (a, b) = (field(&row, p, bits), field(&row, q, bits));
-                    set_field(&mut row, p, bits, b);
-                    set_field(&mut row, q, bits, a);
+                    let (a, b) = (field(row, p, bits), field(row, q, bits));
+                    set_field(row, p, bits, b);
+                    set_field(row, q, bits, a);
                 }
                 if clear_rest {
-                    clear_from(&mut row, u64::from(count) * u64::from(bits));
+                    clear_from(row, u64::from(count) * u64::from(bits));
                 }
             }
-            Mirror::Bits { .. } => reverse_bits(&mut row, bits_used, &mut reversed),
+            Mirror::Bits { .. } => reverse_bits(row, bits_used, reversed),
         }
-        os.write_bytes(address, &row)?;
+        os.write_bytes(address, row)?;
+        os.yield_point()?;
     }
     Ok(())
 }
@@ -346,35 +442,9 @@ pub(crate) fn field(row: &[u8], index: u32, bits: u32) -> u32 {
     field_at(row, u64::from(index) * u64::from(bits), bits)
 }
 
-/// The `bits` at bit `bit` of `row`; bits past its end read as nought.
-pub(crate) fn field_at(row: &[u8], bit: u64, bits: u32) -> u32 {
-    let mut value = 0u64;
-    let first = usize::try_from(bit / 8).unwrap_or(usize::MAX);
-    for (i, byte) in row.iter().skip(first).take(5).enumerate() {
-        value |= u64::from(*byte) << (8 * i);
-    }
-    let shifted = value >> (bit % 8);
-    u32::try_from(shifted & ((1u64 << bits) - 1)).unwrap_or(0)
-}
-
 /// Sets pixel `index` of `bits` bits along `row` to `value`.
 pub(crate) fn set_field(row: &mut [u8], index: u32, bits: u32, value: u32) {
     set_field_at(row, u64::from(index) * u64::from(bits), bits, value);
-}
-
-/// Sets the `bits` at bit `bit` of `row` to `value`; bits past its end are
-/// dropped.
-pub(crate) fn set_field_at(row: &mut [u8], bit: u64, bits: u32, value: u32) {
-    let first = usize::try_from(bit / 8).unwrap_or(usize::MAX);
-    let shift = bit % 8;
-    let mask = ((1u64 << bits) - 1) << shift;
-    let placed = u64::from(value) << shift;
-    for (i, byte) in row.iter_mut().skip(first).take(5).enumerate() {
-        let lane = 8 * i;
-        let m = (mask >> lane) & 0xFF;
-        let v = (placed >> lane) & 0xFF;
-        *byte = u8::try_from((u64::from(*byte) & !m) | (v & m)).unwrap_or(0);
-    }
 }
 
 /// `OS_SpriteOp` 54: an old-format sprite's rows moved down to bit nought,
@@ -385,7 +455,7 @@ pub(crate) fn set_field_at(row: &mut [u8], bit: u64, bits: u32, value: u32) {
 /// are nought here, which no plot shows.
 pub(crate) fn remove_wastage(os: &mut Os<'_>, target: &Target) -> Result<(), Fail> {
     let mut target = *target;
-    let pixels = target.reshapeable(os)?;
+    let (pixels, extents) = target.reshapeable(os)?;
     let shift = target.sprite.first_bit;
     if !pixels.old_format || shift == 0 {
         return Ok(());
@@ -398,7 +468,7 @@ pub(crate) fn remove_wastage(os: &mut Os<'_>, target: &Target) -> Result<(), Fai
         .wrapping_add(1)
         .wrapping_sub(shift);
     let words = used.div_ceil(32);
-    let (old, new) = (sprite.stride(), 4 * u64::from(words));
+    let (old, new) = (extents.stride, 4 * u64::from(words));
     let moved = move |from: &[u8], to: &mut [u8]| {
         for bit in (0..u64::from(used)).step_by(8) {
             let take = u32::try_from((u64::from(used) - bit).min(8)).unwrap_or(8);
@@ -406,10 +476,28 @@ pub(crate) fn remove_wastage(os: &mut Os<'_>, target: &Target) -> Result<(), Fai
         }
     };
     let masked = sprite.masked();
-    target.restride(os, sprite.image, sprite.rows(), (old, new), moved)?;
-    if masked {
-        let mask = target.sprite.mask;
-        target.restride(os, mask, sprite.rows(), (old, new), moved)?;
+    if sprite.rows() > 0 {
+        target.can_grow(os, 0, NO_ROOM_TO_GROW)?;
+        let mut from = row_buffer(os, old)?;
+        let mut to = row_buffer(os, new)?;
+        target.restride(
+            os,
+            Block::Image,
+            sprite.rows(),
+            (old, new),
+            (&mut from, &mut to),
+            moved,
+        )?;
+        if masked {
+            target.restride(
+                os,
+                Block::Mask,
+                sprite.rows(),
+                (old, new),
+                (&mut from, &mut to),
+                moved,
+            )?;
+        }
     }
     target.sprite.words_less_one = words.wrapping_sub(1);
     target.sprite.first_bit = 0;
@@ -461,16 +549,25 @@ impl Change {
 /// or deleted, rows counted from the bottom.
 pub(crate) fn rows(os: &mut Os<'_>, target: &Target, change: Change) -> Result<(), Fail> {
     let mut target = *target;
-    let pixels = target.reshapeable(os)?;
+    let (_, extents) = target.reshapeable(os)?;
     let sprite = target.sprite;
     let rows = sprite.rows();
     if !change.fits(rows) {
         return Err(os.error(OUTSIDE));
     }
-    let blocks: [(bool, u64); 2] = [
-        (false, sprite.stride()),
-        (true, sprite.mask_stride(&pixels)),
-    ];
+    let masked = sprite.masked();
+    let per_row = extents.stride + if masked { extents.mask_stride } else { 0 };
+    let (Change::Insert { count, .. } | Change::Delete { count, .. }) = change;
+    let moved = per_row
+        .checked_mul(u64::from(count))
+        .ok_or_else(|| os.error(NO_ROOM_TO_GROW))?;
+    let grows = if matches!(change, Change::Insert { .. }) {
+        moved
+    } else {
+        0
+    };
+    target.can_grow(os, grows, NO_ROOM_TO_GROW)?;
+    let blocks: [(bool, u64); 2] = [(false, extents.stride), (true, extents.mask_stride)];
     for (is_mask, stride) in blocks {
         if is_mask && !target.sprite.masked() {
             continue;
@@ -527,7 +624,7 @@ fn shift_other(target: &mut Target, is_mask: bool, place: u32, moved: impl Fn(u3
 /// a new-format mask's rows hold its pixels alone.
 pub(crate) fn columns(os: &mut Os<'_>, target: &Target, change: Change) -> Result<(), Fail> {
     let mut target = *target;
-    let pixels = target.reshapeable(os)?;
+    let (pixels, extents) = target.reshapeable(os)?;
     let sprite = target.sprite;
     let width = sprite.width(&pixels);
     if !change.fits(width) {
@@ -542,9 +639,20 @@ pub(crate) fn columns(os: &mut Os<'_>, target: &Target, change: Change) -> Resul
     };
     let field = pixels.field_bits();
     let first = u64::from(sprite.first_bit);
-    let bits = first + u64::from(new_width) * u64::from(field);
-    let words = bytes32(os, bits.div_ceil(32))?;
-    let new_stride = 4 * u64::from(words);
+    let rows = sprite.rows();
+    let shape = Shape::new(&pixels, new_width, rows, sprite.first_bit);
+    let new_stride = 4 * u64::from(shape.words);
+    let masked = sprite.masked();
+    let (old_mask_stride, new_mask_stride) = match (masked, shape.mask_stride) {
+        (false, _) => (0, 0),
+        (true, Some(new)) => (extents.mask_stride, new),
+        (true, None) => return Err(os.error(NO_ROOM_TO_GROW)),
+    };
+    let old_bytes = (extents.stride + old_mask_stride) * u64::from(rows);
+    let new_bytes = (new_stride + new_mask_stride)
+        .checked_mul(u64::from(rows))
+        .ok_or_else(|| os.error(NO_ROOM_TO_GROW))?;
+    target.can_grow(os, new_bytes.saturating_sub(old_bytes), NO_ROOM_TO_GROW)?;
     let regrouped = move |offset: u64, bits: u32| {
         move |from: &[u8], to: &mut [u8]| {
             for x in 0..new_width {
@@ -561,39 +669,41 @@ pub(crate) fn columns(os: &mut Os<'_>, target: &Target, change: Change) -> Resul
             }
         }
     };
-    let masked = sprite.masked();
-    target.restride(
-        os,
-        sprite.image,
-        sprite.rows(),
-        (sprite.stride(), new_stride),
-        regrouped(first, field),
-    )?;
-    if masked {
-        let (offset, mask_bits) = if pixels.old_format {
-            (first, field)
-        } else {
-            (0, pixels.mask_bits())
-        };
-        let new_mask_stride = if pixels.old_format {
-            new_stride
-        } else {
-            u64::from(new_width)
-                .saturating_mul(u64::from(mask_bits))
-                .div_ceil(32)
-                * 4
-        };
-        let mask = target.sprite.mask;
+    if rows > 0 {
+        let mut from = row_buffer(os, extents.stride.max(old_mask_stride))?;
+        let mut to = row_buffer(os, new_stride.max(new_mask_stride))?;
         target.restride(
             os,
-            mask,
-            sprite.rows(),
-            (sprite.mask_stride(&pixels), new_mask_stride),
-            regrouped(offset, mask_bits),
+            Block::Image,
+            rows,
+            (extents.stride, new_stride),
+            (
+                first_bytes(&mut from, extents.stride),
+                first_bytes(&mut to, new_stride),
+            ),
+            regrouped(first, field),
         )?;
+        if masked {
+            let (offset, mask_bits) = if pixels.old_format {
+                (first, field)
+            } else {
+                (0, pixels.mask_bits())
+            };
+            target.restride(
+                os,
+                Block::Mask,
+                rows,
+                (old_mask_stride, new_mask_stride),
+                (
+                    first_bytes(&mut from, old_mask_stride),
+                    first_bytes(&mut to, new_mask_stride),
+                ),
+                regrouped(offset, mask_bits),
+            )?;
+        }
     }
-    target.sprite.words_less_one = words.wrapping_sub(1);
-    target.sprite.last_bit = u32::try_from(bits.wrapping_sub(1) % 32).unwrap_or(31);
+    target.sprite.words_less_one = shape.words.wrapping_sub(1);
+    target.sprite.last_bit = shape.last_bit;
     target.finish(os)
 }
 
@@ -617,19 +727,19 @@ pub(crate) fn palette(os: &mut Os<'_>, target: &Target, regs: &mut Regs) -> Resu
         }
         0 => {
             if held != 0 {
-                target.reshapeable(os)?;
+                let _ = target.reshapeable(os)?;
                 resize_palette(os, &mut target, held, 0)?;
             }
             return Ok(());
         }
         _ => {}
     }
-    let pixels = target.reshapeable(os)?;
+    let (pixels, _) = target.reshapeable(os)?;
     if !pixels.paletted() {
         return Err(os.error(NO_DEEP_PALETTE));
     }
     let entries = if pixels.log2_bpp == 3 {
-        if regs.r[3] >> 31 != 0 {
+        if regs.r[3] & super::reason::PALETTE_FULL != 0 {
             FULL_PALETTE
         } else {
             new_palette_entries(&pixels)
@@ -641,14 +751,18 @@ pub(crate) fn palette(os: &mut Os<'_>, target: &Target, regs: &mut Regs) -> Resu
     };
     let colours = palette_colours(os, &target.sprite, &pixels, held, entries)?;
     resize_palette(os, &mut target, held, entries)?;
-    for (i, colour) in (0u32..).zip(colours) {
-        let at = target
-            .sprite
-            .address(SPRITE_HEADER_LEN + i * SPRITE_PALETTE_ENTRY_LEN);
-        os.write_word(at, colour)?;
-        os.write_word(at.wrapping_add(4), colour)?;
+    let mut bytes = Vec::new();
+    if bytes
+        .try_reserve_exact(colours.len() * SPRITE_PALETTE_ENTRY_LEN as usize)
+        .is_err()
+    {
+        return Err(os.error(NO_MEMORY));
     }
-    Ok(())
+    for colour in colours {
+        bytes.extend_from_slice(&colour.to_le_bytes());
+        bytes.extend_from_slice(&colour.to_le_bytes());
+    }
+    os.write_bytes(target.sprite.address(SPRITE_HEADER_LEN), &bytes)
 }
 
 /// The words of the `entries` a palette made for the sprite holds, as RISC OS
@@ -668,22 +782,34 @@ fn palette_colours(
     if colours.try_reserve_exact(entries as usize).is_err() {
         return Err(os.error(NO_MEMORY));
     }
-    let entry_word = |os: &mut Os<'_>, i: u32| {
-        os.read_word(sprite.address(SPRITE_HEADER_LEN + i * SPRITE_PALETTE_ENTRY_LEN))
+    let grouped = held != 0 && pixels.log2_bpp == 3;
+    let read = if grouped {
+        held.min(len32(GROUP_BASES))
+    } else if held != 0 {
+        entries
+    } else {
+        0
     };
-    if held != 0 && pixels.log2_bpp == 3 {
+    let held_pairs = os.read_vec(
+        sprite.address(SPRITE_HEADER_LEN),
+        read as usize * SPRITE_PALETTE_ENTRY_LEN as usize,
+    )?;
+    let mut firsts = held_pairs
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|pair| u32::from_le_bytes([pair[0], pair[1], pair[2], pair[3]]));
+    if grouped {
         let mut bases = [0; GROUP_BASES];
-        for (k, base) in (0..held).zip(bases.iter_mut()) {
-            *base = entry_word(os, k)?;
+        for (base, first) in bases.iter_mut().zip(&mut firsts) {
+            *base = first;
         }
         for (shown, i) in grouped_colours(&bases).zip(0..entries) {
             let [low, ..] = bases[i as usize % GROUP_BASES].to_le_bytes();
             colours.push(shown.riscos_word() | BOTH_STATES | u32::from(low | low >> 4));
         }
     } else if held != 0 {
-        for i in 0..entries {
-            colours.push(entry_word(os, i)? | BOTH_STATES);
-        }
+        colours.extend(firsts.map(|first| first | BOTH_STATES));
     } else {
         let defaults = default_words(pixels.log2_bpp, false);
         colours.extend(

@@ -2,6 +2,8 @@
 //! states it, so a picture written back to the format it was read from says
 //! exactly what it said before.
 
+use tairix_util::divisor::gcd;
+
 /// What a [`Density`] counts pixels per.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DensityUnit {
@@ -105,7 +107,7 @@ impl Density {
     pub fn shape(&self) -> Option<(u32, u32)> {
         let across = u128::from(self.across.0) * u128::from(self.down.1);
         let down = u128::from(self.down.0) * u128::from(self.across.1);
-        let common = gcd(across, down);
+        let common = gcd(across, down).max(1);
         Some((
             u32::try_from(across / common).ok()?,
             u32::try_from(down / common).ok()?,
@@ -126,7 +128,7 @@ impl Density {
         let restate = |value: (u32, u32)| {
             let numerator = u128::from(value.0) * to.0 * from.1;
             let denominator = u128::from(value.1) * to.1 * from.0;
-            let common = gcd(numerator, denominator);
+            let common = gcd(numerator, denominator).max(1);
             Some((
                 u32::try_from(numerator / common).ok()?,
                 u32::try_from(denominator / common).ok()?,
@@ -170,19 +172,6 @@ fn convert(value: (u32, u32), from: (u128, u128), to: (u128, u128)) -> Option<u3
     let denominator = u128::from(value.1) * to.1 * from.0;
     let rounded = (numerator + denominator / 2) / denominator;
     u32::try_from(rounded).ok().filter(|&whole| whole > 0)
-}
-
-const fn gcd(mut a: u128, mut b: u128) -> u128 {
-    while b != 0 {
-        let rest = a % b;
-        a = b;
-        b = rest;
-    }
-    if a == 0 {
-        1
-    } else {
-        a
-    }
 }
 
 #[cfg(test)]

@@ -420,7 +420,7 @@ impl Os<'_> {
         if self.perform(X | NUMBER_TO_NAME, &mut name).is_ok() {
             self.read_zstring(buffer, 16)
         } else {
-            let length = self.manager_message(b"UnnamedTerritory", buffer, 16)?;
+            let length = self.own_lookup(own, b"UnnamedTerritory", buffer, 16)?;
             Ok(self.read_until(buffer, length as usize, |_| false)?.0)
         }
     }
@@ -452,17 +452,6 @@ impl Os<'_> {
         self.dst_changeover()
     }
 
-    /// The text `token` of the Manager's own messages, at most `room` bytes.
-    fn manager_message(&mut self, token: &[u8], buffer: u32, room: u32) -> Result<u32, Fail> {
-        let file = self.own_open(own)?;
-        self.write_bytes(file.request(), token)?;
-        self.write_byte(file.request().wrapping_add(len32(token.len())), 0)?;
-        let mut regs = Regs::default();
-        regs.r[..4].copy_from_slice(&[file.descriptor(), file.request(), buffer, room]);
-        self.perform(X | crate::msgtrans::LOOKUP, &mut regs)?;
-        Ok(regs.r[3])
-    }
-
     /// A territory's or alphabet's name, its token's stem and its number,
     /// into R1's buffer of R2 bytes, cut short to fit; `error` if it has none
     /// or none of it fits.
@@ -473,7 +462,7 @@ impl Os<'_> {
             .map_err(|_| self.no_memory())?;
         token.extend_from_slice(stem);
         token.extend_from_slice(crate::convert::Decimal::of(regs.r[0].cast_signed()).as_bytes());
-        match self.manager_message(&token, regs.r[1], regs.r[2]) {
+        match self.own_lookup(own, &token, regs.r[1], regs.r[2]) {
             Ok(length) if length != 0 => Ok(()),
             Ok(_) | Err(Fail::Error(_)) => Err(self.own_error(own, error, &[])),
             Err(unwind) => Err(unwind),
@@ -585,7 +574,12 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let configured = os.read_cmos(TERRITORY_CMOS).unwrap_or(0);
     os.world.territory.current = u32::from(configured ^ 1);
     if os
-        .manager_message(b"UnmatchedZoneName", workspace + CUSTOM_AT, CUSTOM_ROOM)
+        .own_lookup(
+            self::own,
+            b"UnmatchedZoneName",
+            workspace + CUSTOM_AT,
+            CUSTOM_ROOM,
+        )
         .is_err()
     {
         os.write_bytes(workspace + CUSTOM_AT, b"Local\0")?;
@@ -758,7 +752,7 @@ const fn asked(r0: u32) -> Asked {
 /// A token of the Manager's messages, written with a new line.
 fn message_line(os: &mut Os<'_>, token: &[u8]) -> Result<(), Fail> {
     let buffer = os.world.territory.own.reply();
-    let length = os.manager_message(token, buffer, 120)?;
+    let length = os.own_lookup(own, token, buffer, crate::msgtrans::REPLY_ROOM)?;
     let text = os.read_until(buffer, length as usize, |_| false)?.0;
     line(os, &text)
 }

@@ -162,7 +162,7 @@ mod program {
         let Ok(window_len) = usize::try_from(REG_OFFSET + 4) else {
             return FAIL_MAP;
         };
-        let Ok(base) = u64::try_from(tairix_rt::mmio_map(GRANT_HANDLE, 0, window_len)) else {
+        let Ok(base) = u64::try_from(tairix_rt::mmio_map(GRANT_HANDLE, 0, window_len, None)) else {
             return FAIL_MAP;
         };
         let reg = (base + REG_OFFSET) as *const u32;

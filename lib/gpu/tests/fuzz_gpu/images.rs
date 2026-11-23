@@ -16,6 +16,7 @@ use tairix_gpu::{
 };
 
 use super::buffers::{self, Shape};
+use super::common::Make;
 use super::{below, index_of};
 
 /// Rounds per sweep. Miri interprets every operation, so it drives a handful.
@@ -646,8 +647,8 @@ struct Round {
 }
 
 impl Round {
-    fn new(rng: &mut Prng) -> Self {
-        let device = super::device(Arc::new(tairix_parallel::Serial));
+    fn new(rng: &mut Prng, make: Make<'_>) -> Self {
+        let device = make(Arc::new(tairix_parallel::Serial));
         let info = device.info().clone();
         let context = device
             .create_context(&ContextDesc::default())
@@ -1256,8 +1257,8 @@ impl Round {
     }
 }
 
-pub(super) fn run_round(rng: &mut Prng) {
-    let mut round = Round::new(rng);
+pub(super) fn run_round(rng: &mut Prng, make: Make<'_>) {
+    let mut round = Round::new(rng, make);
     for _ in 0..DESCRIPTIONS_PER_ROUND {
         let desc = draw_any_desc(rng, &round.info);
         let Some(expected) = admits(&round.info, &desc) else {

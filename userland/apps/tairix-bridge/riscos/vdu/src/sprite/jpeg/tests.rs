@@ -68,9 +68,7 @@ fn a_plot_s_options_come_from_each_call_s_own_bits() {
 }
 
 #[test]
-fn inches_and_common_divisors_are_whole() {
+fn inches_are_whole_and_held_to_a_word() {
     assert_eq!(inches(118, 100), 299);
     assert_eq!(inches(u32::MAX, 1), u32::MAX, "held to a word");
-    assert_eq!(gcd(72, 144), 72);
-    assert_eq!(gcd(0, 5), 5);
 }

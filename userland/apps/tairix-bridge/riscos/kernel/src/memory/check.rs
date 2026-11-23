@@ -78,6 +78,25 @@ impl Memory {
         complete | partial
     }
 
+    /// Whether every page from `start` to `end` (exclusive; one byte if they
+    /// are equal) gives all of `rights`, flags as [`Memory::check_access`]
+    /// gives them: the walk ends at the first that does not.
+    #[must_use]
+    pub fn grants(&mut self, start: u32, end: u64, rights: u32) -> bool {
+        let end = end.max(u64::from(start) + 1);
+        let mut at = u64::from(start);
+        while at < end {
+            let Ok(address) = u32::try_from(at) else {
+                return false;
+            };
+            if self.page_flags(address) & rights != rights {
+                return false;
+            }
+            at = self.uniform_run(address).min(end);
+        }
+        true
+    }
+
     /// Whether the page tables refuse an access at `address`: a write if
     /// `write`, from a privileged mode if `privileged`.
     #[must_use]

@@ -26,6 +26,10 @@ pub(crate) struct Drawn {
     pub(crate) height: u32,
 }
 
+/// The largest eigen factor a screen the drivers draw, or a sprite's mode,
+/// takes: a pixel eight OS units across.
+pub(crate) const MOST_EIG: u32 = 3;
+
 /// A mode's variables, as `OS_ReadModeVariable` reads them for a mode named
 /// by number, selector or sprite mode word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -178,7 +182,7 @@ impl Format {
             u64::from(columns) < u64::from(width / cell.size_x)
                 && u64::from(rows) < u64::from(height / cell.space_y)
         };
-        self.x_eig() <= 3 && self.y_eig() <= 3 && lines_fit && colours && text_fits
+        self.x_eig() <= MOST_EIG && self.y_eig() <= MOST_EIG && lines_fit && colours && text_fits
     }
 
     /// Variable `number`, as a mode named rather than the current one reads
@@ -243,6 +247,21 @@ impl Format {
         self.vars[var::LOG2_BPC as usize]
     }
 
+    /// Whether its pixels are `other`'s: the same depth, field and colours,
+    /// held as the same colour flags hold them, whatever either's size or
+    /// its other flags.
+    pub(crate) const fn same_pixels(&self, other: &Self) -> bool {
+        const COLOUR_FLAGS: u32 = Flags::FULL_PALETTE
+            .union(Flags::GREYSCALE)
+            .union(Flags::RGB)
+            .union(Flags::ALPHA)
+            .bits();
+        (self.flags() ^ other.flags()) & COLOUR_FLAGS == 0
+            && self.ncolour() == other.ncolour()
+            && self.log2_bpp() == other.log2_bpp()
+            && self.log2_bpc() == other.log2_bpc()
+    }
+
     /// Pixels across.
     pub(crate) const fn width(&self) -> u32 {
         self.vars[var::X_WIND_LIMIT as usize] + 1
@@ -279,11 +298,14 @@ impl Format {
     }
 
     /// The bytes the screen takes: the lines it shows, twice over for
-    /// Teletext, whose flashing alternates two frames.
+    /// Teletext, whose flashing alternates two frames; a word's most where
+    /// that passes a word, which no screen memory holds.
     pub(crate) const fn screen_bytes(&self) -> u32 {
-        let frame = self.line_length() * self.height();
+        let Some(frame) = self.line_length().checked_mul(self.height()) else {
+            return u32::MAX;
+        };
         if self.has(Flags::TELETEXT) {
-            2 * frame
+            frame.saturating_mul(2)
         } else {
             frame
         }
@@ -341,7 +363,12 @@ impl Format {
 
     /// Whether an 8-bit mode takes its palette in VIDC1's groups of sixteen.
     pub(crate) const fn grouped(&self) -> bool {
-        self.log2_bpp() == 3 && self.ncolour() == 63
+        self.log2_bpp() == 3 && !self.full_palette()
+    }
+
+    /// Whether an 8-bit mode holds 256 palette entries of its own.
+    pub(crate) const fn full_palette(&self) -> bool {
+        full_palette(self.log2_bpp(), self.flags())
     }
 }
 
@@ -356,8 +383,15 @@ pub(crate) struct Cell {
     pub(crate) space_y: u32,
 }
 
+/// Whether a mode of `log2_bpp` bits a pixel and mode flags `flags` holds 256
+/// palette entries of its own: an 8-bit one its flags say does, as RISC OS 5
+/// tells them apart, whatever its colour count.
+pub(crate) const fn full_palette(log2_bpp: u32, flags: u32) -> bool {
+    log2_bpp == 3 && Flags::new(flags).has(Flags::FULL_PALETTE)
+}
+
 /// The highest colour number a depth gives a mode by default.
-const fn default_ncolour(log2_bpp: u32) -> u32 {
+pub(crate) const fn default_ncolour(log2_bpp: u32) -> u32 {
     match log2_bpp {
         0 => 1,
         1 => 3,

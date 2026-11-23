@@ -36,6 +36,25 @@ impl SlotKey {
     pub const fn generation(self) -> u32 {
         self.generation.get()
     }
+
+    /// The key as one word, its index above its generation, as a holder
+    /// hands it to another process.
+    #[must_use]
+    pub fn to_bits(self) -> u64 {
+        (u64::from(self.index) << u32::BITS) | u64::from(self.generation.get())
+    }
+
+    /// The key `bits` spells, or `None` where no map issues one — a
+    /// generation of zero. It is an identifier like any other, checked
+    /// against the map it is presented to.
+    #[must_use]
+    pub fn from_bits(bits: u64) -> Option<Self> {
+        let generation = u32::try_from(bits & u64::from(u32::MAX)).ok()?;
+        Some(Self {
+            index: u32::try_from(bits >> u32::BITS).ok()?,
+            generation: NonZeroU32::new(generation)?,
+        })
+    }
 }
 
 /// A key type a [`SlotMap`] issues: a [`SlotKey`] under a holder's own name,

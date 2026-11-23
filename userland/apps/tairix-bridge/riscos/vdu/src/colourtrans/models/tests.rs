@@ -99,3 +99,14 @@ fn any_register_s_value_converts_without_a_fault() {
         }
     }
 }
+
+#[test]
+fn a_product_or_quotient_past_a_word_keeps_its_low_word_as_the_processor_does() {
+    assert_eq!(super::times(i32::MIN, 2 << 16), 0, "minus two to the 32nd");
+    assert_eq!(super::ratio(i32::MIN, 1 << 15), 0, "the same, by division");
+    assert_eq!(
+        super::times(-(1 << 16), 3 << 16),
+        -(3 << 16),
+        "within a word, as it is"
+    );
+}

@@ -1118,6 +1118,10 @@ const RUNTIME_CEILING_BUDGETS: u32 = 2;
 /// names: on x86_64 the board's own VGA beside a `ramfb` is console 0.
 pub const DISPLAY_ID: &str = "display0";
 
+/// Bytes of the host-visible region a PCI virtio GPU carries, which the
+/// device maps host-visible blobs into.
+pub const VIRTIO_GPU_HOST_VISIBLE: u64 = 64 << 20;
+
 /// The display device a run attaches, if any.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Display {
@@ -1135,26 +1139,50 @@ pub enum Display {
         width: u32,
         /// The height it states.
         height: u32,
+        /// Whether it takes Venus work: QEMU's OpenGL device with Venus and
+        /// blob resources, run under its headless EGL display with Mesa's
+        /// software Vulkan driver, so a vertical needs no GPU and draws the
+        /// same on every host. Only the x86_64 board attaches it.
+        venus: bool,
     },
 }
 
 impl Display {
     /// The `-device` argument attaching `self`: the virtio GPU on the PCI
-    /// transport with `pci` options where a board's virtio devices are PCI
-    /// functions, else on virtio-mmio. `None` for no display.
+    /// transport with `pci` options and a host-visible region where a
+    /// board's virtio devices are PCI functions, else on virtio-mmio, which
+    /// carries none. `None` for no display, or for a Venus GPU off PCI, which
+    /// [`Runner::run`] refuses first.
     #[must_use]
     pub fn device(self, pci: Option<&str>) -> Option<String> {
         match self {
             Self::None => None,
             Self::Ramfb => Some(format!("ramfb,id={DISPLAY_ID}")),
-            Self::VirtioGpu { width, height } => {
+            Self::VirtioGpu {
+                width,
+                height,
+                venus,
+            } => {
                 let mode = format!("id={DISPLAY_ID},xres={width},yres={height}");
-                Some(match pci {
-                    Some(options) => format!("virtio-gpu-pci,{mode},{options}"),
-                    None => format!("virtio-gpu-device,{mode}"),
-                })
+                let region = format!("hostmem={VIRTIO_GPU_HOST_VISIBLE}");
+                match (pci, venus) {
+                    (Some(options), false) => {
+                        Some(format!("virtio-gpu-pci,{mode},{region},{options}"))
+                    }
+                    (Some(options), true) => Some(format!(
+                        "virtio-gpu-gl-pci,{mode},{region},venus=on,blob=on,{options}"
+                    )),
+                    (None, false) => Some(format!("virtio-gpu-device,{mode}")),
+                    (None, true) => None,
+                }
             }
         }
+    }
+
+    /// Whether this is a GPU that takes Venus work.
+    #[must_use]
+    pub const fn venus(self) -> bool {
+        matches!(self, Self::VirtioGpu { venus: true, .. })
     }
 
     /// The monitor command dumping this display's screen to `path`: the
@@ -2394,6 +2422,11 @@ impl Runner {
         for a in &spec.extra_args {
             cmd.arg(a);
         }
+        if spec.devices.display.venus() {
+            let driver = software_vulkan_driver(&vulkan_driver_dirs())?;
+            cmd.env("VK_DRIVER_FILES", &driver);
+            cmd.env("VK_ICD_FILENAMES", &driver);
+        }
 
         // Every run gets a human monitor, even one that injects nothing: a
         // guest killed as hung is interrogated over it first, so the report
@@ -2541,6 +2574,11 @@ fn validate_boot_inputs(spec: &Spec) -> io::Result<()> {
     .or_else(|| {
         (spec.dma_translation == DmaTranslation::VirtioIommu && spec.devices.message_sources > 0)
             .then_some("the virtio-iommu takes the slot the first message source would")
+    })
+    .or_else(|| {
+        (spec.devices.display.venus()
+            && (spec.arch != Arch::X86_64 || spec.session != SessionKind::HeadlessTest))
+            .then_some("a Venus GPU is a PCI function only the headless x86_64 board attaches")
     });
     if let Some(refused) = refused {
         return Err(io::Error::new(io::ErrorKind::Unsupported, refused));
@@ -2563,6 +2601,57 @@ fn validate_boot_inputs(spec: &Spec) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The library Mesa's software Vulkan driver, lavapipe, is.
+const SOFTWARE_VULKAN_LIBRARY: &str = "libvulkan_lvp.so";
+
+/// The directories the Vulkan loader reads driver manifests from: each data
+/// directory's `vulkan/icd.d`, then the system configuration's.
+fn vulkan_driver_dirs() -> Vec<PathBuf> {
+    let data = std::env::var_os("XDG_DATA_DIRS")
+        .filter(|dirs| !dirs.is_empty())
+        .unwrap_or_else(|| OsString::from("/usr/local/share:/usr/share"));
+    std::env::split_paths(&data)
+        .map(|dir| dir.join("vulkan/icd.d"))
+        .chain([PathBuf::from("/etc/vulkan/icd.d")])
+        .collect()
+}
+
+/// The manifest of Mesa's software Vulkan driver among `dirs`, the first in
+/// directory and name order, which a Venus GPU's host renders through.
+///
+/// # Errors
+///
+/// [`io::ErrorKind::NotFound`] where none of `dirs` holds one.
+fn software_vulkan_driver(dirs: &[PathBuf]) -> io::Result<PathBuf> {
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut manifests: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        manifests.sort();
+        let lavapipe = manifests.into_iter().find(|manifest| {
+            std::fs::read_to_string(manifest).is_ok_and(|text| {
+                text.lines().any(|line| {
+                    line.contains("\"library_path\"") && line.contains(SOFTWARE_VULKAN_LIBRARY)
+                })
+            })
+        });
+        if let Some(lavapipe) = lavapipe {
+            return Ok(lavapipe);
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        format!(
+            "a Venus GPU renders through Mesa's software Vulkan driver, and no manifest naming \
+             {SOFTWARE_VULKAN_LIBRARY} is installed (Debian/Ubuntu: mesa-vulkan-drivers)"
+        ),
+    ))
 }
 
 /// Attach a QEMU monitor in `mode` (`readline` or `control`) on `socket`,
@@ -4776,7 +4865,8 @@ mod tests {
         assert_eq!(
             Display::VirtioGpu {
                 width: 1024,
-                height: 768
+                height: 768,
+                venus: false
             }
             .screendump(path),
             "screendump /tmp/screen.ppm display0"
@@ -4792,12 +4882,93 @@ mod tests {
         assert_eq!(
             Display::VirtioGpu {
                 width: 640,
-                height: 480
+                height: 480,
+                venus: false
             }
             .device(Some("disable-legacy=on")),
-            Some("virtio-gpu-pci,id=display0,xres=640,yres=480,disable-legacy=on".into())
+            Some(
+                "virtio-gpu-pci,id=display0,xres=640,yres=480,hostmem=67108864,disable-legacy=on"
+                    .into()
+            )
         );
+        let venus = Display::VirtioGpu {
+            width: 640,
+            height: 480,
+            venus: true,
+        };
+        assert_eq!(
+            venus.device(Some("disable-legacy=on")),
+            Some(
+                "virtio-gpu-gl-pci,id=display0,xres=640,yres=480,hostmem=67108864,venus=on,\
+                 blob=on,disable-legacy=on"
+                    .into()
+            )
+        );
+        assert_eq!(venus.device(None), None, "no Venus GPU off PCI");
+        assert!(venus.venus() && !Display::Ramfb.venus());
         assert_eq!(Display::None.device(None), None);
+    }
+
+    #[test]
+    fn a_venus_gpu_is_refused_off_the_headless_x86_64_board() {
+        let kernel = std::env::current_exe().expect("a file that exists");
+        let venus = Display::VirtioGpu {
+            width: 640,
+            height: 480,
+            venus: true,
+        };
+        let board = |arch| match arch {
+            Arch::X86_64 => Spec::for_x86_64_kernel(kernel.clone()),
+            Arch::Aarch64 => Spec::for_aarch64_kernel(kernel.clone()),
+            Arch::Riscv64 => Spec::for_riscv64_kernel(kernel.clone()),
+        };
+        for (arch, session) in [
+            (Arch::Aarch64, SessionKind::HeadlessTest),
+            (Arch::Riscv64, SessionKind::HeadlessTest),
+            (Arch::X86_64, SessionKind::WindowedInteractive),
+        ] {
+            let mut spec = board(arch);
+            spec.session = session;
+            spec.devices.display = venus;
+            let refused = validate_boot_inputs(&spec).expect_err("refused");
+            assert_eq!(
+                refused.kind(),
+                io::ErrorKind::Unsupported,
+                "{arch:?} {session:?}"
+            );
+        }
+        let mut spec = board(Arch::X86_64);
+        spec.devices.display = venus;
+        validate_boot_inputs(&spec).expect("the headless x86_64 board attaches it");
+    }
+
+    #[test]
+    fn the_software_vulkan_driver_is_found_by_the_library_its_manifest_names() {
+        let root = std::env::temp_dir().join(format!("tairix-icd-{}", std::process::id()));
+        let (first, second) = (root.join("first"), root.join("second"));
+        std::fs::create_dir_all(&first).expect("a directory");
+        std::fs::create_dir_all(&second).expect("a directory");
+        let manifest = |library: &str| {
+            format!("{{\n  \"ICD\": {{\n    \"library_path\": \"{library}\"\n  }}\n}}\n")
+        };
+        std::fs::write(first.join("intel_icd.json"), manifest("libvulkan_intel.so"))
+            .expect("written");
+        std::fs::write(second.join("a_icd.json"), manifest("libvulkan_radeon.so"))
+            .expect("written");
+        std::fs::write(
+            second.join("lvp_icd.x86_64.json"),
+            manifest("libvulkan_lvp.so"),
+        )
+        .expect("written");
+        std::fs::write(second.join("notes.txt"), manifest("libvulkan_lvp.so")).expect("written");
+        let dirs = [root.join("absent"), first.clone(), second.clone()];
+        assert_eq!(
+            software_vulkan_driver(&dirs).expect("found"),
+            second.join("lvp_icd.x86_64.json")
+        );
+        let refused = software_vulkan_driver(&dirs[..2]).expect_err("none there");
+        assert_eq!(refused.kind(), io::ErrorKind::NotFound);
+        std::fs::remove_dir_all(&root).expect("cleaned up");
     }
 
     /// An ordinary pointer script must be exhausted, so a choreography that

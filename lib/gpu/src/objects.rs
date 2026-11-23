@@ -5,7 +5,8 @@ use alloc::sync::Arc;
 use core::fmt;
 
 use crate::command::Command;
-use crate::device::{owned, Allocation, Buffer, CommandBuffer, Context, SoftwareShared};
+use crate::device::{Allocation, Buffer, CommandBuffer, Context};
+use crate::host::{owned, Host, Object};
 use crate::image::{
     BufferImageCopy, BufferViewDesc, ClearValue, ImageCopy, ImageDesc, ImageRange, ImageViewDesc,
 };
@@ -16,7 +17,7 @@ use crate::{Error, MAX_COPY_REGIONS};
 
 impl CommandBuffer {
     fn named_image(&self, image: &Image) -> Result<ImageKey, Error> {
-        owned(&image.shared, image.context, &self.shared, self.context)?;
+        owned(&image.host, image.context, &self.host, self.context)?;
         Ok(image.key)
     }
 
@@ -132,9 +133,7 @@ impl Context {
     /// [`Error::TooLarge`], [`Error::Samples`], [`Error::Usage`] or
     /// [`Error::Unsupported`].
     pub fn image_requirements(&self, desc: &ImageDesc) -> Result<MemoryRequirements, Error> {
-        self.shared
-            .image_form(desc)
-            .map(|(_, requirements)| requirements)
+        self.host.image_requirements(desc)
     }
 
     /// An image placed `offset` bytes into one of this context's allocations.
@@ -154,17 +153,12 @@ impl Context {
         offset: u64,
         desc: &ImageDesc,
     ) -> Result<Image, Error> {
-        owned(
-            &allocation.shared,
-            allocation.context,
-            &self.shared,
-            self.key,
-        )?;
+        owned(&allocation.host, allocation.context, &self.host, self.key)?;
         let key = self
-            .shared
+            .host
             .create_image(self.key, (allocation.key, offset), desc)?;
         Ok(Image {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             key,
             desc: *desc,
@@ -186,14 +180,10 @@ impl Context {
         image: &Image,
         desc: &ImageViewDesc,
     ) -> Result<ImageView, Error> {
-        owned(&image.shared, image.context, &self.shared, self.key)?;
-        let key = self
-            .shared
-            .model
-            .lock()
-            .create_view(self.key, image.key, desc)?;
+        owned(&image.host, image.context, &self.host, self.key)?;
+        let key = self.host.create_view(self.key, image.key, desc)?;
         Ok(ImageView {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             key,
             desc: *desc,
@@ -216,14 +206,10 @@ impl Context {
         buffer: &Buffer,
         desc: &BufferViewDesc,
     ) -> Result<BufferView, Error> {
-        owned(&buffer.shared, buffer.context, &self.shared, self.key)?;
-        let key = self
-            .shared
-            .model
-            .lock()
-            .create_buffer_view(self.key, buffer.key, desc)?;
+        owned(&buffer.host, buffer.context, &self.host, self.key)?;
+        let key = self.host.create_buffer_view(self.key, buffer.key, desc)?;
         Ok(BufferView {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             key,
             desc: *desc,
@@ -239,9 +225,9 @@ impl Context {
     ///
     /// And those of every request that makes memory ([`Context#memory`]).
     pub fn create_sampler(&self, desc: &SamplerDesc) -> Result<Sampler, Error> {
-        let key = self.shared.model.lock().create_sampler(self.key, desc)?;
+        let key = self.host.create_sampler(self.key, desc)?;
         Ok(Sampler {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             key,
             desc: *desc,
@@ -251,7 +237,7 @@ impl Context {
 
 /// An image: typed, sized texels in memory laid out as the device lays them.
 pub struct Image {
-    pub(crate) shared: Arc<SoftwareShared>,
+    pub(crate) host: Arc<dyn Host>,
     pub(crate) context: ContextKey,
     pub(crate) key: ImageKey,
     desc: ImageDesc,
@@ -267,8 +253,7 @@ impl Image {
 
 impl Drop for Image {
     fn drop(&mut self) {
-        self.shared
-            .release(self.context, |context| &mut context.images, self.key);
+        self.host.release(self.context, Object::Image(self.key));
     }
 }
 
@@ -283,7 +268,7 @@ impl fmt::Debug for Image {
 /// A view of an image: some of its levels, layers and planes, seen in one
 /// dimension and format.
 pub struct ImageView {
-    pub(crate) shared: Arc<SoftwareShared>,
+    pub(crate) host: Arc<dyn Host>,
     pub(crate) context: ContextKey,
     pub(crate) key: ViewKey,
     desc: ImageViewDesc,
@@ -299,8 +284,7 @@ impl ImageView {
 
 impl Drop for ImageView {
     fn drop(&mut self) {
-        self.shared
-            .release(self.context, |context| &mut context.views, self.key);
+        self.host.release(self.context, Object::View(self.key));
     }
 }
 
@@ -315,7 +299,7 @@ impl fmt::Debug for ImageView {
 /// A texel buffer: a buffer's range read, or read and written, as texels of a
 /// format.
 pub struct BufferView {
-    pub(crate) shared: Arc<SoftwareShared>,
+    pub(crate) host: Arc<dyn Host>,
     pub(crate) context: ContextKey,
     pub(crate) key: BufferViewKey,
     desc: BufferViewDesc,
@@ -331,8 +315,8 @@ impl BufferView {
 
 impl Drop for BufferView {
     fn drop(&mut self) {
-        self.shared
-            .release(self.context, |context| &mut context.buffer_views, self.key);
+        self.host
+            .release(self.context, Object::BufferView(self.key));
     }
 }
 
@@ -346,7 +330,7 @@ impl fmt::Debug for BufferView {
 
 /// How an image is sampled.
 pub struct Sampler {
-    pub(crate) shared: Arc<SoftwareShared>,
+    pub(crate) host: Arc<dyn Host>,
     pub(crate) context: ContextKey,
     pub(crate) key: SamplerKey,
     desc: SamplerDesc,
@@ -362,8 +346,7 @@ impl Sampler {
 
 impl Drop for Sampler {
     fn drop(&mut self) {
-        self.shared
-            .release(self.context, |context| &mut context.samplers, self.key);
+        self.host.release(self.context, Object::Sampler(self.key));
     }
 }
 

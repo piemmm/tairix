@@ -3,8 +3,9 @@
 TAIRiX Bridge's VDU drivers and sprites (`plans/RISCOS-EMULATOR.md` §8, RO21
 and RO22): RISC OS 5's screen modes and screen memory, the VDU stream,
 `OS_Plot`, colours and palettes, Teletext, the pointer, and the ScreenModes
-module; `OS_SpriteOp`, SpriteExtend with its JPEG SWIs, and SpriteUtils; over
-the guest memory the kernel gives them.
+module; ColourTrans, InverseTable and BlendTable; `OS_SpriteOp`, SpriteExtend
+with its JPEG SWIs, and SpriteUtils; over the guest memory the kernel gives
+them.
 
 - **Modes**: the numbered modes from `lib/vdu`, selectors and mode strings,
   what the current monitor type shows and what it trades a mode it lacks for,

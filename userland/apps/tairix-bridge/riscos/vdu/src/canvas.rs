@@ -9,6 +9,7 @@ use tairix_riscos_arm::mmu::PAGE_SIZE;
 use tairix_riscos_kernel::memory::layout::HIGH_ZERO_PAGE;
 use tairix_riscos_kernel::os::{len32, Fail, Os};
 use tairix_riscos_kernel::output::workspace;
+use tairix_util::bitfield::{field_at, set_field_at};
 
 /// A colour block: the OR and exclusive-OR words for each of a pattern's
 /// eight rows, as zero page holds them, with the row offset the ECF origin
@@ -63,6 +64,12 @@ impl Block {
     }
 }
 
+/// The bit of its memory word the byte at `address` starts at: where a
+/// colour block's words fall on it.
+pub(crate) const fn word_bit(address: u32) -> u32 {
+    8 * (address & 3)
+}
+
 /// A screen in memory as the drivers write it: its lines one after
 /// another from its top line's first byte, as the screen's area, mapped
 /// twice, holds them wherever a hardware scroll has moved its start.
@@ -104,7 +111,7 @@ impl Canvas {
         eor: u32,
     ) -> Result<(), Fail> {
         let start = self.address(row, 0);
-        let lead = 8 * (start & 3);
+        let lead = word_bit(start);
         let first = lead + (x0 << self.log2_bpc);
         let end = lead + ((x1 + 1) << self.log2_bpc);
         let mut word = first / 32;
@@ -133,7 +140,7 @@ impl Canvas {
         let mut bytes = [0; 4];
         let length = unit.div_ceil(8) as usize;
         os.read_bytes(self.address(row, bit / 8), &mut bytes[..length])?;
-        Ok(bits_at(&bytes, bit % 8, unit))
+        Ok(field_at(&bytes, u64::from(bit % 8), unit))
     }
 
     /// Writes `bytes` at byte `byte` of line `row`.
@@ -215,7 +222,10 @@ impl Canvas {
         while x <= x1 {
             let (first, bytes, upto) = self.chunk(x, x1 + 1, &mut chunk);
             os.read_bytes(self.address(row, first), bytes)?;
-            out.extend((x..upto).map(|px| bits_at(bytes, (px << self.log2_bpc) - 8 * first, unit)));
+            out.extend(
+                (x..upto)
+                    .map(|px| field_at(bytes, u64::from((px << self.log2_bpc) - 8 * first), unit)),
+            );
             x = upto;
         }
         Ok(())
@@ -241,7 +251,12 @@ impl Canvas {
             }
             let held = &pixels[(x - x0) as usize..(upto - x0) as usize];
             for (px, &pixel) in (x..upto).zip(held) {
-                set_bits_at(bytes, (px << self.log2_bpc) - 8 * first, unit, pixel);
+                set_field_at(
+                    bytes,
+                    u64::from((px << self.log2_bpc) - 8 * first),
+                    unit,
+                    pixel,
+                );
             }
             os.write_bytes(self.address(row, first), bytes)?;
             x = upto;
@@ -279,30 +294,6 @@ pub(crate) const fn mask_between(low: u32, high: u32) -> u32 {
     };
     let below_low = if low >= 32 { u32::MAX } else { (1 << low) - 1 };
     below_high & !below_low
-}
-
-/// The `unit` bits at bit `bit` of `bytes`, lowest first.
-fn bits_at(bytes: &[u8], bit: u32, unit: u32) -> u32 {
-    if unit >= 8 {
-        let at = (bit / 8) as usize;
-        let mut word = [0; 4];
-        let length = (unit / 8) as usize;
-        word[..length].copy_from_slice(&bytes[at..at + length]);
-        return u32::from_le_bytes(word);
-    }
-    (u32::from(bytes[(bit / 8) as usize]) >> (bit % 8)) & ((1 << unit) - 1)
-}
-
-fn set_bits_at(bytes: &mut [u8], bit: u32, unit: u32, value: u32) {
-    if unit >= 8 {
-        let at = (bit / 8) as usize;
-        let length = (unit / 8) as usize;
-        bytes[at..at + length].copy_from_slice(&value.to_le_bytes()[..length]);
-        return;
-    }
-    let mask = ((1u32 << unit) - 1) << (bit % 8);
-    let byte = &mut bytes[(bit / 8) as usize];
-    *byte = ((u32::from(*byte) & !mask) | ((value << (bit % 8)) & mask)).to_le_bytes()[0];
 }
 
 #[cfg(test)]

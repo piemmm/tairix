@@ -93,6 +93,14 @@
 #define TAIRIX_HW_RES_IOMMU_GROUP ((uint16_t)15u)
 #define TAIRIX_HW_RES_MSI_DOORBELL ((uint16_t)16u)
 #define TAIRIX_HW_RES_VOLUME ((uint16_t)17u)
+#define TAIRIX_HW_RES_MEMORY_REGION ((uint16_t)18u)
+
+/* mmio_map caching (uint32_t): AS_GRANTED for every grant but a memory
+ * region, whose part takes the caching its device states. */
+#define TAIRIX_REGION_CACHING_AS_GRANTED ((uint32_t)0u)
+#define TAIRIX_REGION_CACHING_WRITE_BACK ((uint32_t)1u)
+#define TAIRIX_REGION_CACHING_WRITE_COMBINE ((uint32_t)2u)
+#define TAIRIX_REGION_CACHING_UNCACHED ((uint32_t)3u)
 
 /* Property keys (uint32_t). */
 #define TAIRIX_HW_PROPERTY_USB_INTERFACE ((uint32_t)1u)

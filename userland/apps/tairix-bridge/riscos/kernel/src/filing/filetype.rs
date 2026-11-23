@@ -24,7 +24,9 @@ pub const TEXT: u32 = 0xFFF;
 /// names spell them.
 #[must_use]
 pub fn digits(kind: u32) -> [u8; 3] {
-    core::array::from_fn(|i| tairix_util::hex::upper_digit((kind >> (8 - 4 * i)).to_le_bytes()[0]))
+    let mut digits = [0; 3];
+    tairix_util::hex::fill_upper(&mut digits, kind.into());
+    digits
 }
 
 #[cfg(test)]

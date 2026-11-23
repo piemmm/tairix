@@ -75,6 +75,9 @@ const NAMES: &[&str] = &[
     "GenerateTable",
 ];
 
+/// The flag bit a call naming a sprite sets where R1 points at the sprite
+/// rather than naming it.
+const SPRITE_POINTER: u32 = 1;
 /// Its messages, and their file, kept at its workspace's start.
 const MESSAGES: &[u8] = include_bytes!("../resources/Colours/Messages");
 const MESSAGES_FILE: OwnFile = OwnFile::named(b"Resources:$.Resources.Colours.Messages\0");
@@ -134,6 +137,8 @@ const LOADINGS_COMMAND: &str = "ColourTransLoadings";
 const MAP_SIZE_COMMAND: &str = "ColourTransMapSize";
 const MAP_COMMAND: &str = "ColourTransMap";
 const MAP_SYNTAX: &str = "Syntax: *ColourTransMap <pair> ...";
+/// The most pairs one `*ColourTransMap` takes.
+const MAP_MOST: u8 = 255;
 
 /// A palette or mode argument naming the current one.
 pub(crate) const CURRENT: u32 = u32::MAX;
@@ -177,7 +182,7 @@ pub(crate) static COLOUR_TRANS: Builtin = Builtin {
             max: 3,
             translate: 0b111,
             help: Help::Text(
-                "Sets how many pairs the next *ColourTransMap gives for blue, green and red.",
+                "Sets how many pairs the *ColourTransMap commands after it give for blue, green and red.",
             ),
             syntax: Some("Syntax: *ColourTransMapSize <blue> <green> <red>"),
             run: Some(calibration::map_size_command),
@@ -186,10 +191,10 @@ pub(crate) static COLOUR_TRANS: Builtin = Builtin {
             name: MAP_COMMAND,
             kind: CommandKind::Command,
             min: 1,
-            max: 255,
+            max: MAP_MOST,
             translate: 0,
             help: Help::Text(
-                "Sets the screen's calibration from its pairs, the last pair first.",
+                "Gives pairs, the last first, toward the screen's calibration, set once all *ColourTransMapSize asked for are given.",
             ),
             syntax: Some(MAP_SYNTAX),
             run: Some(calibration::map_command),
@@ -223,8 +228,10 @@ pub(crate) struct State {
     tables: alloc::vec::Vec<tables::ThirtyTwoK>,
     /// The screen's calibration and its RMA copy; none for the default.
     calibration: Option<calibration::Installed>,
-    /// The counts the next `*ColourTransMap` gives, the table's order.
+    /// The counts `*ColourTransMap` gives, the table's order, and the pairs
+    /// it has given toward them, a line at a time.
     map_size: [u32; 3],
+    map_given: alloc::vec::Vec<u32>,
 }
 
 fn own(world: &mut World) -> Option<&mut Own> {
@@ -247,6 +254,7 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         tables: alloc::vec::Vec::new(),
         calibration: None,
         map_size: [0; 3],
+        map_given: alloc::vec::Vec::new(),
     })
 }
 
@@ -258,7 +266,10 @@ fn finalise(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
         return Ok(());
     };
     let tables = state.tables.iter().map(|table| table.at);
-    os.rma_free_all(tables.chain(state.calibration.map(|installed| installed.block)))
+    for block in tables.chain(state.calibration.map(|installed| installed.block)) {
+        os.free_rma_quietly(block);
+    }
+    Ok(())
 }
 
 /// A ColourTrans SWI: `ColourV` called with R8 its offset and C set, the
@@ -401,20 +412,18 @@ fn matched(
     look: Look,
     answer: Answer,
 ) -> Result<(), Fail> {
-    let Some(loadings) = loadings(os) else {
-        return Ok(());
-    };
     let wanted = Rgb::from_riscos_word(regs.r[0]);
-    let answered = |against: &Against| match answer {
+    let answered = |against: &Against, loadings| match answer {
         Answer::Gcol => against.gcol(wanted, loadings, look),
         Answer::Number => against.colour_number(wanted, loadings, look),
     };
     let answer = match of {
         Of::Named if (regs.r[1], regs.r[2]) != (CURRENT, CURRENT) => {
             let named = palettes::named(os, regs.r[1], regs.r[2])?;
-            Some(answered(&named.calibrated_by(screen_calibration(os))))
+            let named = named.calibrated_by(screen_calibration(os));
+            loadings(os).map(|loadings| answered(&named, loadings))
         }
-        _ => current(os)?.map(answered),
+        _ => current(os)?.map(|(against, loadings)| answered(against, loadings)),
     };
     if let Some(answer) = answer {
         regs.r[0] = answer;
@@ -427,9 +436,11 @@ fn loadings(os: &mut Os<'_>) -> Option<Loadings> {
     os.extension::<State>().map(|state| state.loadings)
 }
 
-/// The current mode's colours, read where they were made stale; none while
-/// ColourTrans holds nothing.
-fn current<'o>(os: &'o mut Os<'_>) -> Result<Option<&'o Against>, Fail> {
+/// The current mode's colours, read where they were made stale, and the
+/// loadings they are matched by as they stand once read: reading them may run
+/// the guest's code, which may set the loadings. None while ColourTrans holds
+/// nothing.
+fn current<'o>(os: &'o mut Os<'_>) -> Result<Option<(&'o Against, Loadings)>, Fail> {
     if os
         .extension::<State>()
         .is_some_and(|state| state.current.is_none())
@@ -441,7 +452,7 @@ fn current<'o>(os: &'o mut Os<'_>) -> Result<Option<&'o Against>, Fail> {
     }
     Ok(os
         .extension::<State>()
-        .and_then(|state| state.current.as_ref()))
+        .and_then(|state| Some((state.current.as_ref()?, state.loadings))))
 }
 
 /// The screen's calibration; none for the default.

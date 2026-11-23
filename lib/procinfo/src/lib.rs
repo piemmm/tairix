@@ -133,6 +133,7 @@ pub mod composition;
 pub mod cputime;
 pub mod display;
 pub mod dma;
+pub mod gpu;
 pub mod human;
 pub mod hwtree;
 pub mod kstats;
@@ -167,6 +168,7 @@ pub use client::{IpcTransport, NamedSource, OpenError};
 pub use composition::{memory_composition, MemoryPart};
 pub use cputime::{for_each_cpu_time, CpuTotals, CPU_TIME_PAGE};
 pub use dma::{for_each_dma_group, for_each_dma_node, for_each_dma_unit, DMA_PAGE};
+pub use gpu::{for_each_gpu_device, render_gpu_device, GPU_DEVICE_HEADER, GPU_PAGE};
 pub use human::{
     cpu_feature_flags, format_count, format_load, format_mib, format_size, format_tenths,
     format_uptime, processor_summary, SIZE_WIDTH, UNMEASURED,

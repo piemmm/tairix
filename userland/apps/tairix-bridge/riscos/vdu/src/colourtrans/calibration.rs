@@ -13,7 +13,7 @@ use tairix_riscos_kernel::service::CALIBRATION_CHANGED;
 
 use super::{
     make_stale, own, parameters, screen_calibration, write_to, State, BAD_CALIBRATION, MAP_COMMAND,
-    MAP_SIZE_COMMAND, MAP_SYNTAX,
+    MAP_MOST, MAP_SIZE_COMMAND, MAP_SYNTAX,
 };
 
 /// The pairs a list may hold: one a device level.
@@ -165,15 +165,16 @@ fn set_table(os: &mut Os<'_>, table: Calibration) -> Result<(), Fail> {
 }
 
 /// `table` held as the screen's calibration, the default where none; the
-/// default where its RMA copy finds no room.
+/// default where its RMA copy finds no room. The old copy is given back
+/// quietly: the guest may have freed it already.
 fn install(os: &mut Os<'_>, table: Option<Calibration>) -> Result<(), Fail> {
+    make_stale(os);
     if let Some(old) = os
         .extension::<State>()
         .and_then(|state| state.calibration.take())
     {
-        os.rma_free(old.block)?;
+        os.free_rma_quietly(old.block);
     }
-    make_stale(os);
     let Some(table) = table else {
         return Ok(());
     };
@@ -246,6 +247,7 @@ pub(super) fn convert_palette(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fa
             table.convert(Rgb::from_riscos_word(device)).riscos_word()
         });
         os.write_word(regs.r[2].wrapping_add(offset), standard)?;
+        os.yield_point()?;
     }
     Ok(())
 }
@@ -280,24 +282,47 @@ pub(super) fn write_commands(
     Ok(text.last().copied())
 }
 
+/// The most text one pair takes on a `*ColourTransMap` line: a space, an
+/// `&` and eight digits.
+const PAIR_TEXT: usize = 10;
+/// The pairs a `*ColourTransMap` line written holds: as many as a command
+/// line, its terminator after, holds and the command takes.
+const PAIRS_PER_LINE: usize = {
+    let fit = (tairix_obey::command::MOST_LINE - 1 - MAP_COMMAND.len()) / PAIR_TEXT;
+    if fit < MAP_MOST as usize {
+        fit
+    } else {
+        MAP_MOST as usize
+    }
+};
+
 /// The commands that set the table `words` hold: its sizes blue first and
-/// its pairs last first, the order the commands read them in; none where
-/// there is no room for them.
+/// its pairs last first, the order the commands read them in, spread over
+/// as many `*ColourTransMap` lines as they need; none where there is no
+/// room for them.
 fn commands(words: &[u32]) -> Option<Vec<u8>> {
     let (counts, pairs) = words.split_at(COUNTS as usize);
+    let lines = pairs.len().div_ceil(PAIRS_PER_LINE);
     let mut text = Vec::new();
-    text.try_reserve(MAP_SIZE_COMMAND.len() + MAP_COMMAND.len() + 11 * words.len() + 2)
-        .ok()?;
+    text.try_reserve(
+        MAP_SIZE_COMMAND.len()
+            + (MAP_COMMAND.len() + 1) * lines
+            + (PAIR_TEXT + 1) * words.len()
+            + 1,
+    )
+    .ok()?;
     text.extend_from_slice(MAP_SIZE_COMMAND.as_bytes());
     for &count in counts.iter().rev() {
         number(&mut text, count);
     }
     text.push(b'\n');
-    text.extend_from_slice(MAP_COMMAND.as_bytes());
-    for &pair in pairs.iter().rev() {
-        number(&mut text, pair);
+    for line in pairs.rchunks(PAIRS_PER_LINE) {
+        text.extend_from_slice(MAP_COMMAND.as_bytes());
+        for &pair in line.iter().rev() {
+            number(&mut text, pair);
+        }
+        text.push(b'\n');
     }
-    text.push(b'\n');
     Some(text)
 }
 
@@ -308,38 +333,64 @@ fn number(text: &mut Vec<u8>, value: u32) {
 }
 
 /// `*ColourTransMapSize <blue> <green> <red>`: the pairs each list of the
-/// next `*ColourTransMap` gives.
+/// calibration the `*ColourTransMap` commands after it give. A size no list
+/// may hold is refused, and no pairs are taken until a good one is given.
 pub(super) fn map_size_command(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let mut sizes = [0; 3];
     parameters(os, regs.r[0], &mut sizes)?;
     sizes.reverse();
+    let good = sizes.iter().all(|n| (2..=MOST_PAIRS).contains(n));
     if let Some(state) = os.extension::<State>() {
-        state.map_size = sizes;
+        state.map_size = if good { sizes } else { [0; 3] };
+        state.map_given.clear();
     }
-    Ok(())
+    if good {
+        Ok(())
+    } else {
+        Err(os.own_error(own, BAD_CALIBRATION, &[]))
+    }
 }
 
-/// `*ColourTransMap <pair> ...`: the calibration from its pairs, the last
-/// pair first, as many as `*ColourTransMapSize` set, made the screen's as
-/// `ColourTrans_SetCalibration` makes a table its.
+/// `*ColourTransMap <pair> ...`: R1 pairs toward the calibration
+/// `*ColourTransMapSize` sized, given on one line or over several; once they
+/// are all given, the calibration from them, the last pair first, made the
+/// screen's as `ColourTrans_SetCalibration` makes a table its. More pairs
+/// than were sized are a syntax error, found before any is read, and the
+/// gathering starts again.
 pub(super) fn map_command(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    let counts = os
-        .extension::<State>()
-        .map_or([0; 3], |state| state.map_size);
-    let pairs: u64 = counts.iter().map(|&n| u64::from(n)).sum();
-    if u64::from(regs.r[1]) != pairs {
+    let Some(state) = os.extension::<State>() else {
+        return Err(os.syntax_failure(MAP_SYNTAX));
+    };
+    let counts = state.map_size;
+    let mut given = core::mem::take(&mut state.map_given);
+    let sized: u64 = counts.iter().map(|&n| u64::from(n)).sum();
+    let held = given.len();
+    if u64::from(regs.r[1]) > sized.saturating_sub(held as u64) {
         return Err(os.syntax_failure(MAP_SYNTAX));
     }
-    let length = COUNTS as usize + regs.r[1] as usize;
-    let mut words = Vec::new();
-    if words.try_reserve_exact(length).is_err() {
+    let count = regs.r[1] as usize;
+    if given.try_reserve_exact(count + COUNTS as usize).is_err() {
+        if let Some(state) = os.extension::<State>() {
+            state.map_given = given;
+        }
         return Err(os.no_memory());
     }
-    words.extend_from_slice(&counts);
-    words.resize(length, 0);
-    parameters(os, regs.r[0], &mut words[COUNTS as usize..])?;
-    words[COUNTS as usize..].reverse();
-    match Calibration::of_words(words) {
+    given.resize(held + count, 0);
+    let read = parameters(os, regs.r[0], &mut given[held..]);
+    if read.is_err() {
+        given.truncate(held);
+    }
+    let complete = read.is_ok() && given.len() as u64 == sized;
+    if !complete {
+        if let Some(state) = os.extension::<State>() {
+            state.map_given = given;
+        }
+        return read;
+    }
+    given.reverse();
+    given.extend_from_slice(&counts);
+    given.rotate_right(counts.len());
+    match Calibration::of_words(given) {
         Ok(table) => set_table(os, table),
         Err(Invalid) => refused(os),
     }

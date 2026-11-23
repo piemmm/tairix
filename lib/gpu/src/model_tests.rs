@@ -1,11 +1,12 @@
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::Duration64;
 use tairix_inline::ArrayVec;
 
 use super::{BufferKey, ContextKey, JobId, Point, Request, TimelineKey};
-use crate::backend::tests::{NoPool, Test};
-use crate::backend::Backend;
+use crate::backend::tests::Test;
+use crate::backend::{Backend, NoPool};
 use crate::command::Command;
 use crate::info::{
     BufferUsage, DeviceInfo, Features, FormatTable, Limits, MemoryHeap, MemoryProperties,
@@ -77,7 +78,7 @@ fn allocate(
 ) -> Result<super::AllocationKey, Error> {
     let (charge, overhead) = model.charge_allocation(context, size, memory_type)?;
     let made = Test
-        .allocate(size, [charge, overhead])
+        .allocate(&Arc::new(()), (memory_type, size), [charge, overhead])
         .and_then(crate::shared);
     let memory = match made {
         Ok(memory) => memory,
@@ -148,7 +149,7 @@ fn take(model: &mut Model, now: u64) -> Dispatch {
 fn a_reset_spares_every_context_whose_work_had_not_begun() {
     let mut model = model(1, 3);
     let contexts: Vec<ContextKey> = (0..3)
-        .map(|_| model.create_context(None).expect("a context"))
+        .map(|_| model.create_context(None, ()).expect("a context"))
         .collect();
     let (guilty, bystander, collateral) = (contexts[0], contexts[1], contexts[2]);
     let buffers: Vec<BufferKey> = contexts.iter().map(|&c| buffer(&mut model, c)).collect();
@@ -174,7 +175,7 @@ fn a_reset_spares_every_context_whose_work_had_not_begun() {
 fn a_spared_job_goes_back_ahead_of_what_was_dispatched_after_it() {
     let mut model = model(1, 3);
     let contexts: Vec<ContextKey> = (0..3)
-        .map(|_| model.create_context(None).expect("a context"))
+        .map(|_| model.create_context(None, ()).expect("a context"))
         .collect();
     let (first, second, guilty) = (contexts[0], contexts[1], contexts[2]);
     let buffers: Vec<BufferKey> = contexts.iter().map(|&c| buffer(&mut model, c)).collect();
@@ -196,7 +197,7 @@ fn a_spared_job_goes_back_ahead_of_what_was_dispatched_after_it() {
 fn spared_jobs_run_again_in_the_order_they_first_ran() {
     let mut model = model(1, 4);
     let contexts: Vec<ContextKey> = (0..3)
-        .map(|_| model.create_context(None).expect("a context"))
+        .map(|_| model.create_context(None, ()).expect("a context"))
         .collect();
     let (first, second, guilty) = (contexts[0], contexts[1], contexts[2]);
     let buffers: Vec<BufferKey> = contexts.iter().map(|&c| buffer(&mut model, c)).collect();
@@ -224,7 +225,7 @@ fn an_engine_s_list_grows_by_doubling_so_a_burst_of_contexts_moves_it_few_times(
     let mut model = model(2, 1);
     let mut rooms = Vec::new();
     for _ in 0..256 {
-        let _ = model.create_context(None).expect("a context");
+        let _ = model.create_context(None, ()).expect("a context");
         rooms.push(
             model
                 .engines
@@ -246,7 +247,7 @@ fn an_engine_s_list_grows_by_doubling_so_a_burst_of_contexts_moves_it_few_times(
 #[test]
 fn completions_of_another_context_s_lost_work_signal_nothing() {
     let mut model = model(1, 2);
-    let doomed = model.create_context(None).expect("a context");
+    let doomed = model.create_context(None, ()).expect("a context");
     let mine = buffer(&mut model, doomed);
     let fence = job(&mut model, doomed, 0, mine, &[], &[], 10);
     let first = take(&mut model, 0);
@@ -269,7 +270,7 @@ fn completions_of_another_context_s_lost_work_signal_nothing() {
 #[test]
 fn a_value_is_reached_only_once_every_signal_up_to_it_has_landed() {
     let mut model = model(2, 2);
-    let context = model.create_context(None).expect("a context");
+    let context = model.create_context(None, ()).expect("a context");
     let target = buffer(&mut model, context);
     let timeline = model.create_timeline(context, 0).expect("a timeline");
     let fences = [
@@ -295,10 +296,13 @@ fn a_value_is_reached_only_once_every_signal_up_to_it_has_landed() {
 fn memory_made_for_a_context_released_meanwhile_is_refused_and_given_back() {
     use crate::memory::Budget;
     let mut model = model(1, 1);
-    let context = model.create_context(None).expect("a context");
+    let context = model.create_context(None, ()).expect("a context");
     let (charge, overhead) = model.charge_allocation(context, 64, HOST).expect("charged");
-    let memory =
-        crate::shared(Test.allocate(64, [charge, overhead]).expect("made")).expect("shared");
+    let memory = crate::shared(
+        Test.allocate(&Arc::new(()), (HOST, 64), [charge, overhead])
+            .expect("made"),
+    )
+    .expect("shared");
     // Released while its memory is made, without the device's lock.
     drop(model.destroy_context(context));
     let held = model.work_heap_taken();
@@ -323,7 +327,7 @@ fn memory_made_for_a_context_released_meanwhile_is_refused_and_given_back() {
 #[test]
 fn a_timeline_no_one_waits_on_wakes_no_one_as_it_moves() {
     let mut model = model(1, 1);
-    let context = model.create_context(None).expect("a context");
+    let context = model.create_context(None, ()).expect("a context");
     let target = buffer(&mut model, context);
     let _ = job(&mut model, context, 0, target, &[], &[], 10);
     let unwatched = take(&mut model, 0);
@@ -342,7 +346,7 @@ fn a_timeline_no_one_waits_on_wakes_no_one_as_it_moves() {
 #[test]
 fn a_context_whose_own_work_overran_is_lost_for_that() {
     let mut model = model(2, 2);
-    let context = model.create_context(None).expect("a context");
+    let context = model.create_context(None, ()).expect("a context");
     let target = buffer(&mut model, context);
     let _ = job(&mut model, context, 0, target, &[], &[], 100);
     let _ = job(&mut model, context, 1, target, &[], &[], 10);
@@ -356,8 +360,8 @@ fn a_context_whose_own_work_overran_is_lost_for_that() {
 #[test]
 fn work_that_had_not_begun_overran_nothing() {
     let mut model = model(1, 2);
-    let guilty = model.create_context(None).expect("a context");
-    let waiting = model.create_context(None).expect("a context");
+    let guilty = model.create_context(None, ()).expect("a context");
+    let waiting = model.create_context(None, ()).expect("a context");
     let buffers = [buffer(&mut model, guilty), buffer(&mut model, waiting)];
     let _ = job(&mut model, guilty, 0, buffers[0], &[], &[], 10);
     let _ = job(&mut model, waiting, 0, buffers[1], &[], &[], 5);
@@ -373,7 +377,7 @@ fn work_that_had_not_begun_overran_nothing() {
 fn a_second_reset_puts_what_it_spares_ahead_of_what_the_first_left() {
     let mut model = model(1, 4);
     let contexts: Vec<ContextKey> = (0..4)
-        .map(|_| model.create_context(None).expect("a context"))
+        .map(|_| model.create_context(None, ()).expect("a context"))
         .collect();
     let buffers: Vec<BufferKey> = contexts.iter().map(|&c| buffer(&mut model, c)).collect();
     for (at, span) in [10, 100, 1000, 1000].into_iter().enumerate() {
@@ -398,8 +402,8 @@ fn a_second_reset_puts_what_it_spares_ahead_of_what_the_first_left() {
 #[test]
 fn an_engine_serves_the_queues_ready_for_it_in_turn() {
     let mut model = model(1, 1);
-    let one = model.create_context(None).expect("a context");
-    let two = model.create_context(None).expect("a context");
+    let one = model.create_context(None, ()).expect("a context");
+    let two = model.create_context(None, ()).expect("a context");
     let (a, b) = (buffer(&mut model, one), buffer(&mut model, two));
     let a_jobs = [
         job(&mut model, one, 0, a, &[], &[], 10),
@@ -428,7 +432,7 @@ fn an_engine_serves_the_queues_ready_for_it_in_turn() {
 #[test]
 fn a_queue_s_next_job_waits_its_turn_however_much_room_its_engine_has() {
     let mut model = model(1, 4);
-    let context = model.create_context(None).expect("a context");
+    let context = model.create_context(None, ()).expect("a context");
     let target = buffer(&mut model, context);
     let gate = model.create_timeline(context, 0).expect("a timeline");
     let _ = job(&mut model, context, 0, target, &[(gate, 1)], &[], 10);
@@ -447,7 +451,7 @@ fn a_queue_s_next_job_waits_its_turn_however_much_room_its_engine_has() {
 #[test]
 fn memory_the_cpu_cannot_reach_is_refused_to_it() {
     let mut model = model(1, 1);
-    let context = model.create_context(None).expect("a context");
+    let context = model.create_context(None, ()).expect("a context");
     let device_only = allocate(&mut model, context, 64, DEVICE_ONLY).expect("memory");
     let host = allocate(&mut model, context, 64, HOST).expect("memory");
     assert!(matches!(
@@ -460,7 +464,7 @@ fn memory_the_cpu_cannot_reach_is_refused_to_it() {
 #[test]
 fn a_released_timeline_stays_while_queued_work_holds_it() {
     let mut model = model(1, 1);
-    let context = model.create_context(None).expect("a context");
+    let context = model.create_context(None, ()).expect("a context");
     let target = buffer(&mut model, context);
     let timeline = model.create_timeline(context, 0).expect("a timeline");
     let _ = job(&mut model, context, 0, target, &[], &[(timeline, 3)], 10);
@@ -536,8 +540,8 @@ fn a_description_no_context_could_be_served_by_is_refused() {
 #[test]
 fn a_released_context_s_running_work_is_let_finish_and_discarded() {
     let mut model = model(1, 1);
-    let gone = model.create_context(None).expect("a context");
-    let staying = model.create_context(None).expect("a context");
+    let gone = model.create_context(None, ()).expect("a context");
+    let staying = model.create_context(None, ()).expect("a context");
     let (a, b) = (buffer(&mut model, gone), buffer(&mut model, staying));
     let _ = job(&mut model, gone, 0, a, &[], &[], 10);
     let _ = job(&mut model, gone, 0, a, &[], &[], 10);
@@ -568,7 +572,7 @@ fn work_a_queue_s_family_does_not_run_is_refused() {
         ..model.info().clone()
     };
     model = Model::new(info, &[1], NoPool).expect("a well-formed device");
-    let context = model.create_context(None).expect("a context");
+    let context = model.create_context(None, ()).expect("a context");
     let target = buffer(&mut model, context);
     let fill = [Command::Fill {
         dst: target,
@@ -595,7 +599,7 @@ fn work_a_queue_s_family_does_not_run_is_refused() {
 #[test]
 fn a_timeline_s_pending_signals_are_charged_for_their_room_and_give_it_back_as_they_land() {
     let mut model = model(1, 1);
-    let context = model.create_context(None).expect("a context");
+    let context = model.create_context(None, ()).expect("a context");
     let target = buffer(&mut model, context);
     let gate = model.create_timeline(context, 0).expect("a gate");
     let timeline = model.create_timeline(context, 0).expect("a timeline");
@@ -641,7 +645,7 @@ fn a_timeline_s_pending_signals_are_charged_for_their_room_and_give_it_back_as_t
 fn work_a_lost_context_drops_lets_go_of_the_timelines_it_held() {
     for overrun in [false, true] {
         let mut model = model(1, 1);
-        let context = model.create_context(None).expect("a context");
+        let context = model.create_context(None, ()).expect("a context");
         let target = buffer(&mut model, context);
         let timeline = model.create_timeline(context, 0).expect("a timeline");
         let _ = job(&mut model, context, 0, target, &[], &[(timeline, 1)], 10);
@@ -671,7 +675,7 @@ fn work_a_lost_context_drops_lets_go_of_the_timelines_it_held() {
 fn an_engine_has_room_to_list_every_queue_of_every_context_it_serves() {
     let mut model = model(3, 1);
     let contexts: Vec<ContextKey> = (0..7)
-        .map(|_| model.create_context(None).expect("a context"))
+        .map(|_| model.create_context(None, ()).expect("a context"))
         .collect();
     let engine = model.engines.first().expect("an engine");
     assert_eq!(engine.queues, 21);
@@ -688,7 +692,7 @@ fn the_room_a_burst_of_contexts_made_stays_charged_to_the_heap_and_small() {
     let base = model.work_heap_taken();
     let burst = |model: &mut Model| {
         let keys: Vec<ContextKey> = (0..256)
-            .map(|_| model.create_context(None).expect("a context"))
+            .map(|_| model.create_context(None, ()).expect("a context"))
             .collect();
         for key in keys {
             model.destroy_context(key);
@@ -717,15 +721,15 @@ fn the_room_a_burst_of_contexts_made_stays_charged_to_the_heap_and_small() {
 #[test]
 fn a_pipeline_refused_at_its_limit_still_looks_at_the_working_memory() {
     let mut model = software(1, 1);
-    let rich = model.create_context(Some(u64::MAX)).expect("a context");
+    let rich = model.create_context(Some(u64::MAX), ()).expect("a context");
     let own = {
-        let probe = model.create_context(Some(u64::MAX)).expect("a probe");
+        let probe = model.create_context(Some(u64::MAX), ()).expect("a probe");
         let used = model.memory_taken(probe).expect("live").total();
         drop(model.destroy_context(probe));
         used
     };
     // Room for its own state and nothing past it.
-    let poor = model.create_context(Some(own)).expect("a context");
+    let poor = model.create_context(Some(own), ()).expect("a context");
     let need = crate::software::dispatch::Need {
         words: 1 << 12,
         masks: 1,
@@ -749,7 +753,7 @@ fn a_pipeline_refused_at_its_limit_still_looks_at_the_working_memory() {
 #[test]
 fn a_context_is_made_from_working_memory_no_pipeline_holds_before_the_heap_refuses() {
     let mut model = software(1, 1);
-    let context = model.create_context(Some(u64::MAX)).expect("a context");
+    let context = model.create_context(Some(u64::MAX), ()).expect("a context");
     let need = crate::software::dispatch::Need {
         words: 1 << 17,
         masks: 1,
@@ -775,7 +779,7 @@ fn a_context_is_made_from_working_memory_no_pipeline_holds_before_the_heap_refus
     // The hold goes with nothing looking at the pool after it.
     drop(hold);
     assert!(
-        model.create_context(None).is_ok(),
+        model.create_context(None, ()).is_ok(),
         "the working memory no pipeline holds went back first"
     );
 }
@@ -786,7 +790,7 @@ fn allocations_charged_together_each_have_their_tables_room_before_any_memory_is
     let taken = |model: &Model, context| model.memory_taken(context).expect("live").total();
     // An unlimited context's cost of three allocations, and of a fourth's
     // charges, its table having room for it.
-    let probe = model.create_context(None).expect("a context");
+    let probe = model.create_context(None, ()).expect("a context");
     for _ in 0..3 {
         allocate(&mut model, probe, 64, HOST).expect("memory");
     }
@@ -798,7 +802,7 @@ fn allocations_charged_together_each_have_their_tables_room_before_any_memory_is
     // Room for two allocations' charges, not for those and the table's
     // growth the second needs once the first's entry is kept.
     let tight = model
-        .create_context(Some(three + 2 * one))
+        .create_context(Some(three + 2 * one), ())
         .expect("a context");
     for _ in 0..3 {
         allocate(&mut model, tight, 64, HOST).expect("memory");
@@ -815,11 +819,11 @@ fn allocations_charged_together_each_have_their_tables_room_before_any_memory_is
 #[test]
 fn a_refused_submission_leaves_its_resolved_commands_with_the_caller() {
     let mut model = model(1, 1);
-    let probe = model.create_context(None).expect("a context");
+    let probe = model.create_context(None, ()).expect("a context");
     let _ = buffer(&mut model, probe);
     let used = model.memory_taken(probe).expect("live").total();
     // No room for any job past its buffer.
-    let tight = model.create_context(Some(used)).expect("a context");
+    let tight = model.create_context(Some(used), ()).expect("a context");
     let target = buffer(&mut model, tight);
     let fill = || Command::Fill {
         dst: target,

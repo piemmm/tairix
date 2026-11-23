@@ -92,6 +92,8 @@ The queries:
   and group, its owner's generation and state, how many streams it masters
   through, and its domain's mappings and the bytes they map (needs
   `CAP_SYSINFO_HW`).
+- `gpu` — the served GPUs: one row per GPU a driver serves — the
+  hardware-tree node of its device, and the channel a program opens it on.
 - `audio`, `sound` — the sound devices: one row per sink and source — its
   id, whether it is its direction's default, its level and mute, the rate
   its clock is measured at while it plays, the frames it has lost, its

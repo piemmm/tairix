@@ -3,13 +3,17 @@
 //! deleting, renaming and copying one (`OS_SpriteOp` 8, 9, 13, 15 and
 //! 24 to 27).
 
+use alloc::vec::Vec;
+
 use tairix_image::{sprite_area as block, SpriteName, SPRITE_HEADER_LEN, SPRITE_PALETTE_ENTRY_LEN};
 use tairix_riscos_kernel::os::{len32, Entry, Fail, Os, Regs};
 
 use super::area::{read_name, Area, Naming};
 use super::format::{self, Pixels};
 use super::header::Sprite;
-use super::{system, NOT_FOUND, NO_DEEP_NEW_PALETTE, NO_ROOM, NO_ROOM_TO_COPY, UNRECOGNISED};
+use super::{
+    system, NOT_FOUND, NO_DEEP_NEW_PALETTE, NO_MEMORY, NO_ROOM, NO_ROOM_TO_COPY, UNRECOGNISED,
+};
 use crate::palette::{reason as palette_reason, PALETTE_V};
 
 /// An operation's sprite: the area it is in, how R0 named it, and its
@@ -81,6 +85,7 @@ pub(crate) fn create(os: &mut Os<'_>, naming: Naming, regs: &mut Regs) -> Result
     let shape = Shape::new(&pixels, regs.r[4], regs.r[5], 0);
     let palette = entries * SPRITE_PALETTE_ENTRY_LEN;
     let length = shape.length(palette);
+    let screen = screen_palette(os, entries)?;
     if let Some(old) = area.find(os, &name)? {
         area.remove(os, &old)?;
     }
@@ -101,7 +106,7 @@ pub(crate) fn create(os: &mut Os<'_>, naming: Naming, regs: &mut Regs) -> Result
         mode: word,
     };
     sprite.write(os)?;
-    write_screen_palette(os, &sprite, entries)?;
+    os.write_bytes(sprite.address(SPRITE_HEADER_LEN), &screen)?;
     os.fill(
         sprite.address(sprite.image),
         length - SPRITE_HEADER_LEN - palette,
@@ -120,13 +125,17 @@ pub(crate) const fn new_palette_entries(pixels: &Pixels) -> u32 {
     }
 }
 
-/// Writes the screen's first `entries` palette entries as `OS_ReadPalette`
-/// gives them, each state's word, into `sprite`'s palette.
-pub(crate) fn write_screen_palette(
-    os: &mut Os<'_>,
-    sprite: &Sprite,
-    entries: u32,
-) -> Result<(), Fail> {
+/// The screen's first `entries` palette entries as `OS_ReadPalette` gives
+/// them, each state's word in turn: read before the sprite they are for is
+/// made, so that no claimant of `PaletteV` meets it half made.
+pub(crate) fn screen_palette(os: &mut Os<'_>, entries: u32) -> Result<Vec<u8>, Fail> {
+    let mut bytes = Vec::new();
+    if bytes
+        .try_reserve_exact(entries as usize * SPRITE_PALETTE_ENTRY_LEN as usize)
+        .is_err()
+    {
+        return Err(os.error(NO_MEMORY));
+    }
     for entry in 0..entries {
         let mut read = Regs::new([
             entry,
@@ -144,11 +153,10 @@ pub(crate) fn write_screen_palette(
             0,
         ]);
         os.call_vector(PALETTE_V, &mut read, Entry::Supervisor)?;
-        let at = sprite.address(SPRITE_HEADER_LEN + entry * SPRITE_PALETTE_ENTRY_LEN);
-        os.write_word(at, read.r[2])?;
-        os.write_word(at.wrapping_add(4), read.r[3])?;
+        bytes.extend_from_slice(&read.r[2].to_le_bytes());
+        bytes.extend_from_slice(&read.r[3].to_le_bytes());
     }
-    Ok(())
+    Ok(bytes)
 }
 
 /// A new sprite's rows: the words each takes and its last bit, its first
@@ -161,6 +169,9 @@ pub(crate) struct Shape {
     pub(crate) image: Option<u32>,
     /// The bytes a mask for it takes; none likewise.
     pub(crate) mask: Option<u32>,
+    /// The bytes each row of a mask for it takes: an old-format sprite's its
+    /// image's, a new-format one's none past what a word counts.
+    pub(crate) mask_stride: Option<u64>,
 }
 
 impl Shape {
@@ -185,6 +196,7 @@ impl Shape {
             last_bit,
             image: fit(image),
             mask: fit(mask),
+            mask_stride,
         }
     }
 
@@ -235,7 +247,9 @@ pub(crate) fn copy(os: &mut Os<'_>, target: &Target, regs: &mut Regs) -> Result<
         return Ok(());
     }
     let length = target.sprite.next;
-    if length < SPRITE_HEADER_LEN || !length.is_multiple_of(4) {
+    let from = target.sprite.at;
+    let readable = os.readable(from, u64::from(from) + u64::from(length));
+    if length < SPRITE_HEADER_LEN || !length.is_multiple_of(4) || !readable {
         return Err(os.error(UNRECOGNISED));
     }
     let at = target.area.append(os, length, NO_ROOM_TO_COPY)?;
@@ -252,17 +266,6 @@ pub(crate) fn copy(os: &mut Os<'_>, target: &Target, regs: &mut Regs) -> Result<
 /// The name a sprite of the system area made by `VDU 23,27` and its kin
 /// takes: number `n` spelt in decimal.
 pub(crate) fn numbered_name(n: u8) -> SpriteName {
-    let mut digits = [0u8; 3];
-    let mut length = 0;
-    let mut value = n;
-    loop {
-        digits[length] = b'0' + value % 10;
-        length += 1;
-        value /= 10;
-        if value == 0 {
-            break;
-        }
-    }
-    digits[..length].reverse();
-    SpriteName::spelt_by(&digits[..length])
+    let mut digits = [0u8; 12];
+    SpriteName::spelt_by(tairix_util::fmt::format_i32(i32::from(n), &mut digits).as_bytes())
 }

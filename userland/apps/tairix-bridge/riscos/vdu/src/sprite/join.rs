@@ -5,16 +5,16 @@
 //! whole, every bit set but where a sprite's own mask clears one, as a new
 //! mask's are. Nothing changes unless the area holds the result.
 
-use alloc::vec::Vec;
-
 use tairix_image::SPRITE_HEADER_LEN;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
+use tairix_util::fallible;
 
 use super::create::{Shape, Target};
-use super::edit::{field_at, set_field_at};
+use super::edit::row_buffer;
 use super::format::Pixels;
-use super::header::{advanced, Sprite};
+use super::header::{advanced, Extents, Sprite};
 use super::{CANNOT_JOIN, NO_MEMORY};
+use tairix_util::bitfield::{field_at, set_field_at};
 
 /// `OS_SpriteOp` 35: R3's sprite joined to the target's, below it where R4
 /// is not nought.
@@ -26,11 +26,12 @@ pub(crate) fn append(os: &mut Os<'_>, target: &Target, regs: &Regs) -> Result<()
     if one.at == two.at || one.mode != two.mode {
         return Err(os.error(CANNOT_JOIN));
     }
-    let pixels = one.pixels(os)?;
-    for sprite in [&one, &two] {
-        area.holds(os, sprite)?;
-        sprite.whole(os, &pixels)?;
-    }
+    let pixels = one.pixels_kept(os)?;
+    two.still(os)?;
+    area.holds(os, &one)?;
+    let one_extents = one.whole(os, &pixels)?;
+    area.holds(os, &two)?;
+    let two_extents = two.whole(os, &pixels)?;
     let (w1, w2) = (one.width(&pixels), two.width(&pixels));
     let (h1, h2) = (one.rows(), two.rows());
     let shape = if below {
@@ -52,23 +53,12 @@ pub(crate) fn append(os: &mut Os<'_>, target: &Target, regs: &Regs) -> Result<()
     };
     let length =
         u64::from(SPRITE_HEADER_LEN) + u64::from(palette) + u64::from(image) + u64::from(mask);
-    let block = area.block(os)?;
-    let room =
-        u64::from(block.size) - u64::from(block.free) + u64::from(one.next) + u64::from(two.next);
     let Ok(length) = u32::try_from(length) else {
         return Err(os.error(NO_MEMORY));
     };
-    if u64::from(length) > room {
-        return Err(os.error(NO_MEMORY));
-    }
-    let mut body = Vec::new();
-    if body
-        .try_reserve_exact((length - SPRITE_HEADER_LEN) as usize)
-        .is_err()
-    {
-        return Err(os.error(NO_MEMORY));
-    }
-    body.resize((length - SPRITE_HEADER_LEN) as usize, 0);
+    replaceable(os, area, [&one, &two], length)?;
+    let mut body = fallible::zeroed((length - SPRITE_HEADER_LEN) as usize)
+        .ok_or_else(|| os.error(NO_MEMORY))?;
     os.read_bytes(
         one.address(SPRITE_HEADER_LEN),
         &mut body[..palette as usize],
@@ -81,8 +71,9 @@ pub(crate) fn append(os: &mut Os<'_>, target: &Target, regs: &Regs) -> Result<()
         w1,
         h1,
     };
+    let sprites = [(&one, &one_extents), (&two, &two_extents)];
     let (image_part, mask_part) = body[palette as usize..].split_at_mut(image as usize);
-    joined.rows(os, [&one, &two], image_part, false)?;
+    joined.rows(os, sprites, image_part, false)?;
     if masked {
         let mask_stride = u64::from(mask) / u64::from(rows.max(1));
         let joined = Joined {
@@ -90,7 +81,7 @@ pub(crate) fn append(os: &mut Os<'_>, target: &Target, regs: &Regs) -> Result<()
             ..joined
         };
         mask_part.fill(0xFF);
-        joined.rows(os, [&one, &two], mask_part, true)?;
+        joined.rows(os, sprites, mask_part, true)?;
     }
     let (later, earlier) = if two.at > one.at {
         (two, one)
@@ -115,6 +106,39 @@ pub(crate) fn append(os: &mut Os<'_>, target: &Target, regs: &Regs) -> Result<()
     os.write_bytes(sprite.address(SPRITE_HEADER_LEN), &body)
 }
 
+/// Checks the area holds a sprite of `length` once both `sprites` are
+/// removed, and memory takes the change from the earlier of them on: removing
+/// them and appending it can then be done whole, so a refusal changes
+/// nothing. Sprites overlapping each other cannot be removed apart.
+fn replaceable(
+    os: &mut Os<'_>,
+    area: super::area::Area,
+    [one, two]: [&Sprite; 2],
+    length: u32,
+) -> Result<(), Fail> {
+    let block = area.block(os)?;
+    let room =
+        u64::from(block.size) - u64::from(block.free) + u64::from(one.next) + u64::from(two.next);
+    if u64::from(length) > room {
+        return Err(os.error(NO_MEMORY));
+    }
+    let end_of = |sprite: &Sprite| u64::from(sprite.at) + u64::from(sprite.next);
+    let apart = end_of(one) <= u64::from(two.at) || end_of(two) <= u64::from(one.at);
+    let freed_to = block
+        .free
+        .checked_sub(one.next)
+        .and_then(|f| f.checked_sub(two.next));
+    let (true, Some(freed_to)) = (apart, freed_to) else {
+        return Err(os.error(super::UNRECOGNISED));
+    };
+    let touched_end = u64::from(block.free).max(u64::from(freed_to) + u64::from(length));
+    if os.writable(one.at.min(two.at), u64::from(area.address(0)) + touched_end) {
+        Ok(())
+    } else {
+        Err(os.error(super::UNRECOGNISED))
+    }
+}
+
 /// How the joined sprite's rows are laid out.
 #[derive(Clone, Copy)]
 struct Joined {
@@ -130,36 +154,40 @@ struct Joined {
 
 impl Joined {
     /// Fills `out` with the joined image's rows, or its mask's where `mask`,
-    /// from the two sprites'.
+    /// from the two sprites', each proven whole.
     fn rows(
         &self,
         os: &mut Os<'_>,
-        sprites: [&Sprite; 2],
+        sprites: [(&Sprite, &Extents); 2],
         out: &mut [u8],
         mask: bool,
     ) -> Result<(), Fail> {
+        if out.is_empty() {
+            return Ok(());
+        }
         let bits = if mask && !self.pixels.old_format {
             self.pixels.mask_bits()
         } else {
             self.pixels.field_bits()
         };
-        let mut sources = [Vec::new(), Vec::new()];
-        for (source, sprite) in sources.iter_mut().zip(sprites) {
-            let stride = if mask {
-                sprite.mask_stride(&self.pixels)
+        let blocks = sprites.map(|(sprite, extents)| {
+            if mask {
+                (sprite.mask, extents.mask_stride)
             } else {
-                sprite.stride()
-            };
-            let length = usize::try_from(stride).map_err(|_| os.error(NO_MEMORY))?;
-            if source.try_reserve_exact(length).is_err() {
-                return Err(os.error(NO_MEMORY));
+                (sprite.image, extents.stride)
             }
-            source.resize(length, 0);
+        });
+        let mut sources = [alloc::vec::Vec::new(), alloc::vec::Vec::new()];
+        for ((source, &(_, stride)), (sprite, _)) in sources.iter_mut().zip(&blocks).zip(sprites) {
+            if sprite.rows() > 0 {
+                *source = row_buffer(os, stride)?;
+            }
         }
         let opaque = u32::try_from((1u64 << bits) - 1).unwrap_or(u32::MAX);
         let stride = usize::try_from(self.stride).map_err(|_| os.error(NO_MEMORY))?;
         for (row, line) in (0u32..).zip(out.chunks_exact_mut(stride.max(1))) {
-            for (which, sprite) in sprites.into_iter().enumerate() {
+            os.yield_point()?;
+            for (which, (sprite, _)) in sprites.into_iter().enumerate() {
                 let source_row = if self.below {
                     if (which == 0) != (row < self.h1) {
                         continue;
@@ -172,11 +200,7 @@ impl Joined {
                 } else {
                     row
                 };
-                let (start, row_stride) = if mask {
-                    (sprite.mask, sprite.mask_stride(&self.pixels))
-                } else {
-                    (sprite.image, sprite.stride())
-                };
+                let (start, row_stride) = blocks[which];
                 let has = !mask || sprite.masked();
                 if has {
                     let address =

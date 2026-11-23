@@ -22,6 +22,9 @@ use crate::Error;
 
 /// What a device's work runs on.
 pub(crate) trait Backend: Sized + Send + Sync + 'static {
+    /// A context as the device holds it, let go once the model's context and
+    /// the last of its memory and work are.
+    type Context: Send + Sync;
     /// A memory as the device holds it, standing for the charges paying for
     /// it until its last holder lets it go.
     type Memory: Debug + Send + Sync;
@@ -36,12 +39,30 @@ pub(crate) trait Backend: Sized + Send + Sync + 'static {
     /// What the device keeps for its work under its lock.
     type Pool: Pool;
 
+    /// Whether the model's deadlines need watching from outside: a backend
+    /// that meters its own work ends an overrun itself.
+    const WATCHED: bool;
+
     /// The host bytes a memory of `size` keeps beside the bytes asked for.
     fn overhead(size: u64) -> u64;
 
-    /// `size` zeroed bytes standing for `charges`: its bytes, then what it
-    /// keeps besides. Made without the device's lock.
-    fn allocate(&self, size: u64, charges: [Charge; 2]) -> Result<Self::Memory, Error>;
+    /// A context's form on the device, made without the device's lock: a
+    /// device may be waited on for it.
+    fn create_context(&self) -> Result<Self::Context, Error>;
+
+    /// `size` zeroed bytes of memory type `memory_type` in `context`,
+    /// standing for `charges`: its bytes, then what it keeps besides. Made
+    /// without the device's lock.
+    fn allocate(
+        &self,
+        context: &Arc<Self::Context>,
+        memory: (u32, u64),
+        charges: [Charge; 2],
+    ) -> Result<Self::Memory, Error>;
+
+    /// `context` was lost: a device running work it cannot stop lets the
+    /// context go once that work is answered.
+    fn lost(&self, context: &Arc<Self::Context>);
 
     /// Write `data` at `offset` from the CPU, the range proved within it.
     fn write(&self, memory: &Self::Memory, offset: u64, data: &[u8]) -> Result<(), Error>;
@@ -152,6 +173,37 @@ pub(crate) trait Pool: Send + Sized {
 
     /// Take back what a job ran in, answering what the pool let go.
     fn give(&mut self, lease: Self::Lease) -> [Self::Grown; 2];
+}
+
+/// The pool of a backend that keeps none.
+pub(crate) struct NoPool;
+
+impl Pool for NoPool {
+    type Need = ();
+    type Hold = ();
+    type Plan = ();
+    type Grown = ();
+    type Lease = ();
+
+    fn wider((): (), (): ()) {}
+
+    fn prune(&mut self) {}
+
+    fn plan(&mut self, (): (), _: (&Arc<Budget>, u64), _: &Arc<Budget>) -> (Result<(), Error>, ()) {
+        (Ok(()), ())
+    }
+
+    fn make((): ()) -> Result<((), ()), Error> {
+        Ok(((), ()))
+    }
+
+    fn install(&mut self, (): ()) {}
+
+    fn take(&mut self, (): ()) {}
+
+    fn give(&mut self, (): ()) -> [(); 2] {
+        [(), ()]
+    }
 }
 
 #[cfg(test)]

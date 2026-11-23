@@ -100,3 +100,79 @@ fn a_256_colour_gcol_and_colour_number_shuffle_their_bits() {
         assert_eq!(number_of_gcol(gcol_of_number(n)), n);
     }
 }
+
+#[test]
+fn each_gcol_action_lays_its_bits_as_named_by_its_low_three_bits() {
+    let (old, bits) = (0b1100u32, 0b1010u32);
+    let named = [
+        bits,
+        old | bits,
+        old & bits,
+        old ^ bits,
+        !old,
+        old,
+        old & !bits,
+        old | !bits,
+    ];
+    for (action, laid) in (0u32..).zip(named) {
+        assert_eq!(combine(action, old, bits), laid, "action {action}");
+        assert_eq!(
+            combine(action | 0x18, old, bits),
+            laid,
+            "action {action} with ECF bits"
+        );
+    }
+}
+
+#[test]
+fn each_direct_layout_holds_its_channels_in_its_fields_either_way_round() {
+    let full = Flags::FULL_PALETTE.bits();
+    let layouts = [
+        ((4, 0xFFF, 0), [4, 4, 4], 2, 0xFFF),
+        ((4, 0xFFFF, full), [5, 6, 5], 2, 0xFFFF),
+        ((4, 0xFFFF, 0), [5, 5, 5], 2, 0x7FFF),
+        ((5, u32::MAX, 0), [8, 8, 8], 4, 0xFF_FFFF),
+    ];
+    for ((log2_bpp, ncolour, flags), [low, middle, high], bytes, colour_bits) in layouts {
+        for swapped in [false, true] {
+            let flags = flags | if swapped { Flags::RGB.bits() } else { 0 };
+            let direct = Direct::of_parts(log2_bpp, ncolour, flags);
+            let bits = if swapped {
+                [high, middle, low]
+            } else {
+                [low, middle, high]
+            };
+            assert_eq!(direct.channel_bits(), bits);
+            assert_eq!((direct.bytes(), direct.colour_bits()), (bytes, colour_bits));
+            let red = (1 << bits[0]) - 1;
+            assert_eq!(
+                direct.pack_channels([red, 0, 0]),
+                if swapped { red << (low + middle) } else { red },
+                "red lowest unless swapped"
+            );
+            for pixel in [0, 1, 0x1234, 0x00AB_CDEF, u32::MAX].map(|p| p & colour_bits) {
+                assert_eq!(direct.pack_channels(direct.channels(pixel)), pixel);
+                let bytes_of = |rgb: [u32; 3]| rgb.map(|v| v.to_le_bytes()[0]);
+                assert_eq!(
+                    direct.pack(bytes_of(direct.unpack_replicated(pixel))),
+                    pixel
+                );
+                assert_eq!(direct.pack(bytes_of(direct.unpack(pixel))), pixel);
+            }
+            assert_eq!(direct.unpack_replicated(colour_bits), [255; 3]);
+            assert_eq!(direct.unpack(colour_bits), [255; 3]);
+        }
+    }
+}
+
+#[test]
+fn a_colour_number_s_nibbles_widen_as_risc_os_5_widens_them() {
+    let five_six_five = Direct::of_parts(4, 0xFFFF, Flags::FULL_PALETTE.bits());
+    assert_eq!(
+        five_six_five.pack_nibbles([0b1000, 0b1000, 0b1000]),
+        0b1_0000 | (0b10_0010 << 5) | (0b1_0000 << 11),
+        "five bits the low bit repeated, six the top two"
+    );
+    let eight = Direct::of_parts(5, u32::MAX, 0);
+    assert_eq!(eight.pack_nibbles([0xA, 0x5, 0x1]), 0x11_55AA);
+}

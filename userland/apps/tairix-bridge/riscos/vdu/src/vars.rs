@@ -185,7 +185,7 @@ pub(crate) fn byte_160(vdu: &Vdu, index: u32) -> (u32, u32) {
 
 /// The colour number and tint of the pixel value `pixel` in `format`.
 pub(crate) fn number_of(format: &Format, pixel: u32) -> (u32, u32) {
-    if format.log2_bpp() == 3 && format.grouped() {
+    if format.grouped() {
         crate::colour::number_of_internal(pixel.to_le_bytes()[0])
     } else {
         (pixel, 0)

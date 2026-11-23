@@ -201,11 +201,15 @@ impl RequestQueue {
         self.queue.kick(transport);
         let completed = match refused {
             Some(err) => Err(err),
-            None => self.await_completions(
+            None => await_completions(
+                &mut self.queue,
                 host,
                 budget_ns,
                 start_ns.saturating_add(budget_ns),
-                &mut out,
+                |_| {
+                    out -= 1;
+                    Ok(out == 0)
+                },
             ),
         };
         if completed.is_err() && out != 0 {
@@ -219,56 +223,67 @@ impl RequestQueue {
         completed
     }
 
-    /// Wait until the `out` chains still with the device come back, answering
-    /// the last; `out` counts down as they do.
-    fn await_completions(
-        &mut self,
-        host: &dyn VirtioHost,
-        budget_ns: u64,
-        deadline_ns: u64,
-        out: &mut u16,
-    ) -> Result<UsedToken, DriverError> {
-        let mut left = budget_ns;
-        let mut last_wait = None;
-        let mut idle_wakes = 0;
-        loop {
-            loop {
-                match self.queue.poll_used() {
-                    Ok(token) => {
-                        *out -= 1;
-                        if *out == 0 {
-                            return Ok(token);
-                        }
-                        idle_wakes = 0;
-                    }
-                    Err(VirtioError::NoCompletion) => break,
-                    Err(err) => return Err(err.as_driver_error()),
-                }
-            }
-            match last_wait {
-                // Read only after a wake that left a chain out, so a batch
-                // answered on its first wake costs one clock reading.
-                Some(CompletionSignal::Fired) => left = deadline_ns.saturating_sub(host.now_ns()),
-                // The ring has now been read once more — a completion whose
-                // interrupt was lost is already there — so a wait that timed
-                // out, or could not be made, ends the batch.
-                Some(CompletionSignal::TimedOut) => left = 0,
-                None => {}
-            }
-            if left == 0 {
-                return Err(DriverError::DeviceOffline);
-            }
-            if idle_wakes == MAX_COMPLETION_WAKES {
-                return Err(DriverError::DeviceFault);
-            }
-            idle_wakes += 1;
-            last_wait = Some(host.notify_wait(self.queue.index(), left));
-        }
-    }
-
     /// Never return the rings to their pool: the device may still be using
     /// them.
     pub fn withhold(&mut self) {
         self.queue.withhold();
+    }
+}
+
+/// Hand each completion `queue` posts to `take`, waiting on `host` for more,
+/// until `take` says the wait is over, answering the completion that ended
+/// it; for at most `budget_ns`, which runs out at `deadline_ns`.
+///
+/// A wake is only advisory, so the ring is drained after every one and each
+/// wait is given only what is left of the budget. A wait that times out, or
+/// could not be made at all, ends it once the ring has been read again, and
+/// [`MAX_COMPLETION_WAKES`] wakes in a row that bring nothing end it sooner.
+///
+/// # Errors
+///
+/// [`DriverError::DeviceOffline`] once the budget is spent,
+/// [`DriverError::DeviceFault`] for a wake storm, the mapped queue error for
+/// a completion the device had no right to post, or `take`'s own refusal.
+pub(crate) fn await_completions(
+    queue: &mut SplitQueue,
+    host: &dyn VirtioHost,
+    budget_ns: u64,
+    deadline_ns: u64,
+    mut take: impl FnMut(UsedToken) -> Result<bool, DriverError>,
+) -> Result<UsedToken, DriverError> {
+    let mut left = budget_ns;
+    let mut last_wait = None;
+    let mut idle_wakes = 0;
+    loop {
+        loop {
+            match queue.poll_used() {
+                Ok(token) => {
+                    if take(token)? {
+                        return Ok(token);
+                    }
+                    idle_wakes = 0;
+                }
+                Err(VirtioError::NoCompletion) => break,
+                Err(err) => return Err(err.as_driver_error()),
+            }
+        }
+        match last_wait {
+            // Read only after a wake that left a chain out, so a batch
+            // answered on its first wake costs one clock reading.
+            Some(CompletionSignal::Fired) => left = deadline_ns.saturating_sub(host.now_ns()),
+            // The ring has now been read once more — a completion whose
+            // interrupt was lost is already there — so a wait that timed
+            // out, or could not be made, ends the batch.
+            Some(CompletionSignal::TimedOut) => left = 0,
+            None => {}
+        }
+        if left == 0 {
+            return Err(DriverError::DeviceOffline);
+        }
+        if idle_wakes == MAX_COMPLETION_WAKES {
+            return Err(DriverError::DeviceFault);
+        }
+        idle_wakes += 1;
+        last_wait = Some(host.notify_wait(queue.index(), left));
     }
 }

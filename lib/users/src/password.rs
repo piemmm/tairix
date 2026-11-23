@@ -246,10 +246,10 @@ fn hex_value(byte: u8) -> Result<u8, ParseError> {
 
 /// Write `bytes` to `out` as lowercase hex.
 fn write_hex(out: &mut dyn fmt::Write, bytes: &[u8]) -> fmt::Result {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    for byte in bytes {
-        out.write_char(char::from(DIGITS[usize::from(byte >> 4)]))?;
-        out.write_char(char::from(DIGITS[usize::from(byte & 0x0f)]))?;
+    for &byte in bytes {
+        for digit in tairix_util::hex::digits(byte) {
+            out.write_char(char::from(digit))?;
+        }
     }
     Ok(())
 }

@@ -42,6 +42,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::audio::{Rate, MAX_CHANNELS};
 use tairix_abi::Errno;
+use tairix_util::divisor::gcd;
 use tairix_util::fallible;
 use tairix_util::mathf;
 
@@ -229,17 +230,6 @@ fn phase_taps<'a>(
         *slot = low + (high - low) * blend;
     }
     scratch
-}
-
-/// The greatest common divisor, by Euclid.
-const fn gcd(a: u32, b: u32) -> u32 {
-    let (mut a, mut b) = (a, b);
-    while b != 0 {
-        let next = a % b;
-        a = b;
-        b = next;
-    }
-    a
 }
 
 /// The modified Bessel function of the first kind, order zero, by its power

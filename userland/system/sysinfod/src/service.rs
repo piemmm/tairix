@@ -6,6 +6,7 @@ use alloc::vec::Vec;
 use tairix_abi::audio::{AudioDeviceDescriptor, ControlAccess, StreamDescriptor};
 use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::fs::STORAGE_CATALOG;
+use tairix_abi::gpu::{GpuDeviceDescriptor, GPU_CHANNEL_ENDPOINTS, GPU_NODE_COMPATIBLE};
 use tairix_abi::hwtree::{snapshot_nodes, HwNode, HwTreeHeader};
 use tairix_abi::net_ipc::{
     NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
@@ -322,6 +323,10 @@ fn inventory_list(
             || source.process_records(caller, ProcessScope::Caller),
             ProcessRecord::to_le_bytes,
         ),
+        SysinfoQueryId::GPU_DEVICES => page.of(
+            || served_gpus(&source.hardware_tree(caller)?),
+            GpuDeviceDescriptor::to_le_bytes,
+        ),
         SysinfoQueryId::AUDIO_DEVICES => page.of(
             || {
                 // Whether a device may be changed, and whether the room is
@@ -523,6 +528,32 @@ fn resource_limits(
         written += ResourceLimitRecord::WIRE_LEN;
     }
     Ok(written)
+}
+
+/// The GPUs `tree` holds served: each node publishing a GPU channel whose
+/// endpoint is the GPU block's for the node it sits under — the one channel
+/// the kernel lets that node's driver bind — in the tree's order.
+///
+/// # Errors
+///
+/// [`Errno::BadMagic`] for a snapshot that does not decode, and
+/// [`Errno::OutOfMemory`] where the list cannot be held.
+pub fn served_gpus(tree: &[u8]) -> Result<Vec<GpuDeviceDescriptor>, Errno> {
+    let mut gpus = Vec::new();
+    for node in snapshot_nodes(tree).ok_or(Errno::BadMagic)? {
+        let Some(endpoint) = node.channel_endpoint(GPU_NODE_COMPATIBLE) else {
+            continue;
+        };
+        if GPU_CHANNEL_ENDPOINTS.node_of(endpoint) != Some(node.parent()) {
+            continue;
+        }
+        gpus.try_reserve(1).map_err(|_| Errno::OutOfMemory)?;
+        gpus.push(GpuDeviceDescriptor {
+            endpoint,
+            node: node.parent(),
+        });
+    }
+    Ok(gpus)
 }
 
 /// The board's `compatible` strings in `tree`, a `hw_tree_read` snapshot: its
@@ -2230,6 +2261,61 @@ mod tests {
         let n = serve_once(&source, &caller(&caps), &sink, &req, &mut resp).unwrap();
         let board = PlatformCompatible::decode(&resp[..n]).unwrap();
         assert!(board.strings().eq([&b"vendor,board"[..]]));
+        assert!(sink.events.borrow().as_slice().is_empty(), "not audited");
+    }
+
+    #[test]
+    fn the_served_gpus_are_the_channels_their_nodes_drivers_could_bind() {
+        use tairix_abi::gpu::{GpuDeviceDescriptor, GPU_CHANNEL_ENDPOINTS, GPU_NODE_COMPATIBLE};
+        use tairix_abi::hwtree::{HwMatchKey, HwResource};
+
+        let channel = |id, parent, compatible: &[u8], endpoint| {
+            let mut node = HwNode::new(id, parent, HwDeviceClass::Other);
+            node.push_match_key(HwMatchKey::compatible(compatible).unwrap())
+                .unwrap();
+            node.push_resource(HwResource::endpoint(endpoint)).unwrap();
+            node
+        };
+        let mut nodes = tree_nodes();
+        nodes.push(channel(
+            3,
+            1,
+            GPU_NODE_COMPATIBLE,
+            GPU_CHANNEL_ENDPOINTS.endpoint(1),
+        ));
+        // A channel naming another node's endpoint, and one of another kind.
+        nodes.push(channel(
+            4,
+            2,
+            GPU_NODE_COMPATIBLE,
+            GPU_CHANNEL_ENDPOINTS.endpoint(1),
+        ));
+        nodes.push(channel(
+            5,
+            2,
+            b"tairix,audiochan",
+            GPU_CHANNEL_ENDPOINTS.endpoint(2),
+        ));
+        let mut source = FixtureSource::new();
+        source.hwtree = tree_blob(2, &nodes);
+        let sink = RecordingSink::new();
+        let page = PageRequest {
+            offset: 0,
+            limit: 8,
+            flags: 0,
+            walk: PageRequest::FRESH,
+        };
+        let req = request_bytes(SysinfoQueryId::GPU_DEVICES, &page.to_le_bytes());
+        let mut resp = [0u8; 512];
+        let n = serve_once(&source, &caller(&Caps(&[])), &sink, &req, &mut resp).unwrap();
+        assert_eq!(n, GpuDeviceDescriptor::WIRE_LEN, "one served GPU");
+        assert_eq!(
+            GpuDeviceDescriptor::from_le_bytes(&resp[..n]),
+            Ok(GpuDeviceDescriptor {
+                endpoint: GPU_CHANNEL_ENDPOINTS.endpoint(1),
+                node: 1,
+            })
+        );
         assert!(sink.events.borrow().as_slice().is_empty(), "not audited");
     }
 

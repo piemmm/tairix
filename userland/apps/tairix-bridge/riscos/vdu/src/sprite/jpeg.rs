@@ -19,7 +19,7 @@
 use alloc::vec::Vec;
 
 use tairix_image::{
-    jpeg_decode_stored, jpeg_frame, DecodeError, DecodeLimits, DensityUnit, JpegFrame,
+    jpeg_decode_stored, jpeg_frame, DecodeError, DecodeLimits, DensityUnit, JpegFrame, RasterImage,
 };
 use tairix_riscos_arm::mmu::PAGE_SIZE;
 use tairix_riscos_kernel::error::Error;
@@ -29,11 +29,12 @@ use tairix_riscos_kernel::swi::os::{file as reason, FILE, SWI_NUMBER_FROM_STRING
 use tairix_riscos_kernel::swi::X;
 
 use super::extend::{State, SPRITE_EXTEND};
+use super::format::STANDARD_DPI;
 use super::paint::{self, PlotFlags, Scale};
 use super::{NO_MEMORY, RESERVED_FLAGS};
 
-/// SpriteExtend's JPEG SWI chunk and its SWIs' names.
-pub(crate) const CHUNK: u32 = 0x4_9980;
+pub(crate) use tairix_riscos_kernel::swi::chunk::SPRITE_EXTEND as CHUNK;
+/// The names of SpriteExtend's JPEG SWIs, in [`CHUNK`].
 pub(crate) const NAMES: &[&str] = &[
     "Info",
     "FileInfo",
@@ -64,9 +65,6 @@ const GREY: u32 = 1;
 const NO_TRANSFORMED_PLOTS: u32 = 2;
 const DENSITY_RATIO: u32 = 4;
 const PROCESS_SHIFT: u32 = 3;
-/// The density a JPEG stating none is taken to have, and the scale of a
-/// pixel aspect: the standard screen's.
-const STANDARD_DPI: u32 = 90;
 /// RISC OS 5's workspace for a plot: a base, and a part for each 32 pixels
 /// across.
 const WORKSPACE_BASE: u32 = 0x8000;
@@ -213,8 +211,8 @@ fn density(frame: &JpegFrame) -> ((u32, u32), bool) {
         DensityUnit::Centimetre => ((inches(across, 100), inches(down, 100)), false),
         DensityUnit::Metre => ((inches(across, 10_000), inches(down, 10_000)), false),
         DensityUnit::Aspect => {
-            let common = gcd(across, down).max(1);
-            let scale = |v: u32| (v / common).saturating_mul(STANDARD_DPI);
+            let (across, down) = density.shape().unwrap_or((1, 1));
+            let scale = |v: u32| v.saturating_mul(STANDARD_DPI);
             ((scale(across), scale(down)), true)
         }
     }
@@ -224,13 +222,6 @@ fn density(frame: &JpegFrame) -> ((u32, u32), bool) {
 /// dots per inch and cut down.
 fn inches(per: u32, hundredths: u32) -> u32 {
     u32::try_from(u64::from(per) * 254 / u64::from(hundredths)).unwrap_or(u32::MAX)
-}
-
-fn gcd(mut a: u32, mut b: u32) -> u32 {
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    a
 }
 
 /// A plot's picture options: translucency and the colour mapping.
@@ -262,28 +253,36 @@ fn plot_scaled(
     let Some(scale) = Scale::read(os, scale)? else {
         return Ok(());
     };
-    plot(os, bytes, at, scale, picture)
+    let frame = drawn_frame(os, bytes)?;
+    plot(os, bytes, &frame, at, scale, picture)
 }
 
-/// The JPEG `bytes` decoded and plotted from pixel `at`, scaled.
+/// The frame of the JPEG `bytes` a plot draws, refused as its decode would
+/// refuse it where it holds no pixels: a plot is sized before it decodes.
+fn drawn_frame(os: &mut Os<'_>, bytes: &[u8]) -> Result<JpegFrame, Fail> {
+    let frame = jpeg_frame(bytes).map_err(|error| refused(os, &error))?;
+    if frame.stored.0 == 0 || frame.stored.1 == 0 {
+        return Err(refused(os, &DecodeError::ZeroDimension));
+    }
+    Ok(frame)
+}
+
+/// The JPEG `bytes` of `frame` decoded and plotted from pixel `at`, scaled.
 fn plot(
     os: &mut Os<'_>,
     bytes: &[u8],
+    frame: &JpegFrame,
     at: crate::raster::Point,
     scale: Scale,
     picture: Picture,
 ) -> Result<(), Fail> {
-    let image = jpeg_decode_stored(bytes, &LIMITS).map_err(|error| refused(os, &error))?;
     let flags = PlotFlags(picture.translucency << 8);
-    paint::put_picture(
-        os,
-        (image.width(), image.height()),
-        image.pixels(),
-        at,
-        scale,
-        flags,
-        picture.mapping,
-    )
+    let decode = |os: &mut Os<'_>| {
+        jpeg_decode_stored(bytes, &LIMITS)
+            .map(RasterImage::into_pixels)
+            .map_err(|error| refused(os, &error))
+    };
+    paint::put_picture(os, frame.stored, decode, at, scale, flags, picture.mapping)
 }
 
 /// The JPEG `bytes` through R2's matrix or parallelogram, plotted where
@@ -295,7 +294,7 @@ fn plot_transformed(
     shape: u32,
     descriptor: u32,
 ) -> Result<(), Fail> {
-    let frame = jpeg_frame(bytes).map_err(|error| refused(os, &error))?;
+    let frame = drawn_frame(os, bytes)?;
     let picture = Picture::of(
         flags,
         TRANSFORMED_TRANSLUCENCY_SHIFT,
@@ -306,7 +305,7 @@ fn plot_transformed(
     else {
         return Err(os.error(NOT_SCALING));
     };
-    plot(os, bytes, at, scale, picture)
+    plot(os, bytes, &frame, at, scale, picture)
 }
 
 /// The error a JPEG `lib/image` refuses gives: memory where the machine is
@@ -352,15 +351,10 @@ fn runs_on(bytes: &[u8]) -> bool {
 /// File `name` whole, read through a block of the RMA.
 fn file_bytes(os: &mut Os<'_>, name: u32) -> Result<Vec<u8>, Fail> {
     let length = super::file::file_length(os, name)?;
-    let block = os.rma_claim(length.max(1))?;
-    let read = (|| {
+    os.read_through_rma(length, |os, block| {
         let mut load = Regs::new([reason::LOAD, name, block, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        os.perform(X | FILE, &mut load)?;
-        os.read_vec(block, length as usize)
-    })();
-    let freed = os.rma_free(block);
-    let read = read?;
-    freed.map(|()| read)
+        os.perform(X | FILE, &mut load)
+    })
 }
 
 #[cfg(test)]

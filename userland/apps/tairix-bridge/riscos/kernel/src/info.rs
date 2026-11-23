@@ -385,7 +385,7 @@ impl Os<'_> {
     pub(crate) fn read_sys_info(&mut self, regs: &mut Regs) -> Result<(), Fail> {
         match regs.r[0] {
             0 => {
-                let pages = u32::from(self.read_cmos(cmos::SCREEN_SIZE)? & 0x7F);
+                let pages = u32::from(self.cmos_pages(cmos::SCREEN_SIZE)?);
                 let mut bytes = pages * PAGE_SIZE;
                 if bytes == 0 {
                     bytes = 160 * 1024;

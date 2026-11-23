@@ -19,8 +19,7 @@ use crate::shape::{Bounds, Point, FX};
 use crate::stroke::{lay_over, Blend, Change, Coat};
 use crate::tool::GradientShape;
 
-/// The 4×4 ordered-dither thresholds, out of 16.
-const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+use tairix_raster::dither::BAYER_4 as BAYER;
 
 /// The shares along a gradient a pixel can lie at: one for each byte value.
 const SHARES: usize = u8::MAX as usize + 1;

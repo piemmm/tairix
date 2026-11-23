@@ -621,7 +621,7 @@ impl MmioWindowMap {
         space: &mut AddressSpace<P>,
         region: MmioRegion,
     ) -> Result<(), MmioError> {
-        self.unmap_at(space, region.virt)
+        self.unmap_at(space, region.virt).map(|_| ())
     }
 
     /// Tear down the mapping based at `virt` (the base [`MmioRegion::virt`] a
@@ -632,6 +632,8 @@ impl MmioWindowMap {
     /// handed userland (not the whole opaque [`MmioRegion`]), so it releases
     /// by base; [`Self::unmap_from`] is the by-region wrapper over this.
     ///
+    /// Returns the number of data pages the mapping held.
+    ///
     /// # Errors
     ///
     /// * [`MmioError::UnknownRegion`] — `virt` is not a live mapping of this
@@ -641,7 +643,7 @@ impl MmioWindowMap {
         &mut self,
         space: &mut AddressSpace<P>,
         virt: VirtAddr,
-    ) -> Result<(), MmioError> {
+    ) -> Result<usize, MmioError> {
         let (leading_guard_slot, data_pages) = self.locate(virt).ok_or(MmioError::UnknownRegion)?;
         let first_data_slot = leading_guard_slot + 1;
 
@@ -660,7 +662,7 @@ impl MmioWindowMap {
         // The run's record leaves last: every slot it held, guards included,
         // becomes free space the next placement can use.
         self.regions.remove(leading_guard_slot);
-        Ok(())
+        Ok(data_pages)
     }
 
     /// Unmap from `space` every window whose physical span `keep` refuses,

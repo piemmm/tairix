@@ -8,14 +8,15 @@ use alloc::vec::Vec;
 use tairix_colour::Rgb;
 use tairix_image::{SPRITE_HEADER_LEN, SPRITE_PALETTE_ENTRY_LEN};
 use tairix_riscos_kernel::os::{len32, Entry, Fail, Os, Regs};
-use tairix_vdu::mode::{var, Flags};
+use tairix_vdu::mode::var;
 
 use super::calibration::Calibration;
 use super::matching::{self, Loadings, Look};
 use super::CURRENT;
 use crate::colour::{gcol_of_number, Direct};
 use crate::palette::{
-    default_words, grouped_colours, kind, reason, EIGHT_BIT_COLOURS, GROUP_BASES, PALETTE_V,
+    default_words, grouped_colours, is_default_256, kind, reason, EIGHT_BIT_COLOURS, GROUP_BASES,
+    PALETTE_V, VIDC1_CHANNEL,
 };
 use crate::screen::Named;
 use crate::sprite::{Area, Naming, Sprite, UNKNOWN_MODE};
@@ -39,7 +40,7 @@ impl Holding {
     const fn of(log2_bpp: u32, ncolour: u32, flags: u32) -> Self {
         match log2_bpp {
             0..=2 => Self::Palette(log2_bpp),
-            3 if Flags::new(flags).has(Flags::FULL_PALETTE) => Self::Full,
+            3 if crate::mode::full_palette(log2_bpp, flags) => Self::Full,
             3 => Self::Grouped,
             _ => Self::Direct(Direct::of_parts(log2_bpp, ncolour, flags)),
         }
@@ -112,7 +113,7 @@ impl Against {
             words.len().min(EIGHT_BIT_COLOURS)
         };
         let default_256 = matches!(holding, Holding::Grouped | Holding::Full)
-            && matching::is_default_256(&colours[..len]);
+            && is_default_256(&colours[..len], VIDC1_CHANNEL);
         Self {
             holding,
             colours,
@@ -218,6 +219,22 @@ pub(crate) fn holding_of(os: &mut Os<'_>, mode: u32) -> Result<Holding, Fail> {
         [Some(log2_bpp), Some(ncolour), Some(flags)] => Ok(Holding::of(log2_bpp, ncolour, flags)),
         _ => Err(os.error(UNKNOWN_MODE)),
     }
+}
+
+/// A mode of `log2_bpp`'s default palette as ColourTrans matches against
+/// it, its flashing colours in their first state.
+#[cfg(test)]
+pub(crate) fn default_against(log2_bpp: u32) -> Against {
+    let holding = match log2_bpp {
+        0..=2 => Holding::Palette(log2_bpp),
+        _ => Holding::Grouped,
+    };
+    let entries = holding.entries().min(Holding::Grouped.entries());
+    let words: Vec<u32> = crate::palette::default_colours(log2_bpp, entries)
+        .iter()
+        .map(|colour| colour.riscos_word())
+        .collect();
+    Against::of_words(holding, &words)
 }
 
 /// Mode `mode`'s colours with `words`, a sprite's palette: a 256-colour
@@ -364,10 +381,14 @@ fn current_mode(os: &mut Os<'_>) -> Result<u32, Fail> {
 
 /// `sprite`'s palette, each entry's two states as held, or as RISC OS 5
 /// shows an eight-bit sprite's palette of fewer than 256: its first
-/// sixteen's colours made 256 as VIDC1 would, bare of their low bytes.
+/// sixteen's colours made 256 as VIDC1 would, bare of their low bytes. None
+/// for a sprite whose pixels name no entry it holds.
 pub(crate) fn sprite_pairs(os: &mut Os<'_>, sprite: &Sprite) -> Result<Vec<[u32; 2]>, Fail> {
-    let entries = sprite.named_entries();
+    let entries = sprite.named_entries(os)?;
     let mut pairs = Vec::new();
+    if entries == 0 {
+        return Ok(pairs);
+    }
     if pairs.try_reserve_exact(Holding::Full.colours()).is_err() {
         return Err(os.no_memory());
     }

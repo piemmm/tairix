@@ -73,7 +73,7 @@ static MODULES: [&Builtin; 1] = [&CODED];
 /// A session with [`CODED`] and an application, and the code's address.
 fn coded() -> (Session, u32) {
     let mut s = boot_with(&RISC_OS_5, tairix_tz::Zone::UTC, 0, &MODULES);
-    s.application(Bits::Bit32, 0x1_0000);
+    s.application(Bits::Bit32, crate::testkit::SLOT_BYTES);
     let code = s.kernel.os().guest_code_of(&CODED).expect("active");
     (s, code)
 }

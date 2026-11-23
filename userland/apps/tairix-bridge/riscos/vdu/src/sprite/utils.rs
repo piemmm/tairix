@@ -316,10 +316,8 @@ fn list(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     if count == 0 {
         return os.write_line(b"The system sprite area holds no sprites");
     }
-    for number in 1..=count {
-        let Some(sprite) = area.nth(os, number)? else {
-            break;
-        };
+    let mut walk = area.walk(os)?;
+    while let Some(sprite) = walk.next(os)? {
         os.write_line(sprite.name.as_bytes())?;
     }
     Ok(())
@@ -328,13 +326,11 @@ fn list(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
 /// `*SInfo`: the area's size, free space and count.
 fn info(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     let block = Area::system(os)?.block(os)?;
-    let mut digits = [0; 12];
+    let mut digits = [0; 20];
     let mut line = |os: &mut Os<'_>, value: u32, words: &[u8]| -> Result<(), Fail> {
-        let number = tairix_util::fmt::format_usize(value as usize, &mut digits)
-            .as_bytes()
-            .to_vec();
+        let number = tairix_util::fmt::format_u64(u64::from(value), &mut digits);
         os.write_text(b"  ")?;
-        os.write_text(&number)?;
+        os.write_text(number.as_bytes())?;
         os.write_line(words)
     };
     os.write_line(b"The system sprite area:")?;

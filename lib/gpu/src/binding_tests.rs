@@ -1,6 +1,7 @@
 //! Bind set layouts, bind sets, pipeline layouts and shader modules on the
 //! software device.
 
+use crate::device::as_software;
 use alloc::sync::Arc;
 
 use tairix_abi::time::MonotonicClock;
@@ -810,7 +811,7 @@ fn a_pipeline_layout_is_what_an_entry_point_is_agreed_against() {
         let layout = context
             .create_pipeline_layout(sets, push)
             .expect("a pipeline layout");
-        let model = context.shared.model.lock();
+        let model = as_software(&context.host).model.lock();
         let state = model
             .live(context.key)
             .expect("live")

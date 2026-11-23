@@ -5,16 +5,14 @@
 
 mod common;
 
-use std::sync::LazyLock;
-
-use common::SELECTOR_AT;
-use tairix_fscopy::fixture::Tree;
-use tairix_riscos_filing::session::{command, modules_with, session, Setup, DISC, SLOT_BYTES};
-use tairix_riscos_kernel::module::Builtin;
+use common::{with_files, SELECTOR_AT};
+use tairix_riscos_filing::session::command;
 use tairix_riscos_kernel::os::Regs;
 use tairix_riscos_kernel::service::MODE_EXTENSION;
+use tairix_riscos_kernel::swi::chunk::SCREEN_MODES;
 use tairix_riscos_kernel::swi::os::SERVICE_CALL;
 use tairix_riscos_kernel::swi::X;
+use tairix_vdu::mode::var::{LOG2_BPP, X_EIG, X_WIND_LIMIT, Y_EIG, Y_WIND_LIMIT};
 
 const MONITOR: &[u8] =
     b"file_format:1\nmonitor_title:Test\nstartmode\nmode_name:VGA\nx_res:640\ny_res:480\n\
@@ -22,21 +20,9 @@ pixel_rate:25175\nh_timings:96,40,8,640,8,8\nv_timings:2,25,8,480,8,2\nsync_pol:
 /// A selector for the file's mode at eight bits a pixel, any frame rate.
 const SELECTOR: [u32; 6] = [1, 640, 480, 3, u32::MAX, u32::MAX];
 
-static MODULES: LazyLock<Vec<&'static Builtin>> =
-    LazyLock::new(|| modules_with(&[&tairix_riscos_vdu::MODULES]));
-
 #[test]
 fn a_loaded_file_answers_for_its_modes_and_a_wild_selector_is_passed_on() {
-    let tree = Tree::new()
-        .dir(DISC)
-        .file(&format!("{DISC}/Monitor,fff"), MONITOR);
-    let mut session = session(&Setup {
-        vdu: Some(tairix_riscos_vdu::DRIVERS),
-        modules: MODULES.as_slice(),
-        bytes: SLOT_BYTES,
-        keys: b"",
-        disc: Some(&tree),
-    });
+    let mut session = with_files(&[("Monitor", MONITOR)]);
     let os = &mut session.kernel.os();
     command(os, "LoadModeFile HostFS:$.Monitor").expect("the file loaded");
     for (i, word) in (0u32..).zip(SELECTOR) {
@@ -65,25 +51,10 @@ fn a_loaded_file_answers_for_its_modes_and_a_wild_selector_is_passed_on() {
 }
 
 /// ScreenModes' SWIs and the first offset past them.
-const READ_INFO: u32 = 0x4_87C0;
-const ENUMERATE_AUDIO_FORMATS: u32 = 0x4_87C1;
-const FEATURES: u32 = 0x4_87C2;
-const PAST_SWIS: u32 = 0x4_87C3;
-
-/// A session whose disc holds `files`, each a name and its text.
-fn with_files(files: &[(&str, &[u8])]) -> tairix_riscos_filing::session::Session {
-    let mut tree = Tree::new().dir(DISC);
-    for (name, text) in files {
-        tree = tree.file(&format!("{DISC}/{name},fff"), text);
-    }
-    session(&Setup {
-        vdu: Some(tairix_riscos_vdu::DRIVERS),
-        modules: MODULES.as_slice(),
-        bytes: SLOT_BYTES,
-        keys: b"",
-        disc: Some(&tree),
-    })
-}
+const READ_INFO: u32 = SCREEN_MODES;
+const ENUMERATE_AUDIO_FORMATS: u32 = SCREEN_MODES + 1;
+const FEATURES: u32 = SCREEN_MODES + 2;
+const PAST_SWIS: u32 = SCREEN_MODES + 3;
 
 /// SWI `number` with R0 to R2 `low`: what it leaves in R0 to R2, or its
 /// error's number.
@@ -198,4 +169,114 @@ fn a_reinitialised_screenmodes_closes_the_messages_its_errors_opened() {
     };
     let first = cycle();
     assert_eq!(cycle(), first, "the RMA as it was");
+}
+
+#[test]
+fn a_teletext_mode_two_banks_of_which_pass_a_word_is_refused_not_a_crash() {
+    let huge = b"file_format:1\nmonitor_title:Huge\nstartmode\nmode_name:Huge\nx_res:16384\n\
+y_res:16384\npixel_rate:250000\nh_timings:96,40,8,16384,8,8\nv_timings:2,25,8,16384,8,2\n\
+sync_pol:3\nendmode\n";
+    let mut session = with_files(&[("Huge", huge)]);
+    let os = &mut session.kernel.os();
+    command(os, "LoadModeFile HostFS:$.Huge").expect("the file loaded");
+    let mut shadow = Regs::new([114, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    os.perform(X | tairix_riscos_kernel::swi::os::BYTE, &mut shadow)
+        .expect("the shadow bank asked for");
+    let selector = [
+        1,
+        16384,
+        16384,
+        2,
+        u32::MAX,
+        0,
+        2,
+        6,
+        65536,
+        1,
+        39,
+        2,
+        24,
+        u32::MAX,
+    ];
+    for (i, word) in (0u32..).zip(selector) {
+        os.write_word(SELECTOR_AT + 4 * i, word).expect("written");
+    }
+    let mut regs = Regs::new([0, SELECTOR_AT, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let selected = os.perform(X | tairix_riscos_kernel::swi::os::SCREEN_MODE, &mut regs);
+    assert!(
+        matches!(selected, Err(tairix_riscos_kernel::os::Fail::Error(_))),
+        "{selected:?}"
+    );
+}
+
+#[test]
+fn a_screen_loaded_from_a_newer_sprite_takes_a_mode_of_its_pixels() {
+    use tairix_riscos_kernel::swi::os::{READ_MODE_VARIABLE, SCREEN_MODE, SPRITE_OP};
+    let mut session = with_files(&[]);
+    let os = &mut session.kernel.os();
+    for (i, word) in (0u32..).zip([1, 640, 480, 5, u32::MAX, u32::MAX]) {
+        os.write_word(SELECTOR_AT + 4 * i, word).expect("written");
+    }
+    call(os, SCREEN_MODE, [0, SELECTOR_AT, 0]).expect("32 bits a pixel");
+    let name = SELECTOR_AT + 0x100;
+    os.write_bytes(name, b"HostFS:$.Shot\0").expect("written");
+    call(os, SPRITE_OP, [2, 0, name]).expect("saved");
+    call(os, SCREEN_MODE, [0, 12, 0]).expect("mode 12");
+    call(os, SPRITE_OP, [3, 0, name]).expect("loaded");
+    let read = |os: &mut tairix_riscos_kernel::os::Os<'_>, variable: u32| {
+        call(os, READ_MODE_VARIABLE, [u32::MAX, variable, 0]).expect("read")[2]
+    };
+    let (x_eig, y_eig, log2_bpp, right, top) = (X_EIG, Y_EIG, LOG2_BPP, X_WIND_LIMIT, Y_WIND_LIMIT);
+    assert_eq!(
+        [x_eig, y_eig, log2_bpp, right, top].map(|variable| read(os, variable)),
+        [1, 1, 5, 639, 479]
+    );
+}
+
+#[test]
+fn a_numbered_mode_on_a_file_s_monitor_is_its_nearest_mode_at_that_depth() {
+    use tairix_riscos_kernel::swi::os::{READ_MODE_VARIABLE, SCREEN_MODE};
+    let mut session = with_files(&[("Monitor", MONITOR)]);
+    let os = &mut session.kernel.os();
+    command(os, "LoadModeFile HostFS:$.Monitor").expect("the file loaded");
+    call(os, SCREEN_MODE, [0, 12, 0]).expect("mode 12");
+    let read = |os: &mut tairix_riscos_kernel::os::Os<'_>, variable: u32| {
+        call(os, READ_MODE_VARIABLE, [u32::MAX, variable, 0]).expect("read")[2]
+    };
+    let (log2_bpp, right, top) = (LOG2_BPP, X_WIND_LIMIT, Y_WIND_LIMIT);
+    assert_eq!(
+        [log2_bpp, right, top].map(|variable| read(os, variable)),
+        [2, 639, 479],
+        "the file's 640 by 480, at mode 12's depth"
+    );
+}
+
+#[test]
+fn a_screen_saved_with_a_full_palette_is_loaded_with_one() {
+    use tairix_riscos_kernel::swi::os::{READ_MODE_VARIABLE, READ_PALETTE, SCREEN_MODE, SPRITE_OP};
+    let mut session = with_files(&[]);
+    common::select_full_palette(&mut session).expect("256 colours, each its own");
+    common::vdu(&mut session, &[19, 200, 16, 0x12, 0x34, 0x56]).expect("colour 200 set");
+    let os = &mut session.kernel.os();
+    let name = SELECTOR_AT + 0x100;
+    os.write_bytes(name, b"HostFS:$.Full\0").expect("written");
+    let mut save = Regs::new([2, 0, name, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    os.perform(X | SPRITE_OP, &mut save)
+        .expect("saved with its palette");
+    call(os, SCREEN_MODE, [0, 12, 0]).expect("mode 12");
+    call(os, SPRITE_OP, [3, 0, name]).expect("loaded");
+    let flags = call(
+        os,
+        READ_MODE_VARIABLE,
+        [u32::MAX, tairix_vdu::mode::var::MODE_FLAGS, 0],
+    )
+    .expect("read")[2];
+    let full = tairix_vdu::mode::Flags::FULL_PALETTE.bits();
+    assert_eq!(flags & full, full, "a full palette selected");
+    let colour = call(os, READ_PALETTE, [200, 16, 0]).expect("read")[2];
+    assert_eq!(
+        colour & 0xFFFF_FF00,
+        0x5634_1200,
+        "colour 200 as it was saved"
+    );
 }

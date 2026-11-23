@@ -26,7 +26,7 @@ defines.
 the eight line shapes from `plot::LINE` to `plot::DOTTED_WITHOUT_ENDS`, the
 point, the horizontal line fills, the triangle, rectangle and parallelogram,
 the two flood fills, circles, arcs, segments and sectors, the block move and
-copy, and ellipses — and in its low three whether the point is given
+copy, ellipses and the sprite plot (`plot::SPRITE`) — and in its low three whether the point is given
 absolutely (`plot::ABSOLUTE`) and which colour plots (`plot::INK`): none, the
 foreground, inverted or the background.
 
@@ -37,6 +37,9 @@ variables `OS_ReadModeVariable` reads for it: its pixels and text size, eigen
 factors, `Log2BPP` and `Log2BPC`, `NColour`, `LineLength`, `ScreenSize`,
 `YShftFactor` and `ModeFlags`. `mode::numbered` answers a mode by number, and
 `None` past 53, whose depth only the module that defined it knows.
+`mode::repeated` repeats a value's low bits across a wider field, a word at
+most: how a mode doubling its pixels holds each one, and how a colour fills a
+word of pixels.
 
 `mode::var` numbers the mode variables as `OS_ReadModeVariable` takes them,
 and `mode::vdu_var` the text window's size as `OS_ReadVduVariables` does.

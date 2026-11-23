@@ -693,9 +693,11 @@ pub fn build_framebuffer_bundle(
 /// carves the frames and console the device reads under its node's DMA grant
 /// (`CAP_MEM_DMA`), answers every command on the device interrupt
 /// (`CAP_IRQ_BIND`), grants the frames to the presenter (`CAP_SHM`), binds the
-/// reserved `DISPLAY_ENDPOINT` (`CAP_IPC_BIND_PRIVILEGED`) and records its
-/// decisions (`CAP_LOG_EMIT`). Carries `tairix_drv_display_gpu_virtio::BIND_KEYS`,
-/// so it autoloads against a discovered virtio GPU on either bus.
+/// reserved `DISPLAY_ENDPOINT` (`CAP_IPC_BIND_PRIVILEGED`), publishes the GPU
+/// it serves where the device takes Venus work (`CAP_HW_EMIT`) and records
+/// its decisions (`CAP_LOG_EMIT`). Carries
+/// `tairix_drv_display_gpu_virtio::BIND_KEYS`, so it autoloads against a
+/// discovered virtio GPU on either bus.
 ///
 /// # Errors
 ///
@@ -709,6 +711,31 @@ pub fn build_virtio_gpu_bundle(
         ctx,
         arch,
         "tairix-drv-display-gpu-virtio",
+        tairix_drv_display_gpu_virtio::REQUIRED_CAPABILITIES,
+        tairix_drv_display_gpu_virtio::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the Venus check (`plans/GPU.md` GP5.2, GP5.3): the fixture
+/// driver `tests/integration/venus_check_program`, which brings a virtio GPU up
+/// as the display driver does and so binds it with that driver's table and
+/// runs with its capabilities. Its `Run` binary is behind the crate's `program` feature,
+/// because the vertical's guest kernel links its library.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_venus_check_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    sign_bundle(
+        ctx,
+        arch,
+        "tairix-test-venus-check",
+        &["program"],
         tairix_drv_display_gpu_virtio::REQUIRED_CAPABILITIES,
         tairix_drv_display_gpu_virtio::BIND_KEYS,
         profile,
@@ -1507,6 +1534,36 @@ pub fn virtio_gpu_driver_store_files(
                 store_file(
                     VIRTIO_GPU_STORE_PATH,
                     build_virtio_gpu_bundle(ctx, arch, profile)?,
+                ),
+            )
+        })
+        .as_ref()
+        .map(Vec::as_slice)
+        .map_err(Clone::clone)
+}
+
+/// The autoload set with the Venus check in the display driver's place: the
+/// disk of the Venus vertical. Built once per xtask process and memoised.
+///
+/// # Errors
+///
+/// As [`build_venus_check_bundle`].
+pub fn venus_driver_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    FILES[memo_slot(arch, profile)]
+        .get_or_init(|| {
+            autoload_set(
+                ctx,
+                arch,
+                profile,
+                store_file(
+                    VIRTIO_GPU_STORE_PATH,
+                    build_venus_check_bundle(ctx, arch, profile)?,
                 ),
             )
         })

@@ -82,7 +82,7 @@ use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
 use tairix_abi::driver::filesystem::DirVisit;
 use tairix_abi::driver::filesystem::NodeKind;
 use tairix_abi::driver::filesystem::VolumeStats;
-use tairix_abi::driver::DriverEnding;
+use tairix_abi::driver::{DriverEnding, RegionCaching};
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{HwResource, HwResourceKind, NodeEndpointBlock};
 use tairix_abi::input::{KeyEdge, PointerInput, POINTER_EDGE_UNTIMED};
@@ -150,8 +150,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::aspace::{
-    fold_region_pages, pages_spanning, AddressSpaceRegistry, FaultAccess, FaultLocality,
-    FileRegion, LoadedDriver, OpenBacking, SnapshotRetire,
+    fold_region_pages, pages_spanning, window_pages, AddressSpaceRegistry, FaultAccess,
+    FaultLocality, FileRegion, LoadedDriver, OpenBacking, SnapshotRetire,
 };
 use crate::audit::AuditEvent;
 use crate::backing::{Backing, Unbacked};
@@ -10141,6 +10141,7 @@ where
         handle: u64,
         offset: u64,
         len: usize,
+        caching: Option<RegionCaching>,
     ) -> SyscallResult {
         // step 2 (capability) was enforced by the dispatcher: the
         // `mmio_map` spec carries `CAP_MMIO_MAP`. Step 3 (validate every
@@ -10177,12 +10178,13 @@ where
             return Err(Errno::PermissionDenied);
         }
         // The memory type follows the grant: coherent framebuffer RAM stays
-        // write-back, a display aperture requests write combining, and every
-        // register window is Device-strongly-ordered. Mapping a framebuffer
-        // as Device would force each pixel store through a separate ordered
-        // transaction; mapping coherent guest RAM as WC would needlessly
-        // discard its cacheability.
-        let kind = MmioMemoryKind::from_resource(&resource)?;
+        // write-back, a display aperture requests write combining, every
+        // register window is Device-strongly-ordered, and a memory region's
+        // part takes the caching its device states for it. Mapping a
+        // framebuffer as Device would force each pixel store through a
+        // separate ordered transaction; mapping coherent guest RAM as WC would
+        // needlessly discard its cacheability.
+        let kind = MmioMemoryKind::of_mapping(&resource, caching)?;
         // Mechanism: the installed producer maps only that region — with the
         // memory type `kind` selects, never executable — into the caller's
         // own live address space and returns its base virtual address. The
@@ -10194,7 +10196,8 @@ where
         // pages into the registry snapshot so a later copy through the
         // driver's space sees it. Only on success.
         if let Ok(base) = result {
-            self.publish_region_mapping(caller.process(), base, pages_spanning(len as u64));
+            let (first, pages) = window_pages(base, len as u64);
+            self.publish_region_mapping(caller.process(), first, pages);
             if self
                 .aspaces
                 .read()
@@ -10207,6 +10210,18 @@ where
             }
         }
         result
+    }
+
+    fn mmio_unmap(&self, caller: &CallerContext<'_>, base: u64) -> SyscallResult {
+        // No capability: this takes back only a window of the caller's own
+        // (the `shm_unmap` posture). The facility unmaps exactly the window
+        // recorded at `base` in the running caller's own device window, and a
+        // `base` naming none fails closed `NotFound` with nothing changed.
+        let pages = self.mmio_map_facility.unmap_window(base)?;
+        // The window's pages leave the snapshot the copy path walks.
+        let (first, _) = window_pages(base, 0);
+        self.publish_region_teardown(caller.process(), first, pages);
+        Ok(0)
     }
 
     fn port_read(
@@ -37059,19 +37074,20 @@ mod tests {
         fn map_device_window(&mut self, _phys: u64, _len: usize) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
-        fn map_framebuffer_window(
+        fn map_write_combining_window(
             &mut self,
             _phys: u64,
             _len: usize,
         ) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
         }
-        fn map_writeback_framebuffer_window(
-            &mut self,
-            _phys: u64,
-            _len: usize,
-        ) -> Result<u64, LiveSpaceError> {
+        fn map_writeback_window(&mut self, _phys: u64, _len: usize) -> Result<u64, LiveSpaceError> {
             Err(LiveSpaceError::Anon(AnonError::OutOfMemory))
+        }
+        fn unmap_device_window(&mut self, _base: u64) -> Result<u64, LiveSpaceError> {
+            Err(LiveSpaceError::Mmio(
+                tairix_kernel_mem::MmioError::UnknownRegion,
+            ))
         }
         fn retain_device_windows(
             &mut self,
@@ -37956,6 +37972,11 @@ mod tests {
             *self.last_kind.lock() = Some(kind);
             self.ret
         }
+
+        fn unmap_window(&self, base: u64) -> Result<u64, Errno> {
+            *self.last.lock() = Some((base, 0));
+            self.ret.map(|_| 2)
+        }
     }
 
     /// Build the shared handler test scaffolding (scheduler, registries,
@@ -38001,7 +38022,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        assert_eq!(h.mmio_map(&ctx, 7, 0, 0x10), Err(Errno::NotFound));
+        assert_eq!(h.mmio_map(&ctx, 7, 0, 0x10, None), Err(Errno::NotFound));
     }
 
     /// The grant is owner-bound: a handle minted for another **process**, or
@@ -38047,7 +38068,7 @@ mod tests {
             caps: &caps,
         };
         assert_eq!(
-            h.mmio_map(&owner, handle + 1, 0, 0x10),
+            h.mmio_map(&owner, handle + 1, 0, 0x10, None),
             Err(Errno::NotFound)
         );
 
@@ -38060,7 +38081,10 @@ mod tests {
             task_id: SecTaskId(3),
             caps: &foreign_caps,
         };
-        assert_eq!(h.mmio_map(&foreign, handle, 0, 0x10), Err(Errno::NotFound));
+        assert_eq!(
+            h.mmio_map(&foreign, handle, 0, 0x10, None),
+            Err(Errno::NotFound)
+        );
 
         // Neither refusal touched the mapping mechanism.
         assert!(facility.last.lock().is_none());
@@ -38103,7 +38127,7 @@ mod tests {
             task_id: SecTaskId(42),
             caps: &caps,
         };
-        assert!(h.mmio_map(&sibling, handle, 0, 0x10).is_ok());
+        assert!(h.mmio_map(&sibling, handle, 0, 0x10, None).is_ok());
         assert!(facility.last.lock().is_some());
     }
 
@@ -38141,7 +38165,7 @@ mod tests {
         )
         .with_mmio_map_facility(facility);
 
-        assert_eq!(h.mmio_map(&ctx, handle, 0, 0x4000), Ok(0x9000_0000));
+        assert_eq!(h.mmio_map(&ctx, handle, 0, 0x4000, None), Ok(0x9000_0000));
         // Exactly the requested sub-region reached the mechanism — its base
         // is the grant base plus the offset, and its length the request,
         // never a caller-supplied physical address (here offset 0, full
@@ -38178,6 +38202,12 @@ mod tests {
             _kind: MmioMemoryKind,
         ) -> Result<u64, Errno> {
             self.revoke_then(|live| live.map_device_window(phys_base, len))
+        }
+
+        fn unmap_window(&self, base: u64) -> Result<u64, Errno> {
+            crate::kthread::with_current_live_space(self.cpu, |live| live.unmap_device_window(base))
+                .ok_or(Errno::NotImplemented)?
+                .map_err(crate::live_producer::live_errno)
         }
     }
 
@@ -38281,7 +38311,10 @@ mod tests {
         )
         .with_mmio_map_facility(facility);
 
-        assert_eq!(h.mmio_map(&ctx, handle, 0, 0x1000), Err(Errno::NotFound));
+        assert_eq!(
+            h.mmio_map(&ctx, handle, 0, 0x1000, None),
+            Err(Errno::NotFound)
+        );
         let mut windows = 0;
         space
             .with(|live| {
@@ -38396,16 +38429,101 @@ mod tests {
         )
         .with_mmio_map_facility(facility);
 
-        assert_eq!(h.mmio_map(&ctx, write_back, 0, 32), Ok(0xA000_0000));
+        let region = aspaces
+            .write()
+            .mint_grant(
+                ProcessId(2),
+                HwResource::memory_region(0x1_0000_0000, 0x40_0000, 1),
+            )
+            .unwrap();
+        assert_eq!(h.mmio_map(&ctx, write_back, 0, 32, None), Ok(0xA000_0000));
+        assert_eq!(*facility.last_kind.lock(), Some(MmioMemoryKind::WriteBack));
+        assert_eq!(
+            h.mmio_map(&ctx, write_combine, 0, 32, None),
+            Ok(0xA000_0000)
+        );
         assert_eq!(
             *facility.last_kind.lock(),
-            Some(MmioMemoryKind::FramebufferWriteBack)
+            Some(MmioMemoryKind::WriteCombine)
         );
-        assert_eq!(h.mmio_map(&ctx, write_combine, 0, 32), Ok(0xA000_0000));
+        for (caching, kind) in [
+            (RegionCaching::WriteBack, MmioMemoryKind::WriteBack),
+            (RegionCaching::WriteCombine, MmioMemoryKind::WriteCombine),
+            (RegionCaching::Uncached, MmioMemoryKind::Device),
+        ] {
+            assert_eq!(
+                h.mmio_map(&ctx, region, 0x1000, 0x2000, Some(caching)),
+                Ok(0xA000_0000)
+            );
+            assert_eq!(*facility.last_kind.lock(), Some(kind), "{caching:?}");
+            assert_eq!(*facility.last.lock(), Some((0x1_0000_1000, 0x2000)));
+        }
         assert_eq!(
-            *facility.last_kind.lock(),
-            Some(MmioMemoryKind::FramebufferWriteCombine)
+            h.mmio_map(
+                &ctx,
+                region,
+                0x3F_F000,
+                0x2000,
+                Some(RegionCaching::WriteBack)
+            ),
+            Err(Errno::OutOfRange),
+            "a part past the region"
         );
+        *facility.last.lock() = None;
+        assert_eq!(
+            h.mmio_map(&ctx, region, 0x1000, 0x2000, None),
+            Err(Errno::NotSupported),
+            "a region's part is mapped only with the caching its device states"
+        );
+        assert_eq!(
+            h.mmio_map(&ctx, write_back, 0, 32, Some(RegionCaching::Uncached)),
+            Err(Errno::NotSupported),
+            "only a memory region takes a caching"
+        );
+        assert_eq!(
+            *facility.last.lock(),
+            None,
+            "a refused caching maps nothing"
+        );
+    }
+
+    /// The unmap reaches the mechanism with the caller's base, answers what
+    /// it answers, and with no mechanism wired unmaps nothing.
+    #[test]
+    fn mmio_unmap_hands_the_base_to_the_mechanism_and_fails_closed_without_one() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let unwired = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        assert_eq!(
+            unwired.mmio_unmap(&ctx, 0x4000_1000),
+            Err(Errno::NotImplemented)
+        );
+        for (ret, answer) in [
+            (Ok(0xA000_0000), Ok(0)),
+            (Err(Errno::NotFound), Err(Errno::NotFound)),
+        ] {
+            let facility: &'static RecordingMmioFacility =
+                crate::forever(Box::new(RecordingMmioFacility {
+                    last: tairix_sync::SpinLock::new(None),
+                    last_kind: tairix_sync::SpinLock::new(None),
+                    ret,
+                }));
+            let h = KernelSyscallHandlers::new(
+                &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+            )
+            .with_mmio_map_facility(facility);
+            assert_eq!(h.mmio_unmap(&ctx, 0x4000_1100), answer);
+            assert_eq!(*facility.last.lock(), Some((0x4000_1100, 0)));
+        }
     }
 
     /// A valid, owned grant whose mechanism is unwired holds
@@ -38435,7 +38553,7 @@ mod tests {
         );
 
         assert_eq!(
-            h.mmio_map(&ctx, handle, 0, 0x4000),
+            h.mmio_map(&ctx, handle, 0, 0x4000, None),
             Err(Errno::NotImplemented)
         );
     }
@@ -38478,7 +38596,10 @@ mod tests {
         )
         .with_mmio_map_facility(facility);
 
-        assert_eq!(h.mmio_map(&ctx, handle, 0, 0x10), Err(Errno::OutOfRange));
+        assert_eq!(
+            h.mmio_map(&ctx, handle, 0, 0x10, None),
+            Err(Errno::OutOfRange)
+        );
         // The wrong-kind grant was refused before the mechanism ran.
         assert!(facility.last.lock().is_none());
     }
@@ -38527,7 +38648,7 @@ mod tests {
         // A 4 KiB BAR 0x3D50_0000 into the window maps exactly 4 KiB at the
         // absolute base `0x6_0000_0000 + 0x3D50_0000` — never the 1 GiB grant.
         assert_eq!(
-            h.mmio_map(&ctx, handle, 0x3D50_0000, 0x1000),
+            h.mmio_map(&ctx, handle, 0x3D50_0000, 0x1000, None),
             Ok(0x9000_0000)
         );
         assert_eq!(*facility.last.lock(), Some((0x6_3D50_0000, 0x1000)));
@@ -38536,7 +38657,7 @@ mod tests {
         // mechanism (fail closed).
         *facility.last.lock() = None;
         assert_eq!(
-            h.mmio_map(&ctx, handle, 0x3FFF_F000, 0x2000),
+            h.mmio_map(&ctx, handle, 0x3FFF_F000, 0x2000, None),
             Err(Errno::OutOfRange)
         );
         assert!(facility.last.lock().is_none());
@@ -47591,11 +47712,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            h.mmio_map(&ctx, around, 0x1_0000, 0x1000),
+            h.mmio_map(&ctx, around, 0x1_0000, 0x1000, None),
             Err(Errno::PermissionDenied)
         );
         assert_eq!(
-            h.mmio_map(&ctx, around, 0, 0x1000),
+            h.mmio_map(&ctx, around, 0, 0x1000, None),
             Err(Errno::NotImplemented),
             "a window beside the unit reaches the mechanism"
         );
@@ -50021,6 +50142,104 @@ mod tests {
 
         // Cleanup so the global region registry does not leak across tests.
         let _ = crate::sharedreg::unmap(facility, ProcessId(region_owner), owner_va);
+    }
+
+    /// A device window publishes its own pages even where its base keeps its
+    /// block's offset into a page — a virtio-MMIO slot, a block placed
+    /// mid-page — and its unmap takes exactly those pages back; neither walks
+    /// the caller's whole space.
+    ///
+    /// An unaligned base once named no page, so every such map rebuilt the
+    /// snapshot from the resident set.
+    #[test]
+    fn mmio_map_and_unmap_publish_only_the_windows_own_pages() {
+        const RESIDENT_PAGES: usize = 64;
+        const RESIDENT_BASE: u64 = 0x9000_0000;
+        const WINDOW_VA: u64 = 0x4000_1000;
+
+        let cpu = crate::test_boot::claim_cpu();
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::on_cpu(cpu));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let driver = crate::test_boot::claim_task();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(driver, &[CapabilityId::MMIO_MAP], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(driver),
+            caps: &caps,
+        };
+        let (space, physmap) = frozen_call_aspace(b"");
+        aspaces
+            .write()
+            .register(ProcessId(driver), space, physmap)
+            .expect("registration succeeds");
+
+        let first = Page::from_addr(VirtAddr::new(WINDOW_VA)).expect("aligned");
+        let second = Page::from_addr(VirtAddr::new(WINDOW_VA + PAGE_SIZE as u64)).expect("aligned");
+        let mut live_space = big_live_space(RESIDENT_BASE, RESIDENT_PAGES, first);
+        live_space
+            .map(
+                second,
+                Frame(400),
+                MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+            )
+            .expect("map");
+        let (live, observer) = PublishedLive::published(live_space);
+        let _guard = crate::kthread::publish_live_space_for_test(cpu, live);
+
+        // A block 0x200 into its page spans two of them.
+        let handle = aspaces
+            .write()
+            .mint_grant(ProcessId(driver), HwResource::mmio(0xFE00_0200, 0x1000))
+            .unwrap();
+        let facility: &'static RecordingMmioFacility =
+            crate::forever(Box::new(RecordingMmioFacility {
+                last: tairix_sync::SpinLock::new(None),
+                last_kind: tairix_sync::SpinLock::new(None),
+                ret: Ok(WINDOW_VA + 0x200),
+            }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_mmio_map_facility(facility);
+
+        assert_eq!(
+            h.mmio_map(&ctx, handle, 0, 0x1000, None),
+            Ok(WINDOW_VA + 0x200)
+        );
+        let snapshot = || {
+            let held = aspaces.read();
+            let (space, _) = held.resolve(ProcessId(driver)).expect("registered");
+            (
+                space.translate(first).is_some(),
+                space.translate(second).is_some(),
+                space.mapped_pages(),
+            )
+        };
+        assert_eq!(
+            snapshot(),
+            (true, true, 4),
+            "both of the window's pages joined the call window's two"
+        );
+        assert_eq!(h.mmio_unmap(&ctx, WINDOW_VA + 0x200), Ok(0));
+        assert_eq!(
+            snapshot(),
+            (false, false, 2),
+            "the unmapped window's pages left the snapshot"
+        );
+        // SAFETY: the published space is not borrowed here and this test is
+        // single-threaded.
+        assert_eq!(
+            unsafe { (*observer).freezes() },
+            0,
+            "neither the map nor the unmap walked the caller's whole space"
+        );
     }
 
     /// `shm_map` fails closed for a forged handle (`NotFound`) and for a grant

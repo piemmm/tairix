@@ -703,6 +703,21 @@ pub const TARGETS: &[Target] = &[
         spread: Spread::OneProcess,
     },
     Target {
+        package: "tairix-drvrt",
+        description: "the driver host's register windows, memory parts, DMA slabs and shared \
+                      buffer, each formed over a base its syscall seam answers, and a carve's \
+                      release record taken back once as its slab drops, on whichever thread",
+        features: &[],
+        scope: Scope::LibExcept {
+            skip: &["tests::a_kernel_mapping_base_becomes_a_pointer_at_that_address"],
+            reason: "it forms a pointer at an address the kernel answered, the crate's one \
+                     integer-to-pointer cast, kept to the production syscall adapter, which the \
+                     interpreter refuses under strict provenance; the host forms every window, \
+                     slab and slice over the mock's pointers instead",
+        },
+        spread: Spread::OneProcess,
+    },
+    Target {
         package: "tairix-arch-api",
         description: "the HAL's shared unsafe floor: the frame-pointer unwinder's walk over a \
                       hostile stack, the page-table reclaim walk, and the per-CPU and quiesce \
@@ -885,6 +900,15 @@ pub const TARGETS: &[Target] = &[
         description: "the split and packed rings' device-side views, which the mock device \
                       reaches by device address through each DMA slab's own pointer, and the \
                       bounce buffers' scrub of what a device held",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-kernel-virtio",
+        description: "the in-kernel DMA host's slabs, whose free re-enters the host through \
+                      the pointer each carries and finds its buffer by slot, and the register \
+                      windows the provisioning walks map over storage their mapper owns",
         features: &[],
         scope: Scope::AllTargets,
         spread: Spread::OneProcess,

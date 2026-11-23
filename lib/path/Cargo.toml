@@ -15,6 +15,9 @@ workspace = true
 # The filesystem ABI's path and name bounds, which the parser's own bounds
 # are by definition: a spelling no syscall would take is refused here too.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The one spelling of a byte as two hex digits, which a staging name's tag
+# is written in.
+tairix-util = { path = "../util", version = "=0.0.0" }
 
 [dev-dependencies]
 # The in-tree fuzz harness draws its inputs through the shared seed/budget

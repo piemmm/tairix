@@ -94,7 +94,7 @@ impl Ink {
 /// The furthest a point's pixels may lie from the screen's corner: far past
 /// any screen, near enough that sums and differences of a shape's points stay
 /// within a word.
-const REACH: i32 = 1 << 28;
+pub(crate) const REACH: i32 = 1 << 28;
 
 impl Vdu {
     /// A point in OS units from the origin, in pixels, held within
@@ -539,35 +539,12 @@ impl Vdu {
         }
         let (dx, dy) = (to.0 - corner.0, to.1 - corner.1);
         let canvas = self.canvas();
-        let across = (source.right - source.left + 1).cast_unsigned() as usize;
-        let lines = (source.top - source.bottom + 1).cast_unsigned() as usize;
-        let mut pixels = Vec::new();
-        if pixels.try_reserve_exact(across * lines).is_err() {
-            return Err(os.no_memory());
-        }
-        for y in source.bottom..=source.top {
-            canvas.pixels(
-                os,
-                canvas.row_of(y),
-                source.left.cast_unsigned(),
-                source.right.cast_unsigned(),
-                &mut pixels,
-            )?;
-        }
         let window = self.graphics.window;
-        if form & codes::INK == codes::BLOCK_MOVE {
-            let clear = Block::read(os, workspace::BACKGROUND_STORE)?;
-            self.draw_spans(
-                os,
-                rectangle(
-                    (source.left, source.bottom),
-                    (source.right, source.top),
-                    window,
-                ),
-                &clear,
-            )?;
-            cover(os, source)?;
-        }
+        let clear = if form & codes::INK == codes::BLOCK_MOVE {
+            Some(Block::read(os, workspace::BACKGROUND_STORE)?)
+        } else {
+            None
+        };
         let first = source.left + dx;
         let (left, right) = (
             first.max(window.left),
@@ -577,27 +554,62 @@ impl Vdu {
             (source.bottom + dy).max(window.bottom),
             (source.top + dy).min(window.top),
         );
-        if left > right || bottom > top {
-            return Ok(());
+        let shown = (left <= right && bottom <= top).then_some(bottom..=top);
+        let across = (source.right - source.left + 1).cast_unsigned() as usize;
+        let mut row = Vec::new();
+        if row.try_reserve_exact(across).is_err() {
+            return Err(os.no_memory());
         }
-        let skip = (left - first).cast_unsigned() as usize;
-        let take = (right - left + 1).cast_unsigned() as usize;
-        for y in bottom..=top {
-            let from = (y - dy - source.bottom).cast_unsigned() as usize * across + skip;
-            canvas.put_pixels(
+        // A row at a time, in the order no destination row is written before
+        // the source row it covers is read: one row held, however large the
+        // block, and a move's source row cleared just after it is read.
+        let lines = source.top - source.bottom + 1;
+        for n in 0..lines {
+            let y = if dy > 0 {
+                source.top - n
+            } else {
+                source.bottom + n
+            };
+            row.clear();
+            canvas.pixels(
                 os,
                 canvas.row_of(y),
-                left.cast_unsigned(),
-                &pixels[from..from + take],
+                source.left.cast_unsigned(),
+                source.right.cast_unsigned(),
+                &mut row,
             )?;
+            if let Some(clear) = &clear {
+                let line = rectangle((source.left, y), (source.right, y), window);
+                self.draw_spans(os, line, clear)?;
+            }
+            let to_y = y + dy;
+            if shown.as_ref().is_some_and(|shown| shown.contains(&to_y)) {
+                let skip = (left - first).cast_unsigned() as usize;
+                let take = (right - left + 1).cast_unsigned() as usize;
+                canvas.put_pixels(
+                    os,
+                    canvas.row_of(to_y),
+                    left.cast_unsigned(),
+                    &row[skip..skip + take],
+                )?;
+            }
+            if n % 256 == 255 {
+                os.yield_point()?;
+            }
         }
+        if clear.is_some() {
+            cover(os, source)?;
+        }
+        let Some(shown) = shown else {
+            return Ok(());
+        };
         cover(
             os,
             Rect {
                 left,
-                bottom,
+                bottom: *shown.start(),
                 right,
-                top,
+                top: *shown.end(),
             },
         )
     }

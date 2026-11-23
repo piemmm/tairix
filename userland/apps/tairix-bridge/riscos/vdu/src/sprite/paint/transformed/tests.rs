@@ -15,6 +15,16 @@ fn plotted(
     parallelogram: bool,
     corners: [i128; 4],
 ) -> BTreeMap<(i32, i32), (u32, u32)> {
+    plotted_at((1, 1), words, parallelogram, corners)
+}
+
+/// As [`plotted`], the sprite at eigen factors `eig`.
+fn plotted_at(
+    eig: (i128, i128),
+    words: [i128; 8],
+    parallelogram: bool,
+    corners: [i128; 4],
+) -> BTreeMap<(i32, i32), (u32, u32)> {
     let window = Rect {
         left: 0,
         bottom: 0,
@@ -26,7 +36,7 @@ fn plotted(
         corners,
         parallelogram,
         words,
-        (1, 1),
+        eig,
         (12, 12),
         (PIXEL, PIXEL),
         window,
@@ -34,10 +44,17 @@ fn plotted(
         return covered;
     };
     let bounds = transform.bounds;
+    let read = transform.source_rows();
     for y in bounds.bottom..=bounds.top {
         if let Some((first, last)) = transform.row(y, bounds.left, bounds.right) {
             for x in first..=last {
-                covered.insert((x, y), transform.next());
+                let taken = transform.next();
+                assert!(
+                    read.contains(&taken.1),
+                    "row {} among those read, {read:?}",
+                    taken.1
+                );
+                covered.insert((x, y), taken);
             }
         }
     }
@@ -65,6 +82,27 @@ fn the_identity_at_a_whole_pixel_maps_each_pixel_to_its_own() {
         assert_eq!(
             (column, row),
             ((x - 20).cast_unsigned(), (31 - y).cast_unsigned())
+        );
+    }
+}
+
+#[test]
+fn a_sprite_s_eigen_factors_size_its_pixels_through_a_matrix() {
+    let identity = matrix(ONE, 0, 0, ONE, 20 * PIXEL, 20 * PIXEL);
+    let wide = plotted_at((2, 1), identity, false, WHOLE);
+    assert_eq!(wide.len(), 288);
+    for ((x, y), (column, row)) in wide {
+        assert_eq!(
+            (column, row),
+            (((x - 20) / 2).cast_unsigned(), (31 - y).cast_unsigned())
+        );
+    }
+    let tall = plotted_at((1, 0), identity, false, WHOLE);
+    assert_eq!(tall.len(), 72, "half as tall at YEig 0, rows tying down");
+    for ((x, y), (column, row)) in tall {
+        assert_eq!(
+            (column, row),
+            ((x - 20).cast_unsigned(), (51 - 2 * y).cast_unsigned())
         );
     }
 }
@@ -213,7 +251,27 @@ fn exact_division_helpers_round_as_named() {
     assert_eq!(floor_div(7, -2), Some(-4));
     assert_eq!(nearest_div(5, 2), Some(3));
     assert_eq!(nearest_div(-5, 2), Some(-2));
-    assert_eq!(gcd(12, -18), Some(6));
-    assert_eq!(gcd(0, 0), Some(1));
+    assert_eq!(common_factor(&[12, -18]), Some(6));
+    assert_eq!(common_factor(&[0, 0]), Some(1));
+    assert_eq!(common_factor(&[-12, 18, 8]), Some(2));
+    assert_eq!(
+        common_factor(&[i128::MIN, i128::MIN]),
+        None,
+        "past the signed range"
+    );
     assert_eq!(floor_div(i128::MIN, -1), None);
+}
+
+#[test]
+fn a_transform_too_wide_to_carry_exactly_draws_nothing_rather_than_wrapping() {
+    let words = matrix(
+        722_263_651,
+        1_741_310_710,
+        -1_228_469_590,
+        -2_028_150_568,
+        -193,
+        157,
+    );
+    let corners = [1_966_757_470, -628_653_697, -1_969_186_531, 820_605_320];
+    assert!(plotted(words, false, corners).is_empty());
 }

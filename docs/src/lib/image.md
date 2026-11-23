@@ -399,10 +399,13 @@ module's own rustdoc:
   a sprite's transparency, so a file carrying both is contradicting itself;
   taking the mask keeps one answer rather than inventing arithmetic over two.
 
-An old-format (numbered-mode) mask is the image's own depth and shares its row
-layout and wastage, and only whether a pixel's bits are all clear is read; a
-new-format mask is one bit per pixel from bit zero of rows of its own; and a
-wide mask — the mode word's top bit — is eight bits of alpha per pixel.
+An old-format (numbered-mode) mask takes each pixel's field and shares the
+image's row layout and wastage, and only whether a pixel's bits are all clear
+is read; a new-format mask is one bit per pixel from bit zero of rows of its
+own; and a wide mask — the mode word's top bit — is eight bits of alpha per
+pixel. A mode doubling its pixels on the screen — 2, 4, 5 and 10 — stores
+each pixel, image and mask alike, in a field twice its depth, its value
+repeated across it: such a sprite is as many pixels across as its fields.
 
 The shared sequence shape addresses a sprite by page index; its name, mode
 and palette are what `open_native` reports ([Writing](#writing)). The CMYK,
@@ -850,7 +853,20 @@ state (`EncodeError`) rather than approximate it:
   off a word boundary. `SpriteMode::with_eig` restates a mode for pixels of
   another shape — a numbered mode as the numbered mode or mode word of its
   depth and that shape, a mode word with its resolution fields rewritten — so
-  an editor that reshapes a sprite's pixels writes a mode that agrees.
+  an editor that reshapes a sprite's pixels writes a mode that agrees, and
+  `SpriteMode::least_stored_bytes` is the fewest bytes a sprite of a size in
+  that mode stores.
+- **The sprite format's one definition** serves every other reader of it, the
+  TAIRiX Bridge's VDU drivers among them: `sprite_area` and `sprite_control`
+  give each word's offset in an area's and a sprite's control block,
+  `sprite_type` the types a mode word names, `SpriteModeWord` a mode word's
+  form — a number, a RISC OS 3.5 resolution word or a RISC OS 5 eigen word,
+  and what each holds — with `SpriteModeWord::dpi_word` and `eig_word` to
+  write one, `sprite_mask_stride` a new-format mask row's bytes,
+  `sprite_direct_fields` a direct-colour type's field widths and pixel bytes,
+  `SpriteMaskDepth` the form and width of a sprite's mask, and
+  `SpriteName::spelt_by` and `lowered` a name as a caller spells it and as
+  RISC OS stores it.
 - **OpenRaster** writes borrowed layer sources (`OraLayerSource`: a name, a
   `PictureSource`, an offset, an opacity and whether it shows), so an editor's
   layers are never copied whole to be written: each layer as its PNG, the stack
@@ -874,11 +890,14 @@ A writer that embeds a JPEG's bytes unchanged — a PDF's `DCTDecode` image, an
 SVG data URL, a RISC OS Draw file's JPEG object — must say what they hold
 without parsing them itself. `jpeg_frame` answers it from the segments up to
 the frame header, refused exactly as a decode refuses them: the stored
-raster's size, its components (one or three), whether the frame is
-progressive, the density its JFIF header states and the `Orientation` its
+raster's size, its components (one or three), its coding process
+(`JpegProcess`: baseline, extended or progressive), the density its JFIF
+header states and the `Orientation` its
 EXIF segment states, whose `to_picture` is the map from the stored raster onto
 the picture `decode` answers, for a format that draws the raster as stored and
-turns it as it is placed. `decode_sprite` and `encode_sprite` are one sprite
+turns it as it is placed; `jpeg_decode_stored` decodes that raster as
+stored, unturned, for such a format to place. `decode_sprite` and
+`encode_sprite` are one sprite
 with no area around it, as a Draw file's sprite object holds it: the decode
 answers its pixels, its eigen factors and the length of its own bytes
 (`LoneSprite`), and `SpriteMode::density` states a mode's factors as dots to

@@ -111,6 +111,11 @@ pub const TARGETS: &[Target] = &[
     },
     Target {
         package: "tairix-abi",
+        test: "fuzz_gpu_channel",
+        description: "lib/abi gpu-v1 frame (requests, replies to every op, region spans, the served-GPU record)",
+    },
+    Target {
+        package: "tairix-abi",
         test: "fuzz_net_echo",
         description: "lib/abi SocketEcho delivery decoder (echo replies and ICMP errors, the reply hop limit in the frame's spare byte)",
     },
@@ -212,12 +217,17 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-riscos-vdu",
         test: "fuzz_sprites",
-        description: "userland/apps/tairix-bridge/riscos/vdu sprites: every OS_SpriteOp reason with each naming over areas whose blocks and sprites are salted, factors, matrices, parallelograms and tables pointing anywhere, output switched to sprites, the JPEG SWIs over JPEGs with bytes changed, PLOT &E8-&EF, VDU 23,27 and the SpriteUtils commands; every refusal a value, every error block readable, the drivers still answering",
+        description: "userland/apps/tairix-bridge/riscos/vdu sprites: every OS_SpriteOp reason with each naming over areas whose blocks and sprites are salted, factors, matrices, parallelograms and tables pointing anywhere, output switched to sprites, the JPEG SWIs over JPEGs with bytes changed, PLOT &E8-&EF, VDU 23,27 and the SpriteUtils commands, sprite files loaded and merged whole, salted or noise, and control block words made hostile under the calls after; every refusal a value, every error block readable, the drivers still answering",
     },
     Target {
         package: "tairix-riscos-vdu",
         test: "fuzz_screenmodes",
         description: "userland/apps/tairix-bridge/riscos/vdu ScreenModes: hostile monitor definition files — a good file's lines dropped, repeated, reordered or garbled, unknown keys, numbers past any range, modes past the most kept, or random bytes — loaded with *LoadModeFile, then ScreenModes' SWIs at every offset with hostile registers, the screen modes enumerated and selected, and the mode extension service with hostile selectors; every refusal a value, every error block readable, the drivers still answering",
+    },
+    Target {
+        package: "tairix-riscos-vdu",
+        test: "fuzz_colourtrans",
+        description: "userland/apps/tairix-bridge/riscos/vdu ColourTrans, InverseTable and BlendTable: every SWI with hostile registers over salted palettes, calibration tables and buffers pointing anywhere, sizes asked and translucencies past any range, in screens of every depth, and *ColourTransMap, *ColourTransMapSize and *ColourTransLoadings with hostile numbers; every refusal a value, every error block readable, the drivers still answering",
     },
     Target {
         package: "tairix-riscos-filing",
@@ -243,6 +253,11 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-gpu",
         test: "fuzz_gpu",
         description: "lib/gpu submission model on the software device: copies, fills and updates over buffers sharing allocations against a byte-array reference; image descriptions of every shape, and the copies and clears of images against a texel reference; bind sets, dispatches and passes, direct and indirect, sound or carrying faults from a stated catalogue, each refusal at its first faulty command, each admitted one alike on a twin of several participants drawing every indirect record directly",
+    },
+    Target {
+        package: "tairix-gpu",
+        test: "fuzz_served",
+        description: "lib/gpu served device over a loopback channel: the submission sweeps through gpu-v1 against their references, and the requests a client sent sent again, changed and by another client, each answered once and leaving nothing held",
     },
     Target {
         package: "tairix-gpu",
@@ -744,7 +759,19 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-virtio",
         test: "fuzz_virtqueue",
         description:
-            "split-virtqueue completion path (hostile device-written used ring / descriptors)",
+            "split-virtqueue completion path and the many-requests ticket queue (hostile device-written used ring / descriptors, answers in any order)",
+    },
+    Target {
+        package: "tairix-drv-display-gpu-virtio",
+        test: "fuzz_gpu_answers",
+        description:
+            "virtio-gpu answer decoding: the verdict and fence, display information, EDID, capsets and a mapping's caching (hostile device-written bytes)",
+    },
+    Target {
+        package: "tairix-drv-display-gpu-virtio",
+        test: "fuzz_venus_replies",
+        description:
+            "Venus reply decoding: results, objects made, physical devices, properties, queue families, memory and requirements, and the statement narrowed from them (hostile renderer-written bytes)",
     },
     Target {
         package: "tairix-usb",

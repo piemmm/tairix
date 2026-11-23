@@ -668,6 +668,41 @@ pub(crate) fn watch_service(s: &mut Session, number: u32, at: u32) {
     copy_in(s, &guest).expect("linked");
 }
 
+/// Links a module claiming service `number` for reason `reason` and
+/// answering R5 `r5`, writing nothing: a module misstating what it answered.
+pub(crate) fn answer_service(s: &mut Session, number: u32, reason: u32, r5: u32) {
+    let mut guest = Guest::new(&alloc::format!("Answer{number:X}"));
+    guest.entry(Field::Service, |_| {
+        let matched = |instruction| asm::when(Condition::Eq, instruction);
+        alloc::vec![
+            asm::push(1 << 4),
+            asm::ldr(4, 15, 24),
+            asm::cmp(1, 4),
+            asm::ldr(4, 15, 20),
+            matched(asm::cmp(2, 4)),
+            matched(asm::ldr(5, 15, 16)),
+            matched(asm::mov(1, 0)),
+            asm::pull(1 << 4),
+            asm::mov_pc_lr(),
+            number,
+            reason,
+            r5,
+        ]
+    });
+    copy_in(s, &guest).expect("linked");
+}
+
+/// Links a module owning SWI chunk `chunk`, each of whose SWIs answers R3
+/// `r3` and changes nothing else: a module misstating what it answered.
+pub(crate) fn answer_swis(s: &mut Session, chunk: u32, r3: u32) {
+    let mut guest = Guest::new(&alloc::format!("Swis{chunk:X}"));
+    guest.set(Field::SwiChunk, chunk);
+    guest.entry(Field::SwiHandler, |_| {
+        alloc::vec![asm::ldr(3, 15, 0), asm::mov_pc_lr(), r3]
+    });
+    copy_in(s, &guest).expect("linked");
+}
+
 #[test]
 fn a_service_goes_round_the_modules_in_their_order_until_one_claims_it() {
     let mut s = session();
@@ -1301,4 +1336,21 @@ fn a_listing_s_value_starts_at_its_column_or_a_space_past_a_long_keyword() {
         "a keyword that reaches the column"
     );
     assert_eq!(value_padding(VALUE_COLUMN + 9), 1, "and one past it");
+}
+
+#[test]
+fn a_block_given_back_quietly_is_freed_and_one_the_heap_lacks_ignored() {
+    let mut s = session();
+    let block = module(&mut s, [6, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        .expect("claimed")
+        .r[2];
+    let mut os = s.kernel.os();
+    os.free_rma_quietly(block);
+    os.free_rma_quietly(DATA);
+    os.free_rma_quietly(block);
+    assert_eq!(
+        module(&mut s, [7, 0, block, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        Err(0x185),
+        "freed by the first"
+    );
 }

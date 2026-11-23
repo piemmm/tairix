@@ -124,3 +124,19 @@ fn a_page_shown_in_the_window_does_not_stop_the_pool_shrinking() {
         "and it grows again"
     );
 }
+
+#[test]
+fn an_area_s_extent_is_what_reading_it_gives() {
+    let mut s = with_application(&RISC_OS_5, Bits::Bit32);
+    change(&mut s, 0x2_0000);
+    let (read, _) = s.user_swi(X | READ_DYNAMIC_AREA, registers(&[AREA]));
+    assert_eq!(
+        s.kernel.os().area_extent(AREA).expect("the RAM disc"),
+        (read.r[0], 0x2_0000)
+    );
+    assert_eq!(read.r[1], 0x2_0000);
+    assert!(
+        s.kernel.os().area_extent(0x7FFF_0000).is_err(),
+        "no such area"
+    );
+}

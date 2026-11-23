@@ -108,6 +108,11 @@ fn a_refusal_is_read_for_what_it_says() {
         "an answer to another request"
     );
     assert_eq!(ok_nodata(&[0; 3]), Err(DriverError::DeviceFault));
+    assert_eq!(
+        ok_nodata(&response(RESP_OK_NODATA, HEADER_LEN)[..HEADER_LEN - 1]),
+        Err(DriverError::DeviceFault),
+        "every answer is a whole header"
+    );
 }
 
 #[test]
@@ -160,5 +165,143 @@ fn only_an_answer_carrying_its_fence_says_the_command_has_run() {
         fenced(&answer[..12], 9),
         Err(DriverError::DeviceFault),
         "cut short"
+    );
+}
+
+fn word64(bytes: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(bytes[at..at + 8].try_into().expect("a word"))
+}
+
+#[test]
+fn each_3d_request_is_laid_out_as_the_specification_has_it() {
+    let info = get_capset_info(2);
+    assert_eq!(info.as_bytes().len(), 32);
+    assert_eq!([0, 24].map(|at| word(info.as_bytes(), at)), [0x0108, 2]);
+    let capset = get_capset(CAPSET_VENUS, 3);
+    assert_eq!(capset.as_bytes().len(), 32);
+    assert_eq!(
+        [0, 24, 28].map(|at| word(capset.as_bytes(), at)),
+        [0x0109, 4, 3]
+    );
+    let create = ctx_create(9, CAPSET_VENUS, b"venus");
+    let bytes = create.as_bytes();
+    assert_eq!(bytes.len(), 96);
+    assert_eq!([0, 16, 24, 28].map(|at| word(bytes, at)), [0x0200, 9, 5, 4]);
+    assert_eq!(&bytes[32..37], b"venus");
+    assert!(bytes[37..].iter().all(|&byte| byte == 0));
+    let long = ctx_create(9, CAPSET_VENUS, &[b'n'; 100]);
+    assert_eq!(word(long.as_bytes(), 24), 64, "a name is cut at its field");
+    let destroy = ctx_destroy(9);
+    assert_eq!(destroy.as_bytes().len(), 24);
+    assert_eq!([0, 16].map(|at| word(destroy.as_bytes(), at)), [0x0201, 9]);
+    let spec = BlobSpec {
+        blob_id: 0x1122_3344_5566_7788,
+        size: 0x2_0000_0000,
+        mappable: true,
+        shareable: true,
+    };
+    let blob = resource_create_blob(9, 0x1_0005, &spec);
+    let bytes = blob.as_bytes();
+    assert_eq!(bytes.len(), 56);
+    assert_eq!(
+        [0, 16, 24, 28, 32, 36].map(|at| word(bytes, at)),
+        [0x010C, 9, 0x1_0005, 2, 3, 0],
+        "host memory, mappable and shareable, no guest entries"
+    );
+    assert_eq!(
+        [40, 48].map(|at| word64(bytes, at)),
+        [spec.blob_id, spec.size]
+    );
+    let plain = resource_create_blob(
+        9,
+        7,
+        &BlobSpec {
+            mappable: false,
+            shareable: false,
+            ..spec
+        },
+    );
+    assert_eq!(word(plain.as_bytes(), 32), 0);
+    let map = resource_map_blob(0x1_0005, 0x40_1000);
+    assert_eq!(map.as_bytes().len(), 40);
+    assert_eq!(
+        [0, 24].map(|at| word(map.as_bytes(), at)),
+        [0x0208, 0x1_0005]
+    );
+    assert_eq!(word64(map.as_bytes(), 32), 0x40_1000);
+    let unmap = resource_unmap_blob(0x1_0005);
+    assert_eq!(unmap.as_bytes().len(), 32);
+    assert_eq!(
+        [0, 24].map(|at| word(unmap.as_bytes(), at)),
+        [0x0209, 0x1_0005]
+    );
+    let submit = submit_3d(9, 128);
+    assert_eq!(submit.as_bytes().len(), 32);
+    assert_eq!(
+        [0, 16, 24, 28].map(|at| word(submit.as_bytes(), at)),
+        [0x0207, 9, 128, 0]
+    );
+}
+
+#[test]
+fn a_ring_fence_names_its_ring_beside_the_fence() {
+    let mut header = [0xAA; HEADER_LEN];
+    fence_on_ring(&mut header, 77, 12);
+    assert_eq!(word(&header, 4), 3, "VIRTIO_GPU_FLAG_FENCE and the ring's");
+    assert_eq!(word64(&header, 8), 77);
+    assert_eq!(header[20], 12);
+    assert_eq!(header[16..20], [0xAA; 4], "the context is left as it was");
+}
+
+#[test]
+fn each_3d_answer_is_read_fail_closed() {
+    let mut info = response(RESP_OK_CAPSET_INFO, CAPSET_INFO_LEN);
+    for (at, value) in [(24, 4u32), (28, 1), (32, 160)] {
+        info[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    assert_eq!(
+        capset_info(&info),
+        Ok(CapsetInfo {
+            id: 4,
+            max_version: 1,
+            max_size: 160
+        })
+    );
+    assert_eq!(
+        capset_info(&info[..CAPSET_INFO_LEN - 5]),
+        Err(DriverError::DeviceFault)
+    );
+    assert_eq!(
+        capset_info(&response(RESP_OK_NODATA, CAPSET_INFO_LEN)),
+        Err(DriverError::DeviceFault)
+    );
+    let mut capset_bytes = response(RESP_OK_CAPSET, HEADER_LEN + 8);
+    capset_bytes[HEADER_LEN..].copy_from_slice(&[9; 8]);
+    assert_eq!(capset(&capset_bytes, 8), Ok(&[9u8; 8][..]));
+    assert_eq!(capset(&capset_bytes, 9), Err(DriverError::DeviceFault));
+    let mut map = response(RESP_OK_MAP_INFO, MAP_INFO_LEN);
+    for (stated, caching) in [
+        (1u32, Some(RegionCaching::WriteBack)),
+        (2, Some(RegionCaching::Uncached)),
+        (3, Some(RegionCaching::WriteCombine)),
+        (0x13, Some(RegionCaching::WriteCombine)),
+        (0, None),
+        (4, None),
+    ] {
+        map[HEADER_LEN..HEADER_LEN + 4].copy_from_slice(&stated.to_le_bytes());
+        assert_eq!(map_info(&map), Ok(caching), "{stated}");
+    }
+    assert_eq!(
+        map_info(&map[..HEADER_LEN]),
+        Ok(None),
+        "a mapping whose caching was not written"
+    );
+    assert_eq!(
+        map_info(&response(RESP_ERR_INVALID_RESOURCE_ID, MAP_INFO_LEN)),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        ok_nodata(&response(RESP_ERR_INVALID_CONTEXT_ID, HEADER_LEN)),
+        Err(DriverError::NotFound)
     );
 }

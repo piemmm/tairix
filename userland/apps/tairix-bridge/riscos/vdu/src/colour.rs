@@ -250,7 +250,7 @@ impl Colours {
     /// The pixel value `OS_SetColour` takes `value` for: in a 256-colour mode
     /// whose palette is grouped, a GCOL with its tint below; else itself.
     pub(crate) fn set_colour_pixel(format: &Format, value: u32) -> u32 {
-        if format.log2_bpp() == 3 && !format.has(Flags::FULL_PALETTE) {
+        if format.grouped() {
             u32::from(number_of_gcol(value.to_le_bytes()[0]))
         } else {
             value
@@ -340,7 +340,7 @@ impl Colours {
 /// variable: the number within the mode's colours, or in the full-palette and
 /// direct-colour modes the byte as given.
 fn colour_var(format: &Format, c: u8, number: u8) -> u32 {
-    if format.direct() || (format.log2_bpp() == 3 && format.has(Flags::FULL_PALETTE)) {
+    if format.direct() || format.full_palette() {
         return u32::from(c);
     }
     let colours = if format.log2_bpp() == 3 {
@@ -371,21 +371,6 @@ fn default_text_white(format: &Format) -> u32 {
         3 => 0xFF,
         _ => Direct::of(format).pack([0xFF; 3]),
     }
-}
-
-/// A four-bit channel as five bits, its low bit repeated.
-const fn five_of_four(n: u32) -> u32 {
-    (n << 1) | (n & 1)
-}
-
-/// A five-bit channel as eight, its top bits repeated below it.
-pub(crate) const fn eight_of_five(v: u32) -> u32 {
-    (v << 3) | (v >> 2)
-}
-
-/// A six-bit channel as eight, its top bits repeated below it.
-const fn eight_of_six(v: u32) -> u32 {
-    (v << 2) | (v >> 4)
 }
 
 /// The pixel value colour number `colour` with `tint` is in `format`.
@@ -454,19 +439,46 @@ pub(crate) struct Direct {
     layout: Layout,
 }
 
+/// The direct-colour sprite types a mode's pixels take.
 #[derive(Clone, Copy)]
 enum Layout {
-    /// Four bits each.
     Twelve,
-    /// Five, six and five.
-    Sixteen,
-    /// Five each.
     Fifteen,
-    /// Eight each.
+    Sixteen,
     TwentyFour,
 }
 
+/// `body` with `fields` the constant fields of `layout`.
+macro_rules! fields_of {
+    ($layout:expr, |$fields:ident| $body:expr) => {
+        match $layout {
+            Layout::Twelve => {
+                let $fields = fields::TWELVE;
+                $body
+            }
+            Layout::Fifteen => {
+                let $fields = fields::FIFTEEN;
+                $body
+            }
+            Layout::Sixteen => {
+                let $fields = fields::SIXTEEN;
+                $body
+            }
+            Layout::TwentyFour => {
+                let $fields = fields::TWENTY_FOUR;
+                $body
+            }
+        }
+    };
+}
+
 impl Direct {
+    /// Five bits a channel, red lowest: how a 32K table numbers its cells.
+    pub(crate) const FIFTEEN: Self = Self {
+        swapped: false,
+        layout: Layout::Fifteen,
+    };
+
     /// `format`'s.
     pub(crate) fn of(format: &Format) -> Self {
         Self::of_parts(format.log2_bpp(), format.ncolour(), format.flags())
@@ -488,153 +500,72 @@ impl Direct {
         }
     }
 
-    /// Red, green and blue packed into a pixel.
-    pub(crate) fn pack(self, [r, g, b]: [u8; 3]) -> u32 {
-        let (low, high) = if self.swapped { (b, r) } else { (r, b) };
-        let (low, g, high) = (u32::from(low), u32::from(g), u32::from(high));
-        match self.layout {
-            Layout::Twelve => (low >> 4) | ((g >> 4) << 4) | ((high >> 4) << 8),
-            Layout::Sixteen => (low >> 3) | ((g >> 2) << 5) | ((high >> 3) << 11),
-            Layout::Fifteen => (low >> 3) | ((g >> 3) << 5) | ((high >> 3) << 10),
-            Layout::TwentyFour => low | (g << 8) | (high << 16),
-        }
-    }
-
-    /// Red, green and blue of four bits each packed into a pixel, each
-    /// widened by repeating its bits, as RISC OS 5 widens a colour number's.
-    pub(crate) const fn pack_nibbles(self, [r, g, b]: [u32; 3]) -> u32 {
-        let (low, high) = if self.swapped { (b, r) } else { (r, b) };
-        match self.layout {
-            Layout::Twelve => low | (g << 4) | (high << 8),
-            Layout::Sixteen => {
-                five_of_four(low) | (((g << 2) | (g >> 2)) << 5) | (five_of_four(high) << 11)
-            }
-            Layout::Fifteen => {
-                five_of_four(low) | (five_of_four(g) << 5) | (five_of_four(high) << 10)
-            }
-            Layout::TwentyFour => (low * 0x11) | ((g * 0x11) << 8) | ((high * 0x11) << 16),
-        }
-    }
-
-    /// The bytes a pixel takes.
-    pub(crate) const fn bytes(self) -> usize {
-        match self.layout {
-            Layout::TwentyFour => 4,
-            Layout::Twelve | Layout::Sixteen | Layout::Fifteen => 2,
-        }
-    }
-
-    /// Every bit a pixel's colour takes.
-    pub(crate) const fn colour_bits(self) -> u32 {
-        match self.layout {
-            Layout::Twelve => 0xFFF,
-            Layout::Sixteen => 0xFFFF,
-            Layout::Fifteen => 0x7FFF,
-            Layout::TwentyFour => 0xFF_FFFF,
-        }
-    }
-
-    /// A pixel's red, green and blue, each widened to eight bits by repeating
-    /// its top bits below it, as a deep sprite's colours widen.
-    pub(crate) const fn unpack_replicated(self, pixel: u32) -> [u32; 3] {
-        let (low, g, high) = match self.layout {
-            Layout::Twelve => (
-                (pixel & 0xF) * 0x11,
-                ((pixel >> 4) & 0xF) * 0x11,
-                ((pixel >> 8) & 0xF) * 0x11,
-            ),
-            Layout::Sixteen => (
-                eight_of_five(pixel & 0x1F),
-                eight_of_six((pixel >> 5) & 0x3F),
-                eight_of_five((pixel >> 11) & 0x1F),
-            ),
-            Layout::Fifteen => (
-                eight_of_five(pixel & 0x1F),
-                eight_of_five((pixel >> 5) & 0x1F),
-                eight_of_five((pixel >> 10) & 0x1F),
-            ),
-            Layout::TwentyFour => (pixel & 0xFF, (pixel >> 8) & 0xFF, (pixel >> 16) & 0xFF),
-        };
+    /// Red, green and blue as the fields hold them, lowest first, or the
+    /// fields as red, green and blue: the one reordering either way.
+    const fn ordered(self, [a, b, c]: [u32; 3]) -> [u32; 3] {
         if self.swapped {
-            [high, g, low]
+            [c, b, a]
         } else {
-            [low, g, high]
+            [a, b, c]
         }
     }
 
     /// The bits each of red, green and blue takes.
     pub(crate) const fn channel_bits(self) -> [u32; 3] {
-        let (low, g, high) = match self.layout {
-            Layout::Twelve => (4, 4, 4),
-            Layout::Sixteen => (5, 6, 5),
-            Layout::Fifteen => (5, 5, 5),
-            Layout::TwentyFour => (8, 8, 8),
-        };
-        if self.swapped {
-            [high, g, low]
-        } else {
-            [low, g, high]
-        }
+        self.ordered(fields_of!(self.layout, |f| f.widths))
+    }
+
+    /// The bytes a pixel takes.
+    pub(crate) const fn bytes(self) -> usize {
+        fields_of!(self.layout, |f| f.bytes)
+    }
+
+    /// Every bit a pixel's colour takes.
+    pub(crate) const fn colour_bits(self) -> u32 {
+        fields_of!(self.layout, |f| f.colour_bits())
     }
 
     /// A pixel's red, green and blue as it holds them, each in its own bits.
     pub(crate) const fn channels(self, pixel: u32) -> [u32; 3] {
-        let (low, g, high) = match self.layout {
-            Layout::Twelve => (pixel & 0xF, (pixel >> 4) & 0xF, (pixel >> 8) & 0xF),
-            Layout::Sixteen => (pixel & 0x1F, (pixel >> 5) & 0x3F, (pixel >> 11) & 0x1F),
-            Layout::Fifteen => (pixel & 0x1F, (pixel >> 5) & 0x1F, (pixel >> 10) & 0x1F),
-            Layout::TwentyFour => (pixel & 0xFF, (pixel >> 8) & 0xFF, (pixel >> 16) & 0xFF),
-        };
-        if self.swapped {
-            [high, g, low]
-        } else {
-            [low, g, high]
-        }
+        self.ordered(fields_of!(self.layout, |f| f.extract(pixel)))
     }
 
     /// Red, green and blue, each in its own bits, packed into a pixel.
-    pub(crate) const fn pack_channels(self, [r, g, b]: [u32; 3]) -> u32 {
-        let (low, high) = if self.swapped { (b, r) } else { (r, b) };
-        match self.layout {
-            Layout::Twelve => low | (g << 4) | (high << 8),
-            Layout::Sixteen => low | (g << 5) | (high << 11),
-            Layout::Fifteen => low | (g << 5) | (high << 10),
-            Layout::TwentyFour => low | (g << 8) | (high << 16),
-        }
+    pub(crate) const fn pack_channels(self, channels: [u32; 3]) -> u32 {
+        let values = self.ordered(channels);
+        fields_of!(self.layout, |f| f.place(values))
     }
 
-    /// A pixel's red, green and blue, each widened to eight bits.
-    pub(crate) fn unpack(self, pixel: u32) -> [u32; 3] {
-        let (low, g, high) = match self.layout {
-            Layout::Twelve => (
-                (pixel & 0xF) * 17,
-                ((pixel >> 4) & 0xF) * 17,
-                ((pixel >> 8) & 0xF) * 17,
-            ),
-            Layout::Sixteen => (
-                (pixel & 0x1F) * 255 / 31,
-                ((pixel >> 5) & 0x3F) * 255 / 63,
-                ((pixel >> 11) & 0x1F) * 255 / 31,
-            ),
-            Layout::Fifteen => (
-                (pixel & 0x1F) * 255 / 31,
-                ((pixel >> 5) & 0x1F) * 255 / 31,
-                ((pixel >> 10) & 0x1F) * 255 / 31,
-            ),
-            Layout::TwentyFour => (pixel & 0xFF, (pixel >> 8) & 0xFF, (pixel >> 16) & 0xFF),
-        };
-        if self.swapped {
-            [high, g, low]
-        } else {
-            [low, g, high]
-        }
+    /// Red, green and blue packed into a pixel, each cut to its bits.
+    pub(crate) const fn pack(self, [r, g, b]: [u8; 3]) -> u32 {
+        let values = self.ordered([r as u32, g as u32, b as u32]);
+        fields_of!(self.layout, |f| f.place(f.narrowed(values)))
+    }
+
+    /// Red, green and blue of four bits each packed into a pixel, each
+    /// widened as RISC OS 5 widens a colour number's.
+    pub(crate) const fn pack_nibbles(self, nibbles: [u32; 3]) -> u32 {
+        let values = self.ordered(nibbles);
+        fields_of!(self.layout, |f| f.place(f.nibbles_widened(values)))
+    }
+
+    /// A pixel's red, green and blue, each widened to eight bits by repeating
+    /// its top bits below it, as a deep sprite's colours widen.
+    pub(crate) const fn unpack_replicated(self, pixel: u32) -> [u32; 3] {
+        self.ordered(fields_of!(self.layout, |f| f.replicated(f.extract(pixel))))
+    }
+
+    /// A pixel's red, green and blue, each widened to eight bits, rounded
+    /// down.
+    pub(crate) const fn unpack(self, pixel: u32) -> [u32; 3] {
+        self.ordered(fields_of!(self.layout, |f| f.rounded(f.extract(pixel))))
     }
 }
 
 /// An eight-bit mode's simple pattern colour: the colour number's six bits
 /// and two bits of tint above them.
 fn simple_8(format: &Format, c: u8) -> u8 {
-    if format.has(Flags::FULL_PALETTE) && format.log2_bpp() == 3 && format.ncolour() == 255 {
+    if format.full_palette() {
         return c;
     }
     internal(u32::from(c), u32::from(c))
@@ -714,6 +645,13 @@ pub(crate) fn replicate(format: &Format, value: u32) -> u32 {
     repeated(value & format.pixel_mask(), 1 << format.log2_bpp(), 32)
 }
 
+/// Destination bits `old` with source bits `bits` laid on them by GCOL action
+/// `action`.
+pub(crate) const fn combine(action: u32, old: u32, bits: u32) -> u32 {
+    let [ora, eor] = operate(action & 7, bits);
+    (old | ora) ^ eor
+}
+
 /// The OR and exclusive-OR words GCOL action `operation` takes on `word`.
 const fn operate(operation: u32, word: u32) -> [u32; 2] {
     match operation {
@@ -746,6 +684,10 @@ fn alike(format: &Format, a: u32, b: u32) -> u32 {
     }
     mask
 }
+
+mod fields;
+
+pub(crate) use fields::replicated;
 
 #[cfg(test)]
 mod tests;

@@ -181,27 +181,33 @@ pub(crate) const KEYWORDS: [Keyword; 34] = [
     keyword("Print", Kind::Number(Field::new(cmos::PRINT_SERIAL, 5, 3))),
     keyword(
         "PrinterBufferSize",
-        Kind::Size(Field::new(cmos::PRINTER_BUFFER, 0, 7), PAGE_SIZE),
+        Kind::Size(
+            Field::new(cmos::PRINTER_BUFFER, 0, cmos::PAGES_BITS),
+            PAGE_SIZE,
+        ),
     ),
     keyword(
         "RamFSSize",
-        Kind::Size(Field::new(cmos::RAM_DISC, 0, 7), PAGE_SIZE),
+        Kind::Size(Field::new(cmos::RAM_DISC, 0, cmos::PAGES_BITS), PAGE_SIZE),
     ),
     keyword("Repeat", Kind::Number(Field::new(cmos::KEY_REPEAT, 0, 8))),
     keyword(
         "RMASize",
-        Kind::Size(Field::new(cmos::RMA_SIZE, 0, 7), PAGE_SIZE),
+        Kind::Size(Field::new(cmos::RMA_SIZE, 0, cmos::PAGES_BITS), PAGE_SIZE),
     ),
     keyword(
         "ScreenSize",
-        Kind::Size(Field::new(cmos::SCREEN_SIZE, 0, 7), PAGE_SIZE),
+        Kind::Size(
+            Field::new(cmos::SCREEN_SIZE, 0, cmos::PAGES_BITS),
+            PAGE_SIZE,
+        ),
     ),
     keyword("Scroll", Kind::NoParm(SCROLL, 0)),
     keyword("NoScroll", Kind::NoParm(SCROLL, 1)),
     keyword(
         "SpriteSize",
         Kind::Size(
-            Field::new(cmos::SPRITE_SIZE, 0, cmos::SPRITE_SIZE_BITS),
+            Field::new(cmos::SPRITE_SIZE, 0, cmos::PAGES_BITS),
             PAGE_SIZE,
         ),
     ),

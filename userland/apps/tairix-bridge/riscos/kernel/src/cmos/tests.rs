@@ -50,7 +50,7 @@ fn nv_memory_reads_reset_values_and_takes_no_passphrase() {
     use crate::swi::X;
     use crate::testkit::{boot, DATA};
     let mut s = boot(&RISC_OS_5);
-    s.application(Bits::Bit32, 0x1_0000);
+    s.application(Bits::Bit32, crate::testkit::SLOT_BYTES);
     let mut r = [0; 13];
     r[..2].copy_from_slice(&[6, u32::from(KEY_DELAY)]);
     assert_eq!(s.user_swi(X | NV_MEMORY, r).0.r[2], 32);
@@ -66,4 +66,17 @@ fn nv_memory_reads_reset_values_and_takes_no_passphrase() {
     assert!(regs.flag(tairix_riscos_arm::psr::V));
     assert_eq!(s.peek(regs.r[0]), 0x411);
     assert_eq!(s.kernel.os().world.cmos.read(STATION), 0);
+}
+
+#[test]
+fn a_size_location_counts_pages_in_its_low_bits_alone() {
+    use crate::memory::layout::RISC_OS_5;
+    use crate::memory::Bits;
+    use crate::testkit::{boot, SLOT_BYTES};
+    let mut s = boot(&RISC_OS_5);
+    s.application(Bits::Bit32, SLOT_BYTES);
+    for location in [SCREEN_SIZE, RAM_DISC, SPRITE_SIZE] {
+        assert!(s.kernel.os().world.cmos.write(location, 0x81));
+        assert_eq!(s.kernel.os().cmos_pages(location), Ok(1), "{location:#X}");
+    }
 }

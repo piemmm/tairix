@@ -124,12 +124,7 @@ pub fn format_u64(value: u64, buf: &mut [u8; 20]) -> &str {
 /// structure that would help an attacker correlate them.
 #[must_use]
 pub fn format_hex_u64(value: u64, buf: &mut [u8; 16]) -> &str {
-    for (i, slot) in buf.iter_mut().enumerate() {
-        // `(value >> shift) & 0xF` is in `0..=15`; cast to `u8` is lossless.
-        #[allow(clippy::cast_possible_truncation)]
-        let nibble = ((value >> ((15 - i) * 4)) & 0xF) as u8;
-        *slot = crate::hex::digit(nibble);
-    }
+    crate::hex::fill(buf, value);
     core::str::from_utf8(&buf[..]).unwrap_or("?")
 }
 

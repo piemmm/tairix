@@ -17,6 +17,7 @@ use crate::sprite::{
     SPRITE_HEADER_LEN,
 };
 use crate::RGBA_BYTES;
+use tairix_util::bitfield::set_field_at;
 
 /// One sprite to write.
 #[derive(Copy, Clone)]
@@ -201,12 +202,7 @@ fn write_sprite(
     let stride = row_stride(width, bits)?;
     let mask = masked
         .then(|| {
-            let mask_bits = match parsed.mask {
-                MaskDepth::Image => bits,
-                MaskDepth::Bit => 1,
-                MaskDepth::Alpha => 8,
-            };
-            row_stride(width, mask_bits).map(|mask_stride| (parsed.mask, mask_stride))
+            row_stride(width, parsed.mask.bits(bits)).map(|mask_stride| (parsed.mask, mask_stride))
         })
         .transpose()?;
     let shape = Shape {
@@ -258,26 +254,6 @@ fn write_sprite(
     write_rows(out, source, &shape, parsed.layout)
 }
 
-/// Pack `value`, `bits` wide, at bit `bit` of `row`, least significant pixel
-/// leftmost as a sprite lays them.
-fn put_bits(row: &mut [u8], bit: u64, bits: u32, value: u32) {
-    let mut bit = bit;
-    let mut value = value;
-    let mut left = bits;
-    while left > 0 {
-        let at = (bit / 8) as usize;
-        let offset = u32::try_from(bit % 8).unwrap_or(0);
-        let take = (8 - offset).min(left);
-        if let Some(byte) = row.get_mut(at) {
-            let part = value & ((1 << take) - 1);
-            *byte |= u8::try_from(part << offset).unwrap_or(0);
-        }
-        value >>= take;
-        bit += u64::from(take);
-        left -= take;
-    }
-}
-
 /// Write the image rows and then the mask rows.
 fn write_rows(
     out: &mut Output,
@@ -300,7 +276,7 @@ fn write_rows(
                 indices_fit(&rows.samples, palette.len())?;
                 for (x, &index) in (0u64..).zip(&rows.samples) {
                     let value = tairix_vdu::mode::repeated(u32::from(index), bits, field);
-                    put_bits(&mut line, x * u64::from(field), field, value);
+                    set_field_at(&mut line, x * u64::from(field), field, value);
                 }
             }
             (Layout::Packed { bytes, channels }, PictureKind::Rgba) => {
@@ -327,6 +303,7 @@ fn write_rows(
     let Some((depth, mask_stride)) = shape.mask else {
         return Ok(());
     };
+    let bits = depth.bits(shape.bits);
     let mut mask_line = scratch(mask_stride as usize)?;
     for y in 0..shape.height {
         rows.read(source, y);
@@ -336,30 +313,13 @@ fn write_rows(
                 PictureKind::Indexed { .. } => rows.mask.get(x).copied().unwrap_or(0),
                 PictureKind::Rgba => rows.samples.get(x * RGBA_BYTES + 3).copied().unwrap_or(0),
             };
-            let at = x as u64;
-            match depth {
-                MaskDepth::Alpha => put_bits(&mut mask_line, at * 8, 8, u32::from(alpha)),
-                MaskDepth::Image | MaskDepth::Bit => {
-                    let bits = if depth == MaskDepth::Image {
-                        shape.bits
-                    } else {
-                        1
-                    };
-                    let solid = match alpha {
-                        0 => false,
-                        u8::MAX => true,
-                        _ => return Err(EncodeError::SpriteMaskNotBinary),
-                    };
-                    if solid {
-                        put_bits(
-                            &mut mask_line,
-                            at * u64::from(bits),
-                            bits,
-                            u32::MAX >> (32 - bits),
-                        );
-                    }
-                }
-            }
+            let value = match (depth, alpha) {
+                (MaskDepth::Alpha, alpha) => u32::from(alpha),
+                (_, 0) => continue,
+                (_, u8::MAX) => u32::MAX,
+                _ => return Err(EncodeError::SpriteMaskNotBinary),
+            };
+            set_field_at(&mut mask_line, x as u64 * u64::from(bits), bits, value);
         }
         out.push(&mask_line)?;
     }

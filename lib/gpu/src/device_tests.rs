@@ -1,3 +1,4 @@
+use crate::device::as_software;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -323,7 +324,7 @@ fn memory_is_reached_from_another_context_only_once_it_is_imported() {
 fn a_released_context_s_budget_stays_charged_to_the_heap_while_its_memory_is_held() {
     let (device, _) = device();
     let keeper = context(&device);
-    let heap = || keeper.shared.model.lock().work_heap_taken();
+    let heap = || as_software(&keeper.host).model.lock().work_heap_taken();
     let owner = context(&device);
     let shared = memory(&owner, 64);
     let imported = keeper
@@ -584,7 +585,7 @@ fn memory_past_a_context_s_limit_or_its_heap_is_refused() {
     let second = context(&device);
     // All of the heap but 64 bytes, past what the device and both contexts
     // already keep.
-    let taken = first.shared.model.lock().work_heap_taken();
+    let taken = as_software(&first.host).model.lock().work_heap_taken();
     let most = memory(&first, heap - taken - extra - 64);
     let refused = second.allocate(&AllocationDesc {
         size: 128,
@@ -636,7 +637,7 @@ pub(crate) fn fill_heap(device: &Device) -> (Context, Allocation) {
         probe.memory_used().total() - base - 4096
     };
     let hog = context(device);
-    let taken = hog.shared.model.lock().work_heap_taken();
+    let taken = as_software(&hog.host).model.lock().work_heap_taken();
     let most = memory(
         &hog,
         (crate::software::heap_bytes(RAM) - taken - extra - 8) / 4 * 4,
@@ -1160,8 +1161,17 @@ fn a_submission_with_no_commands_still_waits_and_signals_in_order() {
 
 /// Host threads, kept so a test can join them.
 #[derive(Default)]
-struct HostThreads {
+pub(crate) struct HostThreads {
     started: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
+}
+
+impl HostThreads {
+    /// Wait for every thread started to end.
+    pub(crate) fn join(&self) {
+        for handle in core::mem::take(&mut *self.started.lock().expect("unpoisoned")) {
+            handle.join().expect("the thread ran to its end");
+        }
+    }
 }
 
 impl Spawn for HostThreads {

@@ -47,6 +47,7 @@ use tairix_abi::account::{
 };
 
 use tairix_abi::driver::filesystem::WriteRefusal;
+use tairix_abi::driver::RegionCaching;
 use tairix_abi::field::{
     TAG_BOOL, TAG_BYTES, TAG_CAP, TAG_DECIMAL, TAG_DURATION, TAG_ERROR, TAG_IP, TAG_LIST, TAG_MAC,
     TAG_NULL, TAG_SIGNED, TAG_STR, TAG_TIME, TAG_UNSIGNED, TAG_UUID,
@@ -769,6 +770,24 @@ fn hwtree_enum_macros(out: &mut String) {
     }
     out.push('\n');
 
+    out.push_str(
+        "/* mmio_map caching (uint32_t): AS_GRANTED for every grant but a memory\n \
+         * region, whose part takes the caching its device states. */\n",
+    );
+    for (name, caching) in [
+        ("AS_GRANTED", None),
+        ("WRITE_BACK", Some(RegionCaching::WriteBack)),
+        ("WRITE_COMBINE", Some(RegionCaching::WriteCombine)),
+        ("UNCACHED", Some(RegionCaching::Uncached)),
+    ] {
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_REGION_CACHING_{name} ((uint32_t){}u)",
+            RegionCaching::arg(caching)
+        );
+    }
+    out.push('\n');
+
     out.push_str("/* Property keys (uint32_t). */\n");
     for key in HwProperty::ALL {
         let _ = writeln!(
@@ -806,6 +825,7 @@ fn resource_kind_name(kind: HwResourceKind) -> &'static str {
         HwResourceKind::IommuGroup => "IOMMU_GROUP",
         HwResourceKind::MsiDoorbell => "MSI_DOORBELL",
         HwResourceKind::Volume => "VOLUME",
+        HwResourceKind::MemoryRegion => "MEMORY_REGION",
     }
 }
 

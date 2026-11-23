@@ -88,6 +88,7 @@ for filesystems, the feature section below.
 | Display switched off when idle (desktop screensaver, login screen) | ✓ virtio-gpu | ✓ virtio-gpu · ◐ Pi 4 engine | ✓ virtio-gpu | — |
 | Desktop paced at the output's own refresh rate | ✓ virtio-gpu | ✓ virtio-gpu · ✓ Pi 4 engine | ✓ virtio-gpu | — |
 | Native display engine (mode setting, several outputs, hotplug, HDMI 2.0 scrambling) | ◐ virtio-gpu | ◐ Pi 4 HVS + HDMI | ◐ virtio-gpu | — |
+| GPU served to programs (`gpu-v1` device channel) | ◐ virtio-gpu Venus | ▢ | ▢ | — |
 | Sandboxed font service (`fontd`, glyph rendering) | ✓ floor | ✓ store | ✓ floor | ▢ |
 | Graphical login screen (`greeter.app`) | ◐ | ◐ | ◐ | ▢ |
 | Fast user switching (concurrent desktop sessions) | ▢ | ◐ | ▢ | ▢ |

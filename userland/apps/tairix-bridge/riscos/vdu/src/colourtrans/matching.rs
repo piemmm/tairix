@@ -6,7 +6,6 @@ use tairix_colour::Rgb;
 use tairix_vdu::palette::default_256;
 
 use crate::colour::Direct;
-use crate::palette::EIGHT_BIT_COLOURS;
 
 /// The weights of the squared error ColourTrans minimises, held as the
 /// word `*ColourTransLoadings` and `MiscOp` 0 set: `&BBGGRRxx`, a byte a
@@ -17,6 +16,9 @@ pub(crate) struct Loadings(pub(crate) u32);
 impl Loadings {
     /// RISC OS's own: red two, green four, blue one.
     pub(crate) const DEFAULT: Self = Self(0x0104_0200);
+
+    /// Each channel weighed alike.
+    pub(crate) const UNIT: Self = Self::of_channels([1, 1, 1]);
 
     /// Red's, green's and blue's loadings, the low byte nought.
     pub(crate) const fn of_channels([red, green, blue]: [u8; 3]) -> Self {
@@ -70,16 +72,6 @@ pub(crate) fn search(colours: &[Rgb], wanted: Rgb, loadings: Loadings, look: Loo
         }
     }
     best.map_or(0, |(_, i)| i)
-}
-
-/// Whether 256 colours are the default palette's as ColourTrans tells it:
-/// each channel's top four bits alike, as VIDC1 held a colour.
-pub(crate) fn is_default_256(colours: &[Rgb]) -> bool {
-    colours.len() == EIGHT_BIT_COLOURS
-        && colours.iter().zip(0..=u8::MAX).all(|(colour, pixel)| {
-            let [r, g, b] = default_256(pixel);
-            [colour.r >> 4, colour.g >> 4, colour.b >> 4] == [r >> 4, g >> 4, b >> 4]
-        })
 }
 
 /// The default 256-colour palette's match, made from the palette's own form

@@ -365,26 +365,18 @@ impl Os<'_> {
     fn international_name(&mut self, reason: u32, number: u32) -> Result<Vec<u8>, Fail> {
         let buffer = self.world.international.own.reply();
         if let Some((_, length)) = self.ask_international(reason, number, buffer, NAME_ROOM - 1)? {
-            return Ok(self.read_until(buffer, length as usize, |_| false)?.0);
+            let length = length.min(NAME_ROOM - 1) as usize;
+            return Ok(self.read_until(buffer, length, |_| false)?.0);
         }
-        let file = self.own_open(own)?;
-        self.write_bytes(file.request(), b"UnnamedEntry\0")?;
-        let mut lookup = Regs::default();
-        lookup.r[..4].copy_from_slice(&[file.descriptor(), file.request(), buffer, NAME_ROOM]);
-        self.perform(X | crate::msgtrans::LOOKUP, &mut lookup)?;
-        Ok(self.read_until(buffer, lookup.r[3] as usize, |_| false)?.0)
+        let length = self.own_lookup(own, b"UnnamedEntry", buffer, NAME_ROOM)?;
+        Ok(self.read_until(buffer, length as usize, |_| false)?.0)
     }
 
     /// The text of its message `token`.
     fn international_message(&mut self, token: &[u8]) -> Result<Vec<u8>, Fail> {
-        let file = self.own_open(own)?;
-        let buffer = file.request().wrapping_add(128);
-        self.write_bytes(file.request(), token)?;
-        self.write_byte(file.request().wrapping_add(len32(token.len())), 0)?;
-        let mut lookup = Regs::default();
-        lookup.r[..4].copy_from_slice(&[file.descriptor(), file.request(), buffer, 120]);
-        self.perform(X | crate::msgtrans::LOOKUP, &mut lookup)?;
-        Ok(self.read_until(buffer, lookup.r[3] as usize, |_| false)?.0)
+        let buffer = self.world.international.own.reply();
+        let length = self.own_lookup(own, token, buffer, crate::msgtrans::REPLY_ROOM)?;
+        Ok(self.read_until(buffer, length as usize, |_| false)?.0)
     }
 }
 
@@ -576,7 +568,7 @@ fn listing(os: &mut Os<'_>, heading: &[u8], reason: u32) -> Result<(), Fail> {
             break;
         }
         if let Some((_, length)) = os.ask_international(reason, number, at, room)? {
-            at = at.wrapping_add(length);
+            at += length.min(room);
             os.write_byte(at, b'\t')?;
             at = at.wrapping_add(1);
         }

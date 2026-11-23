@@ -1,5 +1,6 @@
 //! [`RtDriverHost`] — the rt-backed [`DriverHost`] a user-space driver links.
 
+use alloc::sync::Arc;
 use core::cell::Cell;
 use core::ptr::NonNull;
 
@@ -8,6 +9,7 @@ use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 use tairix_abi::driver::net::MAC_ADDRESS_LEN;
 use tairix_abi::driver::virtio::VirtioHost;
 use tairix_abi::driver::CompletionSignal;
+use tairix_abi::driver::{MemoryMapper, MemoryWindow, RegionCaching};
 use tairix_abi::hwtree::{HwProperty, HwResource, HwResourceKind};
 use tairix_abi::mailbox_ipc;
 use tairix_abi::{
@@ -16,7 +18,7 @@ use tairix_abi::{
 };
 use tairix_caps::CapabilitySet;
 
-use crate::syscalls::GrantSyscalls;
+use crate::syscalls::{DmaRelease, GrantSyscalls};
 
 /// Maximum number of device-resource grants a driver process holds at start.
 ///
@@ -42,16 +44,13 @@ pub use tairix_abi::hwtree::GrantedResource;
 struct GrantSlot {
     handle: u64,
     resource: HwResource,
-    /// The `(offset, base_va)` of the most recently mapped sub-region of
-    /// this grant, or `None` while none has been mapped. A driver maps a
-    /// bounded `[offset, offset + len)` sub-region of its grant (not the
-    /// whole window), so the cache is keyed by `offset`:
-    /// a repeat request for the same sub-region reuses the cached VA, while a
-    /// request at a different offset (a second BAR in the same outbound
-    /// window) maps afresh (no repeated syscall for the
-    /// same window). A real mapping never bases at VA `0` (it is a user
-    /// address above the image bias).
-    mapped: Cell<Option<(u64, u64)>>,
+    /// The `(offset, base)` of the most recently mapped sub-region of this
+    /// grant, or `None` while none has been mapped. A driver maps a bounded
+    /// `[offset, offset + len)` sub-region of its grant (not the whole
+    /// window), so the cache is keyed by `offset`: a repeat request for the
+    /// same sub-region reuses the cached base, while a request at a different
+    /// offset (a second BAR in the same outbound window) maps afresh.
+    mapped: Cell<Option<(u64, NonNull<u8>)>>,
 }
 
 /// The user-space driver host: maps kernel-issued device-resource grants over
@@ -82,6 +81,15 @@ pub struct RtDriverHost<S: GrantSyscalls> {
     shared_taken: Cell<bool>,
     /// What the driver's device reaches, stated with every carve.
     dma_reach: Cell<DmaReach>,
+    /// What every carve's free goes through, shared by each slab carved, so
+    /// no slab reaches back into the host however it is moved or borrowed.
+    dma_release: Cell<Option<Arc<CarveRelease<S::Release>>>>,
+}
+
+/// The grant a carve was made under and the seam its free goes through.
+struct CarveRelease<R> {
+    release: R,
+    handle: u64,
 }
 
 impl<S: GrantSyscalls> RtDriverHost<S> {
@@ -217,6 +225,7 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
             dma_window: None,
             shared_taken: Cell::new(false),
             dma_reach: Cell::new(DmaReach::FULL),
+            dma_release: Cell::new(None),
         }
     }
 
@@ -278,12 +287,10 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
     fn resolve(&self, req_base: u64, len: usize) -> Option<(&GrantSlot, u64)> {
         let req_end = req_base.checked_add(len as u64)?;
         for slot in self.grants.iter().flatten() {
-            let window_start = match slot.resource.kind() {
-                Some(HwResourceKind::Mmio | HwResourceKind::Framebuffer) => slot.resource.base(),
-                Some(HwResourceKind::BusWindow) => slot.resource.translated_base(),
-                // A DMA constraint, IRQ line, or port range is not a mappable
-                // window (validate the kind).
-                _ => continue,
+            // A DMA constraint, IRQ line, port range or memory region is no
+            // register window (validate the kind).
+            let Some(window_start) = slot.resource.register_window_base() else {
+                continue;
             };
             let window_end = window_start.checked_add(slot.resource.length())?;
             if req_base >= window_start && req_end <= window_end {
@@ -294,7 +301,7 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
     }
 
     /// Map the `[offset, offset + len)` sub-region of `slot`'s granted window
-    /// through the `mmio_map` syscall, returning its base VA; reuse the cached
+    /// through the `mmio_map` syscall, returning its base; reuse the cached
     /// base on a repeat request for the **same** sub-region offset.
     ///
     /// Mapping a bounded sub-region rather than the whole grant is what lets a
@@ -307,20 +314,37 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
         slot: &GrantSlot,
         offset: u64,
         len: usize,
-    ) -> Result<u64, MmioMapError> {
-        if let Some((cached_offset, cached_va)) = slot.mapped.get() {
+    ) -> Result<NonNull<u8>, MmioMapError> {
+        if let Some((cached_offset, cached)) = slot.mapped.get() {
             if cached_offset == offset {
-                return Ok(cached_va);
+                return Ok(cached);
             }
         }
-        let ret = self.syscalls.mmio_map(slot.handle, offset, len);
-        if ret <= 0 {
-            return Err(mmio_error(ret));
-        }
-        #[allow(clippy::cast_sign_loss)] // `ret > 0` checked above; it is a user VA.
-        let va = ret as u64;
-        slot.mapped.set(Some((offset, va)));
-        Ok(va)
+        let base = self
+            .syscalls
+            .mmio_map(slot.handle, offset, len, None)
+            .map_err(mmio_error)?;
+        slot.mapped.set(Some((offset, base)));
+        Ok(base)
+    }
+
+    /// The record a carve under grant `handle` is freed through, made once and
+    /// shared by every carve under it.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfMemory`] when the heap refuses the record.
+    fn carve_release(&self, handle: u64) -> Result<Arc<CarveRelease<S::Release>>, DriverError> {
+        let release = match self.dma_release.take() {
+            Some(release) if release.handle == handle => release,
+            _ => Arc::try_new(CarveRelease {
+                release: self.syscalls.dma_release(),
+                handle,
+            })
+            .map_err(|_| DriverError::OutOfMemory)?,
+        };
+        self.dma_release.set(Some(Arc::clone(&release)));
+        Ok(release)
     }
 
     /// The DMA-constraint grant carves go under: the selected window, else the
@@ -496,10 +520,9 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
     }
 
     /// Map the cross-process shared data buffer the driver was granted,
-    /// returning its base user virtual address and the region's byte
-    /// length — the kernel's own record, so the driver sizes its view of
-    /// the shared bytes from the kernel's answer, never the granting
-    /// task's claim.
+    /// returning its base and the region's byte length — the kernel's own
+    /// record, so the driver sizes its view of the shared bytes from the
+    /// kernel's answer, never the granting task's claim.
     ///
     /// Resolves the single [`HwResourceKind::Shared`] grant its matched
     /// node carried and maps it through `shm_map`; the granting driver
@@ -514,7 +537,7 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
     /// * [`DriverError::PermissionDenied`] if the kernel refuses the map (the
     ///   driver lacks `CAP_SHM`), else [`DriverError::Unsupported`] for any
     ///   other kernel refusal.
-    pub(crate) fn map_shared(&self) -> Result<(u64, usize), DriverError> {
+    pub(crate) fn map_shared(&self) -> Result<(NonNull<u8>, usize), DriverError> {
         let slot = self
             .grants
             .iter()
@@ -522,18 +545,17 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
             .find(|slot| slot.resource.kind() == Some(HwResourceKind::Shared))
             .ok_or(DriverError::NotFound)?;
         let mut len: u64 = 0;
-        let ret = self.syscalls.shm_map(slot.handle, &mut len);
-        if ret < 0 {
-            return Err(match Errno::try_from_syscall(ret) {
+        let base = self
+            .syscalls
+            .shm_map(slot.handle, &mut len)
+            .map_err(|ret| match Errno::try_from_syscall(ret) {
                 Some(Errno::PermissionDenied) => DriverError::PermissionDenied,
                 _ => DriverError::Unsupported,
-            });
-        }
+            })?;
         // A length the host's address width cannot hold is a kernel-side
         // inconsistency; refuse it rather than truncate.
         let len = usize::try_from(len).map_err(|_| DriverError::Unsupported)?;
-        #[allow(clippy::cast_sign_loss)] // `ret >= 0` checked above; it is a user VA.
-        Ok((ret as u64, len))
+        Ok((base, len))
     }
 }
 
@@ -555,11 +577,9 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
             return Err(DriverError::Busy);
         }
         let (base, len) = self.map_shared()?;
-        let base = usize::try_from(base)
-            .ok()
-            .filter(|&base| base != 0 && base.checked_add(len).is_some())
-            .ok_or(DriverError::LengthOutOfRange)?;
-        if len < least {
+        let sliceable =
+            isize::try_from(len).is_ok() && base.addr().get().checked_add(len).is_some();
+        if !sliceable || len < least {
             return Err(DriverError::LengthOutOfRange);
         }
         // SAFETY: `map_shared` had the kernel map `len` bytes read-write at
@@ -568,12 +588,8 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
         // unmapped while it runs. `shared_taken` makes this the only slice
         // ever built over the region in this process, so the `&mut` is
         // exclusive on this side; the serving driver writes the region only
-        // while it answers this driver's own blocking calls. The address
-        // arrives from the kernel as an integer, so its provenance is the
-        // mapping's exposed one.
-        Ok(unsafe {
-            core::slice::from_raw_parts_mut(core::ptr::with_exposed_provenance_mut::<u8>(base), len)
-        })
+        // while it answers this driver's own blocking calls.
+        Ok(unsafe { core::slice::from_raw_parts_mut(base.as_ptr(), len) })
     }
 }
 
@@ -594,22 +610,62 @@ impl<S: GrantSyscalls> MmioMapper for RtDriverHost<S> {
         // bus aperture costs `len` bytes of mapping, not the aperture's full
         // extent. The kernel returns the base VA of that
         // sub-region directly.
-        let window_va = self.ensure_mapped(slot, offset, len)?;
-        let addr = usize::try_from(window_va).map_err(|_| MmioMapError::InvalidRegion)?;
-        let base = NonNull::new(addr as *mut u8).ok_or(MmioMapError::InvalidRegion)?;
-        // SAFETY: `ensure_mapped` obtained `window_va` from the `mmio_map`
+        let base = self.ensure_mapped(slot, offset, len)?;
+        // SAFETY: `ensure_mapped` obtained `base` from the `mmio_map`
         // syscall, which mapped exactly the `[offset, offset + len)`
         // sub-region of `slot`'s granted window (caching-disabled,
         // user-accessible, never executable) into this process's own
         // address space and kept it valid for the process's lifetime (longer
         // than the returned window). `resolve` proved `[phys_base, phys_base +
         // len)` lies wholly inside that window at `offset`, so the `len` bytes
-        // from `window_va` are in-bounds, ≥ 4-byte aligned (the kernel maps
+        // from `base` are in-bounds, ≥ 4-byte aligned (the kernel maps
         // page-aligned and a real device offset is register-aligned), and
         // exclusively owned by this window. `phys_base` is the device-visible
         // base the window records (the kernel validated the
         // grant and the sub-region bounds).
         Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len) })
+    }
+}
+
+impl<S: GrantSyscalls> MemoryMapper for RtDriverHost<S> {
+    fn map_memory(
+        &self,
+        region: &HwResource,
+        offset: u64,
+        len: usize,
+        caching: RegionCaching,
+    ) -> Result<MemoryWindow, DriverError> {
+        // Capability before state; the kernel re-checks.
+        if !self.caps.contains(CapabilityId::MMIO_MAP) {
+            return Err(DriverError::PermissionDenied);
+        }
+        let slot = self
+            .grants
+            .iter()
+            .flatten()
+            .find(|slot| {
+                slot.resource == *region
+                    && slot.resource.kind() == Some(HwResourceKind::MemoryRegion)
+            })
+            .ok_or(DriverError::NotFound)?;
+        // A part is the caller's to hand back, so it is mapped afresh rather
+        // than through the cache register windows share.
+        let base = self
+            .syscalls
+            .mmio_map(slot.handle, offset, len, Some(caching))
+            .map_err(memory_error)?;
+        // SAFETY: `mmio_map` mapped exactly `[offset, offset + len)` of the
+        // granted region, readable and writable, into this process alone, and
+        // it stays mapped until `unmap_memory` hands this window back
+        // (`GrantSyscalls`' contract).
+        Ok(unsafe { MemoryWindow::from_mapping(offset, base, len) })
+    }
+
+    fn unmap_memory(&self, window: MemoryWindow) -> Result<(), (MemoryWindow, DriverError)> {
+        match self.syscalls.mmio_unmap(window.mapped_at() as u64) {
+            0 => Ok(()),
+            ret => Err((window, memory_error(ret))),
+        }
     }
 }
 
@@ -623,33 +679,25 @@ impl<S: GrantSyscalls> DmaHost for RtDriverHost<S> {
             return Err(DriverError::BufferTooSmall);
         }
         let grant = self.dma_grant().ok_or(DriverError::Unsupported)?;
+        // Had before the carve, so memory the heap refuses carves nothing.
+        let release = self.carve_release(grant.handle)?;
         let mut device: u64 = 0;
-        let ret = self
+        let ptr = self
             .syscalls
-            .dma_alloc(grant.handle, size, self.dma_reach.get(), &mut device);
-        if ret <= 0 {
-            return Err(dma_error(ret));
-        }
-        #[allow(clippy::cast_sign_loss)] // `ret > 0` checked above; it is a user VA.
-        let cpu_va = ret as u64;
-        let addr = usize::try_from(cpu_va).map_err(|_| DriverError::OutOfRange)?;
-        let ptr = NonNull::new(addr as *mut u8).ok_or(DriverError::DeviceFault)?;
+            .dma_alloc(grant.handle, size, self.dma_reach.get(), &mut device)
+            .map_err(dma_error)?;
         let slot = self.next_slot.get();
         self.next_slot.set(slot.wrapping_add(1));
-        let pool_ptr: *const () = core::ptr::from_ref::<Self>(self).cast::<()>();
         // SAFETY: `dma_alloc` carved exactly `size` bytes of zeroed,
         // coherent, `RW` (non-executable), guard-bracketed memory mapped
-        // contiguously into this process's own address space.
-        // `ptr` is its non-null, page-aligned CPU base and `device` its
-        // device-visible base; the region is exclusively this slab's (a fresh
-        // carve per call), so no other live reference aliases it. `pool_ptr`
-        // is this host, which outlives every slab it mints: the host is owned
-        // by the driver process for its whole lifetime, and a slab is always
-        // dropped (its buffers reclaimed) strictly before the host — the carve
-        // is per-request and its slab never escapes the host's borrow. On
-        // drop, `free_dma_shim::<S>` reaches the host back through `pool_ptr`
-        // and issues `dma_free`, so the kernel zeroes and reclaims the carve's
-        // frames rather than leaking them until process exit.
+        // contiguously into this process's own address space, until its
+        // release frees it (`GrantSyscalls`' contract). `ptr` is its
+        // non-null, page-aligned CPU base and `device` its device-visible
+        // base; the region is exclusively this slab's (a fresh carve per
+        // call). `pool` is a strong reference to the release record the
+        // slab's free takes back, so it stays valid however long the slab
+        // lives, and it is `Send + Sync` for a slab dropped on another
+        // thread.
         let slab = unsafe {
             DmaSlab::from_pool(
                 device,
@@ -657,8 +705,8 @@ impl<S: GrantSyscalls> DmaHost for RtDriverHost<S> {
                 size,
                 self.dma_pool,
                 slot,
-                pool_ptr,
-                free_dma_shim::<S>,
+                Arc::into_raw(release).cast::<()>(),
+                release_carve::<S::Release>,
             )
         };
         Ok(match self.coherency {
@@ -682,46 +730,34 @@ impl<S: GrantSyscalls> DmaHost for RtDriverHost<S> {
 }
 
 /// Drop-path shim invoked by [`DmaSlab::drop`] for a slab minted by
-/// [`RtDriverHost::alloc_dma_zeroed`].
+/// [`RtDriverHost::alloc_dma_zeroed`]: releases the carve based at `cpu`
+/// through the `dma_free` syscall, under the grant it was carved under.
 ///
-/// Reaches the originating host back through the opaque `pool` pointer and
-/// releases the carve through the `dma_free` syscall, keyed by the slab's CPU
-/// base `cpu` and the host's single DMA-constraint grant. A host that holds no
-/// DMA grant (so the carve could never have happened) or a kernel refusal is
-/// dropped — `Drop` cannot propagate an error, and a carve still live when the
-/// process exits passes to its node's DMA quarantine, so a missed free costs
-/// memory until the node's next driver quiesces the device, never soundness.
+/// A kernel refusal is dropped — `Drop` cannot propagate an error, and a carve
+/// still live when the process exits passes to its node's DMA quarantine, so a
+/// missed free costs memory until the node's next driver quiesces the device,
+/// never soundness.
 ///
 /// # Safety
 ///
 /// Mirrors the [`SlabFreeFn`](tairix_abi::driver::dma::SlabFreeFn) contract:
-/// `pool` must be the `*const ()` produced by
-/// [`RtDriverHost::alloc_dma_zeroed`] casting `&RtDriverHost<S>`, and the
-/// originating host must still be live (the host outlives every slab it
-/// mints). `cpu` is the slab's CPU base, the user virtual address the carve
-/// returned.
-unsafe fn free_dma_shim<S: GrantSyscalls>(
+/// `pool` is the strong reference to a [`CarveRelease<R>`] the carve leaked
+/// into its slab, taken back exactly once, here.
+unsafe fn release_carve<R: DmaRelease>(
     pool: *const (),
     cpu: NonNull<u8>,
     _slot: usize,
     _len: usize,
     end: SlabEnd,
 ) {
+    // SAFETY: per the function contract; this ends the slab's reference.
+    let release = unsafe { Arc::from_raw(pool.cast::<CarveRelease<R>>()) };
     if end == SlabEnd::Withheld {
         return;
     }
-    // SAFETY: `pool` was produced at the matching `from_pool` call by casting
-    // `&RtDriverHost<S>` through `*const Self as *const ()`; the host outlives
-    // the slab (see the `from_pool` SAFETY note), so this observes a live host
-    // of the same monomorphisation.
-    let host: &RtDriverHost<S> = unsafe { &*(pool.cast::<RtDriverHost<S>>()) };
-    let Some(grant) = host.dma_grant() else {
-        return;
-    };
-    // The kernel resolves `cpu` against this task's own DMA window and fails
-    // closed on anything but a live carve; the result has no recovery on a
-    // drop path, so it is intentionally discarded.
-    let _ = host.syscalls.dma_free(grant.handle, cpu.as_ptr() as u64);
+    let _ = release
+        .release
+        .dma_free(release.handle, cpu.as_ptr().addr() as u64);
 }
 
 impl<S: GrantSyscalls> VirtioHost for RtDriverHost<S> {
@@ -845,11 +881,11 @@ impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
     }
 }
 
-/// Map a non-positive `mmio_map` result to a [`MmioMapError`].
+/// Map a refused `mmio_map` result to a [`MmioMapError`].
 ///
-/// `ret` is `≤ 0`: a negative value is `-errno`, and `0` is an impossible base
-/// VA the kernel never returns for a real mapping (treated as a platform
-/// failure). The capability was already checked locally, so a kernel
+/// `ret` is `-errno`, or a base no pointer can be formed at, which the kernel
+/// never answers for a real mapping (treated as a platform failure). The
+/// capability was already checked locally, so a kernel
 /// `PermissionDenied` here still maps to [`MmioMapError::CapabilityMissing`]
 /// (the authoritative kernel verdict); a bad/forged grant or out-of-range
 /// window maps to [`MmioMapError::InvalidRegion`]; anything else is an
@@ -864,13 +900,24 @@ fn mmio_error(ret: i64) -> MmioMapError {
     }
 }
 
-/// Map a non-positive `dma_alloc` result to a [`DriverError`].
+/// Map a refused `mmio_map` or `mmio_unmap` result on a memory part to a
+/// [`DriverError`]: a grant the kernel no longer holds for the driver
+/// stays [`DriverError::NotFound`], whatever revoked it.
+fn memory_error(ret: i64) -> DriverError {
+    match Errno::try_from_syscall(ret) {
+        Some(Errno::NotFound) => DriverError::NotFound,
+        Some(errno) => DriverError::from_errno(errno),
+        None => DriverError::Unsupported,
+    }
+}
+
+/// Map a refused `dma_alloc` result to a [`DriverError`].
 ///
-/// `ret` is `≤ 0`. A kernel `PermissionDenied` maps to
-/// [`DriverError::PermissionDenied`]; exhausted memory or DMA budget to
-/// [`DriverError::OutOfMemory`]; a carve larger than the kernel can make to
-/// [`DriverError::LengthOutOfRange`]; anything else (an inert facility, an
-/// unknown code, a `0` base) is [`DriverError::Unsupported`].
+/// A kernel `PermissionDenied` maps to [`DriverError::PermissionDenied`];
+/// exhausted memory or DMA budget to [`DriverError::OutOfMemory`]; a carve
+/// larger than the kernel can make to [`DriverError::LengthOutOfRange`];
+/// anything else (an inert facility, an unknown code, a base no pointer can be
+/// formed at) is [`DriverError::Unsupported`].
 fn dma_error(ret: i64) -> DriverError {
     match Errno::try_from_syscall(ret) {
         Some(Errno::PermissionDenied) => DriverError::PermissionDenied,

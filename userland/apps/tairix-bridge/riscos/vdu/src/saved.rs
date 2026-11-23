@@ -16,7 +16,7 @@ use tairix_riscos_kernel::os::{Fail, Os};
 
 use crate::colour::{Colours, Gcol, TextColour};
 use crate::mode::Format;
-use crate::plot::Graphics;
+use crate::plot::{Graphics, REACH};
 use crate::state::Vdu;
 use crate::text::{CursorShape, Text, Window};
 
@@ -138,18 +138,26 @@ impl Saved {
         let mut words = Words::default();
         words.put(WRITTEN);
         self.encode(&mut words);
-        for (i, &word) in (0u32..).zip(&words.words[..words.at]) {
-            os.write_word(address.wrapping_add(4 * i), word)?;
+        let mut bytes = [0u8; 4 * WORDS];
+        for (chunk, word) in bytes
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(&words.words[..words.at])
+        {
+            *chunk = word.to_le_bytes();
         }
-        Ok(())
+        os.write_bytes(address, &bytes[..4 * words.at])
     }
 
     /// The state the save area at `address` holds: none where nothing the
     /// drivers wrote is there.
     pub(crate) fn read(os: &mut Os<'_>, address: u32) -> Result<Option<Self>, Fail> {
+        let mut bytes = [0u8; 4 * WORDS];
+        os.read_bytes(address, &mut bytes)?;
         let mut words = Words::default();
-        for (i, word) in (0u32..).zip(words.words.iter_mut()) {
-            *word = os.read_word(address.wrapping_add(4 * i))?;
+        for (word, chunk) in words.words.iter_mut().zip(bytes.as_chunks::<4>().0) {
+            *word = u32::from_le_bytes(*chunk);
         }
         if words.take() != Some(WRITTEN) {
             return Ok(None);
@@ -284,20 +292,31 @@ fn put_graphics(words: &mut Words, graphics: &Graphics) {
     }
 }
 
+/// Whether `point`, in pixels, is one the drivers hold a point to.
+fn reached((x, y): (i32, i32)) -> bool {
+    (-REACH..=REACH).contains(&x) && (-REACH..=REACH).contains(&y)
+}
+
 fn take_graphics(words: &mut Words) -> Option<Graphics> {
     let (left, bottom) = words.take_pair()?;
     let (right, top) = words.take_pair()?;
     if left < 0 || bottom < 0 || left > right || bottom > top {
         return None;
     }
-    Some(Graphics {
+    let origin = words.take_pair()?;
+    // VDU 29 sets the origin from two 16-bit words, and every pixel point is
+    // held within reach: the sums drawing makes rely on both.
+    if i16::try_from(origin.0).is_err() || i16::try_from(origin.1).is_err() {
+        return None;
+    }
+    let graphics = Graphics {
         window: crate::changed::Rect {
             left,
             bottom,
             right,
             top,
         },
-        origin: words.take_pair()?,
+        origin,
         cursor: words.take_pair()?,
         cursor_pixels: words.take_pair()?,
         old: words.take_pair()?,
@@ -305,7 +324,14 @@ fn take_graphics(words: &mut Words) -> Option<Graphics> {
         new_point: words.take_pair()?,
         char_size: (words.character()?, words.character()?),
         char_space: (words.character()?, words.character()?),
-    })
+    };
+    let points = [
+        graphics.cursor_pixels,
+        graphics.old,
+        graphics.older,
+        graphics.new_point,
+    ];
+    points.into_iter().all(reached).then_some(graphics)
 }
 
 fn put_colours(words: &mut Words, colours: &Colours) {
@@ -345,7 +371,7 @@ fn take_colours(words: &mut Words) -> Option<Colours> {
         dot: (u64::from(high) << 32) | u64::from(low),
         dot_length: words.take().filter(|&n| (1..=MOST_DOTS).contains(&n))?,
         dot_at: words.take().filter(|&n| n < MOST_DOTS)?,
-        ecf_origin: words.take_pair()?,
+        ecf_origin: words.take_pair().filter(|&point| reached(point))?,
     })
 }
 

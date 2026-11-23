@@ -11,7 +11,7 @@ use tairix_riscos_kernel::swi::X;
 use tairix_vdu::mode::var;
 
 use super::matching::Look;
-use super::{current, ecf, loadings, CURRENT};
+use super::{current, ecf, CURRENT};
 
 /// `SetGCOL`'s R3 bit asking for an ECF where one comes closer.
 const USE_ECF: u32 = 1 << 8;
@@ -23,12 +23,9 @@ const TEXT: u32 = 1 << 9;
 /// `SetGCOL` reports a full palette's GCOL in the grouped form, and leaves
 /// only R3's background bit.
 pub(super) fn set_gcol(os: &mut Os<'_>, regs: &mut Regs, look: Look) -> Result<(), Fail> {
-    let Some(loadings) = loadings(os) else {
-        return Ok(());
-    };
     let wanted = Rgb::from_riscos_word(regs.r[0]);
     let [log2_bpp] = crate::vars::mode_variables(os, CURRENT, [var::LOG2_BPP])?;
-    let Some(against) = current(os)? else {
+    let Some((against, loadings)) = current(os)? else {
         return Ok(());
     };
     let number = against.colour_number(wanted, loadings, look);
@@ -69,11 +66,8 @@ pub(super) fn set_colour_number(os: &mut Os<'_>, regs: &Regs) -> Result<(), Fail
 /// `ColourTrans_SetTextColour`, `look` nearest, and `SetOppTextColour`.
 /// RISC OS 5 leaves R0 as it was, not the GCOL its manual gives.
 pub(super) fn set_text_colour(os: &mut Os<'_>, regs: &Regs, look: Look) -> Result<(), Fail> {
-    let Some(loadings) = loadings(os) else {
-        return Ok(());
-    };
     let wanted = Rgb::from_riscos_word(regs.r[0]);
-    let Some(against) = current(os)? else {
+    let Some((against, loadings)) = current(os)? else {
         return Ok(());
     };
     let gcol = against.gcol(wanted, loadings, look);

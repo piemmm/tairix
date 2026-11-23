@@ -28,28 +28,35 @@
 //! load-time capability bitmap up front purely so a missing grant fails fast
 //! without a round trip (the kernel re-checks regardless).
 //!
-//! # Allocation-free and fail-closed
+//! # Fail-closed
 //!
-//! The crate is `no_std` and allocation-free: the grant table is a
-//! fixed-capacity array sized by [`MAX_GRANTS`], so a driver process works
-//! before the userland heap is available (`plans/SPAWN.md` `SP5b`). Every error
-//! path denies — a missing capability, an unmappable request, a window no
-//! grant covers, or a kernel refusal returns an error, never a fabricated
-//! pointer or a panic.
+//! The crate is `no_std`, and the grant table is a fixed-capacity array sized
+//! by [`MAX_GRANTS`]. The one allocation is the record a DMA carve's free goes
+//! through, shared by every slab the host carves, so a slab reaches nothing of
+//! the host however the host is moved, borrowed or dropped. Every error path
+//! denies — a missing capability, an unmappable request, a window no grant
+//! covers, a record the heap refuses, or a kernel refusal returns an error,
+//! never a fabricated pointer or a panic.
 //!
 //! # Testing seam
 //!
-//! The two syscalls the host issues live behind the [`GrantSyscalls`] trait so
-//! the resolution and translation logic is exercised on the host without a
-//! kernel. Production driver processes use [`RtGrantSyscalls`], which forwards
-//! to `tairix_rt`'s wrappers — the one syscall trap.
+//! The syscalls the host issues live behind the [`GrantSyscalls`] trait, and a
+//! carve's free behind [`DmaRelease`], so the resolution and translation logic
+//! is exercised on the host without a kernel. Production driver processes use
+//! [`RtGrantSyscalls`] and [`RtDmaRelease`], which forward to `tairix_rt`'s
+//! wrappers — the one syscall trap.
 //!
 //! A link supplier's own tests answer it through `testkit`'s fake kernel,
 //! exposed by the `test-support` feature.
 
 #![cfg_attr(not(any(test, feature = "test-support")), no_std)]
+// `Arc::try_new`, so a carve's release record the heap refuses fails the
+// carve rather than aborting.
+#![feature(allocator_api)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
+
+extern crate alloc;
 
 pub mod exit;
 mod host;
@@ -59,7 +66,7 @@ mod syscalls;
 
 pub use host::{GrantedResource, RtDriverHost, MAX_GRANTS};
 pub use supplier::{refusal, Recorder, RtSupplier, Supplier, SupplierHost};
-pub use syscalls::{GrantSyscalls, RtGrantSyscalls};
+pub use syscalls::{DmaRelease, GrantSyscalls, RtDmaRelease, RtGrantSyscalls};
 
 #[cfg(target_os = "none")]
 pub mod serve;

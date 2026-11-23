@@ -61,8 +61,12 @@ pub(crate) const SYSTEM_HEAP: u8 = 0x91;
 pub(crate) const RMA_SIZE: u8 = 0x92;
 /// The pages of the system sprite area.
 pub const SPRITE_SIZE: u8 = 0x93;
-/// The low bits of [`SPRITE_SIZE`] that count its pages.
-pub const SPRITE_SIZE_BITS: u8 = 7;
+/// The low bits of a size location — the screen's, the RAM disc's, the
+/// RMA's, the system sprite area's, the printer buffer's — that count its
+/// pages.
+pub const PAGES_BITS: u8 = 7;
+/// [`PAGES_BITS`] as a mask.
+const PAGES_MASK: u8 = (1 << PAGES_BITS) - 1;
 /// The configured language.
 pub(crate) const LANGUAGE: u8 = 0xB9;
 /// The current year's century.
@@ -229,6 +233,11 @@ impl Os<'_> {
         regs.r[..2].copy_from_slice(&[READ_CMOS, u32::from(logical)]);
         self.perform(crate::swi::X | crate::swi::os::BYTE, &mut regs)?;
         Ok(regs.byte(2))
+    }
+
+    /// The pages size location `logical` counts: its low [`PAGES_BITS`].
+    pub fn cmos_pages(&mut self, logical: u8) -> Result<u8, Fail> {
+        Ok(self.read_cmos(logical)? & PAGES_MASK)
     }
 
     /// `value` written to CMOS location `logical` through `OS_Byte` 162.

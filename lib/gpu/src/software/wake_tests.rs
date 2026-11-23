@@ -1,3 +1,4 @@
+use crate::device::as_software;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
@@ -46,7 +47,10 @@ fn a_signal_wakes_its_waiters_before_the_work_it_readied_runs() {
             })
             .expect("admitted");
         // A waiter on the gate, holding its wake as a parked one does.
-        let point = gate.shared.model.lock().point(gate.context, gate.key, 1);
+        let point = as_software(&gate.host)
+            .model
+            .lock()
+            .point(gate.context, gate.key, 1);
         let Ok(Point::Pending(_wake)) = point else {
             panic!("the gate is not yet reached");
         };
@@ -83,7 +87,10 @@ fn a_worker_poked_while_it_is_not_parked_is_not_woken() {
         commands.fill_buffer(&target, 0, 16, 1).expect("recorded");
         seam::arm(0);
         let _fence = submit(&queue(&context), &commands).expect("admitted");
-        assert!(device.shared.backend.wake.state.lock().pending, "poked");
+        assert!(
+            as_software(&device.host).backend.wake.state.lock().pending,
+            "poked"
+        );
         assert_eq!(wakes(&seam::calls(), 1), 0, "with no call, as none waits");
     })
     .join()
@@ -108,12 +115,12 @@ fn work_that_is_not_ready_pokes_no_worker() {
         })
         .expect("admitted");
     assert!(
-        !device.shared.backend.wake.state.lock().pending,
+        !as_software(&device.host).backend.wake.state.lock().pending,
         "nothing to run, so nothing poked"
     );
     gate.signal(1).expect("advances");
     assert!(
-        device.shared.backend.wake.state.lock().pending,
+        as_software(&device.host).backend.wake.state.lock().pending,
         "poked once it is ready"
     );
 }

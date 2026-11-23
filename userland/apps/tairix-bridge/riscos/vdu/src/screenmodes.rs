@@ -124,8 +124,8 @@ const BAD_AUDIO_REASON: Error = Error {
     token: "BadAudioReason",
 };
 
-/// ScreenModes' SWI chunk, and its SWIs' offsets in it.
-const CHUNK: u32 = 0x4_87C0;
+use tairix_riscos_kernel::swi::chunk::SCREEN_MODES as CHUNK;
+/// ScreenModes' SWIs' offsets in [`CHUNK`].
 const READ_INFO: u32 = 0;
 const ENUMERATE_AUDIO_FORMATS: u32 = 1;
 const FEATURES: u32 = 2;
@@ -360,12 +360,10 @@ fn read_file(os: &mut Os<'_>, name: &[u8]) -> Result<Vec<u8>, Fail> {
     if length > MOST_FILE {
         return Err(os.own_error(own, MODE_FILE_TOO_LARGE, &[name]));
     }
-    let buffer = os.rma_claim(length.max(4))?;
-    let mut load = Regs::new([16, at, buffer, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    let loaded = os.perform(X | FILE, &mut load);
-    let read = loaded.and_then(|()| os.read_vec(buffer, length as usize));
-    os.rma_free(buffer)?;
-    read
+    os.read_through_rma(length, |os, buffer| {
+        let mut load = Regs::new([16, at, buffer, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        os.perform(X | FILE, &mut load)
+    })
 }
 
 /// Why a monitor definition file was not read.

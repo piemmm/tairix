@@ -1,8 +1,8 @@
 //! Unit tests for the hex view model.
 
 use super::{
-    digit_value, hex_pair, rows, step_left, step_right, type_byte, type_digit, HexCaret, HexLayout,
-    Nibble, Pane, BYTES_PER_ROW,
+    digit_value, rows, step_left, step_right, type_byte, type_digit, HexCaret, HexLayout, Nibble,
+    Pane, BYTES_PER_ROW,
 };
 
 const fn caret(offset: usize, pane: Pane, nibble: Nibble) -> HexCaret {
@@ -169,7 +169,7 @@ fn the_caret_steps_by_nibble_in_hex_and_by_byte_in_ascii() {
 
 #[test]
 fn bytes_show_as_digits_and_typed_digits_read_back() {
-    assert_eq!(hex_pair(0x0f), *b"0F");
+    assert_eq!(tairix_util::hex::upper_digits(0x0f), *b"0F");
     assert_eq!(digit_value('e'), Some(14));
     assert_eq!(digit_value('E'), Some(14));
     assert_eq!(digit_value('G'), None);

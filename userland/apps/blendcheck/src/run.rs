@@ -23,10 +23,11 @@ mod program {
     use tairix_abi::seat::{ReleaseSurface, SEAT_PRIMARY};
     use tairix_abi::touch::TouchFrame;
     use tairix_abi::{Errno, WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
-    use tairix_blendcheck::{parse, pattern, Command, USAGE};
+    use tairix_blendcheck::{pattern, USAGE};
     use tairix_display::{
         establish_display, Base, BaseFrame, DisplayClient, Presenter, RtDisplayTransport,
     };
+    use tairix_help::HelpOnly;
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
 
     const NAME: &str = "blendcheck";
@@ -53,9 +54,9 @@ mod program {
         let Some(arguments) = tairix_help::arguments(NAME) else {
             return tairix_help::MISUSE;
         };
-        match parse(&arguments) {
-            Ok(Command::Run) => {}
-            Ok(Command::Help) => return tairix_help::print_own_short_help(NAME, Some(USAGE)),
+        match tairix_help::parse_help_only(&arguments) {
+            Ok(HelpOnly::Run) => {}
+            Ok(HelpOnly::Help) => return tairix_help::print_own_short_help(NAME, Some(USAGE)),
             Err(err) => {
                 tairix_help::report_misuse(NAME, &err);
                 return tairix_help::MISUSE;

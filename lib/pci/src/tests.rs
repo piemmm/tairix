@@ -23,13 +23,13 @@ use core::ptr::NonNull;
 use tairix_abi::driver::bus::{Bus, BusDevice};
 use tairix_abi::driver::pci::{PciBus, BUS_MASTER_ENABLE, INTERRUPT_DISABLE};
 use tairix_abi::driver::virtio_pci::{
-    VirtioPciBus, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE, VIRTIO_PCI_CFG_ISR,
-    VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI,
+    VirtioPciBus, VirtioSharedMemory, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE,
+    VIRTIO_PCI_CFG_ISR, VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_CFG_SHARED_MEMORY,
 };
 use tairix_abi::{DriverError, MmioMapError, MmioMapper, MsiMessage, RegisterWindow};
 
 use crate::config::{BarKind, Capability, ConfigAddress, ConfigSpace};
-use crate::enumerate::Pci;
+use crate::enumerate::{Pci, VIRTIO_PCI_CAP64_LEN};
 
 // ---- Mock MMIO mapper ----------------------------------------------------
 
@@ -2170,5 +2170,340 @@ fn msix_state_takes_its_whole_page_and_one_at_the_base_leaves_nothing() {
     assert_eq!(
         PciBus::driver_window(&at_base, function_04(), 0),
         Err(DriverError::NotFound)
+    );
+}
+
+// ---- virtio shared memory -------------------------------------------------
+
+/// One shared-memory capability: `(id, bar byte, offset, length)`.
+type SharedMemoryCap = (u8, u8, u64, u64);
+
+/// BAR4's low dword as QEMU programs a host-visible region: 64-bit,
+/// prefetchable memory.
+const PREFETCHABLE_64: u32 = 0x0000_000C;
+
+/// The dwords of the capability at config-space byte `offset`.
+fn cap_at(offset: u8, dwords: &[u32]) -> impl Iterator<Item = (u16, u32)> + '_ {
+    let first = u16::from(offset) / 4;
+    dwords.iter().zip(first..).map(|(&dword, reg)| (reg, dword))
+}
+
+/// A modern virtio GPU on `00:05.0` laid out as QEMU's `virtio-gpu-pci` with
+/// a host-visible region: its MSI-X table and pending bits in BAR1, its four
+/// configuration structures in the 16 KiB 64-bit prefetchable BAR2, and BAR4 a
+/// 64 MiB 64-bit window at 4 GiB whose low dword is `bar4_low`, then each of
+/// `regions` as a capability of the 64-bit layout.
+fn virtio_gpu_fixture(regions: &[SharedMemoryCap], bar4_low: u32) -> MockConfigSpace {
+    let mut regs = vec![
+        id(0x1AF4, 0x1050),
+        status_with_caplist(),
+        class(0x0380),
+        header(0x00),
+        // BAR1: 32-bit memory at 0xFE00_0000; BAR2/3: 64-bit prefetchable at
+        // 0xFD00_0000; BAR4/5: at 0x1_0000_0000.
+        (5, 0xFE00_0000),
+        (6, 0xFD00_000C),
+        (7, 0x0000_0000),
+        (8, bar4_low),
+        (9, 0x0000_0001),
+        cap_pointer(0x40),
+    ];
+    // MSI-X: three entries, table at BAR1 + 0, pending bits at BAR1 + 0x800.
+    regs.extend(cap_at(0x40, &[0x0002_5011, 0x0000_0001, 0x0000_0801]));
+    let structure = |next: u8, len: u8, cfg_type: u8| {
+        0x09 | u32::from(next) << 8 | u32::from(len) << 16 | u32::from(cfg_type) << 24
+    };
+    regs.extend(cap_at(
+        0x50,
+        &[
+            structure(0x60, 0x10, VIRTIO_PCI_CFG_COMMON),
+            2,
+            0x0000,
+            0x1000,
+        ],
+    ));
+    regs.extend(cap_at(
+        0x60,
+        &[
+            structure(0x78, 0x14, VIRTIO_PCI_CFG_NOTIFY),
+            2,
+            0x3000,
+            0x1000,
+            4,
+        ],
+    ));
+    regs.extend(cap_at(
+        0x78,
+        &[structure(0x88, 0x10, VIRTIO_PCI_CFG_ISR), 2, 0x1000, 0x1000],
+    ));
+    let first_region = 0x98u8;
+    let last = if regions.is_empty() { 0 } else { first_region };
+    regs.extend(cap_at(
+        0x88,
+        &[
+            structure(last, 0x10, VIRTIO_PCI_CFG_DEVICE),
+            2,
+            0x2000,
+            0x1000,
+        ],
+    ));
+    for (at, &(region, bar, offset, length)) in regions.iter().enumerate() {
+        let here = first_region + 0x18 * u8::try_from(at).expect("a few regions");
+        let next = if at + 1 == regions.len() {
+            0
+        } else {
+            here + 0x18
+        };
+        let low = |value: u64| u32::try_from(value & 0xFFFF_FFFF).expect("masked");
+        let high = |value: u64| u32::try_from(value >> 32).expect("shifted");
+        regs.extend(cap_at(
+            here,
+            &[
+                structure(next, VIRTIO_PCI_CAP64_LEN, VIRTIO_PCI_CFG_SHARED_MEMORY),
+                u32::from(bar) | u32::from(region) << 8,
+                low(offset),
+                low(length),
+                high(offset),
+                high(length),
+            ],
+        ));
+    }
+    MockConfigSpace::new(vec![MockFunction {
+        bus: 0,
+        device: 5,
+        function: 0,
+        regs,
+        sizing: vec![(5, 0xFFFF_F000), (6, 0xFFFF_C00C), (8, 0xFC00_000C)],
+    }])
+}
+
+fn virtio_gpu_bdf() -> u64 {
+    ConfigAddress {
+        bus: 0,
+        device: 5,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf()
+    .unwrap()
+}
+
+/// What the function's regions resolve to, through the seam the kernel holds.
+fn shared_memory_of(fixture: MockConfigSpace) -> Vec<VirtioSharedMemory> {
+    let pci = Pci::new(fixture, None);
+    let bus: &dyn VirtioPciBus = &pci;
+    let mut out = [VirtioSharedMemory {
+        id: 0,
+        region: Err(DriverError::NotFound),
+    }; 4];
+    let found = bus
+        .virtio_shared_memory(virtio_gpu_bdf(), &mut out)
+        .expect("the capability list walks");
+    out[..found].to_vec()
+}
+
+#[test]
+fn qemu_s_host_visible_region_is_the_whole_of_its_own_bar() {
+    assert_eq!(
+        shared_memory_of(virtio_gpu_fixture(&[(1, 4, 0, 64 << 20)], PREFETCHABLE_64)),
+        [VirtioSharedMemory {
+            id: 1,
+            region: Ok((0x1_0000_0000, 64 << 20)),
+        }]
+    );
+    let pci = Pci::new(
+        virtio_gpu_fixture(&[(1, 4, 0x1000, 0x2000)], PREFETCHABLE_64),
+        None,
+    );
+    let mut caps = [Capability::Other { offset: 0, id: 0 }; 8];
+    let found = pci
+        .capabilities(virtio_gpu_bdf(), &mut caps)
+        .expect("walks");
+    assert_eq!(
+        caps[found - 1],
+        Capability::VirtioSharedMemory {
+            offset: 0x98,
+            id: 1,
+            bar: 4,
+            bar_offset: 0x1000,
+            length: 0x2000,
+        }
+    );
+    assert_eq!(
+        shared_memory_of(virtio_gpu_fixture(&[], PREFETCHABLE_64)),
+        [],
+        "a function with no region declares none"
+    );
+}
+
+#[test]
+fn a_region_is_refused_for_what_its_bar_holds_and_where_it_lies() {
+    let refused = |region: SharedMemoryCap, bar4_low: u32| {
+        let resolved = shared_memory_of(virtio_gpu_fixture(&[region], bar4_low));
+        assert_eq!(resolved.len(), 1, "{region:?}");
+        resolved[0].region.expect_err("refused")
+    };
+    let mib = 1u64 << 20;
+    for (region, bar4_low, why) in [
+        // Beside the configuration structures, or the MSI-X table and its
+        // pending bits.
+        ((1, 2, 0, 0x1000), PREFETCHABLE_64, DriverError::Busy),
+        ((1, 1, 0, 0x1000), PREFETCHABLE_64, DriverError::Busy),
+        // A BAR whose reads may have side effects is no memory.
+        ((1, 4, 0, 64 * mib), 0x0000_0004, DriverError::Unsupported),
+        // A start or end inside a page.
+        (
+            (1, 4, 0x800, 0x1000),
+            PREFETCHABLE_64,
+            DriverError::Unsupported,
+        ),
+        ((1, 4, 0, 0x1800), PREFETCHABLE_64, DriverError::Unsupported),
+        (
+            (1, 4, 60 * mib, 8 * mib),
+            PREFETCHABLE_64,
+            DriverError::OutOfRange,
+        ),
+        ((1, 4, 0, 0), PREFETCHABLE_64, DriverError::LengthOutOfRange),
+        // Each half of the 64-bit layout is read: either one alone past the
+        // window refuses it.
+        (
+            (1, 4, 1 << 32, 0x1000),
+            PREFETCHABLE_64,
+            DriverError::OutOfRange,
+        ),
+        ((1, 4, 0, 1 << 32), PREFETCHABLE_64, DriverError::OutOfRange),
+        // An unused BAR, and a reserved BAR byte, name no BAR.
+        ((1, 0, 0, 0x1000), PREFETCHABLE_64, DriverError::NotFound),
+        ((1, 0x0C, 0, 0x1000), PREFETCHABLE_64, DriverError::NotFound),
+    ] {
+        assert_eq!(refused(region, bar4_low), why, "{region:?}");
+    }
+}
+
+#[test]
+fn two_regions_claiming_one_id_are_both_refused_and_another_kept() {
+    let resolved = shared_memory_of(virtio_gpu_fixture(
+        &[
+            (1, 4, 0, 0x1000),
+            (2, 4, 0x1000, 0x1000),
+            (1, 4, 0x2000, 0x1000),
+        ],
+        PREFETCHABLE_64,
+    ));
+    let reasons: Vec<_> = resolved
+        .iter()
+        .map(|shared| (shared.id, shared.region))
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            (1, Err(DriverError::DeviceFault)),
+            (2, Ok((0x1_0000_1000, 0x1000))),
+            (1, Err(DriverError::DeviceFault)),
+        ]
+    );
+}
+
+#[test]
+fn every_declared_region_must_fit_the_answer() {
+    let pci = Pci::new(
+        virtio_gpu_fixture(
+            &[(1, 4, 0, 0x1000), (2, 4, 0x1000, 0x1000)],
+            PREFETCHABLE_64,
+        ),
+        None,
+    );
+    let mut one = [VirtioSharedMemory {
+        id: 0,
+        region: Err(DriverError::NotFound),
+    }];
+    assert_eq!(
+        pci.virtio_shared_memory(virtio_gpu_bdf(), &mut one),
+        Err(DriverError::BufferTooSmall)
+    );
+}
+
+#[test]
+fn a_shared_memory_capability_too_short_for_its_layout_is_no_region() {
+    let mut fixture = virtio_gpu_fixture(&[(1, 4, 0, 0x1000)], PREFETCHABLE_64);
+    let header = &mut fixture.funcs[0]
+        .regs
+        .iter_mut()
+        .find(|(reg, _)| *reg == 0x98 / 4)
+        .expect("the region's header")
+        .1;
+    *header = (*header & !0x00FF_0000) | 0x10 << 16;
+    let pci = Pci::new(fixture, None);
+    let mut caps = [Capability::Other { offset: 0, id: 0 }; 8];
+    let found = pci
+        .capabilities(virtio_gpu_bdf(), &mut caps)
+        .expect("walks");
+    assert_eq!(
+        caps[found - 1],
+        Capability::Other {
+            offset: 0x98,
+            id: 0x09
+        }
+    );
+    let mut out = [VirtioSharedMemory {
+        id: 0,
+        region: Err(DriverError::NotFound),
+    }; 2];
+    assert_eq!(pci.virtio_shared_memory(virtio_gpu_bdf(), &mut out), Ok(0));
+}
+
+/// A structure's fields were once read whatever its `cap_len`, so one too
+/// short for its layout took the next capability's bytes as its own.
+#[test]
+fn a_structure_capability_too_short_for_its_layout_names_nothing() {
+    for (header_reg, cap_offset, cfg_type, short_len) in [
+        (16, 0x40, VIRTIO_PCI_CFG_COMMON, 0x0C_u8),
+        (20, 0x50, VIRTIO_PCI_CFG_NOTIFY, 0x10),
+    ] {
+        let mut fixture = virtio_blk_fixture();
+        let header = &mut fixture.funcs[1]
+            .regs
+            .iter_mut()
+            .find(|(reg, _)| *reg == header_reg)
+            .expect("the structure's header")
+            .1;
+        *header = (*header & !0x00FF_0000) | u32::from(short_len) << 16;
+        let pci = Pci::new(fixture, None);
+        let mut caps = [Capability::Other { offset: 0, id: 0 }; 8];
+        let found = pci
+            .capabilities(virtio_blk_bdf(), &mut caps)
+            .expect("walks");
+        assert!(caps[..found].contains(&Capability::Other {
+            offset: cap_offset,
+            id: 0x09
+        }));
+        assert_eq!(
+            pci.virtio_window_region(virtio_blk_bdf(), cfg_type),
+            Err(DriverError::NotFound)
+        );
+    }
+}
+
+/// The whole byte names a structure's BAR: `0x0C` was once read as BAR4, so a
+/// reserved value resolved to another BAR's window.
+#[test]
+fn a_reserved_bar_byte_names_no_window() {
+    let mut fixture = virtio_blk_fixture();
+    let bar = &mut fixture.funcs[1]
+        .regs
+        .iter_mut()
+        .find(|(reg, _)| *reg == 17)
+        .expect("the common configuration's BAR byte")
+        .1;
+    *bar = 0x0000_000C;
+    let pci = Pci::new(fixture, None);
+    assert_eq!(
+        pci.virtio_window_region(virtio_blk_bdf(), VIRTIO_PCI_CFG_COMMON),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        pci.virtio_window_region(virtio_blk_bdf(), VIRTIO_PCI_CFG_ISR),
+        Ok((0xFE00_2000, 0x1000)),
+        "the structures naming a real BAR still resolve"
     );
 }

@@ -45,6 +45,20 @@ pub const VIRTIO_PCI_CFG_DEVICE: u8 = 4;
 /// `cfg_type` for the PCI configuration-access window (virtio 1.1
 /// §4.1.4.7).
 pub const VIRTIO_PCI_CFG_PCI: u8 = 5;
+/// `cfg_type` for a shared-memory region (virtio 1.2 §4.1.4.7), carried in
+/// the 64-bit capability layout with the region's id.
+pub const VIRTIO_PCI_CFG_SHARED_MEMORY: u8 = 8;
+
+/// One shared-memory region a modern virtio function declares: its id among
+/// the function's own, and its CPU-physical `(base, len)` or why it is no
+/// memory a driver may map.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct VirtioSharedMemory {
+    /// The region's id, which says what the device uses it for.
+    pub id: u8,
+    /// Where it lies, or the reason it is refused.
+    pub region: Result<(u64, u64), DriverError>,
+}
 
 /// The virtio "no vector" sentinel (virtio 1.1 §4.1.4.3): writing it
 /// to `queue_msix_vector` / `msix_config` tells the device not to
@@ -188,6 +202,35 @@ pub trait VirtioPciBus: Bus {
     /// * [`DriverError::BufferTooSmall`] / [`DriverError::DeviceFault`]
     ///   — propagated from the capability-list walk.
     fn notify_off_multiplier(&self, bdf: u64) -> Result<u32, DriverError>;
+
+    /// Every shared-memory region function `bdf` declares, written into
+    /// `out`, and how many it declares.
+    ///
+    /// A region's part may be mapped cacheable, so it is memory only where it
+    /// lies wholly within a prefetchable memory BAR that holds nothing else the
+    /// function names: a BAR sharing it with a configuration structure, the
+    /// MSI-X table or its pending bits would put registers behind a cacheable
+    /// mapping. Each refused region carries why:
+    /// [`DriverError::Unsupported`] for an I/O or non-prefetchable BAR,
+    /// [`DriverError::Busy`] for a BAR it shares, [`DriverError::OutOfRange`]
+    /// for one past its BAR, [`DriverError::LengthOutOfRange`] for an empty
+    /// one, [`DriverError::NotFound`] for an unused or reserved BAR,
+    /// [`DriverError::PermissionDenied`] for a BAR outside the host's
+    /// apertures or over memory, and [`DriverError::DeviceFault`] for an id
+    /// two regions claim. A region must also start and end on a page, since
+    /// it is mapped a page at a time: one that does not is
+    /// [`DriverError::Unsupported`].
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::BufferTooSmall`] — `out` cannot hold every region.
+    /// * As the capability-list walk: [`DriverError::NotFound`] for a function
+    ///   with no list, [`DriverError::DeviceFault`] for a list that never ends.
+    fn virtio_shared_memory(
+        &self,
+        bdf: u64,
+        out: &mut [VirtioSharedMemory],
+    ) -> Result<usize, DriverError>;
 
     /// The device features function `bdf` offers, read from its common
     /// configuration through a window `mapper` maps. The function must
@@ -461,6 +504,14 @@ mod tests {
         fn notify_off_multiplier(&self, _bdf: u64) -> Result<u32, DriverError> {
             Ok(4)
         }
+
+        fn virtio_shared_memory(
+            &self,
+            _bdf: u64,
+            _out: &mut [VirtioSharedMemory],
+        ) -> Result<usize, DriverError> {
+            Ok(0)
+        }
     }
 
     #[test]
@@ -549,6 +600,13 @@ mod tests {
             }
             fn notify_off_multiplier(&self, _bdf: u64) -> Result<u32, DriverError> {
                 Ok(4)
+            }
+            fn virtio_shared_memory(
+                &self,
+                _bdf: u64,
+                _out: &mut [VirtioSharedMemory],
+            ) -> Result<usize, DriverError> {
+                Ok(0)
             }
         }
         assert_eq!(

@@ -31,6 +31,7 @@
 use core::cell::RefCell;
 
 use proptest::prelude::*;
+use tairix_abi::driver::RegionCaching;
 use tairix_abi::netattach::FsserveCtl;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
@@ -466,6 +467,7 @@ impl SyscallHandlers for CountingHandlers {
         _handle: u64,
         _offset: u64,
         _len: usize,
+        _caching: Option<RegionCaching>,
     ) -> SyscallResult {
         self.bump();
         Ok(0)
@@ -501,6 +503,10 @@ impl SyscallHandlers for CountingHandlers {
         _reach: tairix_abi::driver::DmaReach,
         _device_out: u64,
     ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn mmio_unmap(&self, _c: &CallerContext<'_>, _base: u64) -> SyscallResult {
         self.bump();
         Ok(0)
     }

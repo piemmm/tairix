@@ -9,8 +9,6 @@ use tairix_riscos_kernel::cmos;
 use tairix_riscos_kernel::memory::handler_reason as reason;
 use tairix_riscos_kernel::memory::{Bits, Create};
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
-use tairix_riscos_kernel::swi::os::READ_DYNAMIC_AREA;
-use tairix_riscos_kernel::swi::X;
 
 use super::area::Area;
 use crate::state;
@@ -51,12 +49,8 @@ impl Sprites {
 /// drivers' routine at `handler`; the drivers' state must be held already, as
 /// the handler records each change in it.
 pub(crate) fn make_area(os: &mut Os<'_>, handler: u32) -> Result<(), Fail> {
-    let pages = os.read_cmos(cmos::SPRITE_SIZE)? & ((1 << cmos::SPRITE_SIZE_BITS) - 1);
-    let caller = if os.layout().admits_26bit {
-        Bits::Bit26
-    } else {
-        Bits::Bit32
-    };
+    let pages = os.cmos_pages(cmos::SPRITE_SIZE)?;
+    let caller = os.layout().kernel_bits();
     let most = if caller == Bits::Bit26 {
         MOST_26BIT
     } else {
@@ -75,13 +69,6 @@ pub(crate) fn make_area(os: &mut Os<'_>, handler: u32) -> Result<(), Fail> {
         caller,
     })?;
     Ok(())
-}
-
-/// The area's base and size as they are now.
-fn area(os: &mut Os<'_>) -> Result<(u32, u32), Fail> {
-    let mut regs = Regs::new([AREA, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    os.perform(X | READ_DYNAMIC_AREA, &mut regs)?;
-    Ok((regs.r[0], regs.r[1] & 0x7FFF_FFFF))
 }
 
 /// The area's handler: a shrink is held to the pages the area's sprites
@@ -103,7 +90,7 @@ pub(crate) fn area_handler(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail>
             regs.r[3] = regs.r[3].min(spare);
         }
         reason::POST_GROW | reason::POST_SHRINK => {
-            let (base, size) = area(os)?;
+            let (base, size) = os.area_extent(AREA)?;
             let before = state::read(os, |vdu, _| {
                 let before = vdu.sprites.system_size;
                 vdu.sprites.system = (size != 0).then_some(base);

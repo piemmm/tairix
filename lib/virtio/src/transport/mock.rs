@@ -26,6 +26,13 @@ use core::cell::RefCell;
 /// status byte the caller can stash in its own descriptor).
 pub type DeviceShim = Box<dyn FnMut(&mut ChainView<'_>) -> Result<u32, VirtioError>>;
 
+/// Callback the test peer invokes for each chain published on a queue whose
+/// device may hold a chain rather than answer it: `Some(written)` answers it
+/// at once, as a [`DeviceShim`] does, and `None` keeps it until
+/// [`MockTransport::answer_held`] answers it, so answers can come back in any
+/// order.
+pub type HoldingShim = Box<dyn FnMut(&mut ChainView<'_>) -> Result<Option<u32>, VirtioError>>;
+
 /// A device model answering a configuration write: called with the whole
 /// configuration window once the written bytes have landed, so a device whose
 /// configuration is a query (virtio-input's `select`/`subsel`) can write its
@@ -55,6 +62,10 @@ struct MockQueue {
     packed_dev_idx: u16,
     packed_dev_wrap: bool,
     shim: Option<DeviceShim>,
+    holder: Option<HoldingShim>,
+    /// The heads of the chains the device took and has not yet answered, in
+    /// the order it took them.
+    held: Vec<u16>,
 }
 
 impl MockQueue {
@@ -69,6 +80,8 @@ impl MockQueue {
             packed_dev_idx: 0,
             packed_dev_wrap: true,
             shim: None,
+            holder: None,
+            held: Vec::new(),
         }
     }
 }
@@ -192,6 +205,53 @@ impl MockTransport {
     /// replaced.
     pub fn install_shim(&mut self, queue: u16, shim: DeviceShim) {
         self.queues[queue as usize].shim = Some(shim);
+    }
+
+    /// Install the [`HoldingShim`] the device answers `queue`'s chains with,
+    /// in place of a [`DeviceShim`].
+    pub fn install_holding_shim(&mut self, queue: u16, holder: HoldingShim) {
+        self.queues[queue as usize].holder = Some(holder);
+    }
+
+    /// The chains the device took on `queue` and has not answered.
+    #[must_use]
+    pub fn held(&self, queue: u16) -> usize {
+        self.queues.get(queue as usize).map_or(0, |q| q.held.len())
+    }
+
+    /// Answer the `at`-th chain the device holds on `queue`, counting from the
+    /// first it took, with what `respond` writes, reporting the bytes it says
+    /// it wrote.
+    ///
+    /// # Errors
+    ///
+    /// * [`VirtioError::QueueIndexOutOfRange`] for an unknown queue, or a
+    ///   chain it does not hold.
+    /// * [`VirtioError::DeviceFault`] if the queue has not been programmed.
+    pub fn answer_held(
+        &mut self,
+        queue: u16,
+        at: usize,
+        respond: impl FnOnce(&mut ChainView<'_>) -> u32,
+    ) -> Result<(), VirtioError> {
+        let q = self
+            .queues
+            .get_mut(queue as usize)
+            .ok_or(VirtioError::QueueIndexOutOfRange)?;
+        if q.size == 0 || q.used_device == 0 {
+            return Err(VirtioError::DeviceFault);
+        }
+        if at >= q.held.len() {
+            return Err(VirtioError::QueueIndexOutOfRange);
+        }
+        let memory = self.memory.as_deref().ok_or(VirtioError::DeviceFault)?;
+        let view =
+            RingView::from_device(memory, q.size, q.desc_device, q.avail_device, q.used_device)?;
+        let head = q.held.remove(at);
+        let mut chain = view.collect_chain(head)?;
+        let written = respond(&mut chain);
+        view.publish_used(head, written);
+        Ok(())
     }
 
     /// Test/fuzz-only **hostile-device** seam: publish a used-ring
@@ -390,9 +450,16 @@ impl MockTransport {
             let slot = q.last_seen_avail_idx % q.size;
             let head = view.read_avail_ring(slot);
             let mut chain = view.collect_chain(head)?;
-            let shim = q.shim.as_mut().ok_or(VirtioError::DeviceFault)?;
-            let written = shim(&mut chain)?;
-            view.publish_used(head, written);
+            if let Some(holder) = q.holder.as_mut() {
+                match holder(&mut chain)? {
+                    Some(written) => view.publish_used(head, written),
+                    None => q.held.push(head),
+                }
+            } else {
+                let shim = q.shim.as_mut().ok_or(VirtioError::DeviceFault)?;
+                let written = shim(&mut chain)?;
+                view.publish_used(head, written);
+            }
             drained += 1;
             q.last_seen_avail_idx = q.last_seen_avail_idx.wrapping_add(1);
         }
@@ -419,6 +486,7 @@ impl Transport for MockTransport {
             q.last_seen_avail_idx = 0;
             q.packed_dev_idx = 0;
             q.packed_dev_wrap = true;
+            q.held.clear();
         }
         Ok(())
     }

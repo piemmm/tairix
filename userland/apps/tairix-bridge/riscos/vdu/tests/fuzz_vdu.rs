@@ -201,7 +201,10 @@ fn call(session: &mut Session, rng: &mut Prng, bytes: &mut Vec<u8>) {
         }
     };
     if let Err(Fail::Error(block)) = result {
-        let _ = session.kernel.os().read_word(block);
+        assert!(
+            session.kernel.os().read_word(block).is_ok(),
+            "the error block at {block:#x} can be read"
+        );
     }
 }
 

@@ -38,10 +38,11 @@
 //! The unsafe construction site is [`DmaSlab::from_pool`]. Every
 //! invariant required by that constructor is established here:
 //!
-//! * `pool_ptr` is `self as *const Self as *const ()`; the slab's
-//!   lifetime is bounded by `'a`, which is the lifetime of the
-//!   `KernelVirtioHost`. The borrow checker enforces that no slab
-//!   minted by this host outlives the host's borrow.
+//! * `pool_ptr` is `self as *const Self as *const ()`. A slab carries no
+//!   lifetime, so nothing in its type keeps the host alive or in place:
+//!   [`KernelVirtioHost::new`] is `unsafe`, its caller promising the host
+//!   neither moves nor drops while a slab it minted lives, and it has no
+//!   `&mut self` method that could retag it away from a slab's pointer.
 //! * `ptr` is the result of [`DmaPool::slot_base`], which is
 //!   documented to be a non-null, page-aligned pointer covering
 //!   exactly `buf.len()` disjoint bytes (witnessed by the pool's
@@ -77,15 +78,11 @@ use tairix_virtio::{DmaHost, DmaSlab, PoolId, SlabEnd, VirtioHost};
 /// # Lifetime
 ///
 /// `'a` bounds the pool's allocator borrow and the borrowed
-/// [`TaskCapabilities`]. Every [`DmaSlab`] minted by this host
-/// re-enters the host on drop, so by construction no slab can
-/// outlive the host — Rust's borrow checker enforces this through
-/// the `&'a self` borrow returned by [`Self::alloc_dma_zeroed`]:
-/// the slab carries no lifetime in its type, but the slab's drop
-/// would dereference `&self` if it ran after the host went away.
-/// Every slab re-enters the host through its free shim on drop, so
-/// all outstanding slabs must be dropped before the host (and the
-/// [`DmaPool`] it owns) is dropped.
+/// [`TaskCapabilities`]. Every [`DmaSlab`] minted by this host re-enters
+/// the host on drop, and the slab's type carries no lifetime, so the host
+/// must stay where it is and alive until its last slab has dropped — the
+/// promise [`Self::new`]'s caller makes. A host leaked to `'static`, as
+/// every production host is, keeps it by construction.
 pub struct KernelVirtioHost<'a, P: PageTable, S: Sink + Sync + ?Sized> {
     /// Per-driver DMA pool, behind a [`SpinLock`] (not a `RefCell`) so the
     /// host is [`Sync`] and a `&'static` host can be shared across the
@@ -130,8 +127,14 @@ impl<'a, P: PageTable, S: Sink + Sync + ?Sized> KernelVirtioHost<'a, P, S> {
     /// `line` is the wait on the device's interrupt line, bound to the
     /// process that bound it, so the host can only wake on a line that
     /// process holds.
+    ///
+    /// # Safety
+    ///
+    /// Every slab the host mints reaches back to it as it drops: the host
+    /// must neither move nor drop until the last slab it minted has
+    /// dropped.
     #[must_use]
-    pub fn new(
+    pub unsafe fn new(
         pool: DmaPool<'a, P>,
         caller: &'a TaskCapabilities,
         audit: &'a S,
@@ -201,9 +204,8 @@ unsafe fn slab_free_shim<P: PageTable, S: Sink + Sync + ?Sized>(
     }
     // SAFETY: `pool` was produced at the matching `from_pool` call by
     // casting `&KernelVirtioHost<'_, P, S>` through `*const Self as
-    // *const ()`. The slab's lifetime is bounded by the host's `'a`
-    // borrow, so the dereference here observes a live host of the
-    // same monomorphisation.
+    // *const ()`, and `new`'s caller keeps that host in place and alive
+    // until this, its slab's drop, has run.
     let host: &KernelVirtioHost<'_, P, S> =
         unsafe { &*(pool.cast::<KernelVirtioHost<'_, P, S>>()) };
     let removed = host.live.lock().remove(&slot);
@@ -261,10 +263,8 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for KernelVirtioHost<'_, P, 
         // SAFETY: as discussed in the module-level comment —
         // (i) `base` is non-null and covers `len` disjoint bytes
         //     (witnessed by the pool's slot bitmap);
-        // (ii) `pool_ptr` outlives the slab because the slab carries
-        //     no lifetime in its type but the slab's drop shim
-        //     dereferences `&self`, which the borrow checker
-        //     enforces via the `&'a self` return path;
+        // (ii) `pool_ptr` outlives the slab: `new`'s caller keeps the
+        //     host in place and alive until its last slab drops;
         // (iii) `device_addr` is the device-visible base of `base[0]`,
         //     produced by `DmaPool::alloc`: its IOVA on a translated pool.
         let slab = unsafe {
@@ -523,7 +523,9 @@ mod tests {
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq, handle);
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         let slab = host.alloc_dma_zeroed(PAGE_SIZE).expect("granted");
         assert_eq!(slab.len(), PAGE_SIZE);
         assert!(slab.as_bytes().iter().all(|b| *b == 0));
@@ -547,7 +549,9 @@ mod tests {
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq, handle);
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         {
             let slab = host.alloc_dma_zeroed(PAGE_SIZE).expect("granted");
             assert_eq!(host.outstanding(), 1);
@@ -573,7 +577,9 @@ mod tests {
         let caller = task_with(&[], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq, handle);
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         let err = host.alloc_dma_zeroed(PAGE_SIZE).unwrap_err();
         assert!(matches!(err, DriverError::PermissionDenied));
         assert_eq!(host.outstanding(), 0);
@@ -591,7 +597,9 @@ mod tests {
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq, handle);
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         let err = host.alloc_dma_zeroed(0).unwrap_err();
         assert!(matches!(err, DriverError::BufferTooSmall));
         assert_eq!(host.outstanding(), 0);
@@ -606,7 +614,9 @@ mod tests {
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq, handle);
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         let mut a = host.alloc_dma_zeroed(PAGE_SIZE).expect("first");
         let mut b = host.alloc_dma_zeroed(PAGE_SIZE).expect("second");
         // Distinct slot indices guarantee the slabs name disjoint
@@ -644,7 +654,9 @@ mod tests {
         // Pre-fire the line through a permissive controller so the
         // ready flag is already set when `notify_wait` polls.
         irq.fire(4, &OkController).expect("pre-fire");
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         assert_eq!(host.notify_wait(0, 1_000), CompletionSignal::Fired);
         // No yield occurred: the pre-fired ready flag was consumed on
         // the first poll.
@@ -671,7 +683,9 @@ mod tests {
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::firing(&irq, handle, 4, 3);
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         // A budget generous enough to outlast the three parks (the fake
         // clock ticks once per park), so the fire is what ends the wait.
         assert_eq!(host.notify_wait(0, 1_000), CompletionSignal::Fired);
@@ -751,7 +765,9 @@ mod tests {
             line: 4,
             yields: AtomicU32::new(0),
         };
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         assert_eq!(host.notify_wait(0, 1_000), CompletionSignal::Fired);
         assert_eq!(
             *probe.ready_during_mask.lock(),
@@ -781,7 +797,9 @@ mod tests {
         // Release every binding owned by the device task before the
         // wait runs.
         irq.release_for(OWNER, &OkController);
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         assert_eq!(host.notify_wait(0, 1_000), CompletionSignal::TimedOut);
         assert!(irq.lookup(handle).is_none());
     }
@@ -806,7 +824,9 @@ mod tests {
         // Never fires; the fake clock ticks once per park, so a 5 ns budget
         // expires after a bounded number of parks.
         let waiter = TestWaiter::idle(&irq, handle);
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         assert_eq!(host.notify_wait(0, 5), CompletionSignal::TimedOut);
         // The binding is untouched: a timed-out wait consumes nothing and
         // leaves the line bound for the next request.
@@ -827,7 +847,9 @@ mod tests {
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq, handle);
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         // The clock starts at 0, so the loop's absolute deadline is the
         // budget itself.
         assert_eq!(host.notify_wait(0, 9), CompletionSignal::TimedOut);
@@ -849,7 +871,9 @@ mod tests {
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq, handle);
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         assert_eq!(host.notify_wait(0, 5), CompletionSignal::TimedOut);
         assert_eq!(waiter.waits(), (1, 0));
         irq.fire(4, &OkController).expect("fire");
@@ -866,7 +890,9 @@ mod tests {
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq, handle);
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         assert_eq!(host.now_ns(), 0);
         assert_eq!(host.notify_wait(0, 5), CompletionSignal::TimedOut);
         assert_eq!(
@@ -887,7 +913,9 @@ mod tests {
         let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq, handle);
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         // The pool's frames hold sixteen pages.
         let err = host.alloc_dma_zeroed(PAGE_SIZE * 64).unwrap_err();
         assert_eq!(err, DriverError::OutOfMemory);
@@ -918,7 +946,9 @@ mod tests {
         );
         let (irq, handle) = irq_binding(4);
         let waiter = TestWaiter::idle(&irq, handle);
-        let host = KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter);
+        // SAFETY: a local of this test, kept in place until every slab it
+        // mints has dropped.
+        let host = unsafe { KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &waiter) };
         let refused = tairix_fuzzseed::meter::refusing_above(0, || {
             host.alloc_dma_zeroed(PAGE_SIZE).map(drop)
         });

@@ -20,6 +20,7 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use steps::{Steps, FRACTION, MAX_PENDING};
 use tairix_audio::{AcCoupling, FilterBank, Ratio, Resampler};
+use tairix_util::divisor::gcd;
 
 /// Bus-oscillator ticks a mix sample lasts.
 pub const TICKS_PER_SAMPLE: u64 = FRACTION as u64;
@@ -77,17 +78,6 @@ pub struct Mixer {
     /// Changes and samples the mix could not hold, and rendered frames
     /// dropped because nothing drained them.
     dropped: u64,
-}
-
-/// The greatest common divisor, by Euclid.
-const fn gcd(a: u64, b: u64) -> u64 {
-    let (mut a, mut b) = (a, b);
-    while b != 0 {
-        let next = a % b;
-        a = b;
-        b = next;
-    }
-    a
 }
 
 /// Mix frames per stream frame for a stream at `stream` hertz, steered by

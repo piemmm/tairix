@@ -86,8 +86,16 @@ impl Os<'_> {
     /// Whether a privileged mode may read and write every byte from `start`
     /// to `end`: a change that must never be left half made asks first.
     pub fn writable(&mut self, start: u32, end: u64) -> bool {
-        let both = PRIVILEGED_READ | PRIVILEGED_WRITE;
-        self.memory.check_access(start, end) & both == both
+        self.memory
+            .grants(start, end, PRIVILEGED_READ | PRIVILEGED_WRITE)
+    }
+
+    /// Whether a privileged mode may read every byte from `start` to `end`:
+    /// work sized from guest memory asks first, and the asking stops at the
+    /// first page that refuses, so a size no memory backs costs the host
+    /// next to nothing.
+    pub fn readable(&mut self, start: u32, end: u64) -> bool {
+        self.memory.grants(start, end, PRIVILEGED_READ)
     }
 
     /// The base of `heap`'s area.

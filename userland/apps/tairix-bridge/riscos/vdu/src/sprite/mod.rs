@@ -70,6 +70,9 @@ pub(crate) mod reason {
     pub(crate) const APPEND: u32 = 35;
     pub(crate) const POINTER: u32 = 36;
     pub(crate) const PALETTE: u32 = 37;
+    /// Reason [`PALETTE`]'s R3 bit asking an eight-bit sprite's new palette
+    /// to hold 256 entries.
+    pub(crate) const PALETTE_FULL: u32 = 1 << 31;
     pub(crate) const ALPHA: u32 = 38;
     pub(crate) const INFO: u32 = 40;
     pub(crate) const READ_PIXEL: u32 = 41;

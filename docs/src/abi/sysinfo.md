@@ -76,6 +76,7 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 | `VOLUME_IO_STATS`       | none                   | no      |
 | `VOLUME_IO_QUEUE`       | `CAP_SYSINFO_KERNEL`   | yes     |
 | `GPU_DEVICE_STATS`      | `CAP_SYSINFO_HW`       | yes     |
+| `GPU_DEVICES`           | none                   | no      |
 | `DMA_UNITS`             | `CAP_SYSINFO_HW`       | yes     |
 | `DMA_GROUPS`            | `CAP_SYSINFO_HW`       | yes     |
 | `DMA_NODES`             | `CAP_SYSINFO_HW`       | yes     |
@@ -475,6 +476,14 @@ service's answer to the caller, not to the broker. `SELF_AUDIO_STREAMS` answers
 one `StreamDescriptor` per stream the caller owns and `GLOBAL_AUDIO_STREAMS`
 every principal's, gated and audited as `GLOBAL_PROCESS_LIST` is, since a
 stream names its owner and what it is doing.
+
+`GPU_DEVICES` answers one `GpuDeviceDescriptor` per GPU a driver serves, in
+the hardware tree's order: the node of the device, and the device channel a
+program connects to it on. It counts only the channel the kernel lets that
+node's driver bind, the GPU block's endpoint for the node, so a channel
+published under a foreign endpoint is never listed. Like `AUDIO_DEVICES` it is
+ungated: which GPUs a machine has is no principal's secret, and the channel
+itself refuses a caller without `CAP_GPU` ([gpu-v1](gpu.md)).
 
 `IRQ_LIST` is gated like `SEAT_LIST` and `HARDWARE_TREE` — on
 `CAP_SYSINFO_HW`, and audited — because each `IrqRecord` names which

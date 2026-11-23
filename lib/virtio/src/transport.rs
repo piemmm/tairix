@@ -19,7 +19,7 @@ use tairix_abi::{DriverError, RegisterWindow};
 #[cfg(any(test, feature = "mock"))]
 mod mock;
 #[cfg(any(test, feature = "mock"))]
-pub use mock::{ChainView, ConfigResponder, DeviceShim, MockTransport};
+pub use mock::{ChainView, ConfigResponder, DeviceShim, HoldingShim, MockTransport};
 
 /// `VIRTIO_F_VERSION_1` (virtio 1.2 §6): the device follows the modern
 /// interface rather than the legacy one.

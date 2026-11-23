@@ -105,6 +105,9 @@ Las consultas:
   unidad y su grupo, la generación y el estado de su propietario, sus
   flujos, y las correspondencias de su dominio y los bytes que abarcan
   (requiere `CAP_SYSINFO_HW`).
+- `gpu` — las GPU servidas: una fila por GPU que sirve un controlador — el
+  nodo de su dispositivo en el árbol de hardware y el canal por el que un
+  programa la abre.
 - `audio`, `sound` — los dispositivos de sonido: una fila por salida y por
   entrada — su identificador, si es la predeterminada de su sentido, su
   nivel y su silencio, la frecuencia medida de su reloj mientras suena, los

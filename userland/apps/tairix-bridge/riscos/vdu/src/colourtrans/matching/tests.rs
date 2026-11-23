@@ -1,5 +1,3 @@
-use alloc::vec::Vec;
-
 use super::*;
 
 /// A colour from a palette word, `&BBGGRR00`.
@@ -21,30 +19,7 @@ fn the_error_weighs_each_channel_by_its_loading() {
 
 #[test]
 fn a_search_takes_the_first_of_equally_near_and_the_last_of_equally_far() {
-    // Mode 12's default palette, its flashing colours in their first state.
-    let sixteen: Vec<Rgb> = [
-        0,
-        0xFF00,
-        0xFF_0000,
-        0xFF_FF00,
-        0xFF00_0000,
-        0xFF00_FF00,
-        0xFFFF_0000,
-        0xFFFF_FF00,
-    ]
-    .iter()
-    .chain(&[
-        0,
-        0xFF00,
-        0xFF_0000,
-        0xFF_FF00,
-        0xFF00_0000,
-        0xFF00_FF00,
-        0xFFFF_0000,
-        0xFFFF_FF00,
-    ])
-    .map(|&w| word(w))
-    .collect();
+    let sixteen = crate::palette::default_colours(2, 16);
     let at = |wanted, look| search(&sixteen, word(wanted), Loadings::DEFAULT, look);
     assert_eq!(at(0x0000_FF00, Look::Nearest), 1);
     assert_eq!(at(0, Look::Furthest), 15);
@@ -79,26 +54,6 @@ fn the_default_256_colour_match_is_its_tint_loop_as_recorded() {
             furthest
         );
     }
-}
-
-#[test]
-fn a_palette_is_the_default_where_each_channel_s_top_nibble_is_its_own() {
-    let default: Vec<Rgb> = (0..=u8::MAX)
-        .map(|p| {
-            let [r, g, b] = default_256(p);
-            Rgb::new(r, g, b)
-        })
-        .collect();
-    assert!(is_default_256(&default));
-    let mut low_nibbles = default.clone();
-    for colour in &mut low_nibbles {
-        colour.r |= 0x0F;
-    }
-    assert!(is_default_256(&low_nibbles), "low nibbles are not compared");
-    let mut moved = default.clone();
-    moved[1].r = 0x21;
-    assert!(!is_default_256(&moved));
-    assert!(!is_default_256(&default[..16]));
 }
 
 #[test]

@@ -10,8 +10,8 @@ use tairix_colour::Rgb;
 use super::matching::{Loadings, Look};
 use super::palettes::Against;
 
-/// When each cell of a two-colour pattern turns on: Bayer's 4×4 order.
-const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+// When each cell of a two-colour pattern turns on: Bayer's 4×4 order.
+use tairix_raster::dither::BAYER_4 as BAYER;
 
 /// The luma of a two-colour pattern, in 256ths, each channel's weight.
 const LUMA: [u32; 3] = [77, 151, 28];

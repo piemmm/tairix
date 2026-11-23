@@ -424,6 +424,12 @@ fn describe_resource(resource: &HwResource, line: &mut String) {
             }
             None => line.push_str("served volume (malformed)"),
         },
+        Some(HwResourceKind::MemoryRegion) => match resource.memory_region_id() {
+            Some(id) => {
+                let _ = write!(line, "Memory region {id} at 0x{base:x} [size=0x{len:x}]");
+            }
+            None => line.push_str("memory region (malformed)"),
+        },
         Some(HwResourceKind::Property) => describe_property(resource, line),
         None => line.push_str("resource (unknown kind)"),
     }
@@ -941,6 +947,16 @@ C 02  Network controller
                 "  IRQ line 33",
             ]
         );
+    }
+
+    #[test]
+    fn verbose_names_a_memory_region_by_its_id_and_span() {
+        let mut line = String::new();
+        describe_resource(
+            &HwResource::memory_region(0x1_0000_0000, 0x400_0000, 1),
+            &mut line,
+        );
+        assert_eq!(line, "Memory region 1 at 0x100000000 [size=0x4000000]");
     }
 
     #[test]

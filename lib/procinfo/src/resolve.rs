@@ -378,7 +378,7 @@ fn resolve_info_value(
         ["system", "machine-id"] => (
             InfoValue::new_str(
                 Sensitivity::Sensitive,
-                &hex_lower(&system_identity(transport)?.machine_id),
+                &tairix_util::hex::encode(&system_identity(transport)?.machine_id),
             ),
             Authorization::Unprivileged,
         ),
@@ -406,16 +406,17 @@ fn resolve_info_value(
                 "pid" => InfoValue::new_str(Sensitivity::Public, &origin.pid().to_string()),
                 "uid" => InfoValue::new_str(Sensitivity::Public, &origin.uid().to_string()),
                 "gid" => InfoValue::new_str(Sensitivity::Public, &origin.gid().to_string()),
-                "proc-id" => {
-                    InfoValue::new_str(Sensitivity::Public, &hex_lower(origin.proc_id().as_bytes()))
-                }
+                "proc-id" => InfoValue::new_str(
+                    Sensitivity::Public,
+                    &tairix_util::hex::encode(origin.proc_id().as_bytes()),
+                ),
                 "trust-domain" => InfoValue::new_str(
                     Sensitivity::Public,
                     trust_domain_name(origin.trust_domain()),
                 ),
                 _ => InfoValue::new_str(
                     Sensitivity::Public,
-                    &hex_lower(origin.capabilities().as_bytes()),
+                    &tairix_util::hex::encode(origin.capabilities().as_bytes()),
                 ),
             };
             (value, Authorization::Unprivileged)
@@ -1914,17 +1915,6 @@ fn time_string(instant: Time64) -> String {
             s.push('0');
         }
         s.push_str(&digits);
-    }
-    s
-}
-
-/// Lowercase-hex encoding of `bytes`.
-fn hex_lower(bytes: &[u8]) -> String {
-    const DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for &b in bytes {
-        s.push(DIGITS[(b >> 4) as usize] as char);
-        s.push(DIGITS[(b & 0x0f) as usize] as char);
     }
     s
 }

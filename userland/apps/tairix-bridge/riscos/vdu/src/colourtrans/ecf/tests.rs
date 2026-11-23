@@ -1,28 +1,6 @@
-use alloc::vec::Vec;
-
 use super::*;
 use crate::colourtrans::matching::Loadings;
-use crate::colourtrans::palettes::Holding;
-use crate::palette::default_words;
-
-/// A mode's default palette, as ColourTrans matches against it.
-fn default_palette(log2_bpp: u32) -> Against {
-    let holding = match log2_bpp {
-        0..=2 => Holding::Palette(log2_bpp),
-        _ => Holding::Grouped,
-    };
-    let entries = if log2_bpp >= 3 {
-        16
-    } else {
-        1 << (1 << log2_bpp)
-    };
-    let words: Vec<u32> = default_words(log2_bpp, false)
-        .iter()
-        .take(entries)
-        .map(|[first, _]| *first)
-        .collect();
-    Against::of_words(holding, &words)
-}
+use crate::colourtrans::palettes::{default_against, Holding};
 
 fn word(w: u32) -> Rgb {
     Rgb::from_riscos_word(w)
@@ -31,7 +9,7 @@ fn word(w: u32) -> Rgb {
 #[test]
 fn two_colours_light_bayer_s_cells_by_the_luma_s_fifteenths() {
     // Each as RISC OS 5 gave it in mode 0: rows 0 to 3, then again.
-    let mode_0 = default_palette(0);
+    let mode_0 = default_against(0);
     for (wanted, rows) in [
         (
             0x8888_8800,
@@ -56,7 +34,7 @@ fn two_colours_light_bayer_s_cells_by_the_luma_s_fifteenths() {
 fn deeper_modes_dither_each_channel_on_a_tile() {
     // Mode 12, as RISC OS 5 gave them: a channel alone, a grey, and three
     // channels at once.
-    let mode_12 = default_palette(2);
+    let mode_12 = default_against(2);
     for (wanted, [row_0, row_1]) in [
         (0x0000_4200, [0x1010_1010, 0]),
         (0x0000_6C00, [0x0101_0101, 0x1010_1010]),

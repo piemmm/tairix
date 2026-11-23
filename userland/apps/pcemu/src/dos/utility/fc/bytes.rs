@@ -3,7 +3,7 @@
 //! with nothing different, that there was nothing.
 
 use super::{at, file_at, have_read, name, read_into, text, DIFFERENT};
-use crate::dos::message::{hex, NEW_LINE};
+use crate::dos::message::NEW_LINE;
 use crate::dos::program::{say, Flow, Id, Program, Routine};
 use crate::frames::{locals, take, Outcome};
 use alloc::vec::Vec;
@@ -41,9 +41,9 @@ fn unread(p: &mut Program<'_, '_>, file: u16) -> (u16, u16, bool) {
 /// The line one differing byte is shown by.
 fn difference(position: u32, first: u8, second: u8) -> [u8; LINE] {
     let mut line = *b"00000000: 00 00\r\n";
-    hex(position, &mut line[..8]);
-    hex(u32::from(first), &mut line[10..12]);
-    hex(u32::from(second), &mut line[13..15]);
+    tairix_util::hex::fill_upper(&mut line[..8], u64::from(position));
+    tairix_util::hex::fill_upper(&mut line[10..12], u64::from(first));
+    tairix_util::hex::fill_upper(&mut line[13..15], u64::from(second));
     line
 }
 

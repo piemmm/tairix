@@ -1,0 +1,49 @@
+[package]
+name = "tairix-gpucheck"
+description = "TAIRiX `gpucheck` CLI: run the same work on each served GPU and on the software device and answer where they differ (`plans/GPU.md` GP11.2)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The `Run` binary's runtime, its listing of the served GPUs and its short
+# help; a consumer of the work alone takes none of them.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt", "dep:tairix-procinfo", "dep:tairix-help"]
+
+[[bin]]
+name = "tairix-gpucheck-run"
+path = "src/run.rs"
+
+[dependencies]
+# The clock the reference reads its deadlines from, and the work's deadline.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The GPU seam the work runs through: each served device, and the software
+# device it is compared with.
+tairix-gpu = { path = "../../../lib/gpu", version = "=0.0.0" }
+# The runner the software device shares its work across: one thread.
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", default-features = false }
+# The short help read from the bundle's own Help/ tree.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", optional = true }
+# The served GPUs, listed by the System Information API.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", optional = true }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# `_start`, the streams and the clock the program reads.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The System Information API's IPC transport.
+tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features = ["program"], optional = true }
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"], optional = true }
+
+[dev-dependencies]
+# The locales every help tree carries.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

@@ -1118,6 +1118,25 @@ tairix-blendcheck` holds each pane to the per-pixel operators. Manifest:
 `CAP_FS_ACCESS`, all within the session baseline. Exit status: `0` shown and
 dismissed, `1` refused or lost, or a usage error.
 
+## `gpucheck` — each served GPU held to the software device (`userland/apps/gpucheck`)
+
+`tairix-gpucheck` lists the GPUs drivers serve (the `GPU_DEVICES` query),
+reaches each through `Device::connect`, and runs the same work on it and on a
+software device: a pattern updated into host-visible memory, a fill beside
+it, both copied through memory the device keeps for itself and back, then a
+fill past its buffer that every device must refuse. It prints one line per
+GPU: agreement, or the first `tairix_gpucheck::Difference` — a byte, the work
+refused, or a different answer to the fill (`plans/GPU.md` GP11.2).
+
+The work and the comparison are the library, so `cargo test -p
+tairix-gpucheck` holds two software devices to agreement and finds the byte a
+device whose copies corrupt one got wrong, and the Venus vertical holds the
+virtio-gpu driver's Venus backend to the same comparison. Manifest:
+`CAP_GPU`, `CAP_SHM`, `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS`, all within the
+session baseline. Exit status: `0` every served GPU agreed, `1` one differed
+or could not be reached, none is served, the list or the software device
+failed, or a usage error.
+
 ## `clear` — clear the terminal screen (`userland/apps/clear`)
 
 `tairix-clear` writes the byte sequence that moves the cursor home and

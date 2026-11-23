@@ -1887,6 +1887,13 @@ pub(crate) fn pages_spanning(bytes: u64) -> u64 {
     bytes.div_ceil(PAGE_SIZE as u64)
 }
 
+/// The first page `[base, base + len)` touches and how many pages it touches:
+/// a window's base keeps its block's offset into the page it begins in.
+pub(crate) fn window_pages(base: u64, len: u64) -> (u64, u64) {
+    let first = base & !(PAGE_SIZE as u64 - 1);
+    (first, pages_spanning((base - first).saturating_add(len)))
+}
+
 /// `process`'s registry snapshot — the view the copy path translates its
 /// user addresses through — as the [`Retire`] its unmaps shut before a frame
 /// is released.
@@ -2845,17 +2852,12 @@ impl AddressSpaceRegistry {
     }
 
     /// Whether a live grant of `task` still authorises a mapping of the
-    /// device span `[phys, phys + len)`: a register window, bus aperture or
-    /// scan-out surface wholly containing it.
+    /// device span `[phys, phys + len)`: a window
+    /// ([`HwResourceKind::is_window`]) wholly containing it.
     #[must_use]
     pub fn maps_window(&self, task: ProcessId, phys: u64, len: u64) -> bool {
         self.live_grants(task).any(|grant| {
-            matches!(
-                grant.kind(),
-                Some(
-                    HwResourceKind::Mmio | HwResourceKind::BusWindow | HwResourceKind::Framebuffer
-                )
-            ) && grant.spans(phys, len)
+            grant.kind().is_some_and(HwResourceKind::is_window) && grant.spans(phys, len)
         })
     }
 

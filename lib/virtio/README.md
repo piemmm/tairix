@@ -27,7 +27,18 @@ carries its own queue code.
   device leaves unanswered keeps its chain and buffers the device's until it
   hands them back; nothing is published before then, and the device is
   reminded of the chain at most once per the request's budget.
+- `TicketQueue`, `Ticket` — many requests at once over a `SplitQueue`, each
+  answered in its own time: a request is published under a generational
+  ticket and answered by the head of the chain the device hands back, so a
+  late or out-of-order answer is its own request's and none waits on
+  another's. A wait for a set of tickets takes every other answer meanwhile,
+  on `RequestQueue`'s budget and wake-storm bound.
 - `PackedQueue` — the packed virtqueue, sized as `SplitQueue` is.
+- `SharedMemory`, `Part` — a device's shared-memory region (virtio 1.2
+  §2.10) held a part at a time: whole-page parts placed first fit, mapped
+  and unmapped through the driver host's `MemoryMapper` with the caching the
+  device states for each, and released only once nothing maps them, so a
+  part's pages are never reused while a mapping reaches them.
 - `DmaSlab`, `BounceBuffer`, `scrub`, `VirtioHost`, `MockHost` — owned
   device-visible memory, the zero-on-free staging wrapper, the one zeroing a
   sensitive payload's staging gets once the device hands it back, the DMA

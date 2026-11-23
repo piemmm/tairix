@@ -37,13 +37,3 @@ fn a_canvas_lays_its_lines_one_after_another() {
     assert_eq!(canvas.row_of(0), 479, "the bottom line");
     assert_eq!(canvas.row_of(479), 0);
 }
-
-#[test]
-fn pixel_bits_are_read_and_written_lowest_first() {
-    let mut bytes = [0u8; 4];
-    set_bits_at(&mut bytes, 2, 2, 3);
-    assert_eq!(bytes[0], 0b1100);
-    assert_eq!(bits_at(&bytes, 2, 2), 3);
-    set_bits_at(&mut bytes, 8, 16, 0xBEEF);
-    assert_eq!(bits_at(&bytes, 8, 16), 0xBEEF);
-}

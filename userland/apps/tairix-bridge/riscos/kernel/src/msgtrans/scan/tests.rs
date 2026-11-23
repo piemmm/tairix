@@ -151,15 +151,15 @@ fn expansion_substitutes_parameters_and_dictionary_words() {
         parameters: [Some(&b"A\n"[..]), Some(&b"BC"[..]), None, None],
         dictionary,
     };
-    let mut out = [0; 64];
-    let n = expansion.expand(
+    let mut out = Held::new(64).expect("room");
+    expansion.expand(
         b"%0 %1 %2 %% %x \x1B\x01 \x1B\x02 \x1B\x00 \x1B\x09.\nnot",
         &mut out,
     );
-    assert_eq!(&out[..n], b"A BC %2 % %x word again A .");
-    let mut short = [0; 3];
-    assert_eq!(expansion.expand(b"%1 long", &mut short), 3);
-    assert_eq!(&short, b"BC ", "cut short silently");
+    assert_eq!(out.bytes, b"A BC %2 % %x word again A .");
+    let mut short = Held::new(3).expect("room");
+    expansion.expand(b"%1 long", &mut short);
+    assert_eq!(short.bytes, b"BC ", "cut short silently");
 }
 
 #[test]
@@ -169,6 +169,28 @@ fn a_dictionary_that_names_itself_is_bounded() {
         parameters: [None; 4],
         dictionary,
     };
-    let mut out = [0; 8];
-    assert_eq!(expansion.expand(b"\x1B\x01", &mut out), 0);
+    let mut out = Held::new(8).expect("room");
+    expansion.expand(b"\x1B\x01", &mut out);
+    assert!(out.bytes.is_empty());
+}
+
+#[test]
+fn a_value_s_end_is_found_the_same_however_it_is_cut_into_pieces() {
+    let data = b"ab\x1B\ncd\x1B\x1B\x1Be\x1B\rf\ng";
+    let whole = value_length(data, 0);
+    assert_eq!(whole, Some(13), "the escaped line feed and return carried");
+    for cut in 0..=data.len() {
+        let mut end = ValueEnd::default();
+        let (first, second) = data.split_at(cut);
+        let found = end
+            .find(first)
+            .or_else(|| end.find(second).map(|n| cut + n));
+        assert_eq!(found, whole, "cut at {cut}");
+    }
+    assert_eq!(
+        value_length(b"ab\x1B", 0),
+        None,
+        "an escape the file ends after"
+    );
+    assert_eq!(value_length(b"ab", 3), None);
 }

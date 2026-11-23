@@ -270,6 +270,23 @@ pub enum Capability {
         /// Multiplier applied to `queue_notify_off` (virtio 1.x §4.1.4.4).
         notify_off_multiplier: u32,
     },
+    /// A virtio shared-memory capability (`cap_id = 0x09`, `cfg_type =`
+    /// [`VIRTIO_PCI_CFG_SHARED_MEMORY`]): the 64-bit layout naming region `id`
+    /// at a 64-bit offset and length within `bar` (virtio 1.2 §4.1.4.7).
+    ///
+    /// [`VIRTIO_PCI_CFG_SHARED_MEMORY`]: tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_SHARED_MEMORY
+    VirtioSharedMemory {
+        /// Byte offset of the capability header in configuration space.
+        offset: u8,
+        /// The region's id among the function's own.
+        id: u8,
+        /// Index of the BAR holding the region.
+        bar: u8,
+        /// Offset of the region within `bar`.
+        bar_offset: u64,
+        /// Length of the region in bytes.
+        length: u64,
+    },
     /// Any other capability ID. Surfaced opaquely; the host audits.
     Other {
         /// Byte offset of the capability header in configuration space.

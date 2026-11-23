@@ -385,11 +385,13 @@ README requires this file to name them:
 | `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init`, `tools/signkeys` (`setting_line`); `configure`, Settings (`ValueShape`) |
 | `count`, `tailwindow` | `head`, `tail`; `count` also the QEMU verticals reading a figure from a guest's log |
 | `defer` | `lib/rt` (`work::Worker`, over either desk, so every worker a program runs), `lib/browse` (the mount worker), `lib/window` (the document host's queue), the desktop session, the screen recorder, the file manager, Settings, Date & Time, Music, Paint, Draw, `netmap`, `smbfs`, WinterSun's client |
+| `bitfield` | `lib/image`, TAIRiX Bridge |
+| `divisor` | `lib/audio`, `lib/image`, `tests/fuzzseed`, the PC emulator, TAIRiX Bridge |
 | `fallible` | `lib/audio`, `lib/bezier`, `lib/browse`, `lib/bytedev`, `lib/countryside`, `lib/discovery`, `lib/drawing`, `lib/font`, `lib/fscopy`, `lib/fsprobe`, `lib/fsserve`, `lib/glob`, `lib/gpu`, `lib/icon`, `lib/image`, `lib/land`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/shaders`, `lib/sound`, `lib/spirv`, `lib/terrain`, `lib/users`, `lib/video`, `lib/writeback`, the kernel, the AmigaDOS, ARXFS, ext4, ISO 9660 and UDF drivers, the USB Audio driver, `userland/gui/wm`, the desktop session, the screen recorder, the greeter, `audiod`, `discoveryd`, `netstack`, `settingsd`, `smbfs`, `sysinfod`, `thermald`, `devmgr`, `elsh`, `blendcheck`, `cp`, `mv`, the file manager, TextEdit, `view`, Paint, Draw, WinterSun, the Bubble Universe, Life, ray tracer, Retro Games and Starfield screensavers |
 | `flags` | `lib/gpu`, `lib/smb`, `lib/spirv` |
 | `getopt` | every command app that takes options (`cat`, `cp`, `df`, `du`, `head`, `ls`, `mount`, `ps`, `seq`, `tail`, `useradd`, `servicectl`, `sysinfo`, …), the desktop session's command line (`applib`), the file manager's |
 | `fmt` | `kernel/sec`, `kernel/ipc`, `kernel/syscall`, `kernel/core`, the kernel binary, the xHCI, USB HID, USB mass-storage, RAID and volume-manager drivers, `lib/controls`, `lib/dmaengine`, `lib/sysconfig`, `devmgr`, `xtask`, the QEMU verticals |
-| `hex` | `tools/cc`, `tools/mkimage`, `tools/signkeys`, `tools/tzcompile`, `xtask` |
+| `hex` | `lib/path`, `lib/procinfo`, `lib/supervisor`, `lib/users`, `tools/cc`, `tools/mkimage`, `tools/signkeys`, `tools/tzcompile`, `xtask`, `confd`, `fstree`, the UDF driver, the desktop session, TextEdit, the PC emulator, TAIRiX Bridge |
 | `hexdump` | `fstree`, TextEdit |
 | `join` | `lib/procinfo`'s multi-valued readings, `netmap`'s host tooltip |
 | `lanes` | `lib/collections`, TextEdit |

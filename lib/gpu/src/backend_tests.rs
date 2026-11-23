@@ -4,19 +4,20 @@
 //! over it as over the software device, so what it refuses and admits over
 //! one it does over the other.
 
+use crate::device::as_software;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_rt::sync::Mutex;
 
-use super::{Backend, Pool, Prepared};
+use super::{Backend, NoPool, Prepared};
 use crate::binding::Bound;
 use crate::command::Op;
 use crate::device::Shared;
 use crate::fair::FairGuard;
 use crate::image::ImageDesc;
 use crate::info::DeviceInfo;
-use crate::memory::{Budget, Charge};
+use crate::memory::Charge;
 use crate::model::Model;
 use crate::pipeline::StagePlan;
 use crate::render::RenderPlan;
@@ -48,38 +49,8 @@ impl core::fmt::Debug for Bytes {
 #[derive(Debug)]
 pub(crate) struct Paged;
 
-/// The pool of a backend that keeps none.
-pub(crate) struct NoPool;
-
-impl Pool for NoPool {
-    type Need = ();
-    type Hold = ();
-    type Plan = ();
-    type Grown = ();
-    type Lease = ();
-
-    fn wider((): (), (): ()) {}
-
-    fn prune(&mut self) {}
-
-    fn plan(&mut self, (): (), _: (&Arc<Budget>, u64), _: &Arc<Budget>) -> (Result<(), Error>, ()) {
-        (Ok(()), ())
-    }
-
-    fn make((): ()) -> Result<((), ()), Error> {
-        Ok(((), ()))
-    }
-
-    fn install(&mut self, (): ()) {}
-
-    fn take(&mut self, (): ()) {}
-
-    fn give(&mut self, (): ()) -> [(); 2] {
-        [(), ()]
-    }
-}
-
 impl Backend for Test {
+    type Context = ();
     type Memory = Bytes;
     type Image = Paged;
     type Set = ();
@@ -87,11 +58,24 @@ impl Backend for Test {
     type Render = ();
     type Pool = NoPool;
 
+    const WATCHED: bool = false;
+
     fn overhead(_: u64) -> u64 {
         crate::model::shared_bytes::<Bytes>()
     }
 
-    fn allocate(&self, size: u64, charges: [Charge; 2]) -> Result<Bytes, Error> {
+    fn create_context(&self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn lost(&self, _: &Arc<()>) {}
+
+    fn allocate(
+        &self,
+        _: &Arc<()>,
+        (_, size): (u32, u64),
+        charges: [Charge; 2],
+    ) -> Result<Bytes, Error> {
         let len = usize::try_from(size).map_err(|_| Error::OutOfMemory)?;
         let bytes = tairix_util::fallible::filled(len, 0u8).ok_or(Error::OutOfMemory)?;
         Ok(Bytes {
@@ -211,9 +195,10 @@ fn allocation<B: Backend>(
         .lock()
         .charge_allocation(context, size, memory_type)
         .expect("charged");
+    let device = shared.model.lock().device(context).expect("live");
     let memory = shared
         .backend
-        .allocate(size, [charge, overhead])
+        .allocate(&device, (memory_type, size), [charge, overhead])
         .and_then(crate::shared)
         .expect("made");
     shared
@@ -244,7 +229,12 @@ const fn layered() -> ImageDesc {
 /// Where an image may be placed on `shared`: in the second memory type, off
 /// its alignment, and holding just less than it needs.
 fn placements<B: Backend>(shared: &Shared<B>) -> [Option<Error>; 3] {
-    let context = shared.model.lock().create_context(None).expect("a context");
+    let device = shared.backend.create_context().expect("a device context");
+    let context = shared
+        .model
+        .lock()
+        .create_context(None, device)
+        .expect("a context");
     let needs = shared
         .image_form(&layered())
         .map(|(_, needs)| needs)
@@ -268,7 +258,7 @@ fn an_image_is_placed_as_its_backend_requires() {
     let info = two_types();
     let device = software(&info);
     assert_eq!(
-        placements(&device.shared),
+        placements(as_software(&device.host)),
         [None, Some(Error::Misaligned), Some(Error::OutOfRange)],
         "the software device places an image in either type, at its texels' alignment"
     );
@@ -288,7 +278,12 @@ fn an_image_is_placed_as_its_backend_requires() {
 /// reaches the first image's level 0, layer 1.
 fn reaches<B: Backend>(shared: &Shared<B>) -> Vec<bool> {
     use crate::binding::{Named, SetRequest};
-    let context = shared.model.lock().create_context(None).expect("a context");
+    let device = shared.backend.create_context().expect("a device context");
+    let context = shared
+        .model
+        .lock()
+        .create_context(None, device)
+        .expect("a context");
     let needs = shared
         .image_form(&layered())
         .map(|(_, needs)| needs)
@@ -383,7 +378,7 @@ fn what_a_binding_reaches_is_the_same_whatever_the_backend_lays_out() {
     let device = software(&info);
     let expected = alloc::vec![true, false, false, true, false];
     assert_eq!(
-        reaches(&device.shared),
+        reaches(as_software(&device.host)),
         expected,
         "over the software device"
     );

@@ -12,7 +12,7 @@ use crate::bios::layout::EMS_DEVICE;
 use crate::dos::data::sysvars;
 use crate::dos::device::{attribute, header};
 use crate::dos::memory::{mcb, psp};
-use crate::dos::message::{self, decimal, decimal_in};
+use crate::dos::message::{decimal, decimal_in};
 use crate::dos::program::{say, Flow, Frame, Id, Int, Program, Returned, Routine};
 use crate::dos::shell::{letter, parse};
 use crate::ems;
@@ -102,11 +102,8 @@ pub fn request(tail: &[u8]) -> Result<u8, Refusal<'_>> {
 /// `n` in upper-case hex, at least `width` digits.
 #[must_use]
 pub fn hex(n: u32, width: usize) -> Vec<u8> {
-    let significant = usize::try_from(8 - n.leading_zeros() / 4)
-        .unwrap_or(8)
-        .max(1);
-    let mut out = alloc::vec![0; significant.max(width)];
-    message::hex(n, &mut out);
+    let mut out = alloc::vec![0; tairix_util::hex::significant(n.into()).max(width)];
+    tairix_util::hex::fill_upper(&mut out, n.into());
     out
 }
 

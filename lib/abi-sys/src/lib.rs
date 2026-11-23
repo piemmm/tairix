@@ -151,6 +151,7 @@ const NUM_TOUCH_READ: u64 = SyscallNumber::TOUCH_READ.as_u16() as u64;
 const NUM_SEAT_SWITCH: u64 = SyscallNumber::SEAT_SWITCH.as_u16() as u64;
 const NUM_SEAT_REVOKE: u64 = SyscallNumber::SEAT_REVOKE.as_u16() as u64;
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
+const NUM_MMIO_UNMAP: u64 = SyscallNumber::MMIO_UNMAP.as_u16() as u64;
 const NUM_PORT_READ: u64 = SyscallNumber::PORT_READ.as_u16() as u64;
 const NUM_PORT_WRITE: u64 = SyscallNumber::PORT_WRITE.as_u16() as u64;
 const NUM_DMA_ALLOC: u64 = SyscallNumber::DMA_ALLOC.as_u16() as u64;
@@ -1187,20 +1188,40 @@ pub extern "C" fn sys_resource_grants(buf: *mut c_void, len: usize) -> u64 {
 /// received for the hardware-tree node it binds — never a raw physical
 /// address — and `[offset, offset + len)` names the sub-region of that grant
 /// to map. The kernel resolves the handle against the calling task, confirms
-/// it names a memory window and the sub-region lies wholly inside it, and
-/// maps only that sub-region (caching disabled); a forged/non-owned handle, a
-/// wrong-kind grant, a sub-region escaping the grant, or a build with no map
-/// facility wired fails closed. Mapping a bounded
+/// it names a window and the sub-region lies wholly inside it, and maps only
+/// that sub-region: with the memory type the grant names when `caching` is
+/// `TAIRIX_REGION_CACHING_AS_GRANTED`, and a memory region's part with the
+/// `TAIRIX_REGION_CACHING_*` its device states, which no other grant takes; a
+/// forged/non-owned handle, a wrong-kind grant or caching, a sub-region
+/// escaping the grant, or a build with no map facility wired fails closed. Mapping a bounded
 /// sub-region lets a driver granted a large outbound bus aperture map just
 /// the single BAR it enumerated, not the whole window.
 /// Gated kernel-side on `TAIRIX_CAP_MMIO_MAP`.
 #[must_use]
 #[export_name = "tairix_sys_mmio_map"]
-pub extern "C" fn sys_mmio_map(handle: u64, offset: u64, len: usize) -> u64 {
+pub extern "C" fn sys_mmio_map(handle: u64, offset: u64, len: usize, caching: u32) -> u64 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced here; the
     // kernel resolves the grant handle against the caller and returns the
     // mapped sub-region's base virtual address.
-    unsafe { raw_syscall(NUM_MMIO_MAP, [handle, offset, len as u64, 0, 0, 0]) }
+    unsafe {
+        raw_syscall(
+            NUM_MMIO_MAP,
+            [handle, offset, len as u64, u64::from(caching), 0, 0],
+        )
+    }
+}
+
+/// `mmio_unmap`: unmap the window [`sys_mmio_map`] mapped at `base` in the
+/// calling driver (`SyscallNumber::MMIO_UNMAP`), so a region larger than
+/// the driver's device window is used a part at a time. Returns a
+/// `TAIRIX_E_*` code: `TAIRIX_E_NOT_FOUND` for a `base` that is not where a
+/// live window of the caller begins, which unmaps nothing.
+#[must_use]
+#[export_name = "tairix_sys_mmio_unmap"]
+pub extern "C" fn sys_mmio_unmap(base: u64) -> i32 {
+    // SAFETY: see `sys_yield`. `base` is a lookup key in the caller's own
+    // window, never dereferenced.
+    unsafe { ret_i32(raw_syscall(NUM_MMIO_UNMAP, [base, 0, 0, 0, 0, 0])) }
 }
 
 /// `port_read`: read one value from a granted legacy I/O port
@@ -4481,7 +4502,8 @@ mod tests {
         (NUM_KEYBOARD_READ, "keyboard_read", 3),
         (NUM_SEAT_SWITCH, "seat_switch", 2),
         (NUM_SEAT_REVOKE, "seat_revoke", 1),
-        (NUM_MMIO_MAP, "mmio_map", 3),
+        (NUM_MMIO_MAP, "mmio_map", 4),
+        (NUM_MMIO_UNMAP, "mmio_unmap", 1),
         (NUM_PORT_READ, "port_read", 3),
         (NUM_PORT_WRITE, "port_write", 4),
         (NUM_DMA_ALLOC, "dma_alloc", 4),
@@ -4880,15 +4902,16 @@ mod tests {
     }
 
     #[test]
-    fn mmio_map_marshals_the_grant_handle_offset_and_len() {
+    fn mmio_map_marshals_the_grant_handle_offset_len_and_caching() {
         let (number, args) = capture(0x9000_0000, || {
-            assert_eq!(sys_mmio_map(0x2A, 0x3D50_0000, 0x1000), 0x9000_0000);
+            assert_eq!(sys_mmio_map(0x2A, 0x3D50_0000, 0x1000, 2), 0x9000_0000);
         });
         assert_eq!(number, NUM_MMIO_MAP);
         assert_eq!(args[0], 0x2A);
         assert_eq!(args[1], 0x3D50_0000);
         assert_eq!(args[2], 0x1000);
-        assert_eq!(&args[3..], &[0, 0, 0]);
+        assert_eq!(args[3], 2);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

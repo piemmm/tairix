@@ -1,0 +1,55 @@
+[package]
+name = "tairix-test-venus-check"
+description = "plans/GPU.md GP5.2 and GP5.3 fixture driver: bound to QEMU's Venus GPU in place of the display driver, it brings the device up as that driver does, makes a Venus context and host blobs, maps them into the host-visible region and reads back through a second mapping what the first wrote, submits a fenced stream, and lets it all go; then makes the driver's Venus backend a GPU as the driver does and holds it to the software device with gpucheck's work, records the verdict, and serves the seat's display."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The `Run` binary is the fixture driver process. It links the driver's
+# program and the userland runtime, so it is built only with `program`, which
+# the bundle builder enables: the vertical's guest kernel links this library
+# for the verdict's identifiers and must never pull the runtime in with it.
+[features]
+program = [
+    "dep:tairix-abi",
+    "dep:tairix-display",
+    "dep:tairix-drv-display-gpu-virtio",
+    "dep:tairix-drvrt",
+    "dep:tairix-gpu",
+    "dep:tairix-gpucheck",
+    "dep:tairix-inline",
+    "dep:tairix-rt",
+    "dep:tairix-virtio",
+]
+
+[[bin]]
+name = "tairix-test-venus-check"
+path = "src/main.rs"
+required-features = ["program"]
+
+[dependencies]
+# The verdict's event identifiers, which the vertical's guest keys on.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+# The `Run` program's, pulled only by `program`: the virtio-gpu driver's
+# bring-up and engine, the shared-memory region its blobs are placed in, and
+# the work its backend is held to the software device with.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0", optional = true }
+tairix-display = { path = "../../../lib/display", version = "=0.0.0", features = ["service"], optional = true }
+tairix-drv-display-gpu-virtio = { path = "../../../drivers/display/gpu_virtio", version = "=0.0.0", optional = true }
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0", optional = true }
+tairix-gpu = { path = "../../../lib/gpu", version = "=0.0.0", optional = true }
+tairix-gpucheck = { path = "../../../userland/apps/gpucheck", version = "=0.0.0", default-features = false, optional = true }
+tairix-inline = { path = "../../../lib/inline", version = "=0.0.0", optional = true }
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0", optional = true }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

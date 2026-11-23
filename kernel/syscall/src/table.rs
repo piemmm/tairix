@@ -8,7 +8,7 @@
 //! decoupled from `kernel/ipc`, `kernel/sched`, and friends
 //! (no bloat).
 
-use tairix_abi::driver::DmaReach;
+use tairix_abi::driver::{DmaReach, RegionCaching};
 use tairix_abi::netattach::FsserveCtl;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
@@ -1166,8 +1166,10 @@ pub trait SyscallHandlers {
     /// the calling task** (rejecting forgery exactly as `irq_wait` re-checks
     /// its binding), confirms the grant names a memory
     /// window and the sub-region lies wholly inside it, maps only that
-    /// sub-region — caching disabled — into the caller's own address space,
-    /// and returns its base user virtual address. A driver therefore never
+    /// sub-region into the caller's own address space — with the caching its
+    /// grant names, or for a memory region the `caching` the driver states,
+    /// which every other grant must leave `None` — and returns its base user
+    /// virtual address. A driver therefore never
     /// reaches physical memory the kernel did not grant it (no ambient
     /// authority), and a driver granted a large outbound bus aperture maps
     /// just the single BAR it enumerated rather than the whole window.
@@ -1182,7 +1184,21 @@ pub trait SyscallHandlers {
         _handle: u64,
         _offset: u64,
         _len: usize,
+        _caching: Option<RegionCaching>,
     ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Unmap the device window based at `base` from the calling driver's
+    /// own address space ([`SyscallNumber::MMIO_UNMAP`]).
+    ///
+    /// Ungated at the dispatcher: the implementation finds `base` among the
+    /// caller's own windows, kernel-side, and unmaps nothing for a `base`
+    /// that is not one.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`].
+    fn mmio_unmap(&self, _caller: &CallerContext<'_>, _base: u64) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -4282,8 +4298,13 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             // sub-region lies wholly inside the grant.
             SyscallNumber::MMIO_MAP => {
                 let len = decode_len(args.0[2])?;
-                self.handlers.mmio_map(caller, args.0[0], args.0[1], len)
+                let caching = RegionCaching::from_arg(args.0[3])?;
+                self.handlers
+                    .mmio_map(caller, args.0[0], args.0[1], len, caching)
             }
+            // args[0] is the base virtual address `mmio_map` returned — a
+            // lookup key in the caller's own window, never dereferenced.
+            SyscallNumber::MMIO_UNMAP => self.handlers.mmio_unmap(caller, args.0[0]),
             // `validate_arg` accepts args[0] as an opaque `Handle` u64; the
             // handler resolves it against the calling task and the grant
             // table. args[1] is the port and args[2] the transfer width,
@@ -6071,13 +6092,18 @@ mod tests {
             handle: u64,
             offset: u64,
             len: usize,
+            caching: Option<RegionCaching>,
         ) -> SyscallResult {
             self.record("mmio_map");
-            // Echo `handle + offset + len` back so the reachability test can
-            // assert the dispatcher decoded all three arguments (handle,
-            // sub-region offset, length) without wiring a real grant table /
-            // map facility here.
-            Ok(handle + offset + len as u64)
+            // Echo every decoded argument back so the reachability test can
+            // assert the dispatcher decoded all four without wiring a real
+            // grant table / map facility here.
+            Ok(handle + offset + len as u64 + RegionCaching::arg(caching))
+        }
+
+        fn mmio_unmap(&self, _c: &CallerContext<'_>, base: u64) -> SyscallResult {
+            self.record("mmio_unmap");
+            Ok(base)
         }
 
         fn port_read(

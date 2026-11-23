@@ -54,7 +54,7 @@ impl Os<'_> {
     /// Makes the area at reset, its pool as many pages as CMOS gives, or as
     /// many of them as the session has: a short pool is a smaller disc.
     pub(crate) fn create_ram_disc(&mut self) -> Result<(), Fail> {
-        let pages = i32::from(self.read_cmos(crate::cmos::RAM_DISC)?);
+        let pages = i32::from(self.cmos_pages(crate::cmos::RAM_DISC)?);
         let window = u32::try_from(self.ceiling_bytes().min(WINDOW_MOST)).unwrap_or(u32::MAX)
             & !(PAGE_SIZE - 1);
         let request = Create {

@@ -61,6 +61,7 @@ mod lint;
 mod locale;
 mod own;
 mod render;
+mod switches;
 
 pub use doc::{
     Align, Block, HelpDoc, HelpError, ListItem, Section, SectionKind, Span, Table,
@@ -78,6 +79,7 @@ pub use locale::{
 pub use own::{arguments, print_own_short_help, report_misuse, user_locale, BundleHelp};
 pub use own::{own_short_help, TryHelp, MISUSE, UNREADABLE_ARGUMENTS};
 pub use render::{render_full, render_short, RenderCtx, Styling};
+pub use switches::{parse_help_only, HelpOnly, HelpOnlyError};
 
 #[cfg(test)]
 mod tests;

@@ -11,7 +11,7 @@ use tairix_riscos_kernel::swi::X;
 
 use super::matching::{Loadings, Look};
 use super::palettes::Against;
-use super::{current, loadings, own, BAD_FONT_OFFSET};
+use super::{current, own, BAD_FONT_OFFSET};
 
 /// The longest offset a run reaches, and the furthest either way a deeper
 /// mode takes.
@@ -62,12 +62,10 @@ pub(super) fn set_font_colours(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), F
 
 /// The colours chosen for R1 to R3; none while ColourTrans holds nothing.
 fn chosen(os: &mut Os<'_>, regs: &Regs) -> Result<Option<Chosen>, Fail> {
-    let Some(loadings) = loadings(os) else {
-        return Ok(None);
-    };
     let [background, foreground] = [regs.r[1], regs.r[2]].map(Rgb::from_riscos_word);
     let longest = regs.r[3].cast_signed();
-    Ok(current(os)?.map(|against| choose(against, background, foreground, longest, loadings)))
+    Ok(current(os)?
+        .map(|(against, loadings)| choose(against, background, foreground, longest, loadings)))
 }
 
 /// `chosen` given in R1 to R3; whether the mode is a deeper one. A deeper

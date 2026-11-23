@@ -59,7 +59,7 @@
 extern crate alloc;
 
 use tairix_abi::cpufreq::{CpuFreqLimits, CpuFreqTarget};
-use tairix_abi::driver::DmaReach;
+use tairix_abi::driver::{DmaReach, RegionCaching};
 use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REQUEST};
 use tairix_abi::fs::{
     Access, AtFlags, LinkFlags, NodeExpect, PathAt, RenameFlags, UnlinkFlags, FD_CWD,
@@ -221,6 +221,7 @@ const NUM_ARCHIVE_WRITE: u64 = SyscallNumber::ARCHIVE_WRITE.as_u16() as u64;
 
 /// `mmio_map` syscall number (as above).
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
+const NUM_MMIO_UNMAP: u64 = SyscallNumber::MMIO_UNMAP.as_u16() as u64;
 const NUM_PORT_READ: u64 = SyscallNumber::PORT_READ.as_u16() as u64;
 const NUM_PORT_WRITE: u64 = SyscallNumber::PORT_WRITE.as_u16() as u64;
 
@@ -2839,7 +2840,9 @@ fn served_grant(
 /// never a raw physical address: the kernel resolves it
 /// **owner-checked against the calling task**, confirms it names a memory
 /// window, confirms `[offset, offset + len)` lies wholly inside that window,
-/// and maps only that sub-region — caching disabled, never executable. A forged or another driver's handle
+/// and maps only that sub-region, never executable — with the caching the
+/// grant names, or for a memory region the `caching` its device states,
+/// which every other grant leaves `None`. A forged or another driver's handle
 /// resolves to nothing and is refused, as is a sub-region escaping the grant.
 /// Mapping a bounded sub-region (not the whole grant) is what lets a driver
 /// granted a large outbound bus aperture map just the single BAR it
@@ -2855,12 +2858,29 @@ fn served_grant(
 /// and hides no error.
 #[must_use]
 #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 mmio_map-result encoding (base ≥ 0, else -errno).
-pub fn mmio_map(handle: u64, offset: u64, len: usize) -> i64 {
+pub fn mmio_map(handle: u64, offset: u64, len: usize, caching: Option<RegionCaching>) -> i64 {
+    let caching = RegionCaching::arg(caching);
     // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
     // the call on the far side of the trap. `mmio_map`
     // dereferences no user pointer; it resolves the grant handle and maps the
     // requested sub-region into the caller's own space, returning its base.
-    let ret = unsafe { raw_syscall(NUM_MMIO_MAP, [handle, offset, len as u64, 0, 0, 0]) };
+    let ret = unsafe { raw_syscall(NUM_MMIO_MAP, [handle, offset, len as u64, caching, 0, 0]) };
+    ret as i64
+}
+
+/// Unmap the window [`mmio_map`] mapped at `base` in the calling driver
+/// (`SyscallNumber::MMIO_UNMAP`), so a region larger than the driver's
+/// device window is used a part at a time.
+///
+/// Returns `0`, or `-errno`: `NotFound` for a `base` that is not where a
+/// live window of the caller begins, which unmaps nothing.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // `0` or `-errno`, which fits an i64.
+pub fn mmio_unmap(base: u64) -> i64 {
+    // SAFETY: `raw_syscall` is always safe to invoke — the kernel validates
+    // the call on the far side of the trap. `base` is a lookup key in the
+    // caller's own window, never dereferenced.
+    let ret = unsafe { raw_syscall(NUM_MMIO_UNMAP, [base, 0, 0, 0, 0, 0]) };
     ret as i64
 }
 

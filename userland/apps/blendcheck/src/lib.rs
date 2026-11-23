@@ -23,77 +23,16 @@
 
 extern crate alloc;
 
-use alloc::string::String;
 use alloc::vec::Vec;
-use core::fmt;
 
 use tairix_abi::driver::display::{AccelCaps, AccelLayer, BufferId, DamageRect, DisplayMode};
 use tairix_display::{scanout_len, ChannelOrder};
 use tairix_raster::{blend_span, DitherRow, Pixel};
 use tairix_util::fallible;
-use tairix_util::getopt::{Arg, Opt, Order, Refusal, Scan, Takes};
-use tairix_util::quote::quote;
 
 /// The usage banner the short-help switches print when the Help tree is
 /// unavailable.
 pub const USAGE: &str = "usage: blendcheck [-h | -?]";
-
-/// One thing the `blendcheck` tool can do.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Command {
-    /// Show the pattern until a key or a button is pressed.
-    Run,
-    /// Render the tool's own short help.
-    Help,
-}
-
-/// Why [`parse`] refused a command line.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BlendcheckError {
-    /// An option `getopt` refuses, worded as it words it.
-    Option(Refusal),
-    /// An operand; the tool takes none.
-    ExtraOperand(String),
-}
-
-impl fmt::Display for BlendcheckError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Option(refusal) => write!(f, "{refusal}"),
-            Self::ExtraOperand(operand) => {
-                write!(f, "extra operand {operand}", operand = quote(operand))
-            }
-        }
-    }
-}
-
-/// The reserved help switches, which are all the tool takes.
-const OPTIONS: &[Opt<()>] = &[
-    Opt::flag('h', &["help"], ()),
-    Opt::letter('?', Takes::Nothing, ()),
-];
-
-/// Parse `args` (excluding the program name) into a [`Command`].
-///
-/// # Errors
-///
-/// * [`BlendcheckError::Option`] — an option `getopt` refuses.
-/// * [`BlendcheckError::ExtraOperand`] — an operand.
-pub fn parse(args: &[&str]) -> Result<Command, BlendcheckError> {
-    let mut operand = None;
-    for arg in Scan::new(OPTIONS, args, Order::Permute) {
-        match arg.map_err(BlendcheckError::Option)? {
-            Arg::Opt((), _) => return Ok(Command::Help),
-            Arg::Operand(found) => {
-                operand.get_or_insert(found);
-            }
-        }
-    }
-    match operand {
-        Some(operand) => Err(BlendcheckError::ExtraOperand(String::from(operand))),
-        None => Ok(Command::Run),
-    }
-}
 
 /// The glass every pane lays over the ramp: black, covering 208 of 255, so
 /// the full ramp beneath it keeps 48 levels — a step every forty-odd pixels

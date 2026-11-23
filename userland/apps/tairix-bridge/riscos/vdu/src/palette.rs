@@ -10,15 +10,13 @@
 
 use tairix_colour::Rgb;
 use tairix_riscos_kernel::os::{len32, Entry, Fail, Os, Regs};
-use tairix_riscos_kernel::vectors::Vector;
 use tairix_vdu::mode::Flags;
 use tairix_vdu::palette::{default_256, DEFAULT_2, DEFAULT_4};
 
 use crate::mode::Format;
 use crate::state::with;
 
-/// `PaletteV`.
-pub(crate) const PALETTE_V: Vector = Vector(0x23);
+pub(crate) use tairix_riscos_kernel::vectors::PALETTE as PALETTE_V;
 
 /// How an entry shows, its reported word's low byte.
 pub(crate) mod kind {
@@ -199,6 +197,17 @@ impl Palette {
     }
 }
 
+/// A mode of `log2_bpp`'s first `entries` default colours, each in its first
+/// flash state.
+#[cfg(test)]
+pub(crate) fn default_colours(log2_bpp: u32, entries: usize) -> alloc::vec::Vec<Rgb> {
+    default_words(log2_bpp, false)
+        .iter()
+        .take(entries)
+        .map(|&[first, _]| Rgb::from_riscos_word(first))
+        .collect()
+}
+
 /// The entries a mode of `log2_bpp` starts with, each logical colour's two
 /// flash states; a Teletext mode's flashing colours steady, with the
 /// supremacy bit; the direct-colour modes' gamma ramp.
@@ -254,20 +263,32 @@ const fn colours(format: &Format) -> u32 {
 
 /// The colours of a palette of eight bits a pixel.
 pub(crate) const EIGHT_BIT_COLOURS: usize = 1 << 8;
+
+/// Whether `colours` are the default 256-colour palette's, each channel
+/// compared in the bits `kept` holds.
+pub(crate) fn is_default_256(colours: &[Rgb], kept: u8) -> bool {
+    colours.len() == EIGHT_BIT_COLOURS
+        && colours.iter().zip(0..=u8::MAX).all(|(colour, pixel)| {
+            colour.to_array().map(|channel| channel & kept)
+                == default_256(pixel).map(|channel| channel & kept)
+        })
+}
 /// The base colours a grouped 256-colour palette makes its colours from:
 /// VIDC1's palette registers, a pixel's low four bits choosing one.
 pub(crate) const GROUP_BASES: usize = 16;
 
+/// The bits of a channel VIDC1 held a colour in: its top four.
+pub(crate) const VIDC1_CHANNEL: u8 = 0xF0;
+
 /// The colour pixel `pixel` of a 256-colour mode whose palette is grouped
 /// shows from base colour `base` at VIDC1's four bits a channel, as RISC OS
-/// 5's ColourTrans and sprite palettes take it: each channel's top four bits.
+/// 5's ColourTrans and sprite palettes take it: each channel's
+/// [`VIDC1_CHANNEL`] bits, repeated below.
 const fn vidc1_shown(base: [u8; 3], pixel: u8) -> [u8; 3] {
-    let nibbles = [
-        (base[0] >> 4) * 0x11,
-        (base[1] >> 4) * 0x11,
-        (base[2] >> 4) * 0x11,
-    ];
-    tairix_vdu::palette::grouped(nibbles, pixel)
+    const fn held(channel: u8) -> u8 {
+        (channel & VIDC1_CHANNEL) | (channel >> 4)
+    }
+    tairix_vdu::palette::grouped([held(base[0]), held(base[1]), held(base[2])], pixel)
 }
 
 /// The 256 colours a grouped palette of base words `bases` shows, as VIDC1

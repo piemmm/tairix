@@ -105,6 +105,9 @@ Die Abfragen:
   Eigentümer übersetzt — Einheit und Gruppe, Generation und Stand des
   Eigentümers, seine Streams sowie die Zuordnungen seiner Domäne und deren
   Bytes (benötigt `CAP_SYSINFO_HW`).
+- `gpu` — die bereitgestellten GPUs: eine Zeile je GPU, die ein Treiber
+  bereitstellt — der Knoten ihres Geräts im Hardwarebaum und der Kanal, über
+  den ein Programm sie öffnet.
 - `audio`, `sound` — die Audiogeräte: eine Zeile je Ausgabe und Eingabe —
   ihre Kennung, ob sie der Standard ihrer Richtung ist, ihr Pegel und ihre
   Stummschaltung, die gemessene Rate ihres Takts während der Wiedergabe, die

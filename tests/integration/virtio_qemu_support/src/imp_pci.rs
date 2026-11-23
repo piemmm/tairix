@@ -310,7 +310,10 @@ where
         owner: caller.process(),
         park: HltWaiter,
     };
-    let vhost = KernelVirtioHost::new(pool, &caller, &SERIAL_SINK, PoolId::fresh(), &wait);
+    // SAFETY: `vhost` stays in place below until the lifecycle that holds
+    // every slab it mints has ended.
+    let vhost =
+        unsafe { KernelVirtioHost::new(pool, &caller, &SERIAL_SINK, PoolId::fresh(), &wait) };
 
     // 6. Drive the shared lifecycle with `body` against the reloaded driver.
     drive_driver_lifecycle(&env, cfg, transport, &vhost, body)

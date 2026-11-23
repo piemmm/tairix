@@ -11,14 +11,14 @@ use tairix_collections::Key;
 use tairix_inline::ArrayVec;
 
 use crate::backend::Backend;
-use crate::command::{Command, CopyRegion, Recorded};
+use crate::command::{Command, CopyRegion};
 use crate::fair::{Fair, FairGuard};
+use crate::host::{owned, ExportId, Host, Object, Served};
 use crate::info::{BufferUsage, DeviceInfo};
 use crate::memory::MemoryUse;
 use crate::model::{
-    AllocationKey, BufferKey, ContextKey, Model, Pick, Point, Request, TimelineKey, Woken,
+    AllocationKey, BufferKey, ContextKey, Model, Pick, Request, TimelineKey, Woken,
 };
-use crate::software::Software;
 use crate::{
     Error, SubmitError, MAX_COPY_REGIONS, MAX_SUBMISSION_BUFFERS, MAX_SUBMISSION_COMMANDS,
     MAX_SUBMISSION_POINTS, MAX_UPDATE_BYTES,
@@ -35,13 +35,16 @@ pub(crate) struct Shared<B: Backend> {
     pub(crate) backend: B,
 }
 
-/// What every handle of the software device shares.
-pub(crate) type SoftwareShared = Shared<Software>;
+/// The software device behind `host`, for tests that look into it.
+#[cfg(test)]
+pub(crate) fn as_software(host: &Arc<dyn Host>) -> &Shared<crate::software::Software> {
+    host.as_any().downcast_ref().expect("a software device")
+}
 
 impl<B: Backend> Shared<B> {
     /// Take `item` out of the context's table `pick` names, letting it go
     /// once the device's lock is: it may hold the last of a memory.
-    pub(crate) fn release<K: Key, V>(&self, context: ContextKey, pick: Pick<B, K, V>, item: K) {
+    pub(crate) fn take<K: Key, V>(&self, context: ContextKey, pick: Pick<B, K, V>, item: K) {
         let released = self.model.lock().release(context, pick, item);
         drop(released);
     }
@@ -50,35 +53,6 @@ impl<B: Backend> Shared<B> {
     pub(crate) fn drive<'a>(&'a self, model: FairGuard<'a, Model<B>>) {
         if model.has_ready() {
             B::drive(self, model);
-        }
-    }
-
-    /// Wait until `timeline` reaches `value`, the context is lost or
-    /// released, or `timeout` elapses.
-    fn wait(
-        &self,
-        context: ContextKey,
-        timeline: TimelineKey,
-        value: u64,
-        timeout: Duration64,
-    ) -> Result<(), Error> {
-        let limit = self
-            .clock
-            .now_ns()
-            .saturating_add(timeout.saturating_total_nanos());
-        let mut model = self.model.lock();
-        loop {
-            let wake = match model.point(context, timeline, value)? {
-                Point::Reached => return Ok(()),
-                Point::Pending(wake) => wake,
-            };
-            let now = self.clock.now_ns();
-            if now >= limit {
-                return Err(Error::TimedOut);
-            }
-            model = self
-                .model
-                .wait_timeout(model, &wake, Duration64::from_nanos(limit - now));
         }
     }
 }
@@ -91,31 +65,27 @@ pub(crate) fn notify(woken: &mut Woken) {
     woken.clear();
 }
 
-/// Whether a handle of `shared`'s device and `context` belongs where it is
-/// used.
-pub(crate) fn owned<B: Backend>(
-    shared: &Arc<Shared<B>>,
-    context: ContextKey,
-    by: &Arc<Shared<B>>,
-    key: ContextKey,
-) -> Result<(), Error> {
-    if Arc::ptr_eq(shared, by) && context == key {
-        Ok(())
-    } else {
-        Err(Error::Foreign)
-    }
-}
-
 /// A device work is made on: a GPU, or the CPU standing in for one.
 pub struct Device {
-    pub(crate) shared: Arc<SoftwareShared>,
+    pub(crate) host: Arc<dyn Host>,
+    /// The device itself, where it is in this process: what a runtime
+    /// serving it to other processes reaches.
+    pub(crate) served: Option<Arc<dyn Served>>,
 }
 
 impl Device {
+    /// The device `shared` holds, in this process.
+    pub(crate) fn local<B: Backend>(shared: Arc<Shared<B>>) -> Self {
+        Self {
+            host: Arc::clone(&shared) as Arc<dyn Host>,
+            served: Some(shared),
+        }
+    }
+
     /// What the device is.
     #[must_use]
     pub fn info(&self) -> &DeviceInfo {
-        &self.shared.info
+        self.host.info()
     }
 
     /// A context: its own memory, objects and queues, which no other context
@@ -129,9 +99,9 @@ impl Device {
     /// room the device made for it ahead of a refusal stays, charged to the
     /// heap, for the next.
     pub fn create_context(&self, desc: &ContextDesc) -> Result<Context, Error> {
-        let key = self.shared.model.lock().create_context(desc.memory_limit)?;
+        let key = self.host.create_context(desc.memory_limit)?;
         Ok(Context {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             key,
         })
     }
@@ -140,7 +110,7 @@ impl Device {
 impl fmt::Debug for Device {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Device")
-            .field("info", &self.shared.info)
+            .field("info", self.host.info())
             .finish_non_exhaustive()
     }
 }
@@ -168,7 +138,7 @@ pub struct ContextDesc {
 /// with [`Error::Destroyed`]. A refusal changes nothing but the room a table
 /// or queue made ahead of it, which stays, charged, for the next.
 pub struct Context {
-    pub(crate) shared: Arc<SoftwareShared>,
+    pub(crate) host: Arc<dyn Host>,
     pub(crate) key: ContextKey,
 }
 
@@ -179,7 +149,7 @@ impl Context {
     ///
     /// [`Error::Lost`] once it is lost.
     pub fn status(&self) -> Result<(), Error> {
-        self.shared.model.lock().status(self.key)
+        self.host.status(self.key)
     }
 
     /// What its memory limit is spent on: its allocations, and the host
@@ -187,11 +157,7 @@ impl Context {
     /// work keep on the device, each for as long as anything holds it.
     #[must_use]
     pub fn memory_used(&self) -> MemoryUse {
-        self.shared
-            .model
-            .lock()
-            .memory_taken(self.key)
-            .unwrap_or_default()
+        self.host.memory_used(self.key)
     }
 
     /// `desc.size` zeroed bytes of memory type `desc.memory_type`.
@@ -203,42 +169,12 @@ impl Context {
     /// memory cannot be had; [`Error::Empty`], [`Error::TooLarge`] and
     /// [`Error::NoSuchMemoryType`] for what no device could allocate.
     pub fn allocate(&self, desc: &AllocationDesc) -> Result<Allocation, Error> {
-        let (charge, overhead) =
-            self.shared
-                .model
-                .lock()
-                .charge_allocation(self.key, desc.size, desc.memory_type)?;
-        // Made between two holds of the device's lock, as zeroing it takes as
-        // long as it is large; its charges stand for it meanwhile.
-        #[cfg(test)]
-        crate::fair::held::note_making();
-        let made = self
-            .shared
-            .backend
-            .allocate(desc.size, [charge, overhead])
-            .and_then(crate::shared);
-        let memory = match made {
-            Ok(memory) => memory,
-            Err(error) => {
-                self.shared.model.lock().unreserve_allocation(self.key);
-                return Err(error);
-            }
-        };
-        let filed =
-            self.shared
-                .model
-                .lock()
-                .file_allocation(self.key, memory, desc.memory_type, desc.size);
-        let key = filed.map_err(|(error, refused)| {
-            drop(refused);
-            error
-        })?;
+        let key = self.host.allocate(self.key, desc)?;
         Ok(Allocation {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             key,
-            size: desc.size,
-            memory_type: desc.memory_type,
+            desc: *desc,
         })
     }
 
@@ -250,30 +186,19 @@ impl Context {
     /// [`Error::Foreign`] for memory of another device, and those of every
     /// request that makes memory ([`Context#memory`]).
     pub fn import(&self, export: Export) -> Result<Allocation, Error> {
-        if !Arc::ptr_eq(&self.shared, &export.shared) {
+        if !Arc::ptr_eq(&self.host, &export.host) {
             return Err(Error::Foreign);
         }
-        let Export {
-            memory,
-            memory_type,
-            size,
-            ..
-        } = export;
-        let filed = self
-            .shared
-            .model
-            .lock()
-            .file_memory(self.key, memory, memory_type, size);
-        let key = filed.map_err(|(error, refused)| {
-            drop(refused);
-            error
-        })?;
+        // The export is spent whatever the answer: a refusal lets its memory
+        // go with it.
+        let imported = self.host.import(self.key, export.key);
+        drop(export);
+        let imported = imported?;
         Ok(Allocation {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
-            key,
-            size,
-            memory_type,
+            key: imported.allocation,
+            desc: imported.desc,
         })
     }
 
@@ -290,21 +215,10 @@ impl Context {
         allocation: &Allocation,
         desc: &BufferDesc,
     ) -> Result<Buffer, Error> {
-        owned(
-            &allocation.shared,
-            allocation.context,
-            &self.shared,
-            self.key,
-        )?;
-        let key = self.shared.model.lock().create_buffer(
-            self.key,
-            allocation.key,
-            desc.offset,
-            desc.size,
-            desc.usage,
-        )?;
+        owned(&allocation.host, allocation.context, &self.host, self.key)?;
+        let key = self.host.create_buffer(self.key, allocation.key, desc)?;
         Ok(Buffer {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             key,
             size: desc.size,
@@ -318,13 +232,9 @@ impl Context {
     ///
     /// Those of every request that makes memory ([`Context#memory`]).
     pub fn create_timeline(&self, initial: u64) -> Result<Timeline, Error> {
-        let key = self
-            .shared
-            .model
-            .lock()
-            .create_timeline(self.key, initial)?;
+        let key = self.host.create_timeline(self.key, initial)?;
         Ok(Timeline {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             key,
         })
@@ -336,9 +246,9 @@ impl Context {
     ///
     /// [`Error::NoSuchQueue`] for one the device does not have.
     pub fn queue(&self, family: u32, index: u32) -> Result<Queue, Error> {
-        let slot = self.shared.info.queue_slot(family, index)?;
+        let slot = self.host.info().queue_slot(family, index)?;
         Ok(Queue {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             slot,
             family,
@@ -350,7 +260,7 @@ impl Context {
     #[must_use]
     pub fn command_buffer(&self) -> CommandBuffer {
         CommandBuffer {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             commands: Vec::new(),
             counted: 0,
@@ -360,11 +270,7 @@ impl Context {
 
 impl Drop for Context {
     fn drop(&mut self) {
-        let released = self.shared.model.lock().destroy_context(self.key);
-        // What it held goes without the device's lock, its memories among it.
-        drop(released);
-        let pruned = self.shared.model.lock().prune_pool();
-        drop(pruned);
+        self.host.destroy_context(self.key);
     }
 }
 
@@ -388,39 +294,23 @@ pub struct AllocationDesc {
 /// Memory of one memory type, held by one context, and released when this
 /// and everything made over it is.
 pub struct Allocation {
-    pub(crate) shared: Arc<SoftwareShared>,
+    pub(crate) host: Arc<dyn Host>,
     pub(crate) context: ContextKey,
     pub(crate) key: AllocationKey,
-    size: u64,
-    memory_type: u32,
+    desc: AllocationDesc,
 }
 
 impl Allocation {
     /// Its size in bytes.
     #[must_use]
     pub const fn size(&self) -> u64 {
-        self.size
+        self.desc.size
     }
 
     /// Its memory type.
     #[must_use]
     pub const fn memory_type(&self) -> u32 {
-        self.memory_type
-    }
-
-    /// The memory the CPU reaches it through, once `len` bytes at `offset`
-    /// are proved within it.
-    fn host(&self, offset: u64, len: usize) -> Result<Arc<<Software as Backend>::Memory>, Error> {
-        let (memory, size) = self
-            .shared
-            .model
-            .lock()
-            .host_memory(self.context, self.key)?;
-        offset
-            .checked_add(len as u64)
-            .filter(|&end| end <= size)
-            .ok_or(Error::OutOfRange)?;
-        Ok(memory)
+        self.desc.memory_type
     }
 
     /// Write `data` at `offset` from the CPU.
@@ -430,8 +320,7 @@ impl Allocation {
     /// [`Error::NotHostVisible`] for memory the CPU cannot reach, and
     /// [`Error::OutOfRange`] past its end.
     pub fn write(&self, offset: u64, data: &[u8]) -> Result<(), Error> {
-        let memory = self.host(offset, data.len())?;
-        self.shared.backend.write(&memory, offset, data)
+        self.host.write(self.context, self.key, offset, data)
     }
 
     /// Read `out.len()` bytes at `offset` from the CPU.
@@ -440,58 +329,62 @@ impl Allocation {
     ///
     /// As [`write`](Self::write).
     pub fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), Error> {
-        let memory = self.host(offset, out.len())?;
-        self.shared.backend.read(&memory, offset, out)
+        self.host.read(self.context, self.key, offset, out)
     }
 
     /// A token another context of this device imports the memory through.
-    /// The memory stays charged to this context.
+    /// The memory stays charged to this context, and the token to its host
+    /// memory, until it is imported or let go.
     ///
     /// # Errors
     ///
-    /// [`Error::Lost`] once the context is lost.
+    /// [`Error::Lost`] once the context is lost, and those of every request
+    /// that makes memory ([`Context#memory`]).
     pub fn export(&self) -> Result<Export, Error> {
-        let (memory, memory_type, size) =
-            self.shared.model.lock().export(self.context, self.key)?;
+        let key = self.host.export(self.context, self.key)?;
         Ok(Export {
-            shared: Arc::clone(&self.shared),
-            memory,
-            memory_type,
-            size,
+            host: Arc::clone(&self.host),
+            key,
+            desc: self.desc,
         })
     }
 }
 
 impl Drop for Allocation {
     fn drop(&mut self) {
-        self.shared
-            .release(self.context, |context| &mut context.allocations, self.key);
+        self.host
+            .release(self.context, Object::Allocation(self.key));
     }
 }
 
 impl fmt::Debug for Allocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Allocation")
-            .field("size", &self.size)
-            .field("memory_type", &self.memory_type)
+            .field("size", &self.desc.size)
+            .field("memory_type", &self.desc.memory_type)
             .finish_non_exhaustive()
     }
 }
 
 /// An allocation's memory on its way to another context, which
-/// [`Context::import`] takes it into.
+/// [`Context::import`] takes it into. It holds the memory until then.
 pub struct Export {
-    shared: Arc<SoftwareShared>,
-    memory: Arc<<Software as Backend>::Memory>,
-    memory_type: u32,
-    size: u64,
+    host: Arc<dyn Host>,
+    key: ExportId,
+    desc: AllocationDesc,
+}
+
+impl Drop for Export {
+    fn drop(&mut self) {
+        self.host.drop_export(self.key);
+    }
 }
 
 impl fmt::Debug for Export {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Export")
-            .field("size", &self.size)
-            .field("memory_type", &self.memory_type)
+            .field("size", &self.desc.size)
+            .field("memory_type", &self.desc.memory_type)
             .finish_non_exhaustive()
     }
 }
@@ -511,7 +404,7 @@ pub struct BufferDesc {
 /// A typed span of an allocation, used only as its usage says. It keeps its
 /// memory while it lives, whatever becomes of the allocation's handle.
 pub struct Buffer {
-    pub(crate) shared: Arc<SoftwareShared>,
+    pub(crate) host: Arc<dyn Host>,
     pub(crate) context: ContextKey,
     pub(crate) key: BufferKey,
     size: u64,
@@ -534,8 +427,7 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        self.shared
-            .release(self.context, |context| &mut context.buffers, self.key);
+        self.host.release(self.context, Object::Buffer(self.key));
     }
 }
 
@@ -554,7 +446,7 @@ impl fmt::Debug for Buffer {
 /// A value is reached only once every signal up to it has landed, so a wait
 /// for it sees all the work those signals followed.
 pub struct Timeline {
-    pub(crate) shared: Arc<SoftwareShared>,
+    pub(crate) host: Arc<dyn Host>,
     pub(crate) context: ContextKey,
     pub(crate) key: TimelineKey,
 }
@@ -566,10 +458,7 @@ impl Timeline {
     ///
     /// [`Error::Lost`] once the context is lost.
     pub fn value(&self) -> Result<u64, Error> {
-        self.shared
-            .model
-            .lock()
-            .timeline_value(self.context, self.key)
+        self.host.timeline_value(self.context, self.key)
     }
 
     /// Set it to `value` from the CPU, readying any work that was waiting for
@@ -581,14 +470,7 @@ impl Timeline {
     /// [`Error::TimelineOrder`] unless `value` is past where it stands and
     /// short of every signal queued work will make.
     pub fn signal(&self, value: u64) -> Result<(), Error> {
-        let mut model = self.shared.model.lock();
-        let waited = model.signal(self.context, self.key, value)?;
-        // Before the work it readied runs, which may be on this thread.
-        if let Some(wake) = waited {
-            wake.notify_all();
-        }
-        self.shared.drive(model);
-        Ok(())
+        self.host.signal(self.context, self.key, value)
     }
 
     /// Wait until it reaches `value`.
@@ -598,18 +480,13 @@ impl Timeline {
     /// [`Error::TimedOut`] when `timeout` elapses first, and [`Error::Lost`]
     /// when the context is lost meanwhile.
     pub fn wait(&self, value: u64, timeout: Duration64) -> Result<(), Error> {
-        self.shared.wait(self.context, self.key, value, timeout)
+        self.host.wait(self.context, self.key, value, timeout)
     }
 }
 
 impl Drop for Timeline {
     fn drop(&mut self) {
-        let released = self
-            .shared
-            .model
-            .lock()
-            .destroy_timeline(self.context, self.key);
-        drop(released);
+        self.host.release(self.context, Object::Timeline(self.key));
     }
 }
 
@@ -625,7 +502,7 @@ impl fmt::Debug for Timeline {
 /// submission seeing everything the ones before it did.
 #[derive(Clone)]
 pub struct Queue {
-    shared: Arc<SoftwareShared>,
+    host: Arc<dyn Host>,
     context: ContextKey,
     slot: usize,
     family: u32,
@@ -660,7 +537,7 @@ impl Queue {
     pub fn submit(&self, submission: &Submission<'_>) -> Result<Fence, SubmitError> {
         let mut buffers: ArrayVec<&[Command], MAX_SUBMISSION_BUFFERS> = ArrayVec::new();
         for buffer in submission.command_buffers {
-            owned(&buffer.shared, buffer.context, &self.shared, self.context)?;
+            owned(&buffer.host, buffer.context, &self.host, self.context)?;
             buffers
                 .try_push(&buffer.commands)
                 .map_err(|_| Error::TooMany)?;
@@ -674,13 +551,9 @@ impl Queue {
             signals: &signals,
             span: submission.deadline.saturating_total_nanos(),
         };
-        // Before the lock, so what a refusal leaves in it goes after it.
-        let mut resolved = Vec::new();
-        let mut model = self.shared.model.lock();
-        let (timeline, value) = model.submit(self.context, &request, &mut resolved)?;
-        self.shared.drive(model);
+        let (timeline, value) = self.host.submit(self.context, &request)?;
         Ok(Fence {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.context,
             timeline,
             value,
@@ -693,12 +566,7 @@ impl Queue {
     ) -> Result<ArrayVec<(TimelineKey, u64), MAX_SUBMISSION_POINTS>, Error> {
         let mut keys = ArrayVec::new();
         for &(timeline, value) in points {
-            owned(
-                &timeline.shared,
-                timeline.context,
-                &self.shared,
-                self.context,
-            )?;
+            owned(&timeline.host, timeline.context, &self.host, self.context)?;
             keys.try_push((timeline.key, value))
                 .map_err(|_| Error::TooMany)?;
         }
@@ -731,7 +599,7 @@ pub struct Submission<'a> {
 /// A submission's completion, as the CPU waits on it.
 #[derive(Clone)]
 pub struct Fence {
-    shared: Arc<SoftwareShared>,
+    host: Arc<dyn Host>,
     context: ContextKey,
     timeline: TimelineKey,
     value: u64,
@@ -745,7 +613,7 @@ impl Fence {
     /// [`Error::TimedOut`] when `timeout` elapses first, and [`Error::Lost`]
     /// when the context is lost before the submission completes.
     pub fn wait(&self, timeout: Duration64) -> Result<(), Error> {
-        self.shared
+        self.host
             .wait(self.context, self.timeline, self.value, timeout)
     }
 
@@ -755,12 +623,7 @@ impl Fence {
     ///
     /// [`Error::Lost`] once the context is lost.
     pub fn is_signalled(&self) -> Result<bool, Error> {
-        let reached = self
-            .shared
-            .model
-            .lock()
-            .point(self.context, self.timeline, self.value)?;
-        Ok(matches!(reached, Point::Reached))
+        self.host.reached(self.context, self.timeline, self.value)
     }
 }
 
@@ -776,7 +639,7 @@ impl fmt::Debug for Fence {
 /// what is named belongs to the context; the rest is checked whole when a
 /// submission carries it, and the buffer can be submitted again.
 pub struct CommandBuffer {
-    pub(crate) shared: Arc<SoftwareShared>,
+    pub(crate) host: Arc<dyn Host>,
     pub(crate) context: ContextKey,
     commands: Vec<Command>,
     /// The commands they count as: a pass one, and each of its draws another.
@@ -802,6 +665,12 @@ impl CommandBuffer {
         self.counted = 0;
     }
 
+    /// The commands recorded.
+    #[cfg(test)]
+    pub(crate) fn commands(&self) -> &[Command] {
+        &self.commands
+    }
+
     pub(crate) fn record(&mut self, command: Command) -> Result<(), Error> {
         let counted = self
             .counted
@@ -817,7 +686,7 @@ impl CommandBuffer {
     }
 
     pub(crate) fn named(&self, buffer: &Buffer) -> Result<BufferKey, Error> {
-        owned(&buffer.shared, buffer.context, &self.shared, self.context)?;
+        owned(&buffer.host, buffer.context, &self.host, self.context)?;
         Ok(buffer.key)
     }
 
@@ -882,16 +751,8 @@ impl CommandBuffer {
             return Err(Error::TooMany);
         }
         let bytes = tairix_util::fallible::copied(data).ok_or(Error::OutOfMemory)?;
-        let charge = self
-            .shared
-            .model
-            .lock()
-            .host_charge(self.context, Recorded::held(&bytes))?;
-        self.record(Command::Update {
-            dst,
-            offset,
-            data: crate::shared(Recorded::new(bytes, charge))?,
-        })
+        let data = self.host.record_update(self.context, bytes)?;
+        self.record(Command::Update { dst, offset, data })
     }
 }
 

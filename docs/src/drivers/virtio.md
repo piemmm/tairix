@@ -68,7 +68,7 @@ and the device drivers carry only the device-specific wire format.
 - **One batch of requests at a time** (`RequestQueue`), over a split queue:
   the one submit-and-wait the request/response drivers (virtio-blk,
   virtio-crypto, the virtio-sound and virtio-net control queues, virtio-gpu's
-  control and cursor queues) share. `submit_and_wait` is a batch of one;
+  cursor queue) share. `submit_and_wait` is a batch of one;
   `submit_all_and_wait` publishes a chain per request with one notify, and
   publishes nothing unless the queue holds every chain at once. A batch waits
   at most its budget in all — each wait after a wake is given what is left of it,
@@ -97,6 +97,23 @@ and the device drivers carry only the device-specific wire format.
   the device may still be reading it, and a virtio-crypto session an
   abandoned or refused create, job or destroy left is destroyed again before
   the next job runs. `scrub` is the one zeroing every driver's staging gets.
+- **Many requests at once, each answered in its own time** (`TicketQueue`),
+  over a split queue: what a device whose answers come back out of order
+  needs — virtio-gpu's control queue, where a fenced 3D command is answered
+  only once its fence lands while the display's commands are answered at
+  once. `publish` puts one request's chain on the queue under a `Ticket` and
+  `kick` notifies the device; `drain` takes every answer posted, `answer`
+  reads a ticket's, and `retire` lets an answered request go. A ticket names
+  its request alone — its record is generational, so a ticket that outlived
+  its request is refused rather than resolving to a later one — and an
+  answer is attributed by the head of the chain the device hands back, so a
+  late answer is still its own request's: no request waits on another's, and
+  a request's buffers stay the device's until its own answer comes. `wait`
+  waits for a set of tickets alone, taking every other answer meanwhile, on
+  the same budget and wake-storm bound as `RequestQueue` (the two share one
+  wait loop). Records answered but not yet retired count against the queue's
+  size, so a caller that never retires is refused rather than growing the
+  table without bound.
 - **Drains are bounded.** A pass over a used ring the driver drains in bulk
   takes at most a ring's worth of completions, however far the device claims
   to have got or however fast it refills what is reposted, and leaves the
@@ -124,9 +141,10 @@ and the device drivers carry only the device-specific wire format.
   [`BufferClass::Sensitive`](../abi/driver_traits.md) by zeroing its
   staging on drop (`AGENTS.md` §4).
 - A `MockTransport` + `ChainView` test seam every virtio driver's host
-  tests run on, built only with `lib/virtio`'s `mock` feature: consumers
-  enable it in `[dev-dependencies]` alone, so no production build compiles
-  it.
+  tests run on, and a `MockRegion` standing in for a device's shared-memory
+  region, each part it maps a window onto its own memory, built only with
+  `lib/virtio`'s `mock` feature: consumers enable it in `[dev-dependencies]`
+  alone, so no production build compiles it.
 
 ## Layering picture
 
@@ -136,7 +154,7 @@ and the device drivers carry only the device-specific wire format.
 |  the net, input, sound, crypto ones)|
 +-------------------+-----------------+
                     | Transport, SplitQueue / PackedQueue, RequestQueue,
-                    | BounceBuffer, VirtioHost
+                    | TicketQueue, BounceBuffer, VirtioHost
                     v
 +-------------------------------------+
 |  lib/virtio                         |  split + packed queues, §3.1 init,
@@ -157,8 +175,9 @@ They consume the same `lib/virtio` protocol the drivers do.
 
 ## Modern PCI transport (`PciTransport`)
 
-`PciTransport` (`drivers/bus/virtio/src/transport_pci.rs`) is the
-concrete `Transport` for a modern (virtio-1.x) PCI device. It owns
+`PciTransport` (`lib/virtio/src/transport_pci.rs`, re-exported by
+`drivers/bus/virtio`) is the concrete `Transport` for a modern (virtio-1.x)
+PCI device. It owns
 the four capability-checked `RegisterWindow`s the bus driver resolves
 from the device's virtio PCI capabilities (virtio 1.1 §4.1.4) —
 *common configuration*, *notification*, *ISR status*, and
@@ -216,6 +235,35 @@ refuses one fails closed. A user-space driver builds it with
 `PciTransport::map`, from the windows and the entry its grants name
 (`virtio_pci_windows`), so the entry comes from the kernel that routed
 it, never from a constant the driver assumes.
+
+## Shared-memory regions (`SharedMemory`)
+
+A modern PCI function may declare shared-memory regions (virtio 1.2 §2.10,
+§4.1.4.7): memory the device keeps coherent with the CPU, each a capability
+of the 64-bit layout naming an id, a BAR, an offset and a length. The kernel's
+PCI probe decodes them where it decodes the four configuration windows
+(`lib/pci`'s `virtio_shared_memory`) and grants each one that is memory a
+driver may map as a `HwResourceKind::MemoryRegion` on the function's node. A
+part of a region may be mapped cacheable, so the probe grants it only where it
+starts and ends on a page and lies wholly within a prefetchable memory BAR that
+holds nothing else the function names — no configuration structure, MSI-X
+table or pending bits, which a cacheable mapping would reach. A region refused, or one
+claiming another's id, is recorded (event `4253`) and the node is published
+without it.
+
+The driver maps a region a part at a time, since a region may outgrow its
+device window: `mmio_map` on the region's grant maps a part with the
+`RegionCaching` the device states for it — write-back, write-combining, or
+uncached — and `mmio_unmap` hands it back. `lib/virtio`'s `SharedMemory`
+holds the parts: `reserve` takes the lowest free run of whole pages, `map`
+and `unmap` go through the driver host's `MemoryMapper` — a part keeps the
+caching it was mapped with, and asking it again with another is refused —
+and `release` refuses a part still mapped, so a part's pages are free for
+another only once nothing maps them.
+The protocol over a region decides when its bytes are settled; a
+`MemoryWindow` only copies them. Regions are decoded on the PCI transport
+alone: a virtio-MMIO device's (its `SHMSel` registers) is not, so a device
+that needs one is driven over PCI.
 
 ## Modern MMIO transport (`MmioTransport`)
 
@@ -407,7 +455,13 @@ drop, looks the buffer up by slot, and routes it back through
 `(P, S)` so the `*const ()` cast back to
 `*const KernelVirtioHost<'_, P, S>` is the inverse of the one
 performed at construction (`AGENTS.md` §2.10 — every `unsafe`
-block carries its `// SAFETY:` justification).
+block carries its `// SAFETY:` justification). A slab carries no
+lifetime, so nothing in its type keeps the host alive or in place:
+`KernelVirtioHost::new` is `unsafe`, its caller promising the host
+neither moves nor drops while a slab it minted lives — which every
+production host, leaked to `'static`, keeps by construction — and the
+host has no `&mut self` method that could retag it away from a slab's
+pointer.
 
 `notify_wait` blocks the loaded driver task on the device's bound
 interrupt line through the kernel's `LineWait` (`kernel/irq`), which
@@ -494,6 +548,14 @@ them (`AGENTS.md` §7 — unit tests next to the code):
   `fuzz_virtqueue` harness drive a hostile device-written used ring /
   descriptor table and assert the consumer fails closed, attributes every
   completion exactly, and never hands out a descriptor a held chain owns.
+  `TicketQueue`'s tests have the mock device hold chains and answer them in
+  any order (`MockTransport::install_holding_shim`, `answer_held`): each
+  answer reaches its own ticket, a wait ends on its own tickets and leaves the
+  rest out, a late answer holds no later request back, a retired ticket is
+  refused however its record is reused, and the second `fuzz_virtqueue`
+  harness mixes honest answers in any order with arbitrary ones and holds the
+  queue to exactly one outstanding request per accepted answer and to its
+  descriptors' conservation.
   It also
   covers the concrete virtio-MMIO transport (`transport_mmio`), which
   lives here for the riscv64 / `AArch64` MMIO bus seam: short-window,

@@ -5,5 +5,6 @@ BadHSV:A colour with neither hue nor saturation cannot be converted
 Switched:The screen's palette cannot be written while output goes to a sprite
 BufferSmall:The buffer is too small for the palette
 NoPalette:This depth of display holds no palette
+ShortPalette:The sprite's palette is too short to hold the palette given
 BadFontOffset:A font colour offset must lie between -14 and 14
 BadMiscOp:ColourTrans_MiscOp has no such reason

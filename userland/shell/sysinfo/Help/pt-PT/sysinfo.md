@@ -104,6 +104,9 @@ As consultas:
   o seu grupo, a geração e o estado do seu proprietário, os seus fluxos, e
   os mapeamentos do seu domínio e os bytes que abrangem (requer
   `CAP_SYSINFO_HW`).
+- `gpu` — as GPU servidas: uma linha por GPU que um controlador serve — o
+  nó do seu dispositivo na árvore de hardware e o canal pelo qual um
+  programa a abre.
 - `audio`, `sound` — os dispositivos de som: uma linha por saída e por
   entrada — o seu identificador, se é a predefinida do seu sentido, o nível
   e o silêncio, a frequência medida do seu relógio durante a reprodução, as

@@ -11,6 +11,11 @@
 # "Property 'rv64-riscv-cpu.svade' not found". Weakening the pin would delete
 # that coverage, so the environment is fixed instead of the test.
 #
+# The Venus GPU vertical needs QEMU's `virtio-gpu-gl-pci`, so QEMU is built with
+# OpenGL against a pinned virglrenderer with Venus. Venus runs each context in
+# virglrenderer's render server, which distro packages do not all ship, so the
+# pinned virglrenderer is built into the same prefix and QEMU linked to it.
+#
 # QEMU ships no official prebuilt binary (unlike the llvm.org clang/lld
 # release), so — like every other external dependency (the charter's "roll
 # your own; do not trust external code") — it is built from the GPG-signed
@@ -39,6 +44,13 @@ QEMU_VERSION="11.0.2"
 # authoritative supply-chain check on the downloaded source.
 QEMU_SIGNING_FPR="CEACC9E15534EBABB82D3FA03353C9CEF108B584"
 
+# Exact virglrenderer release. It publishes no signed artefact, so the pin is
+# the release's commit: git checks every object it fetches against its hash,
+# and the checkout must be exactly this commit.
+VIRGL_VERSION="1.3.0"
+VIRGL_COMMIT="ca50e008863837e094747a69974dde3ae148aeaa"
+VIRGL_REPO="https://gitlab.freedesktop.org/virgl/virglrenderer.git"
+
 # The system-emulation targets the runner drives (the three Tier-1 QEMU
 # arches). Kept in step with `tools/qemu::Arch`; adding a QEMU-tested arch
 # adds its `<arch>-softmmu` target here.
@@ -53,14 +65,29 @@ QEMU_TARGETS="riscv64-softmmu,x86_64-softmmu,aarch64-softmmu"
 # nettle/gcrypt, and nettle is the pkg-config-discoverable one, so the
 # prerequisite probe below can report it by name. `cargo xtask run` needs two
 # more: `gtk`, the window it opens (without it the build offers only headless
-# displays), and `slirp`, the user-mode network its NIC sits on.
+# displays), and `slirp`, the user-mode network its NIC sits on. `opengl` and
+# `virglrenderer` make the Venus vertical's GPU device.
 QEMU_CONFIGURE_OPTS=(
     --enable-fdt
     --enable-nettle
     --enable-gtk
     --enable-slirp
+    --enable-opengl
+    --enable-virglrenderer
     --disable-docs
     --disable-werror
+)
+
+# virglrenderer's configuration: Venus with its render server running each
+# context in a process of its own, over EGL (which is what QEMU's headless
+# display drives).
+VIRGL_MESON_OPTS=(
+    --buildtype=release
+    -Dvenus=true
+    -Drender-server-worker=process
+    -Dplatforms=egl
+    -Dvideo=false
+    -Dtests=false
 )
 
 # Where the pinned build is cached. Defaults to the same persistent cache dir
@@ -76,7 +103,7 @@ BINDIR="${PREFIX}/bin"
 # version number, and a cache holding the old one must rebuild rather than serve
 # it. Written only once the install is verified, and inside `$PREFIX` so a wiped
 # or half-installed tree has no stamp and rebuilds.
-BUILD_ID="${QEMU_VERSION} ${QEMU_TARGETS} ${QEMU_CONFIGURE_OPTS[*]}"
+BUILD_ID="${QEMU_VERSION} ${QEMU_TARGETS} ${QEMU_CONFIGURE_OPTS[*]} virglrenderer ${VIRGL_COMMIT} ${VIRGL_MESON_OPTS[*]}"
 STAMP="${PREFIX}/.build-id"
 
 QEMU_BASE_URL="https://download.qemu.org"
@@ -126,10 +153,10 @@ log "provisioning qemu ${QEMU_VERSION} into ${PREFIX}"
 # cannot install them (no root), so a missing one is a host-setup error we
 # report clearly rather than limp past.
 missing=""
-for tool in wget tar gpg gpgv python3 ninja meson pkg-config cc; do
+for tool in wget tar git gpg gpgv python3 ninja meson pkg-config cc; do
     command -v "$tool" >/dev/null 2>&1 || missing="${missing} ${tool}"
 done
-for pc in glib-2.0 pixman-1 nettle gtk+-3.0 slirp; do
+for pc in glib-2.0 pixman-1 nettle gtk+-3.0 slirp epoxy gbm libdrm; do
     pkg-config --exists "$pc" 2>/dev/null || missing="${missing} ${pc}(dev)"
 done
 if [ -n "$missing" ]; then
@@ -137,9 +164,10 @@ if [ -n "$missing" ]; then
   QEMU is built from source on this runner and these are a one-time host
   setup step (the runner user has no root). Install them once as admin, e.g.
   on Debian/Ubuntu:
-    apt-get install -y build-essential ninja-build meson python3-venv \\
+    apt-get install -y build-essential ninja-build meson python3-venv git \\
       pkg-config libglib2.0-dev libpixman-1-dev nettle-dev zlib1g-dev \\
-      libfdt-dev libgtk-3-dev libslirp-dev flex bison
+      libfdt-dev libgtk-3-dev libslirp-dev flex bison \\
+      libepoxy-dev libgbm-dev libdrm-dev
   See tools/ci/github-runner/README.md (Host prerequisites)."
 fi
 
@@ -182,16 +210,34 @@ tar -xf "${workdir}/${TARBALL}" -C "$workdir"
 srcdir="${workdir}/qemu-${QEMU_VERSION}"
 [ -d "$srcdir" ] || die "expected source directory ${srcdir} not found after extract"
 
+log "fetching virglrenderer ${VIRGL_VERSION}"
+virgldir="${workdir}/virglrenderer"
+git clone --quiet --depth 1 --branch "virglrenderer-${VIRGL_VERSION}" "$VIRGL_REPO" "$virgldir" \
+    || die "could not fetch virglrenderer ${VIRGL_VERSION} from ${VIRGL_REPO}"
+fetched="$(git -C "$virgldir" rev-parse HEAD)"
+[ "$fetched" = "$VIRGL_COMMIT" ] \
+    || die "virglrenderer ${VIRGL_VERSION} is commit ${fetched}, not the pinned ${VIRGL_COMMIT} — refusing to build it"
+
 # Build into a fresh prefix. Remove any partial/older install first so a failed
 # earlier attempt can never leave a half-installed tree that masks the rebuild.
 rm -rf "$PREFIX"
+
+log "building virglrenderer into ${PREFIX}"
+meson setup "${workdir}/virgl-build" "$virgldir" \
+    --prefix="$PREFIX" \
+    --libdir=lib \
+    "${VIRGL_MESON_OPTS[@]}"
+ninja -C "${workdir}/virgl-build" install
+
 mkdir -p "${srcdir}/build"
 (
     cd "${srcdir}/build"
     log "configuring (targets: ${QEMU_TARGETS})"
-    ../configure \
+    # QEMU finds and runs the virglrenderer just built, never a system one.
+    PKG_CONFIG_PATH="${PREFIX}/lib/pkgconfig" ../configure \
         --prefix="$PREFIX" \
         --target-list="$QEMU_TARGETS" \
+        --extra-ldflags="-Wl,-rpath,${PREFIX}/lib" \
         "${QEMU_CONFIGURE_OPTS[@]}"
 
     # Prove a cipher library really was compiled in, keyed on the defines
@@ -202,6 +248,12 @@ mkdir -p "${srcdir}/build"
         || die "configured qemu has no cipher library: neither CONFIG_NETTLE nor
   CONFIG_GCRYPT is defined, so every AES session request would be refused with
   \"no crypto library enabled in build\" and the virtio-crypto vertical fails."
+
+    # The headless display the GPU vertical runs under opens a render node
+    # through GBM; without it QEMU builds its OpenGL and still cannot run.
+    grep -qE '^#define CONFIG_GBM\b' config-host.h \
+        || die "configured qemu has no GBM, so its egl-headless display cannot drive
+  the Venus vertical's virtio-gpu-gl-pci."
 
     log "building (this takes a few minutes)"
     ninja
@@ -216,6 +268,14 @@ offers_backend gtk -display help \
     || die "built qemu offers no gtk display backend, so \`cargo xtask run\` cannot open a window"
 offers_backend user -M none -netdev help \
     || die "built qemu offers no user network backend, so \`cargo xtask run\` has no network"
+offers_backend egl-headless -display help \
+    || die "built qemu offers no egl-headless display, which the Venus vertical runs under"
+"${BINDIR}/qemu-system-x86_64" -device help | grep -qF '"virtio-gpu-gl-pci"' \
+    || die "built qemu has no virtio-gpu-gl-pci, the Venus vertical's GPU"
+ldd "${BINDIR}/qemu-system-x86_64" | grep -qF "${PREFIX}/lib/libvirglrenderer.so" \
+    || die "built qemu is not linked to the pinned virglrenderer in ${PREFIX}/lib"
+[ -x "${PREFIX}/libexec/virgl_render_server" ] \
+    || die "the pinned virglrenderer installed no render server, which every Venus context runs in"
 
 printf '%s\n' "$BUILD_ID" >"$STAMP"
 

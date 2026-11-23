@@ -21,11 +21,11 @@ pub(crate) fn limits() -> DecodeLimits {
     DecodeLimits::new(256, 256, 256 * 256, 0)
 }
 
-/// A numbered mode at each depth the table holds.
-pub(crate) const MODE_2: u32 = 0;
-pub(crate) const MODE_4: u32 = 1;
-pub(crate) const MODE_16: u32 = 12;
-pub(crate) const MODE_256: u32 = 15;
+/// A numbered mode of each colour count the table holds.
+pub(crate) const COLOURS_2: u32 = 0;
+pub(crate) const COLOURS_4: u32 = 1;
+pub(crate) const COLOURS_16: u32 = 12;
+pub(crate) const COLOURS_256: u32 = 15;
 
 /// A RISC OS 3.5 sprite mode word: a type over two 90 DPI fields.
 pub(crate) fn ro35(sprite_type: u32, wide_mask: bool) -> u32 {
@@ -316,8 +316,8 @@ fn recognised_from_head(bytes: &[u8]) -> Option<ImageFormat> {
 #[test]
 fn a_saved_sprite_area_is_recognised_by_the_length_it_states() {
     let bytes = area(&[
-        Sprite::new(MODE_2, 1, 8, 1),
-        Sprite::new(MODE_16, 4, 3, 2).named(b"second"),
+        Sprite::new(COLOURS_2, 1, 8, 1),
+        Sprite::new(COLOURS_16, 4, 3, 2).named(b"second"),
     ]);
     assert_eq!(sniff(&bytes), Some(ImageFormat::Sprite));
     assert_eq!(recognised_from_head(&bytes), Some(ImageFormat::Sprite));
@@ -334,7 +334,7 @@ fn a_saved_sprite_area_is_recognised_by_the_length_it_states() {
 
 #[test]
 fn an_area_with_an_extension_is_recognised_from_its_header_alone() {
-    let sprite = Sprite::new(MODE_2, 1, 8, 1).bytes();
+    let sprite = Sprite::new(COLOURS_2, 1, 8, 1).bytes();
     let extension = [0u8; 64];
     let first = 12 + extension.len();
     let total = first + sprite.len();
@@ -360,7 +360,7 @@ fn an_area_with_an_extension_is_recognised_from_its_header_alone() {
 
 #[test]
 fn an_area_ending_anywhere_but_the_files_end_is_not_recognised() {
-    let whole = one(Sprite::new(MODE_2, 1, 8, 1));
+    let whole = one(Sprite::new(COLOURS_2, 1, 8, 1));
     let mut padded = whole.clone();
     padded.extend_from_slice(&[0; 4]);
     assert_eq!(sniff(&padded), None, "bytes past the area");
@@ -379,7 +379,7 @@ fn an_area_ending_anywhere_but_the_files_end_is_not_recognised() {
 
 #[test]
 fn a_header_no_area_could_have_is_not_recognised() {
-    let whole = one(Sprite::new(MODE_2, 1, 8, 1));
+    let whole = one(Sprite::new(COLOURS_2, 1, 8, 1));
     let with = |at: usize, value: u32| {
         let mut bytes = whole.clone();
         bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
@@ -409,7 +409,7 @@ fn a_header_no_area_could_have_is_not_recognised() {
 
 #[test]
 fn a_lone_sprite_must_fill_its_area() {
-    let mut bytes = one(Sprite::new(MODE_2, 1, 8, 1));
+    let mut bytes = one(Sprite::new(COLOURS_2, 1, 8, 1));
     bytes.extend_from_slice(&[0; 44]);
     let stated = u32::try_from(bytes.len()).expect("small") + 4;
     bytes[8..12].copy_from_slice(&stated.to_le_bytes());
@@ -430,28 +430,28 @@ fn an_empty_input_is_refused() {
 
 #[test]
 fn an_area_declaring_no_sprites_is_refused() {
-    let mut bytes = one(Sprite::new(MODE_2, 1, 8, 1));
+    let mut bytes = one(Sprite::new(COLOURS_2, 1, 8, 1));
     bytes[0..4].copy_from_slice(&0u32.to_le_bytes());
     assert_eq!(refusal(&bytes), DecodeError::SpriteNoSprites);
 }
 
 #[test]
 fn a_first_sprite_offset_inside_the_header_is_refused() {
-    let mut bytes = one(Sprite::new(MODE_2, 1, 8, 1));
+    let mut bytes = one(Sprite::new(COLOURS_2, 1, 8, 1));
     bytes[4..8].copy_from_slice(&12u32.to_le_bytes());
     assert_eq!(refusal(&bytes), DecodeError::SpriteBadArea);
 }
 
 #[test]
 fn an_offset_below_the_files_own_bias_is_refused() {
-    let mut bytes = one(Sprite::new(MODE_2, 1, 8, 1));
+    let mut bytes = one(Sprite::new(COLOURS_2, 1, 8, 1));
     bytes[4..8].copy_from_slice(&2u32.to_le_bytes());
     assert_eq!(refusal(&bytes), DecodeError::SpriteBadArea);
 }
 
 #[test]
 fn a_free_word_offset_past_the_input_is_refused() {
-    let mut bytes = one(Sprite::new(MODE_2, 1, 8, 1));
+    let mut bytes = one(Sprite::new(COLOURS_2, 1, 8, 1));
     let past = u32::try_from(bytes.len()).expect("a small file") + 64;
     bytes[8..12].copy_from_slice(&past.to_le_bytes());
     assert_eq!(refusal(&bytes), DecodeError::SpriteBadArea);
@@ -459,21 +459,21 @@ fn a_free_word_offset_past_the_input_is_refused() {
 
 #[test]
 fn sprites_starting_after_the_area_ends_are_refused() {
-    let mut bytes = one(Sprite::new(MODE_2, 1, 8, 1));
+    let mut bytes = one(Sprite::new(COLOURS_2, 1, 8, 1));
     bytes[8..12].copy_from_slice(&16u32.to_le_bytes());
     assert_eq!(refusal(&bytes), DecodeError::SpriteBadArea);
 }
 
 #[test]
 fn bytes_after_the_area_end_are_ignored() {
-    let mut bytes = one(Sprite::new(MODE_2, 1, 8, 1).pixels(&[1, 0, 1, 0, 1, 0, 1, 0]));
+    let mut bytes = one(Sprite::new(COLOURS_2, 1, 8, 1).pixels(&[1, 0, 1, 0, 1, 0, 1, 0]));
     bytes.extend_from_slice(b"trailing junk the area does not claim");
     assert_eq!(rgba(&bytes)[0], WIMP[7]);
 }
 
 #[test]
 fn a_control_block_running_past_the_input_is_refused() {
-    let mut bytes = one(Sprite::new(MODE_2, 1, 8, 1));
+    let mut bytes = one(Sprite::new(COLOURS_2, 1, 8, 1));
     bytes.truncate(30);
     // The area header still describes a whole file, so the truncation is
     // only found when the control block is read.
@@ -485,19 +485,19 @@ fn a_control_block_running_past_the_input_is_refused() {
 
 #[test]
 fn a_sprite_shorter_than_a_control_block_is_refused() {
-    let bytes = one(Sprite::new(MODE_2, 1, 8, 1).length(43));
+    let bytes = one(Sprite::new(COLOURS_2, 1, 8, 1).length(43));
     assert_eq!(refusal(&bytes), DecodeError::SpriteBadArea);
 }
 
 #[test]
 fn a_sprite_reaching_past_the_area_end_is_refused() {
-    let bytes = one(Sprite::new(MODE_2, 1, 8, 1).length(4096));
+    let bytes = one(Sprite::new(COLOURS_2, 1, 8, 1).length(4096));
     assert_eq!(refusal(&bytes), DecodeError::SpriteBadArea);
 }
 
 #[test]
 fn a_declared_count_the_chain_cannot_satisfy_is_refused() {
-    let mut bytes = one(Sprite::new(MODE_2, 1, 8, 1));
+    let mut bytes = one(Sprite::new(COLOURS_2, 1, 8, 1));
     bytes[0..4].copy_from_slice(&8u32.to_le_bytes());
     assert_eq!(refusal(&bytes), DecodeError::SpriteBadArea);
 }
@@ -508,11 +508,11 @@ fn a_declared_count_the_chain_cannot_satisfy_is_refused() {
 fn a_two_and_a_four_colour_sprite_are_shown_as_the_wimp_plots_them() {
     // Two colours are Wimp colours 0 and 7; four are 0, 2, 4 and 7.
     assert_eq!(
-        rgba(&one(Sprite::new(MODE_2, 1, 2, 1).pixels(&[0, 1]))),
+        rgba(&one(Sprite::new(COLOURS_2, 1, 2, 1).pixels(&[0, 1]))),
         [WIMP[0], WIMP[7]]
     );
     assert_eq!(
-        rgba(&one(Sprite::new(MODE_4, 2, 4, 1).pixels(&[0, 1, 2, 3]))),
+        rgba(&one(Sprite::new(COLOURS_4, 2, 4, 1).pixels(&[0, 1, 2, 3]))),
         [WIMP[0], WIMP[2], WIMP[4], WIMP[7]]
     );
 }
@@ -520,7 +520,7 @@ fn a_two_and_a_four_colour_sprite_are_shown_as_the_wimp_plots_them() {
 #[test]
 fn a_sixteen_colour_sprite_is_the_wimp_palette_not_a_pc_one() {
     let indices: Vec<u32> = (0..16).collect();
-    let decoded = rgba(&one(Sprite::new(MODE_16, 4, 16, 1).pixels(&indices)));
+    let decoded = rgba(&one(Sprite::new(COLOURS_16, 4, 16, 1).pixels(&indices)));
     assert_eq!(decoded, WIMP);
     // Neither the EGA order nor the BBC mode-entry colours.
     assert_ne!(decoded[1], [0x00, 0x00, 0xAA, 255]);
@@ -532,7 +532,8 @@ fn the_desktop_palette_is_the_one_every_depth_decodes_against() {
     for depth in IndexDepth::ALL {
         let colours = desktop_palette(depth);
         assert_eq!(colours.len(), depth.colours());
-        let mode = [MODE_2, MODE_4, MODE_16, MODE_256][depth.bits().trailing_zeros() as usize];
+        let mode =
+            [COLOURS_2, COLOURS_4, COLOURS_16, COLOURS_256][depth.bits().trailing_zeros() as usize];
         let count = u32::try_from(depth.colours()).expect("at most 256");
         let indices: Vec<u32> = (0..count).collect();
         let decoded = rgba(&one(
@@ -772,7 +773,7 @@ fn a_thirty_two_bit_pixels_top_byte_is_unused_without_the_alpha_flag() {
 fn indexed_pixels_run_least_significant_first() {
     // The leftmost pixel of a row is the low bits of its first word, which
     // is the opposite of every other format here.
-    let bytes = one(Sprite::new(MODE_16, 4, 2, 1).pixels(&[15, 0]));
+    let bytes = one(Sprite::new(COLOURS_16, 4, 2, 1).pixels(&[15, 0]));
     let decoded = decode_as(ImageFormat::Sprite, &bytes, &limits()).expect("decodes");
     assert_eq!(quads(&decoded), [WIMP[15], WIMP[0]]);
 }
@@ -781,7 +782,7 @@ fn indexed_pixels_run_least_significant_first() {
 
 #[test]
 fn an_attached_palette_supersedes_the_default() {
-    let sprite = Sprite::new(MODE_4, 2, 4, 1)
+    let sprite = Sprite::new(COLOURS_4, 2, 4, 1)
         .palette(&[[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]])
         .pixels(&[0, 1, 2, 3]);
     assert_eq!(
@@ -800,7 +801,7 @@ fn a_full_256_entry_palette_is_read_straight_through() {
     let entries: Vec<[u8; 3]> = (0..256)
         .map(|i| [u8::try_from(i).expect("in range"), 0, 0])
         .collect();
-    let sprite = Sprite::new(MODE_256, 8, 3, 1)
+    let sprite = Sprite::new(COLOURS_256, 8, 3, 1)
         .palette(&entries)
         .pixels(&[0, 128, 255]);
     assert_eq!(
@@ -815,7 +816,7 @@ fn a_sixteen_entry_palette_at_eight_bits_is_the_vidc_arrangement() {
     // green bits 2 and 3, and blue bit 3.
     let mut entries = [[0u8, 0, 0]; 16];
     entries[1] = [0x00, 0x00, 0x00];
-    let sprite = Sprite::new(MODE_256, 8, 3, 1)
+    let sprite = Sprite::new(COLOURS_256, 8, 3, 1)
         .palette(&entries)
         .pixels(&[0x01, 0x11, 0x81]);
     let decoded = rgba(&one(sprite));
@@ -831,7 +832,7 @@ fn a_sixteen_entry_palette_keeps_each_entry_s_low_bits_as_risc_os_5_shows_them()
     // low nibble itself.
     let mut entries = [[0u8, 0, 0]; 16];
     entries[1] = [0x10, 0x20, 0x30];
-    let sprite = Sprite::new(MODE_256, 8, 1, 1)
+    let sprite = Sprite::new(COLOURS_256, 8, 1, 1)
         .palette(&entries)
         .pixels(&[0x31]);
     assert_eq!(rgba(&one(sprite)), [[0x98, 0x64, 0x30, 255]]);
@@ -843,7 +844,7 @@ fn a_sixty_four_entry_palette_uses_its_last_sixteen() {
     // hands it the last sixteen entries.
     let mut entries = [[0u8, 0, 0]; 64];
     entries[48] = [0x70, 0x30, 0x70];
-    let sprite = Sprite::new(MODE_256, 8, 1, 1)
+    let sprite = Sprite::new(COLOURS_256, 8, 1, 1)
         .palette(&entries)
         .pixels(&[0x00]);
     assert_eq!(rgba(&one(sprite)), [[0x70, 0x30, 0x70, 255]]);
@@ -851,7 +852,7 @@ fn a_sixty_four_entry_palette_uses_its_last_sixteen() {
 
 #[test]
 fn the_eight_bit_default_is_the_screen_bytes_own_arrangement() {
-    let sprite = Sprite::new(MODE_256, 8, 5, 1).pixels(&[0x00, 0xFF, 0x03, 0x60, 0x10]);
+    let sprite = Sprite::new(COLOURS_256, 8, 5, 1).pixels(&[0x00, 0xFF, 0x03, 0x60, 0x10]);
     assert_eq!(
         rgba(&one(sprite)),
         [
@@ -867,7 +868,7 @@ fn the_eight_bit_default_is_the_screen_bytes_own_arrangement() {
 #[test]
 fn a_palette_that_is_not_whole_entries_is_ignored() {
     // The default colours stand rather than a part-read entry being invented.
-    let sprite = Sprite::new(MODE_4, 2, 2, 1)
+    let sprite = Sprite::new(COLOURS_4, 2, 2, 1)
         .raw_palette(vec![9; 12])
         .pixels(&[0, 1]);
     assert_eq!(rgba(&one(sprite)), [WIMP[0], WIMP[2]]);
@@ -887,7 +888,7 @@ fn a_deep_sprites_palette_does_not_colour_its_pixels() {
 fn left_wastage_skips_the_bits_before_the_first_pixel() {
     // Four wasted bits at 4bpp is one pixel's worth, so the row's own first
     // pixel is the second field in the word.
-    let sprite = Sprite::new(MODE_16, 4, 2, 1).left(4).pixels(&[15, 2]);
+    let sprite = Sprite::new(COLOURS_16, 4, 2, 1).left(4).pixels(&[15, 2]);
     assert_eq!(rgba(&one(sprite)), [WIMP[15], WIMP[2]]);
 }
 
@@ -900,17 +901,17 @@ fn left_wastage_is_refused_on_a_new_format_sprite() {
 #[test]
 fn a_used_bit_field_past_a_word_is_refused() {
     assert_eq!(
-        refusal(&one(Sprite::new(MODE_16, 4, 2, 1).last_bit(32))),
+        refusal(&one(Sprite::new(COLOURS_16, 4, 2, 1).last_bit(32))),
         DecodeError::SpriteInvalidWastage
     );
-    let mut bytes = one(Sprite::new(MODE_16, 4, 2, 1));
+    let mut bytes = one(Sprite::new(COLOURS_16, 4, 2, 1));
     bytes[12 + 24..12 + 28].copy_from_slice(&40u32.to_le_bytes());
     assert_eq!(refusal(&bytes), DecodeError::SpriteInvalidWastage);
 }
 
 #[test]
 fn wastage_off_a_pixel_boundary_is_refused() {
-    let mut bytes = one(Sprite::new(MODE_16, 4, 2, 1));
+    let mut bytes = one(Sprite::new(COLOURS_16, 4, 2, 1));
     bytes[12 + 24..12 + 28].copy_from_slice(&2u32.to_le_bytes());
     assert_eq!(refusal(&bytes), DecodeError::SpriteInvalidWastage);
 }
@@ -918,20 +919,20 @@ fn wastage_off_a_pixel_boundary_is_refused() {
 #[test]
 fn a_row_holding_no_whole_pixels_is_refused() {
     // One word wide with the first pixel starting after the last used bit.
-    let sprite = Sprite::new(MODE_16, 4, 2, 1).left(12).last_bit(11);
+    let sprite = Sprite::new(COLOURS_16, 4, 2, 1).left(12).last_bit(11);
     assert_eq!(refusal(&one(sprite)), DecodeError::SpriteInvalidWastage);
 }
 
 #[test]
 fn a_row_that_is_not_a_whole_number_of_pixels_is_refused() {
     // Seven bits used at four bits a pixel names no whole number of them.
-    let sprite = Sprite::new(MODE_16, 4, 2, 1).width_words(1).last_bit(6);
+    let sprite = Sprite::new(COLOURS_16, 4, 2, 1).width_words(1).last_bit(6);
     assert_eq!(refusal(&one(sprite)), DecodeError::SpriteInvalidWastage);
 }
 
 #[test]
 fn an_image_shorter_than_its_declared_rows_is_refused() {
-    let sprite = Sprite::new(MODE_16, 4, 4, 4).raw_image(vec![0; 4]);
+    let sprite = Sprite::new(COLOURS_16, 4, 4, 4).raw_image(vec![0; 4]);
     assert_eq!(refusal(&one(sprite)), DecodeError::SpriteTruncated);
 }
 
@@ -939,13 +940,13 @@ fn an_image_shorter_than_its_declared_rows_is_refused() {
 
 #[test]
 fn a_sprite_with_no_mask_is_wholly_opaque() {
-    let decoded = rgba(&one(Sprite::new(MODE_16, 4, 2, 1).pixels(&[15, 0])));
+    let decoded = rgba(&one(Sprite::new(COLOURS_16, 4, 2, 1).pixels(&[15, 0])));
     assert!(decoded.iter().all(|pixel| pixel[3] == 255));
 }
 
 #[test]
 fn an_old_format_mask_is_read_at_the_images_own_depth() {
-    let sprite = Sprite::new(MODE_16, 4, 4, 1)
+    let sprite = Sprite::new(COLOURS_16, 4, 4, 1)
         .pixels(&[15, 15, 15, 15])
         .mask_image(&[true, false, true, false]);
     let decoded = rgba(&one(sprite));
@@ -957,7 +958,7 @@ fn an_old_format_mask_is_read_at_the_images_own_depth() {
 
 #[test]
 fn an_old_format_mask_honours_the_images_wastage() {
-    let sprite = Sprite::new(MODE_16, 4, 2, 1)
+    let sprite = Sprite::new(COLOURS_16, 4, 2, 1)
         .left(8)
         .pixels(&[15, 15])
         .mask_image(&[false, true]);
@@ -972,7 +973,7 @@ fn an_old_format_mask_honours_the_images_wastage() {
 fn any_set_bit_of_an_old_format_mask_pixel_means_solid() {
     // The format asks for every bit of a mask pixel to agree; one that does
     // not is still a plotted pixel rather than a refusal.
-    let sprite = Sprite::new(MODE_16, 4, 2, 1)
+    let sprite = Sprite::new(COLOURS_16, 4, 2, 1)
         .pixels(&[15, 15])
         .raw_mask(vec![0x01, 0x00, 0x00, 0x00]);
     let decoded = rgba(&one(sprite));
@@ -1031,9 +1032,9 @@ fn a_truncated_mask_is_refused() {
 #[test]
 fn an_area_of_several_sprites_is_a_page_container() {
     let bytes = area(&[
-        Sprite::new(MODE_2, 1, 2, 1).pixels(&[0, 1]),
-        Sprite::new(MODE_16, 4, 4, 2).pixels(&[15; 8]),
-        Sprite::new(MODE_4, 2, 1, 1).pixels(&[1]),
+        Sprite::new(COLOURS_2, 1, 2, 1).pixels(&[0, 1]),
+        Sprite::new(COLOURS_16, 4, 4, 2).pixels(&[15; 8]),
+        Sprite::new(COLOURS_4, 2, 1, 1).pixels(&[1]),
     ]);
     let mut sequence =
         Sequence::open_as(ImageFormat::Sprite, &bytes, &limits()).expect("the area opens");
@@ -1059,8 +1060,8 @@ fn an_area_of_several_sprites_is_a_page_container() {
 #[test]
 fn a_page_is_addressed_directly_and_the_walk_restarts() {
     let bytes = area(&[
-        Sprite::new(MODE_2, 1, 2, 1).pixels(&[0, 1]),
-        Sprite::new(MODE_16, 4, 4, 1).pixels(&[15, 0, 15, 0]),
+        Sprite::new(COLOURS_2, 1, 2, 1).pixels(&[0, 1]),
+        Sprite::new(COLOURS_16, 4, 4, 1).pixels(&[15, 0, 15, 0]),
     ]);
     let mut sequence =
         Sequence::open_as(ImageFormat::Sprite, &bytes, &limits()).expect("the area opens");
@@ -1091,7 +1092,7 @@ fn a_page_is_addressed_directly_and_the_walk_restarts() {
 #[test]
 fn one_unsupported_sprite_does_not_refuse_the_others() {
     let bytes = area(&[
-        Sprite::new(MODE_16, 4, 4, 1).pixels(&[15, 0, 15, 0]),
+        Sprite::new(COLOURS_16, 4, 4, 1).pixels(&[15, 0, 15, 0]),
         Sprite::new(ro35(7, false), 32, 2, 1),
     ]);
     let mut sequence =
@@ -1123,9 +1124,9 @@ fn an_area_whose_every_sprite_is_unsupported_names_a_reason() {
 #[test]
 fn a_probe_and_a_decode_both_answer_the_largest_sprite() {
     let bytes = area(&[
-        Sprite::new(MODE_2, 1, 2, 1).pixels(&[0, 1]),
-        Sprite::new(MODE_16, 4, 4, 3).pixels(&[15; 12]),
-        Sprite::new(MODE_4, 2, 1, 1).pixels(&[1]),
+        Sprite::new(COLOURS_2, 1, 2, 1).pixels(&[0, 1]),
+        Sprite::new(COLOURS_16, 4, 4, 3).pixels(&[15; 12]),
+        Sprite::new(COLOURS_4, 2, 1, 1).pixels(&[1]),
     ]);
     let info = probe_as(ImageFormat::Sprite, &bytes).expect("the header probes");
     assert_eq!(info.format(), ImageFormat::Sprite);
@@ -1138,7 +1139,7 @@ fn a_probe_and_a_decode_both_answer_the_largest_sprite() {
 fn a_probe_allocates_nothing_from_a_geometry_it_reports() {
     // Probing applies no limits of its own, so a caller learns the size it
     // would have to afford before anything is reserved for it.
-    let bytes = one(Sprite::new(MODE_16, 4, 8, 4).pixels(&[0; 32]));
+    let bytes = one(Sprite::new(COLOURS_16, 4, 8, 4).pixels(&[0; 32]));
     let info = probe_as(ImageFormat::Sprite, &bytes).expect("probes");
     assert_eq!((info.width(), info.height()), (8, 4));
     let tight = DecodeLimits::new(4, 4, 16, 0);
@@ -1153,8 +1154,8 @@ fn a_page_is_weighed_against_the_limits_when_it_is_asked_for() {
     // A page container weighs nothing when it opens, so a small page out of
     // a file whose largest the caller could never afford still decodes.
     let bytes = area(&[
-        Sprite::new(MODE_16, 4, 2, 1).pixels(&[15, 0]),
-        Sprite::new(MODE_16, 4, 64, 4).pixels(&[0; 256]),
+        Sprite::new(COLOURS_16, 4, 2, 1).pixels(&[15, 0]),
+        Sprite::new(COLOURS_16, 4, 64, 4).pixels(&[0; 256]),
     ]);
     let tight = DecodeLimits::new(8, 8, 64, 0);
     let mut sequence =
@@ -1168,7 +1169,7 @@ fn a_page_is_weighed_against_the_limits_when_it_is_asked_for() {
 
 #[test]
 fn naming_the_wrong_format_is_refused_rather_than_misread() {
-    let bytes = one(Sprite::new(MODE_2, 1, 8, 1));
+    let bytes = one(Sprite::new(COLOURS_2, 1, 8, 1));
     assert_eq!(
         decode_as(ImageFormat::Png, &bytes, &limits()),
         Err(DecodeError::BadSignature)
@@ -1199,7 +1200,7 @@ fn picture(entry: SpriteEntry) -> crate::Sprite {
 
 #[test]
 fn a_name_ends_at_its_first_control_character() {
-    let sprite = picture(native(&one(Sprite::new(MODE_2, 1, 8, 1))));
+    let sprite = picture(native(&one(Sprite::new(COLOURS_2, 1, 8, 1))));
     assert_eq!(sprite.name.as_bytes(), b"fixture");
     assert_eq!(alloc::format!("{}", sprite.name), "fixture");
 }
@@ -1220,7 +1221,7 @@ fn a_new_name_is_lower_cased_and_held_to_the_control_blocks_field() {
 #[test]
 fn names_match_as_risc_os_matches_them_regardless_of_case() {
     let lower = SpriteName::new("icon").expect("valid");
-    let read = picture(native(&one(Sprite::new(MODE_2, 1, 8, 1)))).name;
+    let read = picture(native(&one(Sprite::new(COLOURS_2, 1, 8, 1)))).name;
     assert!(!lower.matches(&read));
     assert!(lower.matches(&SpriteName::new("ICON").expect("valid")));
 }
@@ -1316,7 +1317,7 @@ fn a_new_paletted_sprite_takes_a_numbered_mode_every_risc_os_reads() {
 
 #[test]
 fn the_least_a_sprite_stores_is_its_control_block_and_its_word_aligned_rows() {
-    let one_bit = SpriteMode::from_value(MODE_2).expect("mode 0");
+    let one_bit = SpriteMode::from_value(COLOURS_2).expect("mode 0");
     // Thirty-three one-bit pixels need two words a row.
     assert_eq!(one_bit.least_stored_bytes(33, 3), Some(44 + 3 * 8));
     assert_eq!(one_bit.least_stored_bytes(32, 1), Some(44 + 4));
@@ -1324,7 +1325,7 @@ fn the_least_a_sprite_stores_is_its_control_block_and_its_word_aligned_rows() {
     // Three twenty-four-bit pixels are seventy-two bits: three words.
     assert_eq!(packed.least_stored_bytes(3, 2), Some(44 + 2 * 12));
     assert_eq!(
-        SpriteMode::from_value(MODE_256)
+        SpriteMode::from_value(COLOURS_256)
             .expect("mode 15")
             .least_stored_bytes(u32::MAX, u32::MAX),
         Some(44 + u64::from(u32::MAX).div_ceil(4) * 4 * u64::from(u32::MAX)),
@@ -1366,6 +1367,30 @@ fn a_mode_that_doubles_its_pixels_holds_each_in_its_screen_memory_field() {
         !SpriteMode::indexed(IndexDepth::Four, (3, 2), false).is_numbered(),
         "a new sprite never takes a doubling mode's number"
     );
+}
+
+#[test]
+fn a_doubling_mode_s_pixels_and_old_mask_read_as_its_colours_depth_reads_them() {
+    for (doubled, field, plain, bits, colours) in [
+        (4, 2, COLOURS_2, 1, vec![1, 0, 1]),
+        (5, 4, COLOURS_4, 2, vec![3, 1, 2]),
+        (10, 16, COLOURS_256, 8, vec![0x01, 0xFF, 0x2A]),
+    ] {
+        let repeated: Vec<u32> = colours.iter().map(|&c| c | (c << bits)).collect();
+        let opaque = [true, false, true];
+        let wide = one(Sprite::new(doubled, field, 3, 1)
+            .pixels(&repeated)
+            .mask_image(&opaque));
+        let narrow = one(Sprite::new(plain, bits, 3, 1)
+            .pixels(&colours)
+            .mask_image(&opaque));
+        assert_eq!(rgba(&wide), rgba(&narrow), "mode {doubled}");
+        assert_eq!(
+            rgba(&wide).iter().map(|pixel| pixel[3]).collect::<Vec<_>>(),
+            [255, 0, 255],
+            "mode {doubled}'s mask"
+        );
+    }
 }
 
 #[test]
@@ -1425,10 +1450,10 @@ fn a_value_naming_no_readable_layout_is_not_a_mode() {
 
 #[test]
 fn a_paletted_sprite_reads_as_its_indices_palette_and_mask() {
-    let sprite = picture(native(&one(Sprite::new(MODE_16, 4, 4, 1)
+    let sprite = picture(native(&one(Sprite::new(COLOURS_16, 4, 4, 1)
         .pixels(&[0, 7, 11, 15])
         .mask_image(&[true, false, true, true]))));
-    assert_eq!(sprite.mode.value(), MODE_16);
+    assert_eq!(sprite.mode.value(), COLOURS_16);
     assert_eq!(sprite.palette, SpritePalette::Implied);
     assert!(sprite.masked);
     let Pixels::Indexed {
@@ -1449,7 +1474,7 @@ fn a_paletted_sprite_reads_as_its_indices_palette_and_mask() {
 #[test]
 fn a_stored_palette_is_kept_exactly_as_the_file_held_it() {
     let entries = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]];
-    let fixture = Sprite::new(MODE_4, 2, 4, 1)
+    let fixture = Sprite::new(COLOURS_4, 2, 4, 1)
         .palette(&entries)
         .pixels(&[3, 2, 1, 0]);
     let raw = fixture.palette.clone();
@@ -1476,7 +1501,7 @@ fn a_direct_sprites_mask_is_folded_into_its_alpha() {
 #[test]
 fn a_sprite_that_cannot_be_read_is_kept_as_its_exact_bytes() {
     let jpeg = Sprite::new(ro35(9, false), 32, 2, 1);
-    let bytes = area(&[Sprite::new(MODE_2, 1, 8, 1), jpeg]);
+    let bytes = area(&[Sprite::new(COLOURS_2, 1, 8, 1), jpeg]);
     let mut reader = SpriteAreaReader::open(&bytes[..], &limits()).expect("the chain is sound");
     assert_eq!(reader.count(), 2);
     assert!(matches!(
@@ -1487,7 +1512,7 @@ fn a_sprite_that_cannot_be_read_is_kept_as_its_exact_bytes() {
         panic!("the JPEG sprite is kept");
     };
     assert_eq!(kept.reason, DecodeError::SpriteUnsupportedType);
-    let second = &bytes[16 - 4 + Sprite::new(MODE_2, 1, 8, 1).bytes().len()..];
+    let second = &bytes[16 - 4 + Sprite::new(COLOURS_2, 1, 8, 1).bytes().len()..];
     assert_eq!(kept.bytes.as_slice(), second);
     assert_eq!(kept.name.as_bytes(), b"fixture");
     assert!(reader.sprite(2).expect("past the end").is_none());
@@ -1495,7 +1520,7 @@ fn a_sprite_that_cannot_be_read_is_kept_as_its_exact_bytes() {
 
 #[test]
 fn a_sprite_too_large_to_open_is_kept_rather_than_refusing_the_area() {
-    let bytes = one(Sprite::new(MODE_16, 4, 64, 4).pixels(&[0; 256]));
+    let bytes = one(Sprite::new(COLOURS_16, 4, 64, 4).pixels(&[0; 256]));
     let tight = DecodeLimits::new(8, 8, 64, 0);
     let mut reader = SpriteAreaReader::open(&bytes[..], &tight).expect("the chain is sound");
     let Some(SpriteEntry::Opaque(kept)) = reader.sprite(0).expect("no machine refusal") else {
@@ -1521,7 +1546,7 @@ fn an_area_none_of_whose_sprites_can_be_read_still_opens_natively() {
 
 #[test]
 fn a_broken_chain_refuses_the_native_walk_too() {
-    let bytes = one(Sprite::new(MODE_2, 1, 8, 1).length(4096));
+    let bytes = one(Sprite::new(COLOURS_2, 1, 8, 1).length(4096));
     assert_eq!(
         SpriteAreaReader::open(&bytes[..], &limits()).err(),
         Some(DecodeError::SpriteBadArea)
@@ -1530,7 +1555,7 @@ fn a_broken_chain_refuses_the_native_walk_too() {
 
 #[test]
 fn opening_an_area_natively_answers_its_reader() {
-    let bytes = one(Sprite::new(MODE_2, 1, 8, 1));
+    let bytes = one(Sprite::new(COLOURS_2, 1, 8, 1));
     let Ok(NativeDocument::Sprites(reader)) =
         open_native(ImageFormat::Sprite, &bytes[..], &limits())
     else {
@@ -1541,7 +1566,7 @@ fn opening_an_area_natively_answers_its_reader() {
 
 #[test]
 fn a_native_sprite_flattens_to_exactly_what_a_decode_answers() {
-    let bytes = one(Sprite::new(MODE_256, 8, 3, 2)
+    let bytes = one(Sprite::new(COLOURS_256, 8, 3, 2)
         .pixels(&[0x00, 0x11, 0xFF, 0x80, 0x03, 0x60])
         .mask_image(&[true, true, false, true, false, true]));
     let flat = picture(native(&bytes)).picture.to_rgba().expect("memory");
@@ -1551,7 +1576,7 @@ fn a_native_sprite_flattens_to_exactly_what_a_decode_answers() {
 
 #[test]
 fn a_mode_takes_an_alpha_mask_keeping_its_layout_and_shape() {
-    let numbered = SpriteMode::from_value(MODE_16).expect("mode 12");
+    let numbered = SpriteMode::from_value(COLOURS_16).expect("mode 12");
     let widened = numbered.with_alpha_mask(true);
     assert!(widened.alpha_mask() && !widened.is_numbered());
     assert_eq!(widened.layout(), numbered.layout());
@@ -1561,6 +1586,10 @@ fn a_mode_takes_an_alpha_mask_keeping_its_layout_and_shape() {
     let alpha = word.with_alpha_mask(true);
     assert_eq!(alpha.value(), ro35(6, true));
     assert_eq!(alpha.with_alpha_mask(false), word);
+    let five = SpriteMode::from_value(ro5(6, 0, false)).expect("a RISC OS 5 word");
+    let alpha = five.with_alpha_mask(true);
+    assert_eq!(alpha.value(), ro5(6, 0, true));
+    assert_eq!(alpha.with_alpha_mask(false), five);
 }
 
 #[test]
@@ -1602,8 +1631,8 @@ fn a_mode_restated_at_another_shape_keeps_its_layout() {
 fn a_fitted_decode_is_the_whole_decode_reduced() {
     let values: Vec<u32> = (0..9 * 7).map(|at| at % 16).collect();
     let bytes = area(&[
-        Sprite::new(MODE_16, 4, 2, 2),
-        Sprite::new(MODE_16, 4, 9, 7).pixels(&values),
+        Sprite::new(COLOURS_16, 4, 2, 2),
+        Sprite::new(COLOURS_16, 4, 9, 7).pixels(&values),
     ]);
     let whole = decode_as(ImageFormat::Sprite, &bytes, &limits()).expect("decodes");
     let fitted = decode_fitted_as(ImageFormat::Sprite, &bytes, &limits(), FitBox::new(3, 3))
@@ -1627,11 +1656,11 @@ fn a_fitted_decode_is_the_whole_decode_reduced() {
 fn a_sprite_is_found_by_its_name_and_decoded_alone() {
     let values: Vec<u32> = (0..4 * 2).collect();
     let bytes = area(&[
-        Sprite::new(MODE_16, 4, 3, 3).named(b"!edit"),
-        Sprite::new(MODE_16, 4, 4, 2)
+        Sprite::new(COLOURS_16, 4, 3, 3).named(b"!edit"),
+        Sprite::new(COLOURS_16, 4, 4, 2)
             .named(b"sm!edit")
             .pixels(&values),
-        Sprite::new(MODE_16, 4, 5, 5).named(b"SM!EDIT"),
+        Sprite::new(COLOURS_16, 4, 5, 5).named(b"SM!EDIT"),
     ]);
     let name = |text: &str| SpriteName::new(text).expect("a sprite name");
     let large = find_named(&bytes, &name("!EDIT"))
@@ -1728,5 +1757,34 @@ fn numbered_modes_are_risc_os_5_s_and_a_sprite_is_never_in_a_text_mode() {
     assert_eq!(
         SpriteMode::indexed(IndexDepth::Eight, (1, 1), false).value(),
         21
+    );
+}
+
+/// The regression: a doubling mode's old-format mask holds each pixel in a
+/// sixteen-bit field, and only its low byte was read, so a pixel whose set
+/// bits lay in its high byte read as clear.
+#[test]
+fn an_old_format_mask_field_wider_than_a_byte_is_read_whole() {
+    let bytes = one(Sprite::new(10, 16, 2, 1)
+        .pixels(&[1, 2])
+        .raw_mask(vec![0x00, 0xFF, 0xFF, 0xFF]));
+    let image = decode_as(ImageFormat::Sprite, &bytes, &limits()).expect("the fixture decodes");
+    let alphas: Vec<u8> = quads(&image).iter().map(|quad| quad[3]).collect();
+    assert_eq!(alphas, [255, 255], "a field with a bit set is solid");
+}
+
+#[test]
+fn a_mask_is_its_images_form_where_numbered_else_alpha_or_one_bit() {
+    use crate::SpriteMaskDepth as Depth;
+    assert_eq!(
+        Depth::of(true, true),
+        Depth::Image,
+        "a numbered mode keeps its form"
+    );
+    assert_eq!(Depth::of(false, true), Depth::Alpha);
+    assert_eq!(Depth::of(false, false), Depth::Bit);
+    assert_eq!(
+        [Depth::Image, Depth::Bit, Depth::Alpha].map(|depth| depth.bits(16)),
+        [16, 1, 8]
     );
 }

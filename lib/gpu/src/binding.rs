@@ -10,8 +10,9 @@ use tairix_spirv::enumerant::{Dim, ImageFormat};
 use tairix_spirv::{Access, Admitted, Binding, BindingKind, ImageShape, Layout, Stages};
 
 use crate::backend::Backend;
-use crate::device::{owned, Buffer, Context, Shared, SoftwareShared};
+use crate::device::{Buffer, Context, Shared};
 use crate::format::{Aspects, Format, FormatFeatures};
+use crate::host::{owned, Host, Object};
 use crate::image::{ImageUsage, ViewDimension};
 use crate::info::{BufferUsage, DeviceInfo};
 use tairix_util::fallible;
@@ -1131,14 +1132,9 @@ impl Context {
         &self,
         bindings: &[LayoutBinding],
     ) -> Result<BindSetLayout, Error> {
-        let tables = LayoutTables::of(&self.shared.info, bindings)?;
-        let key = self
-            .shared
-            .model
-            .lock()
-            .create_bind_set_layout(self.key, tables)?;
+        let key = self.host.create_bind_set_layout(self.key, bindings)?;
         Ok(BindSetLayout {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             key,
         })
@@ -1166,7 +1162,7 @@ impl Context {
         layout: &BindSetLayout,
         entries: &[BindSetEntry<'_>],
     ) -> Result<BindSet, Error> {
-        owned(&layout.shared, layout.context, &self.shared, self.key)?;
+        owned(&layout.host, layout.context, &self.host, self.key)?;
         let count = entries.iter().map(|entry| entry.resources.len()).sum();
         let mut resources = Vec::new();
         resources.try_reserve_exact(count).map_err(exhausted)?;
@@ -1181,7 +1177,7 @@ impl Context {
                 .map(|entry| (entry.binding, entry.resources.len())),
         )
         .ok_or(Error::OutOfMemory)?;
-        let key = self.shared.create_bind_set(
+        let key = self.host.create_bind_set(
             self.key,
             &SetRequest {
                 layout: layout.key,
@@ -1190,25 +1186,24 @@ impl Context {
             },
         )?;
         Ok(BindSet {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             key,
         })
     }
 
     fn owns(&self, resource: &Resource<'_>) -> Result<(), Error> {
-        let mine = |shared: &Arc<SoftwareShared>, context: ContextKey| {
-            owned(shared, context, &self.shared, self.key)
-        };
+        let mine =
+            |host: &Arc<dyn Host>, context: ContextKey| owned(host, context, &self.host, self.key);
         match *resource {
-            Resource::Sampler(sampler) => mine(&sampler.shared, sampler.context),
-            Resource::Image(view) => mine(&view.shared, view.context),
+            Resource::Sampler(sampler) => mine(&sampler.host, sampler.context),
+            Resource::Image(view) => mine(&view.host, view.context),
             Resource::ImageSampler(view, sampler) => {
-                mine(&view.shared, view.context)?;
-                mine(&sampler.shared, sampler.context)
+                mine(&view.host, view.context)?;
+                mine(&sampler.host, sampler.context)
             }
-            Resource::TexelBuffer(view) => mine(&view.shared, view.context),
-            Resource::Buffer { buffer, .. } => mine(&buffer.shared, buffer.context),
+            Resource::TexelBuffer(view) => mine(&view.host, view.context),
+            Resource::Buffer { buffer, .. } => mine(&buffer.host, buffer.context),
         }
     }
 
@@ -1233,16 +1228,14 @@ impl Context {
         let mut keys = Vec::new();
         keys.try_reserve_exact(sets.len()).map_err(exhausted)?;
         for set in sets {
-            owned(&set.shared, set.context, &self.shared, self.key)?;
+            owned(&set.host, set.context, &self.host, self.key)?;
             keys.push(set.key);
         }
-        let key =
-            self.shared
-                .model
-                .lock()
-                .create_pipeline_layout(self.key, &keys, push_constants)?;
+        let key = self
+            .host
+            .create_pipeline_layout(self.key, &keys, push_constants)?;
         Ok(PipelineLayout {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             key,
         })
@@ -1258,13 +1251,9 @@ impl Context {
     /// And those of every request that makes memory ([`Context#memory`]).
     pub fn create_shader_module(&self, module: Admitted) -> Result<ShaderModule, Error> {
         let module = crate::shared(module)?;
-        let key = self
-            .shared
-            .model
-            .lock()
-            .create_shader_module(self.key, &module)?;
+        let key = self.host.create_shader_module(self.key, &module)?;
         Ok(ShaderModule {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             key,
             module,
@@ -1322,7 +1311,7 @@ handle!(
     /// The bindings a bind set holds.
     BindSetLayout,
     BindSetLayoutKey,
-    bind_set_layouts
+    BindSetLayout
 );
 
 handle!(
@@ -1330,19 +1319,19 @@ handle!(
     /// held for as long as the set lives.
     BindSet,
     BindSetKey,
-    bind_sets
+    BindSet
 );
 
 handle!(
     /// The bind set layouts and push constants a pipeline's shaders reach.
     PipelineLayout,
     PipelineLayoutKey,
-    pipeline_layouts
+    PipelineLayout
 );
 
 /// An admitted shader module, made a device's.
 pub struct ShaderModule {
-    pub(crate) shared: Arc<SoftwareShared>,
+    pub(crate) host: Arc<dyn Host>,
     pub(crate) context: ContextKey,
     pub(crate) key: ShaderModuleKey,
     module: Arc<Admitted>,
@@ -1358,11 +1347,8 @@ impl ShaderModule {
 
 impl Drop for ShaderModule {
     fn drop(&mut self) {
-        self.shared.release(
-            self.context,
-            |context| &mut context.shader_modules,
-            self.key,
-        );
+        self.host
+            .release(self.context, Object::ShaderModule(self.key));
     }
 }
 

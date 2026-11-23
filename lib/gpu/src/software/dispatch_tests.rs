@@ -1,6 +1,7 @@
 //! Dispatches on the software device: stopped at their deadline however
 //! their work is shaped.
 
+use crate::device::as_software;
 use alloc::string::String;
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -1311,7 +1312,7 @@ fn a_dispatch_lends_the_set_fitted_to_what_is_still_held() {
         .expect("recorded");
     let _fence = submit(&crate::device_tests::queue(&context), &commands)
         .expect("queued, for no worker runs it");
-    let mut model = context.shared.model.lock();
+    let mut model = as_software(&context.host).model.lock();
     let fitted = model
         .live(context.key)
         .ok()
@@ -2251,7 +2252,7 @@ fn a_queued_dispatch_holds_its_sets_and_nothing_for_each_memory_they_reach() {
     let context = context(&device);
     let wide = wide(&context).expect("a pipeline over a wide set");
     let memory = {
-        let model = context.shared.model.lock();
+        let model = as_software(&context.host).model.lock();
         let live = model.live(context.key).expect("live");
         let set = live.bind_sets.get(wide.set.key).expect("filed");
         assert_eq!(
@@ -2878,7 +2879,7 @@ fn tiles_that_never_wait_on_one_another_share_one_tiles_memory() {
     let context = context(&device);
     let pipeline = |barrier| {
         let rig = rig(&context, &placed(1024, [1, 1, 1], barrier), 4096, &[]).expect("a pipeline");
-        let model = context.shared.model.lock();
+        let model = as_software(&context.host).model.lock();
         let live = model.live(context.key).expect("live");
         let state = live
             .compute_pipelines
@@ -2924,7 +2925,7 @@ fn a_queued_dispatch_is_charged_for_its_push_constants_and_their_sharing() {
     let context = context(&device);
     let wide = wide(&context).expect("a pipeline over a wide set");
     let (pipeline, set) = {
-        let model = context.shared.model.lock();
+        let model = as_software(&context.host).model.lock();
         let live = model.live(context.key).expect("live");
         (
             alloc::sync::Arc::clone(

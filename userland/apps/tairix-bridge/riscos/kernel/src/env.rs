@@ -275,11 +275,9 @@ impl Environment {
 /// number or an address.
 #[must_use]
 pub fn hex(n: u32) -> Hex {
-    let len = (32 - n.leading_zeros()).div_ceil(4).max(1) as usize;
+    let len = tairix_util::hex::significant(n.into());
     let mut digits = [0; 8];
-    for (digit, shift) in digits[..len].iter_mut().zip((0..len).rev()) {
-        *digit = tairix_util::hex::upper_digit((n >> (4 * shift)).to_le_bytes()[0]);
-    }
+    tairix_util::hex::fill_upper(&mut digits[..len], n.into());
     Hex { digits, len }
 }
 
@@ -301,7 +299,9 @@ impl Hex {
 /// `n` as eight hex digits, upper case.
 #[must_use]
 pub fn hex8(n: u32) -> [u8; 8] {
-    core::array::from_fn(|i| tairix_util::hex::upper_digit((n >> (28 - 4 * i)).to_le_bytes()[0]))
+    let mut digits = [0; 8];
+    tairix_util::hex::fill_upper(&mut digits, n.into());
+    digits
 }
 
 impl Os<'_> {

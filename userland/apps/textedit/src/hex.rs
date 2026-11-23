@@ -136,29 +136,12 @@ impl HexLayout {
     #[must_use]
     pub fn offset_text(self, offset: usize, buf: &mut [u8; 16]) -> &str {
         let digits = self.digits.min(buf.len());
-        for (at, slot) in buf[..digits].iter_mut().enumerate() {
-            let shift = (digits - 1 - at) * 4;
-            let digit = u32::try_from(shift)
-                .ok()
-                .and_then(|shift| offset.checked_shr(shift))
-                .unwrap_or(0)
-                & 0xf;
-            *slot = HEX_DIGITS[digit];
-        }
+        tairix_util::hex::fill_upper(
+            &mut buf[..digits],
+            u64::try_from(offset).unwrap_or(u64::MAX),
+        );
         core::str::from_utf8(&buf[..digits]).unwrap_or("")
     }
-}
-
-/// The upper-case hex digits, by value.
-pub const HEX_DIGITS: &[u8; 16] = b"0123456789ABCDEF";
-
-/// A byte's two hex digits.
-#[must_use]
-pub fn hex_pair(byte: u8) -> [u8; 2] {
-    [
-        HEX_DIGITS[usize::from(byte >> 4)],
-        HEX_DIGITS[usize::from(byte & 0xf)],
-    ]
 }
 
 /// The value of a typed hex digit, in the width a nibble is kept in.

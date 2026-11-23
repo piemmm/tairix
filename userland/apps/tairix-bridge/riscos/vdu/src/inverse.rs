@@ -13,9 +13,9 @@ use tairix_colour::Rgb;
 use tairix_riscos_kernel::os::len32;
 use tairix_vdu::palette::default_256;
 
-use crate::colour::eight_of_five;
+use crate::colour::{replicated, Direct};
 use crate::colourtrans::matching::Loadings;
-use crate::palette::EIGHT_BIT_COLOURS;
+use crate::palette::is_default_256;
 
 /// The colours a table covers.
 pub(crate) const CELLS: usize = 1 << 15;
@@ -34,20 +34,20 @@ const STEP: u16 = 1 << 8;
 const TINTS: usize = 4;
 const TINT_LEVELS: usize = 4;
 
-/// `colour`'s fifteen-bit form: each channel's top five bits, red lowest.
-pub(crate) const fn fifteen(colour: Rgb) -> usize {
-    cell([colour.r >> 3, colour.g >> 3, colour.b >> 3])
+/// `colour`'s cell: each channel's top five bits, red lowest.
+pub(crate) fn fifteen(colour: Rgb) -> usize {
+    Direct::FIFTEEN.pack(colour.to_array()) as usize
 }
 
-/// The cell of five-bit red, green and blue `five`, red lowest.
-pub(crate) const fn cell(five: [u8; 3]) -> usize {
-    five[0] as usize | (five[1] as usize) << 5 | (five[2] as usize) << 10
+/// The cell of five-bit red, green and blue `five`.
+pub(crate) fn cell(five: [u8; 3]) -> usize {
+    Direct::FIFTEEN.pack_channels(five.map(u32::from)) as usize
 }
 
 /// The table for `colours`, at most 256 of them; none where there is no
 /// room.
 pub(crate) fn table(colours: &[Rgb]) -> Option<Vec<u8>> {
-    if is_default_256(colours) {
+    if is_default_256(colours, u8::MAX) {
         return default_table();
     }
     let mut keys = Vec::new();
@@ -103,7 +103,9 @@ impl Kept {
 /// along it: the sum of differences splits by channel, so three sweeps give
 /// the nearest over all three.
 fn sweep(keys: &mut [u16], stride: usize) {
-    let lines = (0..CELLS).filter(|cell| (cell / stride).is_multiple_of(LEVELS));
+    let lines = (0..CELLS)
+        .step_by(stride * LEVELS)
+        .flat_map(|block| block..block + stride);
     for start in lines {
         let mut carried = UNREACHED;
         for step in 0..LEVELS {
@@ -120,15 +122,6 @@ fn sweep(keys: &mut [u16], stride: usize) {
     }
 }
 
-/// Whether `colours` are the default 256-colour palette's, exactly.
-fn is_default_256(colours: &[Rgb]) -> bool {
-    colours.len() == EIGHT_BIT_COLOURS
-        && colours
-            .iter()
-            .zip(0..=u8::MAX)
-            .all(|(colour, pixel)| colour.to_array() == default_256(pixel))
-}
-
 /// The default 256-colour palette's table: each cell, its channels widened
 /// to eight bits, matched by the default loadings, the first of equally
 /// near. A colour of the palette is a tint its channels share and a level of
@@ -141,7 +134,7 @@ fn default_table() -> Option<Vec<u8>> {
         colour_of[r % TINTS][r / TINTS][g / TINTS][b / TINTS] = pixel;
     }
     let nearest: [[(usize, u32); LEVELS]; TINTS] = core::array::from_fn(|tint| {
-        core::array::from_fn(|five| nearest_level(eight_of_five(len32(five)), tint))
+        core::array::from_fn(|five| nearest_level(replicated(len32(five), 5), tint))
     });
     let [red, green, blue] = Loadings::DEFAULT.channels().map(u32::from);
     let mut table = Vec::new();

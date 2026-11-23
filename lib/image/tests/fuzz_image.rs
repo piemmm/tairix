@@ -54,12 +54,12 @@ use tairix_image::inspect::inspect;
 use tairix_image::{
     decode, decode_as, decode_fitted, decode_fitted_as, decode_named, decode_peak_bytes,
     decode_peak_bytes_as, decode_sprite, encode_bmp, encode_gif, encode_jpeg, encode_ora,
-    encode_png, encode_sprite_area, encode_tiff, find_named, jpeg_frame, open_native, probe_as,
-    recognise, sniff, DecodeError, DecodeLimits, EncodeError, FitBox, GifOptions, ImageFormat,
-    IndexDepth, JpegOptions, NativeDocument, OraLayer, OraLayerSource, Picture, PictureKind,
-    PictureSource, RasterImage, Rgba8, Sequence, SequenceKind, SpriteAreaReader, SpriteEntry,
-    SpriteInput, SpriteMode, SpriteName, SpritePalette, TiffCompression, TiffOptions,
-    MAX_SPRITE_EIG, MOST_ORA_LAYERS, RECOGNITION_HEAD,
+    encode_png, encode_sprite_area, encode_tiff, find_named, jpeg_decode_stored, jpeg_frame,
+    open_native, probe_as, recognise, sniff, DecodeError, DecodeLimits, EncodeError, FitBox,
+    GifOptions, ImageFormat, IndexDepth, JpegOptions, NativeDocument, OraLayer, OraLayerSource,
+    Picture, PictureKind, PictureSource, RasterImage, Rgba8, Sequence, SequenceKind,
+    SpriteAreaReader, SpriteEntry, SpriteInput, SpriteMode, SpriteName, SpritePalette,
+    TiffCompression, TiffOptions, MAX_SPRITE_EIG, MOST_ORA_LAYERS, RECOGNITION_HEAD,
 };
 use tairix_util::report::{MAX_LINE_BYTES, MAX_REPORT_LINES};
 
@@ -1276,8 +1276,18 @@ const SPRITE_TYPES: [(u32, u32); 9] = [
     (16, 16),
 ];
 
-/// Numbered screen modes at each depth the format defines.
-const SPRITE_MODES: [(u32, u32); 4] = [(0, 1), (1, 2), (12, 4), (15, 8)];
+/// Numbered screen modes at each depth the format defines, and the modes
+/// doubling their pixels at each field width those take.
+const SPRITE_MODES: [(u32, u32); 8] = [
+    (0, 1),
+    (1, 2),
+    (12, 4),
+    (15, 8),
+    (2, 8),
+    (4, 2),
+    (5, 4),
+    (10, 16),
+];
 
 /// One structurally valid sprite: a control block, an optional palette, the
 /// image rows, and an optional mask.
@@ -1289,7 +1299,12 @@ fn build_valid_sprite(rng: &mut Prng) -> Vec<u8> {
     let (mode, bits, left) = match rng.below(3) {
         0 => {
             let (mode, bits) = *rng.pick(&SPRITE_MODES);
-            (mode, bits, u32::try_from(rng.below(4)).unwrap_or(0) * bits)
+            let fields = usize::try_from(32 / bits).unwrap_or(1).min(4);
+            (
+                mode,
+                bits,
+                u32::try_from(rng.below(fields)).unwrap_or(0) * bits,
+            )
         }
         1 => {
             let (kind, bits) = SPRITE_TYPES[rng.below(SPRITE_TYPES.len() - 1)];
@@ -2263,6 +2278,9 @@ fn frame_states_what_a_decode_answers(bytes: &[u8], limits: &DecodeLimits) {
         return;
     };
     assert!(matches!(frame.components, 1 | 3), "{frame:?}");
+    if let Ok(stored) = jpeg_decode_stored(bytes, limits) {
+        assert_eq!((stored.width(), stored.height()), frame.stored, "{frame:?}");
+    }
     if sniff(bytes) == Some(ImageFormat::Jpeg) {
         if let Ok(image) = decode(bytes, limits) {
             assert_eq!(

@@ -42,6 +42,22 @@ const MATRIX: [[u8; 8]; 8] = [
     [63, 31, 55, 23, 61, 29, 53, 21],
 ];
 
+/// The 4×4 ordered-dither matrix, in `0..16`: the 8×8 one's first quadrant at
+/// a quarter of its rank, the same order at half the period.
+pub const BAYER_4: [[u8; 4]; 4] = {
+    let mut quarter = [[0; 4]; 4];
+    let mut y = 0;
+    while y < 4 {
+        let mut x = 0;
+        while x < 4 {
+            quarter[y][x] = MATRIX[y][x] >> 2;
+            x += 1;
+        }
+        y += 1;
+    }
+    quarter
+};
+
 /// The rounding biases one surface row dithers with, resolved once per row.
 ///
 /// The pattern tiles the *surface's* own coordinates rather than any shape's,

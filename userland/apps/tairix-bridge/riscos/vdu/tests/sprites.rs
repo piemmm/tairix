@@ -6,34 +6,49 @@
 
 mod common;
 
-use common::{drivers, vdu};
+use common::{call, drivers, error_number, insert_module, select, vdu, BY_POINTER, USER};
 use tairix_riscos_filing::session::{Session, SLOT_BYTES};
 use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::os::{Fail, Regs};
-use tairix_riscos_kernel::swi::os::{BYTE, CHANGE_DYNAMIC_AREA, READ_DYNAMIC_AREA, SPRITE_OP};
+use tairix_riscos_kernel::swi::chunk::SPRITE_EXTEND;
+use tairix_riscos_kernel::swi::os::{
+    BYTE, CHANGE_DYNAMIC_AREA, READ_DYNAMIC_AREA, READ_VDU_VARIABLES, SET_COLOUR, SPRITE_OP,
+};
 use tairix_riscos_kernel::swi::X;
+use tairix_vdu::mode::var::{N_COLOUR, X_EIG, Y_EIG};
 
 /// Where a test's user area and the names it gives lie, in the slot.
 const AREA: u32 = 0x2_0000;
 const AREA_BYTES: u32 = 0x1_0000;
 const NAME: u32 = 0x9000;
 const OTHER_NAME: u32 = 0x9100;
-/// The area values R0 adds: a user area by name and by pointer.
-const USER: u32 = 256;
-const POINTER: u32 = 512;
+
+/// The screen's first byte, as `OS_ReadVduVariables` 148 gives it.
+fn screen_start(session: &mut Session) -> u32 {
+    let asked = AREA + 0x7100;
+    session.kernel.os().write_word(asked, 148).expect("written");
+    session
+        .kernel
+        .os()
+        .write_word(asked + 4, u32::MAX)
+        .expect("written");
+    swi(
+        session,
+        READ_VDU_VARIABLES,
+        [asked, asked + 8, 0, 0, 0, 0, 0, 0],
+    )
+    .expect("read");
+    session
+        .kernel
+        .os()
+        .read_word(asked + 8)
+        .expect("the screen")
+}
 
 /// `OS_SpriteOp` with registers R0 to R7: what it leaves, or its error's
 /// number.
 fn op(session: &mut Session, low: [u32; 8]) -> Result<Regs, u32> {
-    let mut regs = Regs::new([
-        low[0], low[1], low[2], low[3], low[4], low[5], low[6], low[7], 0, 0, 0, 0, 0,
-    ]);
-    let mut os = session.kernel.os();
-    match os.perform(X | SPRITE_OP, &mut regs) {
-        Ok(()) => Ok(regs),
-        Err(Fail::Error(block)) => Err(os.read_word(block).expect("an error block")),
-        Err(other) => panic!("OS_SpriteOp {low:x?}: {other:?}"),
-    }
+    swi(session, SPRITE_OP, low)
 }
 
 /// Writes `text` with a terminating zero at `at`.
@@ -223,7 +238,7 @@ fn names_match_without_regard_to_ascii_case_and_end_at_any_control_byte() {
         Some(0x86)
     );
     assert_eq!(
-        op(&mut session, [POINTER + 40, AREA, 0, 0, 0, 0, 0, 0]).err(),
+        op(&mut session, [BY_POINTER + 40, AREA, 0, 0, 0, 0, 0, 0]).err(),
         Some(0x86),
         "a null pointer"
     );
@@ -655,10 +670,10 @@ fn the_system_area_is_dynamic_area_3_made_empty_as_it_first_grows() {
 
 /// SpriteExtend's `JPEG_Info`, `JPEG_PlotScaled` and
 /// `JPEG_PlotTransformed`, and the first offset past its SWIs.
-const JPEG_INFO: u32 = 0x4_9980;
-const JPEG_PLOT_SCALED: u32 = 0x4_9982;
-const JPEG_PLOT_TRANSFORMED: u32 = 0x4_9984;
-const JPEG_PAST_SWIS: u32 = 0x4_9987;
+const JPEG_INFO: u32 = SPRITE_EXTEND;
+const JPEG_PLOT_SCALED: u32 = SPRITE_EXTEND + 2;
+const JPEG_PLOT_TRANSFORMED: u32 = SPRITE_EXTEND + 4;
+const JPEG_PAST_SWIS: u32 = SPRITE_EXTEND + 7;
 
 /// A JPEG of 8 by 8 pixels at [`AREA`] plus `at`, its frame header saying it
 /// is `width` by `height`: its length.
@@ -680,29 +695,21 @@ fn jpeg_at(session: &mut Session, at: u32, (width, height): (u16, u16)) -> u32 {
     u32::try_from(bytes.len()).expect("short")
 }
 
+/// SWI `number` with R0 to R7 `low`: what it leaves, or its error's number.
 fn swi(session: &mut Session, number: u32, low: [u32; 8]) -> Result<Regs, u32> {
-    let mut regs = Regs::new([
-        low[0], low[1], low[2], low[3], low[4], low[5], low[6], low[7], 0, 0, 0, 0, 0,
-    ]);
-    let mut os = session.kernel.os();
-    match os.perform(X | number, &mut regs) {
-        Ok(()) => Ok(regs),
-        Err(Fail::Error(block)) => Err(os.read_word(block).expect("an error block")),
-        Err(other) => panic!("SWI &{number:X}: {other:?}"),
-    }
+    call(session, number, &low).map_err(|fail| error_number(session, fail))
 }
 
 /// The number and text of the error SWI `number` gives.
 fn refusal(session: &mut Session, number: u32, low: [u32; 8]) -> (u32, Vec<u8>) {
-    let mut regs = Regs::new([
-        low[0], low[1], low[2], low[3], low[4], low[5], low[6], low[7], 0, 0, 0, 0, 0,
-    ]);
-    let mut os = session.kernel.os();
-    match os.perform(X | number, &mut regs) {
-        Err(Fail::Error(block)) => (
-            os.read_word(block).expect("a number"),
-            os.read_zstring(block + 4, 256).expect("a text"),
-        ),
+    match call(session, number, &low) {
+        Err(Fail::Error(block)) => {
+            let os = &mut session.kernel.os();
+            (
+                os.read_word(block).expect("a number"),
+                os.read_zstring(block + 4, 256).expect("a text"),
+            )
+        }
         other => panic!("SWI &{number:X} gave {other:?}"),
     }
 }
@@ -719,7 +726,6 @@ fn first_pixel(session: &mut Session, name: &[u8]) -> u8 {
 
 #[test]
 fn a_blend_into_a_sprite_with_no_palette_takes_its_mode_s_default_colours() {
-    use tairix_riscos_kernel::swi::os::READ_VDU_VARIABLES;
     let mut session = with_area();
     vdu(&mut session, &[22, 12]).expect("mode 12");
     make(&mut session, b"into", 4, 1, 28, false);
@@ -750,24 +756,7 @@ fn a_blend_into_a_sprite_with_no_palette_takes_its_mode_s_default_colours() {
     .expect("back");
     let into_sprite = first_pixel(&mut session, b"into");
     vdu(&mut session, &[22, 28]).expect("mode 28, the default 256 colours");
-    let asked = AREA + 0x7100;
-    session.kernel.os().write_word(asked, 148).expect("written");
-    session
-        .kernel
-        .os()
-        .write_word(asked + 4, u32::MAX)
-        .expect("written");
-    swi(
-        &mut session,
-        READ_VDU_VARIABLES,
-        [asked, asked + 8, 0, 0, 0, 0, 0, 0],
-    )
-    .expect("read");
-    let screen = session
-        .kernel
-        .os()
-        .read_word(asked + 8)
-        .expect("the screen");
+    let screen = screen_start(&mut session);
     let bottom_left = screen + 479 * 640;
     session
         .kernel
@@ -793,7 +782,6 @@ fn a_blend_into_a_sprite_with_no_palette_takes_its_mode_s_default_colours() {
 
 #[test]
 fn a_sprite_deeper_than_the_destination_is_drawn_through_its_table() {
-    use tairix_riscos_kernel::swi::os::READ_VDU_VARIABLES;
     let mut session = with_area();
     vdu(&mut session, &[22, 12]).expect("mode 12");
     make(&mut session, b"deep", 2, 1, 28, false);
@@ -808,24 +796,7 @@ fn a_sprite_deeper_than_the_destination_is_drawn_through_its_table() {
         .write_bytes(table, &colours)
         .expect("written");
     op(&mut session, [USER + 52, AREA, NAME, 0, 0, 0, 0, table]).expect("drawn through the table");
-    let asked = AREA + 0x7100;
-    session.kernel.os().write_word(asked, 148).expect("written");
-    session
-        .kernel
-        .os()
-        .write_word(asked + 4, u32::MAX)
-        .expect("written");
-    swi(
-        &mut session,
-        READ_VDU_VARIABLES,
-        [asked, asked + 8, 0, 0, 0, 0, 0, 0],
-    )
-    .expect("read");
-    let screen = session
-        .kernel
-        .os()
-        .read_word(asked + 8)
-        .expect("the screen");
+    let screen = screen_start(&mut session);
     let mut bottom_left = [0];
     session
         .kernel
@@ -841,7 +812,6 @@ fn a_sprite_deeper_than_the_destination_is_drawn_through_its_table() {
 #[test]
 fn a_jpeg_on_a_palettised_screen_takes_each_colour_from_colourtrans_s_32k_table() {
     use tairix_riscos_kernel::swi::colour_trans::{SELECT_TABLE, WRITE_PALETTE};
-    use tairix_riscos_kernel::swi::os::READ_VDU_VARIABLES;
     let mut session = with_area();
     common::select_full_palette(&mut session).expect("256 colours");
     let words = AREA + 0x4000;
@@ -900,24 +870,7 @@ fn a_jpeg_on_a_palettised_screen_takes_each_colour_from_colourtrans_s_32k_table(
         .expect("its address");
     let limits = tairix_image::DecodeLimits::new(64, 64, 1 << 12, 1 << 20);
     let decoded = tairix_image::jpeg_decode_stored(&bytes, &limits).expect("decoded");
-    let asked = AREA + 0x7100;
-    session.kernel.os().write_word(asked, 148).expect("written");
-    session
-        .kernel
-        .os()
-        .write_word(asked + 4, u32::MAX)
-        .expect("written");
-    swi(
-        &mut session,
-        READ_VDU_VARIABLES,
-        [asked, asked + 8, 0, 0, 0, 0, 0, 0],
-    )
-    .expect("read");
-    let screen = session
-        .kernel
-        .os()
-        .read_word(asked + 8)
-        .expect("the screen");
+    let screen = screen_start(&mut session);
     for (at, rgba) in decoded.pixels().as_chunks::<4>().0.iter().enumerate() {
         let (x, y) = (
             u32::try_from(at % side).expect("small"),
@@ -980,6 +933,45 @@ fn the_jpeg_swis_refuse_in_their_own_words_and_past_their_last_swi() {
         text.windows(12).any(|w| w == b"SpriteExtend"),
         "naming the module: {text:?}"
     );
+}
+
+#[test]
+fn a_jpeg_of_no_rows_is_refused_however_it_is_plotted() {
+    let mut session = with_area();
+    let at = AREA + 0x8000;
+    let shape = AREA + 0x9000;
+    let none_high = [
+        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+    ];
+    {
+        let os = &mut session.kernel.os();
+        os.write_bytes(at, &none_high).expect("written");
+        for (i, word) in (0u32..).zip([0, 256, 256, 256, 256, 0, 0, 0]) {
+            os.write_word(shape + 4 * i, word)
+                .expect("a scaling parallelogram");
+        }
+    }
+    let length = u32::try_from(none_high.len()).expect("short");
+    let bad = (0x71A, b"The JPEG cannot be read".to_vec());
+    assert_eq!(
+        refusal(
+            &mut session,
+            JPEG_PLOT_TRANSFORMED,
+            [at, 1, shape, length, 0, 0, 0, 0]
+        ),
+        bad,
+        "through a parallelogram"
+    );
+    assert_eq!(
+        refusal(
+            &mut session,
+            JPEG_PLOT_SCALED,
+            [at, 0, 0, 0, length, 0, 0, 0]
+        ),
+        bad,
+        "scaled"
+    );
+    assert!(common::answers(&mut session));
 }
 
 #[test]
@@ -1093,5 +1085,542 @@ fn the_kernel_s_plots_refuse_an_alpha_mask_they_would_use() {
     assert!(
         op(&mut session, [USER + 52, AREA, NAME, 0, 0, 8, 0, 0]).is_ok(),
         "SpriteExtend's blend"
+    );
+}
+
+#[test]
+fn a_plot_into_a_mode_doubling_its_pixels_fills_each_pixel_s_whole_field() {
+    let mut session = with_area();
+    vdu(&mut session, &[22, 4]).expect("mode 4");
+    make(&mut session, b"dot", 8, 1, 4, false);
+    put_name(&mut session, NAME, b"dot");
+    op(&mut session, [USER + 42, AREA, NAME, 0, 0, 1, 0, 0]).expect("pixel 0 set");
+    op(&mut session, [USER + 52, AREA, NAME, 0, 0, 0, 0, 0]).expect("drawn scaled");
+    let screen = screen_start(&mut session);
+    let mut first = [0];
+    session
+        .kernel
+        .os()
+        .read_bytes(screen + 255 * 80, &mut first)
+        .expect("read");
+    assert_eq!(first[0] & 0b11, 0b11, "the pixel's two bits both set");
+}
+
+/// Screen rows `bottom..=top` up from the bottom of a mode 28 screen, the
+/// top one first.
+fn mode_28_rows(session: &mut Session, bottom: u32, top: u32) -> Vec<u8> {
+    let screen = screen_start(session);
+    let mut bytes = vec![0; ((top - bottom + 1) * 640) as usize];
+    session
+        .kernel
+        .os()
+        .read_bytes(screen + (479 - top) * 640, &mut bytes)
+        .expect("read");
+    bytes
+}
+
+/// The graphics window over every column of pixel rows `bottom..=top`.
+fn rows_window(bottom: u32, top: u32) -> Vec<u8> {
+    let mut sequence = vec![24, 0, 0];
+    for unit in [bottom * 2, 1279, top * 2 + 1] {
+        sequence.extend_from_slice(&u16::try_from(unit).expect("on screen").to_le_bytes());
+    }
+    sequence
+}
+
+#[test]
+fn a_plot_held_to_a_few_rows_draws_them_as_it_draws_them_on_the_whole_screen() {
+    let mut session = with_area();
+    vdu(&mut session, &[22, 28]).expect("mode 28");
+    make(&mut session, b"rows", 8, 23, 28, false);
+    put_name(&mut session, NAME, b"rows");
+    op(&mut session, [USER + 29, AREA, NAME, 0, 0, 0, 0, 0]).expect("masked");
+    for y in 0..23 {
+        for x in 0..8 {
+            op(
+                &mut session,
+                [USER + 42, AREA, NAME, x, y, y * 8 + x + 1, 0, 0],
+            )
+            .expect("set");
+        }
+        op(&mut session, [USER + 44, AREA, NAME, y % 8, y, 0, 0, 0]).expect("clear");
+    }
+    let scale = AREA + 0x7200;
+    for (i, factor) in [3, 3, 2, 2].into_iter().enumerate() {
+        let at = scale + 4 * u32::try_from(i).expect("small");
+        session.kernel.os().write_word(at, factor).expect("written");
+    }
+    let plots = [
+        ("blit", [USER + 34, AREA, NAME, 100, 100, 8, 0, 0], 50..=72),
+        (
+            "scaled",
+            [USER + 52, AREA, NAME, 100, 100, 8, scale, 0],
+            50..=83,
+        ),
+        (
+            "tiled",
+            [USER + 65, AREA, NAME, 100, 100, 8, scale, 0],
+            40..=95,
+        ),
+    ];
+    let windows = (45..=90).map(|y| (y, y)).chain([
+        (49, 51),
+        (55, 60),
+        (70, 90),
+        (80, 86),
+        (83, 84),
+        (50, 84),
+        (61, 95),
+        (40, 95),
+    ]);
+    for (name, plot, drawn) in plots {
+        vdu(&mut session, &[26, 16]).expect("cleared");
+        op(&mut session, plot).expect("drawn");
+        let whole = mode_28_rows(&mut session, 40, 95);
+        for (y, row) in (40..=95).rev().zip(whole.chunks(640)) {
+            assert_eq!(
+                row.iter().any(|&pixel| pixel != 0),
+                drawn.contains(&y),
+                "{name} draws on row {y}"
+            );
+        }
+        for (bottom, top) in windows.clone() {
+            vdu(&mut session, &[26, 16]).expect("cleared");
+            vdu(&mut session, &rows_window(bottom, top)).expect("window");
+            op(&mut session, plot).expect("drawn");
+            let start = ((95 - top) * 640) as usize;
+            assert_eq!(
+                mode_28_rows(&mut session, bottom, top),
+                whole[start..start + ((top - bottom + 1) * 640) as usize],
+                "{name} held to rows {bottom} to {top}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_masked_colour_plot_meets_the_colour_s_words_on_lines_off_a_word() {
+    let mut session = with_area();
+    // Lines of 1281 bytes: each starts a byte on from the one above.
+    select(&mut session, &[1, 320, 256, 5, u32::MAX, 6, 1281, u32::MAX]).expect("selected");
+    call(
+        &mut session,
+        SET_COLOUR,
+        &[
+            tairix_riscos_kernel::swi::os::set_colour::BACKGROUND,
+            0x0012_3456,
+        ],
+    )
+    .expect("background");
+    make(&mut session, b"masked", 4, 4, 0x3016_80B5, false);
+    put_name(&mut session, NAME, b"masked");
+    op(&mut session, [USER + 29, AREA, NAME, 0, 0, 0, 0, 0]).expect("mask made");
+    make(&mut session, b"plain", 4, 4, 0x3016_80B5, false);
+    let screen = screen_start(&mut session);
+    let mut drawn = Vec::new();
+    for name in [b"masked".as_slice(), b"plain"] {
+        vdu(&mut session, &[12]).expect("cleared");
+        put_name(&mut session, NAME, name);
+        op(&mut session, [USER + 49, AREA, NAME, 0, 0, 0, 0, 0]).expect("plotted");
+        let mut rows = vec![0; 1281 * 4];
+        session
+            .kernel
+            .os()
+            .read_bytes(screen + 1281 * 252, &mut rows)
+            .expect("read");
+        drawn.push(rows);
+    }
+    assert!(drawn[1].chunks(1281).all(|row| row[..16] != [0; 16]));
+    assert_eq!(drawn[0], drawn[1], "a solid mask covers what no mask does");
+}
+
+#[test]
+fn a_jpeg_through_a_matrix_takes_its_pixels_as_the_standard_screen_s() {
+    let mut session = with_area();
+    common::select_depth(&mut session, 5).expect("32 bits a pixel");
+    let picture = tairix_image::Picture::rgba(16, 16, vec![0xFF; 16 * 16 * 4]).expect("a picture");
+    let options = tairix_image::JpegOptions::new(90, [0, 0, 0]).expect("options");
+    let bytes = tairix_image::encode_jpeg(&picture, options).expect("encoded");
+    let at = AREA + 0x8000;
+    session
+        .kernel
+        .os()
+        .write_bytes(at, &bytes)
+        .expect("written");
+    let length = u32::try_from(bytes.len()).expect("short");
+    let matrix = AREA + 0x7000;
+    let screen = screen_start(&mut session);
+    for (scale, side) in [(0x1_0000, 16), (0x2_0000, 32)] {
+        vdu(&mut session, &[12]).expect("cleared");
+        for (i, word) in (0u32..).zip([scale, 0, 0, scale, 100 << 8, 100 << 8]) {
+            session
+                .kernel
+                .os()
+                .write_word(matrix + 4 * i, word)
+                .expect("written");
+        }
+        swi(
+            &mut session,
+            JPEG_PLOT_TRANSFORMED,
+            [at, 0, matrix, length, 0, 0, 0, 0],
+        )
+        .expect("plotted");
+        let mut pixels = vec![0; 640 * 480 * 4];
+        session
+            .kernel
+            .os()
+            .read_bytes(screen, &mut pixels)
+            .expect("read");
+        let drawn = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|pixel| **pixel != [0; 4])
+            .count();
+        assert_eq!(
+            drawn,
+            side * side,
+            "a picture pixel two OS units at {scale:#x}"
+        );
+    }
+}
+
+/// A 32-bit guest module whose service handler answers
+/// `Service_ModeExtension` for mode 99 as mode 12, which no mode the drivers
+/// fall back to is.
+fn mode_99_module() -> Vec<u8> {
+    let header = [0, 0, 0, 0x34, 0x60, 0x60, 0, 0, 0, 0, 0, 0, 0x50];
+    let handler = [
+        0xE331_0050, // TEQ R1, #&50
+        0x11A0_F00E, // MOVNE PC, R14
+        0xE332_0063, // TEQ R2, #99
+        0x11A0_F00E, // MOVNE PC, R14
+        0xE28F_4008, // ADR R4, workspace list
+        0xE3A0_1000, // MOV R1, #0
+        0xE1A0_F00E, // MOV PC, R14
+    ];
+    let flags = [1];
+    let workspace_list = [0, 12, u32::MAX];
+    let mut image: Vec<u8> = header
+        .iter()
+        .chain(&handler)
+        .chain(&flags)
+        .chain(&workspace_list)
+        .flat_map(|w: &u32| w.to_le_bytes())
+        .collect();
+    image.extend_from_slice(b"Mode99\0\0");
+    image
+}
+
+#[test]
+fn a_sprite_in_a_mode_a_module_describes_is_read_through_that_module() {
+    use tairix_riscos_kernel::swi::colour_trans::READ_PALETTE;
+    let mut session = with_area();
+    insert_module(&mut session, &mode_99_module()).expect("inserted");
+    let buffer = 0xB000;
+    let mut palettes = Vec::new();
+    for (name, mode) in [(b"m12".as_slice(), 12), (b"m99", 99)] {
+        make(&mut session, name, 4, 2, mode, true);
+        put_name(&mut session, NAME, name);
+        op(&mut session, [USER + 42, AREA, NAME, 1, 0, 0x2A, 0x40, 0]).expect("written");
+        let regs = op(&mut session, [USER + 41, AREA, NAME, 1, 0, 0, 0, 0]).expect("read");
+        assert_eq!((regs.r[5], regs.r[6]), (0xA, 0), "mode {mode}'s four bits");
+        let regs = op(&mut session, [USER + 40, AREA, NAME, 0, 0, 0, 0, 0]).expect("read");
+        assert_eq!(regs.r[6], mode, "the number kept");
+        swi(
+            &mut session,
+            READ_PALETTE,
+            [AREA, NAME, buffer, 0x400, 0, 0, 0, 0],
+        )
+        .expect("read");
+        let mut words = vec![0; 0x400];
+        session
+            .kernel
+            .os()
+            .read_bytes(buffer, &mut words)
+            .expect("read");
+        palettes.push(words);
+    }
+    assert_eq!(palettes[0], palettes[1], "every entry its pixels name");
+}
+
+/// Where a test's hook routine is written, in the slot.
+const ROUTINE: u32 = 0xB800;
+
+#[test]
+fn a_scaled_plot_reads_the_rows_shown_once_guest_code_has_moved_the_window() {
+    use tairix_riscos_kernel::swi::os::WRITE_C;
+    let mut session = with_area();
+    vdu(&mut session, &[22, 28]).expect("mode 28");
+    make(&mut session, b"tall", 8, 64, 28, false);
+    put_name(&mut session, NAME, b"tall");
+    for y in 0..64 {
+        for x in 0..8 {
+            op(&mut session, [USER + 42, AREA, NAME, x, y, 7, 0, 0]).expect("set");
+        }
+    }
+    let (hook, slot) = common::palette_v_hook();
+    let base = insert_module(&mut session, &hook).expect("inserted");
+    common::write_words(
+        &mut session,
+        ROUTINE,
+        &common::once_routine(base + slot, WRITE_C, [26, 0, 0, 0, 0, 0, 0, 0]),
+    );
+    for (name, reason) in [("scaled", 52), ("tiled", 65)] {
+        let translucent = [USER + reason, AREA, NAME, 0, 160, 0x8000, 0, 0];
+        vdu(&mut session, &[26, 16]).expect("cleared");
+        op(&mut session, translucent).expect("drawn");
+        let whole = mode_28_rows(&mut session, 60, 160);
+        vdu(&mut session, &[26, 16]).expect("cleared");
+        vdu(&mut session, &rows_window(100, 110)).expect("a few rows");
+        common::write_words(&mut session, base + slot, &[ROUTINE]);
+        op(&mut session, translucent).expect("drawn");
+        assert_eq!(
+            session.kernel.os().read_word(base + slot).expect("read"),
+            0,
+            "{name}: the window moved during the plot"
+        );
+        assert_eq!(
+            mode_28_rows(&mut session, 60, 160),
+            whole,
+            "{name}: every row the moved window shows"
+        );
+    }
+}
+
+/// The bytes of sprite `name`'s image, as many as `length`.
+fn image_bytes(session: &mut Session, name: &[u8], length: usize) -> Vec<u8> {
+    let at = address(session, name);
+    let image = session.kernel.os().read_word(at + 32).expect("its image");
+    let mut bytes = vec![0; length];
+    session
+        .kernel
+        .os()
+        .read_bytes(at + image, &mut bytes)
+        .expect("read");
+    bytes
+}
+
+#[test]
+fn a_plot_draws_where_guest_code_moved_output_and_nowhere_in_another_form() {
+    let mut session = with_area();
+    vdu(&mut session, &[22, 28]).expect("mode 28");
+    make(&mut session, b"tall", 8, 64, 28, false);
+    put_name(&mut session, NAME, b"tall");
+    for y in 0..64 {
+        for x in 0..8 {
+            op(&mut session, [USER + 42, AREA, NAME, x, y, 7, 0, 0]).expect("set");
+        }
+    }
+    let (hook, slot) = common::palette_v_hook();
+    let base = insert_module(&mut session, &hook).expect("inserted");
+    for (target, mode, drawn) in [(&b"same"[..], 28, true), (b"other", 12, false)] {
+        make(&mut session, target, 64, 64, mode, false);
+        put_name(&mut session, OTHER_NAME, target);
+        common::write_words(
+            &mut session,
+            ROUTINE,
+            &common::once_routine(
+                base + slot,
+                SPRITE_OP,
+                [USER + 60, AREA, OTHER_NAME, 0, 0, 0, 0, 0],
+            ),
+        );
+        common::write_words(&mut session, base + slot, &[ROUTINE]);
+        vdu(&mut session, &[16]).expect("cleared");
+        put_name(&mut session, NAME, b"tall");
+        op(&mut session, [USER + 52, AREA, NAME, 0, 0, 0x8000, 0, 0]).expect("drawn");
+        op(&mut session, [USER + 60, AREA, 0, 0, 0, 0, 0, 0]).expect("back to the screen");
+        let mode = String::from_utf8_lossy(target).into_owned();
+        assert_eq!(
+            session.kernel.os().read_word(base + slot).expect("read"),
+            0,
+            "{mode}: output moved during the plot"
+        );
+        assert!(
+            mode_28_rows(&mut session, 0, 63)
+                .iter()
+                .all(|&pixel| pixel == 0),
+            "{mode}: nothing on the screen output moved from"
+        );
+        assert_eq!(
+            image_bytes(&mut session, target, 64 * 4)
+                .iter()
+                .any(|&byte| byte != 0),
+            drawn,
+            "{mode}: drawn into a sprite of the screen's form alone"
+        );
+    }
+}
+
+#[test]
+fn a_colour_mapping_is_given_each_colour_once_whatever_its_spare_bits() {
+    const COUNTER: u32 = 0xBC00;
+    const DESCRIPTOR: u32 = 0xBC10;
+    let mut session = with_area();
+    vdu(&mut session, &[22, 28]).expect("mode 28");
+    make(&mut session, b"deep", 4, 1, 0x3016_80B5, false);
+    let at = address(&mut session, b"deep");
+    let image = session.kernel.os().read_word(at + 32).expect("its image");
+    let counting = [
+        0xE92D_4006, // STMFD R13!, {R1, R2, R14}
+        0xE59F_100C, // LDR R1, counter
+        0xE591_2000, // LDR R2, [R1]
+        0xE282_2001, // ADD R2, R2, #1
+        0xE581_2000, // STR R2, [R1]
+        0xE8BD_8006, // LDMFD R13!, {R1, R2, PC}
+        COUNTER,
+    ];
+    common::write_words(&mut session, ROUTINE, &counting);
+    common::write_words(&mut session, DESCRIPTOR, &[0, ROUTINE]);
+    common::write_words(&mut session, COUNTER, &[0]);
+    common::write_words(
+        &mut session,
+        at + image,
+        &[0x0011_2233, 0x1111_2233, 0x2211_2233, 0x3311_2233],
+    );
+    put_name(&mut session, NAME, b"deep");
+    op(
+        &mut session,
+        [USER + 52, AREA, NAME, 0, 0, 0x80, 0, DESCRIPTOR],
+    )
+    .expect("drawn");
+    assert_eq!(
+        session.kernel.os().read_word(COUNTER).expect("read"),
+        1,
+        "one colour, its spare byte four ways"
+    );
+}
+
+#[test]
+fn a_column_inserted_into_a_sprite_of_no_width_keeps_its_image_where_it_starts() {
+    let mut session = with_area();
+    make(&mut session, b"bare", 0, 3, 28, false);
+    put_name(&mut session, NAME, b"bare");
+    op(&mut session, [USER + 45, AREA, NAME, 0, 0, 0, 0, 0]).expect("a column");
+    let at = address(&mut session, b"bare");
+    assert_eq!(header(&mut session, at), [0x38, 0, 2, 0, 7, 0x2C, 0x2C, 28]);
+    op(&mut session, [USER + 17, AREA, 0, 0, 0, 0, 0, 0]).expect("the area verified");
+}
+
+/// A session whose area holds sprite `a` in mode 28, `b` in mode 99 and a
+/// larger `c` after them, a hook on `Service_ModeExtension` inserted ahead of
+/// the module describing mode 99, and the address of the hook's slot.
+fn hooked_mode_99() -> (Session, u32) {
+    let mut session = with_area();
+    let (hook, slot) = common::service_hook(tairix_riscos_kernel::service::MODE_EXTENSION);
+    let base = insert_module(&mut session, &hook).expect("inserted");
+    insert_module(&mut session, &mode_99_module()).expect("inserted");
+    make(&mut session, b"a", 8, 8, 28, false);
+    make(&mut session, b"b", 8, 8, 99, true);
+    make(&mut session, b"c", 64, 64, 28, false);
+    (session, base + slot)
+}
+
+#[test]
+fn a_sprite_a_module_moves_while_its_mode_is_asked_is_not_changed_where_it_was() {
+    let (mut session, slot) = hooked_mode_99();
+    put_name(&mut session, OTHER_NAME, b"a");
+    common::write_words(
+        &mut session,
+        ROUTINE,
+        &common::once_routine(
+            slot,
+            SPRITE_OP,
+            [USER + 25, AREA, OTHER_NAME, 0, 0, 0, 0, 0],
+        ),
+    );
+    common::write_words(&mut session, slot, &[ROUTINE]);
+    put_name(&mut session, NAME, b"b");
+    assert_eq!(
+        op(&mut session, [USER + 57, AREA, NAME, 0, 2, 0, 0, 0]).err(),
+        Some(0x71E),
+        "rows opened where b no longer is"
+    );
+    assert_eq!(
+        session.kernel.os().read_word(slot).expect("read"),
+        0,
+        "a deleted"
+    );
+    op(&mut session, [USER + 17, AREA, 0, 0, 0, 0, 0, 0]).expect("the area verified");
+    let info = op(&mut session, [USER + 40, AREA, NAME, 0, 0, 0, 0, 0]).expect("b found");
+    assert_eq!((info.r[3], info.r[4]), (8, 8), "b as it was");
+}
+
+#[test]
+fn a_palette_a_module_removes_while_its_mode_is_asked_is_not_written_over_the_image() {
+    use tairix_riscos_kernel::swi::colour_trans::WRITE_PALETTE;
+    let (mut session, slot) = hooked_mode_99();
+    put_name(&mut session, OTHER_NAME, b"b");
+    common::write_words(
+        &mut session,
+        ROUTINE,
+        &common::once_routine(
+            slot,
+            SPRITE_OP,
+            [USER + 37, AREA, OTHER_NAME, 0, 0, 0, 0, 0],
+        ),
+    );
+    let at = address(&mut session, b"b");
+    let image = |session: &mut Session| {
+        let mut bytes = vec![0u8; 0x200];
+        session
+            .kernel
+            .os()
+            .read_bytes(at, &mut bytes)
+            .expect("read");
+        bytes
+    };
+    common::write_words(&mut session, slot, &[ROUTINE]);
+    let words = AREA + 0x9000;
+    common::write_words(&mut session, words, &[0x1122_3300; 16]);
+    put_name(&mut session, NAME, b"b");
+    let refused = swi(
+        &mut session,
+        WRITE_PALETTE,
+        [AREA, NAME, words, 0, 0, 0, 0, 0],
+    );
+    assert_eq!(
+        session.kernel.os().read_word(slot).expect("read"),
+        0,
+        "the palette removed"
+    );
+    let after = image(&mut session);
+    assert_eq!(
+        refused.err(),
+        Some(0xA08),
+        "a palette short of the mode's colours"
+    );
+    assert!(
+        !after
+            .windows(4)
+            .any(|word| word == 0x1122_3300u32.to_le_bytes()),
+        "no colour written over the image or past it"
+    );
+}
+
+#[test]
+fn a_sprite_in_a_mode_a_module_describes_shows_as_that_mode() {
+    use tairix_riscos_kernel::swi::os::READ_MODE_VARIABLE;
+    let mut session = with_area();
+    insert_module(&mut session, &mode_99_module()).expect("inserted");
+    make(&mut session, b"m99", 8, 8, 99, true);
+    put_name(&mut session, NAME, b"m99");
+    op(&mut session, [USER + 60, AREA, NAME, 0, 0, 0, 0, 0]).expect("output switched to it");
+    let mut read = |variable: u32| {
+        swi(
+            &mut session,
+            READ_MODE_VARIABLE,
+            [u32::MAX, variable, 0, 0, 0, 0, 0, 0],
+        )
+        .expect("read")
+        .r[2]
+    };
+    let (x_eig, y_eig, n_colour) = (read(X_EIG), read(Y_EIG), read(N_COLOUR));
+    op(&mut session, [USER + 60, AREA, 0, 0, 0, 0, 0, 0]).expect("back to the screen");
+    assert_eq!(
+        (x_eig, y_eig, n_colour),
+        (1, 2, 15),
+        "mode 12's, as the module says"
     );
 }

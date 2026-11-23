@@ -335,38 +335,47 @@ pub trait LiveUserSpace: Send {
     /// page-table refusal, …).
     fn map_device_window(&mut self, phys_base: u64, len: usize) -> Result<u64, LiveSpaceError>;
 
-    /// Map `len` bytes of a **linear framebuffer** beginning at `phys_base`
-    /// into this space, returning the kernel-chosen base user virtual address
-    /// of the new, guard-bracketed, non-executable window.
+    /// Map `len` bytes of a write-mostly aperture beginning at `phys_base`
+    /// into this space as guard-bracketed, non-executable, write-combining
+    /// memory, returning the kernel-chosen base user virtual address.
     ///
     /// Identical guard-bracketed slot mechanism as [`Self::map_device_window`],
-    /// but the scan-out pages are mapped non-cacheable **Normal** memory
-    /// instead of Device-strongly-ordered: a framebuffer is bulk pixel memory
-    /// the CPU fills a whole frame at a time and the display engine reads back
-    /// as a DMA master, so the slow per-access Device ordering registers need
-    /// is exactly wrong for it (a full-frame blit of Device memory costs tens
-    /// of seconds under emulation). The producer has already resolved and
-    /// validated the framebuffer grant the window comes from (owner-checked,
+    /// but the pages are not Device-strongly-ordered: a display aperture is
+    /// bulk pixel memory the CPU fills a whole frame at a time and the display
+    /// engine reads back as a DMA master, so the slow per-access ordering
+    /// registers need is exactly wrong for it (a full-frame blit of Device
+    /// memory costs tens of seconds under emulation). The producer has already
+    /// resolved and validated the grant the window comes from (owner-checked,
     /// kind, length); this only performs the page-table mechanism.
     ///
     /// # Errors
     ///
     /// [`LiveSpaceError::Mmio`] carrying the precise [`MmioError`] (no free
     /// virtual slot, page-table refusal, …).
-    fn map_framebuffer_window(&mut self, phys_base: u64, len: usize)
-        -> Result<u64, LiveSpaceError>;
+    fn map_write_combining_window(
+        &mut self,
+        phys_base: u64,
+        len: usize,
+    ) -> Result<u64, LiveSpaceError>;
 
-    /// Map a linear framebuffer backed by ordinary coherent RAM as
+    /// Map `len` bytes of memory the device keeps coherent with the CPU — a
+    /// framebuffer in ordinary RAM, a device's memory region — as
     /// guard-bracketed, non-executable, write-back memory.
     ///
     /// # Errors
     ///
     /// [`LiveSpaceError::Mmio`] carrying the precise [`MmioError`].
-    fn map_writeback_framebuffer_window(
-        &mut self,
-        phys_base: u64,
-        len: usize,
-    ) -> Result<u64, LiveSpaceError>;
+    fn map_writeback_window(&mut self, phys_base: u64, len: usize) -> Result<u64, LiveSpaceError>;
+
+    /// Unmap the device window based at `base_va`, returning how many pages
+    /// it held, once its entries are gone from the page table and from every
+    /// CPU's TLB. The frames are the device's, so nothing is freed.
+    ///
+    /// # Errors
+    ///
+    /// [`LiveSpaceError::Mmio`] — [`MmioError::UnknownRegion`] when
+    /// `base_va` is not where a live window begins, which unmaps nothing.
+    fn unmap_device_window(&mut self, base_va: u64) -> Result<u64, LiveSpaceError>;
 
     /// Unmap every device and framebuffer window whose physical span `keep`
     /// refuses, handing each released window's page-aligned base and page
@@ -1349,7 +1358,7 @@ where
         Ok(region.virt().as_u64())
     }
 
-    fn map_framebuffer_window(
+    fn map_write_combining_window(
         &mut self,
         phys_base: u64,
         len: usize,
@@ -1360,15 +1369,18 @@ where
         Ok(region.virt().as_u64())
     }
 
-    fn map_writeback_framebuffer_window(
-        &mut self,
-        phys_base: u64,
-        len: usize,
-    ) -> Result<u64, LiveSpaceError> {
+    fn map_writeback_window(&mut self, phys_base: u64, len: usize) -> Result<u64, LiveSpaceError> {
         let region = self
             .mmio
             .map_cacheable_into(&mut self.space, phys_base, len)?;
         Ok(region.virt().as_u64())
+    }
+
+    fn unmap_device_window(&mut self, base_va: u64) -> Result<u64, LiveSpaceError> {
+        self.mmio
+            .unmap_at(&mut self.space, VirtAddr::new(base_va))
+            .map(|pages| pages as u64)
+            .map_err(LiveSpaceError::from)
     }
 
     fn retain_device_windows(
@@ -1458,6 +1470,7 @@ where
         // region.
         self.shared
             .unmap_at(&mut self.space, VirtAddr::new(base_va))
+            .map(|_| ())
             .map_err(LiveSpaceError::from)
     }
 
@@ -2194,7 +2207,7 @@ mod tests {
             .map_device_window(0xFE98_0000, 0x1000)
             .expect("a free slot exists");
         let revoked = live
-            .map_framebuffer_window(0xFEA0_0100, 0x2000)
+            .map_write_combining_window(0xFEA0_0100, 0x2000)
             .expect("a free slot exists");
         let mut released = std::vec::Vec::new();
         live.retain_device_windows(
@@ -2217,6 +2230,42 @@ mod tests {
         assert!(
             live.translate_page(page_at(kept).unwrap()).is_some(),
             "the kept window stays"
+        );
+    }
+
+    #[test]
+    fn an_unmapped_window_is_gone_and_its_slots_are_mapped_again() {
+        let mut live = live_space!();
+        let page_at = |va: u64| Page::from_addr(VirtAddr::new(va)).unwrap();
+        let region = live
+            .map_writeback_window(0x1_0000_0000, 0x2000)
+            .expect("a free slot exists");
+        let device = live
+            .map_device_window(0xFE98_0000, 0x1000)
+            .expect("a free slot exists");
+        assert_eq!(live.unmap_device_window(region), Ok(2));
+        for page in 0..2 {
+            assert_eq!(
+                live.translate_page(page_at(region + page * PAGE_SIZE as u64)),
+                None
+            );
+        }
+        assert!(
+            live.translate_page(page_at(device)).is_some(),
+            "another window stays"
+        );
+        assert!(matches!(
+            live.unmap_device_window(region),
+            Err(LiveSpaceError::Mmio(crate::mmio::MmioError::UnknownRegion))
+        ));
+        assert!(matches!(
+            live.unmap_device_window(device + 8),
+            Err(LiveSpaceError::Mmio(crate::mmio::MmioError::UnknownRegion))
+        ));
+        assert_eq!(
+            live.map_writeback_window(0x1_0000_2000, 0x2000),
+            Ok(region),
+            "the first fit is the run handed back"
         );
     }
 

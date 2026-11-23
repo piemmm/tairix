@@ -6,19 +6,21 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_spirv::{Access, EntryPoint, SpecValue, Stage, Varying};
+use tairix_spirv::{Access, EntryPoint, SpecValue, Stage, Varying, MAX_SPECIALIZED};
 
 use crate::backend::Backend;
 use crate::binding::{PipelineLayout, ShaderModule};
-use crate::device::{owned, Context, Shared};
+use crate::device::{Context, Shared};
 use crate::format::{Aspects, Format, FormatFeatures};
+use crate::host::owned;
 use crate::info::{DeviceInfo, Features};
 use crate::model::{
     shared_bytes, ContextKey, ContextState, Model, PipelineLayoutKey, Pipelines, RenderPipelineKey,
     ShaderModuleKey,
 };
 use crate::pipeline::{plan_stage, PipelineState, Released, StagePlan};
-use crate::{CompareOp, Error, MAX_PASS_ATTACHMENTS};
+use crate::wire::{put_name, take_name, Reader, Wire, Writer};
+use crate::{CompareOp, Error, MAX_DRAW_VERTEX_BUFFERS, MAX_PASS_ATTACHMENTS};
 
 pub use tairix_raster::{Blend, BlendFactor, BlendOp, DepthBias, LogicOp, StencilOp};
 
@@ -326,6 +328,144 @@ pub(crate) struct RenderRequest<'a> {
     pub(crate) state: FixedState<'a>,
 }
 
+/// A stage of a render pipeline as it arrived, owning what its request
+/// borrows.
+struct OwnedStage {
+    module: ShaderModuleKey,
+    entry_point: alloc::string::String,
+    specialization: Vec<SpecValue>,
+}
+
+impl OwnedStage {
+    fn take(reader: &mut Reader<'_>) -> Result<Self, Error> {
+        Ok(Self {
+            module: Wire::take(reader)?,
+            entry_point: take_name(reader)?,
+            specialization: reader.list(MAX_SPECIALIZED, Wire::take)?,
+        })
+    }
+
+    fn request(&self) -> StageRequest<'_> {
+        StageRequest {
+            module: self.module,
+            entry_point: &self.entry_point,
+            specialization: &self.specialization,
+        }
+    }
+}
+
+fn put_stage(writer: &mut Writer<'_>, stage: &StageRequest<'_>) -> Result<(), Error> {
+    stage.module.put(writer)?;
+    put_name(writer, stage.entry_point)?;
+    writer.list(stage.specialization, |writer, value| value.put(writer))
+}
+
+/// A render pipeline's request as it arrived at a served device, owning what
+/// the request borrows.
+pub(crate) struct OwnedRender {
+    layout: PipelineLayoutKey,
+    vertex: OwnedStage,
+    fragment: Option<OwnedStage>,
+    vertex_buffers: Vec<(u32, VertexStep, Vec<VertexAttribute>)>,
+    topology: Topology,
+    primitive_restart: bool,
+    rasterization: Rasterization,
+    depth_stencil: Option<DepthStencilState>,
+    multisample: Multisample,
+    targets: Vec<ColourTarget>,
+    logic_op: Option<LogicOp>,
+}
+
+impl OwnedRender {
+    pub(crate) fn take(reader: &mut Reader<'_>) -> Result<Self, Error> {
+        Ok(Self {
+            layout: Wire::take(reader)?,
+            vertex: OwnedStage::take(reader)?,
+            fragment: if bool::take(reader)? {
+                Some(OwnedStage::take(reader)?)
+            } else {
+                None
+            },
+            vertex_buffers: reader.list(MAX_DRAW_VERTEX_BUFFERS, |reader| {
+                Ok((
+                    u32::take(reader)?,
+                    VertexStep::take(reader)?,
+                    reader.list(MAX_VERTEX_ATTRIBUTES as usize, Wire::take)?,
+                ))
+            })?,
+            topology: Wire::take(reader)?,
+            primitive_restart: Wire::take(reader)?,
+            rasterization: Wire::take(reader)?,
+            depth_stencil: Wire::take(reader)?,
+            multisample: Wire::take(reader)?,
+            targets: reader.list(MAX_PASS_ATTACHMENTS, Wire::take)?,
+            logic_op: Wire::take(reader)?,
+        })
+    }
+
+    /// Run `make` over the request this describes.
+    pub(crate) fn with_request<R>(
+        &self,
+        make: impl FnOnce(&RenderRequest<'_>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let mut vertex_buffers = Vec::new();
+        vertex_buffers
+            .try_reserve_exact(self.vertex_buffers.len())
+            .map_err(|_| Error::OutOfMemory)?;
+        for (stride, step, attributes) in &self.vertex_buffers {
+            vertex_buffers.push(VertexBuffer {
+                stride: *stride,
+                step: *step,
+                attributes,
+            });
+        }
+        make(&RenderRequest {
+            layout: self.layout,
+            vertex: self.vertex.request(),
+            fragment: self.fragment.as_ref().map(OwnedStage::request),
+            state: FixedState {
+                vertex_buffers: &vertex_buffers,
+                topology: self.topology,
+                primitive_restart: self.primitive_restart,
+                rasterization: self.rasterization,
+                depth_stencil: self.depth_stencil,
+                multisample: self.multisample,
+                targets: &self.targets,
+                logic_op: self.logic_op,
+            },
+        })
+    }
+}
+
+/// Write `request` as [`OwnedRender::take`] reads it.
+pub(crate) fn put_render(
+    writer: &mut Writer<'_>,
+    request: &RenderRequest<'_>,
+) -> Result<(), Error> {
+    request.layout.put(writer)?;
+    put_stage(writer, &request.vertex)?;
+    match &request.fragment {
+        None => false.put(writer)?,
+        Some(fragment) => {
+            true.put(writer)?;
+            put_stage(writer, fragment)?;
+        }
+    }
+    let state = &request.state;
+    writer.list(state.vertex_buffers, |writer, buffer| {
+        buffer.stride.put(writer)?;
+        buffer.step.put(writer)?;
+        writer.list(buffer.attributes, |writer, attribute| attribute.put(writer))
+    })?;
+    state.topology.put(writer)?;
+    state.primitive_restart.put(writer)?;
+    state.rasterization.put(writer)?;
+    state.depth_stencil.put(writer)?;
+    state.multisample.put(writer)?;
+    writer.list(state.targets, |writer, target| target.put(writer))?;
+    state.logic_op.put(writer)
+}
+
 impl<'a> RenderRequest<'a> {
     fn of(desc: &RenderPipelineDesc<'a>) -> Self {
         let stage = |stage: &StageDesc<'a>| StageRequest {
@@ -394,23 +534,18 @@ impl Context {
     ) -> Result<RenderPipeline, Error> {
         for stage in core::iter::once(&desc.vertex).chain(&desc.fragment) {
             owned(
-                &stage.module.shared,
+                &stage.module.host,
                 stage.module.context,
-                &self.shared,
+                &self.host,
                 self.key,
             )?;
         }
-        owned(
-            &desc.layout.shared,
-            desc.layout.context,
-            &self.shared,
-            self.key,
-        )?;
+        owned(&desc.layout.host, desc.layout.context, &self.host, self.key)?;
         let key = self
-            .shared
+            .host
             .create_render_pipeline(self.key, &RenderRequest::of(desc))?;
         Ok(RenderPipeline {
-            shared: Arc::clone(&self.shared),
+            host: Arc::clone(&self.host),
             context: self.key,
             key,
         })
@@ -756,8 +891,7 @@ handle!(
     /// state they run through, ready to draw.
     RenderPipeline,
     RenderPipelineKey,
-    destroy_render_pipeline,
-    releasing
+    RenderPipeline
 );
 
 #[cfg(test)]

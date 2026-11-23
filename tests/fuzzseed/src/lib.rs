@@ -50,6 +50,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tairix_mix::SplitMix64;
+use tairix_util::divisor::gcd;
 
 /// Seed environment variable the `cargo xtask fuzz` orchestrator exports and
 /// the fuzz harnesses read.
@@ -243,15 +244,6 @@ pub fn budget_slices(deadline: Option<Instant>, parts: u32) -> impl Fn(u32) -> O
     let start = Instant::now();
     let share = deadline.map(|deadline| deadline.saturating_duration_since(start) / parts.max(1));
     move |part| share.map(|share| start + share * part.min(parts))
-}
-
-/// Greatest common divisor (Euclid), used to pick a stride that makes the
-/// [`budgeted_sweep`] order a full permutation.
-fn gcd(mut a: usize, mut b: usize) -> usize {
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    a
 }
 
 /// Visit every index in `0..len` exactly once, in a seeded pseudo-random

@@ -68,7 +68,7 @@ an application's own documents folder, the reference harness);
 | RO20.6 | The remaining commands: `AUTO`, `RENUMBER`, `DELETE`, `HELP`, and `EDIT`, which starts the separate ARM BASIC Editor module as RISC OS 5's BASIC does | done |
 | RO21.1 | The VDU drivers, each rule recorded first: modes, the VDU stream, `OS_Plot`, palettes, screen banks, screen memory, Teletext, the pointer, the ScreenModes module | done |
 | RO21.2 | Segments (`PLOT` &A8–&AF): the chord rule as recorded, with the known difference at some chord ends that §8 states | done |
-| RO22.1 | Sprite areas and sprites: `lib/image`'s sprite structures the one definition; the system area as dynamic area 3 with `OS_Byte` 163 and `VDU 23,27`; every non-plotting `OS_SpriteOp` reason, files and taking from the screen | done |
+| RO22.1 | Sprite areas and sprites: `lib/image`'s sprite layouts, types and mode word forms the one definition, the pixels a mode word gives read by RISC OS 5.30's recorded rules; the system area as dynamic area 3 with `OS_Byte` 163 and `VDU 23,27`; every non-plotting `OS_SpriteOp` reason, files and taking from the screen | done |
 | RO22.2 | Output to a sprite or its mask (60–62): every drawing path writing the destination's own form, save areas, `Service_SwitchingOutputToSprite` | done |
 | RO22.3 | Plotting: the kernel's plots, SpriteExtend's scaled, tiled and transformed plots with translation tables, alpha and colour mapping, `PLOT` &E8–&EF, pointer shapes, screen save and load, with the known differences §8 states | done |
 | RO22.4 | SpriteExtend's JPEG SWIs through `lib/image`'s decoder, the stored raster unturned | done |
@@ -1175,9 +1175,14 @@ is fuzzed.
   screen.
 - **Sprites** (RO22):
   - `OS_SpriteOp`, every reason, on system and user areas by name or pointer.
-    Areas, headers, mode words, palettes and masks are read through `lib/image`'s
-    sprite structures. An area is held to its block before it is walked; one
-    that does not hold together is refused where RISC OS 5 reads on.
+    Areas', headers' and mode words' layouts and forms are `lib/image`'s sprite
+    structures; the pixels a mode word gives are read by RISC OS 5.30's recorded
+    rules. An area is held to its block before it is walked, and a sprite held
+    whole — its bits, its blocks within it, memory behind it — before it is
+    plotted or reshaped, reasons 41 to 44 taking its control block as it stands
+    as RISC OS 5's do; one that does not hold together is refused where RISC OS
+    5 reads on, a change reads its control block again once a module has
+    answered for its mode, and a change is checked whole before it is begun.
   - Plotting is the emulator's own path into the destination's format: masked,
     scaled and transformed, with translation tables, alpha and colour mapping,
     each pixel rule pinned by recorded observation. Onto a deep destination a

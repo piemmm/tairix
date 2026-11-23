@@ -1001,7 +1001,11 @@ its `bar.base + offset` physical address and `length`, and
 `CAP_MMIO_MAP`-gated `MmioMapper`. The `bar_offset + length` span is
 bounds-checked against the resolved BAR size before the mapping request,
 so a malformed capability fails closed (`OutOfRange`) rather than
-mapping past the device's window.
+mapping past the device's window. A capability whose `cap_len` is shorter
+than its layout — 16 bytes, 20 for the notify structure, 24 for a
+shared-memory region — names nothing and is surfaced as
+`Capability::Other`, since the bytes past its end belong to whatever
+follows it.
 `Pci::virtio_notify_off_multiplier(bdf)` returns the notification
 scale from the notify capability. The four windows plus the
 multiplier are exactly what `PciTransport::new` consumes, so a

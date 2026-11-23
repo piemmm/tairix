@@ -197,3 +197,23 @@ fn an_exact_reservation_grows_the_storage_by_what_it_says_beforehand() {
     map.try_reserve_exact(1).expect("room");
     assert_eq!(map.held_bytes(), grows, "nothing grew for a vacant slot");
 }
+
+#[test]
+fn a_key_crosses_as_one_word_and_names_what_it_named() {
+    let mut map = map();
+    let first = map.try_insert(1).expect("room");
+    map.remove(first);
+    let second = map.try_insert(2).expect("room");
+    for key in [first, second] {
+        assert_eq!(SlotKey::from_bits(key.to_bits()), Some(key));
+    }
+    assert_eq!(second.index(), first.index(), "the slot is shared");
+    assert_ne!(first.to_bits(), second.to_bits(), "by generation");
+    let spelled = SlotKey::from_bits(first.to_bits()).expect("a key");
+    assert_eq!(map.get(spelled), None, "a stale key names nothing");
+    assert_eq!(
+        SlotKey::from_bits(5 << 32),
+        None,
+        "no map issues generation zero"
+    );
+}

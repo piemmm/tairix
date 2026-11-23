@@ -27,10 +27,15 @@ tairix-vdu = { path = "../../../../../lib/vdu", version = "=0.0.0" }
 tairix-image = { path = "../../../../../lib/image", version = "=0.0.0" }
 # Mode 7's character generator.
 tairix-teletext = { path = "../../../../../lib/teletext", version = "=0.0.0" }
-# Fallible containers for the flood fill's spans and loaded mode files.
+# The bit sets the flood fill and the display mark rows in.
 tairix-collections = { path = "../../../../../lib/collections", version = "=0.0.0" }
-# A number written out for a message's parameter.
+# Numbers written out, and the fallible buffers rows are copied through.
 tairix-util = { path = "../../../../../lib/util", version = "=0.0.0" }
+# Bayer's ordered-dither order, which a two-colour pattern turns its cells on
+# in.
+tairix-raster = { path = "../../../../../lib/raster", version = "=0.0.0" }
+# The longest command line, which a saved calibration's lines keep within.
+tairix-obey = { path = "../../../../../lib/obey", version = "=0.0.0" }
 
 [dev-dependencies]
 # The seeded generator the fuzz harness draws from.

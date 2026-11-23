@@ -57,8 +57,7 @@ pub fn render_mac(mac: [u8; 6]) -> String {
         if index > 0 {
             out.push(':');
         }
-        out.push(hex_digit(byte >> 4));
-        out.push(hex_digit(byte & 0xF));
+        out.extend(tairix_util::hex::digits(*byte).map(char::from));
     }
     out
 }
@@ -93,10 +92,6 @@ pub fn render_neighbor(neighbor: &NetNeighborRecord) -> String {
     out.push_str(neighbor.state.name());
     out.push(')');
     out
-}
-
-fn hex_digit(nibble: u8) -> char {
-    char::from(b"0123456789abcdef"[usize::from(nibble & 0xF)])
 }
 
 /// The first four bytes of an address slot as dotted-quad text.

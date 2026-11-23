@@ -97,6 +97,13 @@ use tairix_caps::CapabilitySet;
 ///   sandboxes, no mapping is ever writable and executable, and a compiler
 ///   serves one target for its life — so its holder can run generated code
 ///   neither in itself nor in any process holding authority.
+/// * `CAP_GPU` — call a served GPU's device channel: make contexts on the
+///   device, and memory, objects and work in them. Baseline because using
+///   the GPU is no more an administrative act than drawing a window: a
+///   context reaches only what it was given, is charged for what it makes
+///   against a limit the serving driver sets, and a client holds a bounded
+///   number of them, so its holder can spend neither another's memory nor
+///   the device's for every other.
 /// * `CAP_NET` — ordinary network use: opening datagram sockets and
 ///   originating/receiving transport traffic through the `netstack`
 ///   socket surface (`plans/NETWORK.md` §0). Baseline because using the
@@ -142,6 +149,7 @@ pub const SESSION_BASELINE: &[CapabilityId] = &[
     CapabilityId::SHM,
     CapabilityId::DESKTOP_LAYER,
     CapabilityId::JIT_MAP_EXEC,
+    CapabilityId::GPU,
     CapabilityId::NET,
     CapabilityId::LOG_EMIT,
 ];
@@ -547,7 +555,7 @@ mod tests {
     #[test]
     fn session_baseline_is_pinned() {
         let set = session_baseline();
-        assert_eq!(set.len(), 12);
+        assert_eq!(set.len(), 13);
         for cap in [
             CapabilityId::FS_ACCESS,
             CapabilityId::PROC_SPAWN,
@@ -559,6 +567,7 @@ mod tests {
             CapabilityId::SHM,
             CapabilityId::DESKTOP_LAYER,
             CapabilityId::JIT_MAP_EXEC,
+            CapabilityId::GPU,
             CapabilityId::NET,
             CapabilityId::LOG_EMIT,
         ] {
@@ -569,7 +578,7 @@ mod tests {
     #[test]
     fn administrator_ceiling_is_pinned() {
         let set = administrator_ceiling();
-        assert_eq!(set.len(), 33);
+        assert_eq!(set.len(), 34);
         for cap in SESSION_BASELINE {
             assert!(set.contains(*cap), "{cap:?} missing from the ceiling");
         }

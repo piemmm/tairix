@@ -562,6 +562,14 @@ mod tests {
         fn notify_off_multiplier(&self, _bdf: u64) -> Result<u32, DriverError> {
             Err(DriverError::Unsupported)
         }
+
+        fn virtio_shared_memory(
+            &self,
+            _bdf: u64,
+            _out: &mut [tairix_abi::driver::virtio_pci::VirtioSharedMemory],
+        ) -> Result<usize, DriverError> {
+            Ok(0)
+        }
     }
 
     impl MsixBus for CommandBus {

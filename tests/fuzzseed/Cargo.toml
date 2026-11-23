@@ -24,6 +24,8 @@ proptest = ["dep:proptest"]
 [dependencies]
 # SplitMix64, the generator every seeded draw is.
 tairix-mix = { path = "../../lib/mix", version = "=0.0.0" }
+# The greatest common divisor a sweep's stride is chosen by.
+tairix-util = { path = "../../lib/util", version = "=0.0.0" }
 # Optional: only the stateful-model harnesses enable the `proptest`
 # feature. Same pinned, already-audited version the model crates use as a
 # dev-dependency. Test scaffolding only — never in a TAIRiX build.

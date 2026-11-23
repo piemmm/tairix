@@ -79,6 +79,8 @@ pub const CHANGE_ENVIRONMENT: Vector = Vector(0x1E);
 pub const SPRITE: Vector = Vector(0x1F);
 /// `ColourV`: every ColourTrans SWI, its offset in R8.
 pub const COLOUR: Vector = Vector(0x22);
+/// `PaletteV`: the palette read and written for the VDU drivers.
+pub const PALETTE: Vector = Vector(0x23);
 /// `SerialV`.
 pub const SERIAL: Vector = Vector(0x24);
 /// `GraphicsV`.

@@ -12,14 +12,14 @@
 
 use tairix_image::{SpriteName, SPRITE_HEADER_LEN, SPRITE_PALETTE_ENTRY_LEN};
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
-use tairix_vdu::mode::{repeated, Flags};
+use tairix_vdu::mode::repeated;
 
 use super::area::{read_name, Area, Naming};
-use super::create::{new_palette_entries, write_screen_palette, Shape};
+use super::create::{new_palette_entries, screen_palette, Shape};
 use super::edit::set_field;
 use super::format::{self, Pixels, BAD_SPRITE_MODE};
 use super::header::{advanced, Sprite};
-use super::{system, FULL_PALETTE, NO_DEEP_NEW_PALETTE, NO_MEMORY, NO_ROOM};
+use super::{system, FULL_PALETTE, NO_DEEP_NEW_PALETTE, NO_ROOM};
 use crate::canvas::Canvas;
 use crate::changed::Rect;
 use crate::colour::Colours;
@@ -116,7 +116,7 @@ impl Grab {
                 ),
             };
             let back = Colours::gcol_pixel(&format, &vdu.colours.back) & format.pixel_mask();
-            let palette = if format.log2_bpp() == 3 && format.has(Flags::FULL_PALETTE) {
+            let palette = if format.full_palette() {
                 FULL_PALETTE
             } else {
                 new_palette_entries(&pixels)
@@ -178,6 +178,7 @@ impl Grab {
         area: Area,
         name: SpriteName,
     ) -> Result<Sprite, Fail> {
+        let screen = screen_palette(os, self.entries)?;
         if let Some(old) = area.find(os, &name)? {
             area.remove(os, &old)?;
         }
@@ -199,7 +200,7 @@ impl Grab {
             mode: self.source.word,
         };
         sprite.write(os)?;
-        write_screen_palette(os, &sprite, self.entries)?;
+        os.write_bytes(sprite.address(SPRITE_HEADER_LEN), &screen)?;
         copy_rows(os, &self.source, &sprite, self.top_left, self.width)?;
         Ok(sprite)
     }
@@ -221,14 +222,8 @@ fn copy_rows(
     width: u32,
 ) -> Result<(), Fail> {
     let stride = sprite.stride();
-    let length = usize::try_from(stride).map_err(|_| os.error(NO_MEMORY))?;
-    let mut background = alloc::vec::Vec::new();
-    let mut row = alloc::vec::Vec::new();
-    if background.try_reserve_exact(length).is_err() || row.try_reserve_exact(length).is_err() {
-        return Err(os.error(NO_MEMORY));
-    }
-    background.resize(length, 0);
-    row.resize(length, 0);
+    let mut background = super::edit::row_buffer(os, stride)?;
+    let mut row = super::edit::row_buffer(os, stride)?;
     let field = source.pixels.field_bits();
     let first = first_pixel(sprite.first_bit, &source.pixels);
     for p in first..first.saturating_add(width) {

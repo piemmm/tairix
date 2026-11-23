@@ -21,7 +21,7 @@ use crate::data::{DataDisplay, DataRow};
 use crate::display::Display;
 use crate::document::Document;
 use crate::editor::Mode;
-use crate::hex::{self, HexCaret, HexLayout, Nibble, Pane, BYTES_PER_ROW};
+use crate::hex::{HexCaret, HexLayout, Nibble, Pane, BYTES_PER_ROW};
 use crate::highlight::Stopped;
 use crate::layout::{Faces, Layout};
 use crate::text::{self, Glyph, Row};
@@ -595,7 +595,7 @@ impl<'a> HexRows<'a> {
                     }
                 }
                 let ink = byte_ink(byte, self.palette);
-                let pair = hex::hex_pair(byte);
+                let pair = tairix_util::hex::upper_digits(byte);
                 if let (true, Ok(text)) = (self.shown(hex_column, 2), core::str::from_utf8(&pair)) {
                     font.draw_text(surface, self.x_of(hex_column), y, text, ink);
                 }

@@ -8,8 +8,6 @@ use tairix_riscos_arm::mmu::PAGE_SIZE;
 use tairix_riscos_kernel::memory::handler_reason as reason;
 use tairix_riscos_kernel::memory::{AreaFlags, Bits, Create};
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
-use tairix_riscos_kernel::swi::os::READ_DYNAMIC_AREA;
-use tairix_riscos_kernel::swi::X;
 use tairix_vdu::mode::Flags;
 
 use crate::canvas::Canvas;
@@ -181,11 +179,7 @@ impl Screen {
 /// drivers' routine at `handler`, every page watched for the display; its
 /// base and size.
 pub(crate) fn make_area(os: &mut Os<'_>, size: u32, handler: u32) -> Result<(u32, u32), Fail> {
-    let caller = if os.layout().admits_26bit {
-        Bits::Bit26
-    } else {
-        Bits::Bit32
-    };
+    let caller = os.layout().kernel_bits();
     let most = if caller == Bits::Bit26 {
         MOST_26BIT
     } else {
@@ -204,14 +198,7 @@ pub(crate) fn make_area(os: &mut Os<'_>, size: u32, handler: u32) -> Result<(u32
         caller,
     })?;
     os.watch_area_for_display(AREA)?;
-    area(os)
-}
-
-/// The area's base and size as they are now.
-pub(crate) fn area(os: &mut Os<'_>) -> Result<(u32, u32), Fail> {
-    let mut regs = Regs::new([AREA, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    os.perform(X | READ_DYNAMIC_AREA, &mut regs)?;
-    Ok((regs.r[0], regs.r[1] & 0x7FFF_FFFF))
+    os.area_extent(AREA)
 }
 
 /// The area's handler: a shrink is held to what the current screen does not
@@ -228,7 +215,7 @@ pub(crate) fn area_handler(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail>
             }
         }
         reason::POST_GROW | reason::POST_SHRINK => {
-            let (base, size) = area(os)?;
+            let (base, size) = os.area_extent(AREA)?;
             let _ = read(os, |vdu, _| {
                 let screen = &mut vdu.screen;
                 screen.base = base;

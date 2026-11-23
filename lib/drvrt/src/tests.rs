@@ -1,7 +1,7 @@
 //! Host tests for [`RtDriverHost`] over a stateful mock [`GrantSyscalls`].
 //!
 //! The mock backs each MMIO grant handle with a real, owned byte buffer and
-//! returns its base as the "mapped" VA, so a [`RegisterWindow`] the host
+//! answers its base as the mapping's, so a [`RegisterWindow`] the host
 //! builds reads and writes the right bytes at the right offset. DMA carves
 //! are backed the same way. This exercises the host's grant resolution,
 //! bus→CPU translation, map-once caching, and fail-closed paths without a
@@ -16,11 +16,14 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 
 use super::*;
+use crate::syscalls::kernel_mapping;
 use core::cell::{Cell, RefCell};
+use core::ptr::NonNull;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use tairix_abi::driver::dma::{DmaHost, DmaReach, SlabCoherencyFn};
-use tairix_abi::driver::CompletionSignal;
+use tairix_abi::driver::{CompletionSignal, MemoryMapper, RegionCaching};
 use tairix_abi::hwtree::{HwProperty, HwResource};
 use tairix_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapError, MmioMapper,
@@ -47,15 +50,19 @@ struct Page([u8; 4096]);
 
 /// A mock mapping's memory, page-aligned as every kernel mapping is, so a
 /// register access through it is aligned exactly as on hardware.
+///
+/// Every pointer it answers derives from one base, as a kernel mapping's
+/// addresses do, so a later mapping of it never invalidates an earlier one.
 struct Mapping {
-    pages: Box<[Page]>,
+    pages: NonNull<[Page]>,
     len: usize,
 }
 
 impl Mapping {
     fn zeroed(len: usize) -> Self {
+        let pages = vec![Page([0; 4096]); len.div_ceil(4096)].into_boxed_slice();
         Self {
-            pages: vec![Page([0; 4096]); len.div_ceil(4096)].into_boxed_slice(),
+            pages: NonNull::from(Box::leak(pages)),
             len,
         }
     }
@@ -64,12 +71,41 @@ impl Mapping {
         self.len
     }
 
-    fn as_ptr(&self) -> *const u8 {
-        self.pages.as_ptr().cast()
+    fn base(&self) -> NonNull<u8> {
+        self.pages.cast()
     }
 
-    fn as_mut_ptr(&mut self) -> *mut u8 {
-        self.pages.as_mut_ptr().cast()
+    /// The byte `offset` into the mapping.
+    fn at(&self, offset: usize) -> NonNull<u8> {
+        assert!(offset <= self.len, "{offset:#x} past {:#x} bytes", self.len);
+        // SAFETY: `offset` lies within the allocation, as just asserted.
+        unsafe { self.base().add(offset) }
+    }
+}
+
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        // SAFETY: `pages` is the allocation `zeroed` leaked, reclaimed once.
+        drop(unsafe { Box::from_raw(self.pages.as_ptr()) });
+    }
+}
+
+/// The address the kernel would name a mapping by, as `mmio_unmap` and
+/// `dma_free` are handed it.
+fn va(base: NonNull<u8>) -> u64 {
+    base.addr().get() as u64
+}
+
+/// The mock's release: records every `(grant, CPU base)` freed, from any
+/// thread.
+struct MockRelease {
+    frees: Arc<Mutex<Vec<(u64, u64)>>>,
+}
+
+impl DmaRelease for MockRelease {
+    fn dma_free(&self, handle: u64, cpu_va: u64) -> i64 {
+        self.frees.lock().unwrap().push((handle, cpu_va));
+        0
     }
 }
 
@@ -81,13 +117,13 @@ struct MockSyscalls {
     mmio_calls: Rc<Cell<usize>>,
     /// The `(offset, len)` of the most recent `mmio_map` call, so a test can
     /// assert the host requested only the sub-region (not the whole grant).
-    last_mmio: Rc<Cell<(u64, usize)>>,
+    last_mmio: Rc<Cell<(u64, usize, Option<RegionCaching>)>>,
     dma_calls: Rc<Cell<usize>>,
     /// The reach every `dma_alloc` stated, in call order.
     dma_reaches: Rc<RefCell<Vec<DmaReach>>>,
-    /// Every CPU base address passed to `dma_free`, in call order. Shared so a
-    /// test can assert each carve's slab freed itself on drop.
-    dma_frees: Rc<RefCell<Vec<u64>>>,
+    /// Every `(grant, CPU base)` a slab's release freed, in call order. Shared
+    /// so a test can assert each carve's slab freed itself on drop.
+    dma_frees: Arc<Mutex<Vec<(u64, u64)>>>,
     /// How many times `dma_quiesced` was called.
     quiesced_calls: Rc<Cell<usize>>,
     /// The grant set `resource_grants` delivers (the kernel-minted grants the
@@ -123,6 +159,12 @@ struct MockSyscalls {
     /// The raw signed result `hw_emit_node` returns (`0` published by
     /// default, or `-errno` to model a kernel refusal).
     emit_result: Cell<i64>,
+    /// Every base passed to `mmio_unmap`, in call order.
+    unmaps: Rc<RefCell<Vec<u64>>>,
+    /// When `Some`, `mmio_unmap` returns this `-errno`.
+    unmap_error: Cell<Option<Errno>>,
+    /// When `Some`, the length `shm_map` reports instead of its backing's.
+    shm_len: Cell<Option<u64>>,
 }
 
 impl MockSyscalls {
@@ -130,11 +172,11 @@ impl MockSyscalls {
         Self {
             backings: RefCell::new(Vec::new()),
             mmio_calls: Rc::new(Cell::new(0)),
-            last_mmio: Rc::new(Cell::new((0, 0))),
+            last_mmio: Rc::new(Cell::new((0, 0, None))),
             dma_calls: Rc::new(Cell::new(0)),
             dma_reaches: Rc::new(RefCell::new(Vec::new())),
             quiesced_calls: Rc::new(Cell::new(0)),
-            dma_frees: Rc::new(RefCell::new(Vec::new())),
+            dma_frees: Arc::new(Mutex::new(Vec::new())),
             delivered: RefCell::new(Vec::new()),
             grants_error: Cell::new(None),
             irq_line_bound: Rc::new(Cell::new(0)),
@@ -148,6 +190,9 @@ impl MockSyscalls {
             ipc_error: Cell::new(None),
             emitted: Rc::new(RefCell::new(Vec::new())),
             emit_result: Cell::new(0),
+            unmaps: Rc::new(RefCell::new(Vec::new())),
+            unmap_error: Cell::new(None),
+            shm_len: Cell::new(None),
         }
     }
 
@@ -199,12 +244,11 @@ impl MockSyscalls {
 
     /// Register a `len`-byte backing buffer for `handle`, reporting
     /// `device_base` as its device-visible base on a DMA carve. Returns the
-    /// base VA the mock will map it at (the `Box`'s heap pointer is stable
-    /// across later `Vec` growth, so the value stays valid after the mock
-    /// moves into the host).
-    fn back(&self, handle: u64, len: usize, device_base: u64) -> u64 {
+    /// base the mock maps it at, which stays valid after the mock moves into
+    /// the host.
+    fn back(&self, handle: u64, len: usize, device_base: u64) -> NonNull<u8> {
         let buffer = Mapping::zeroed(len);
-        let base = buffer.as_ptr() as usize as u64;
+        let base = buffer.base();
         self.backings.borrow_mut().push(Backing {
             handle,
             buffer,
@@ -219,8 +263,8 @@ impl MockSyscalls {
 
     /// A shared handle to the CPU bases passed to `dma_free`, read after the
     /// mock moves into the host to assert each slab freed itself on drop.
-    fn dma_frees(&self) -> Rc<RefCell<Vec<u64>>> {
-        Rc::clone(&self.dma_frees)
+    fn dma_frees(&self) -> Arc<Mutex<Vec<(u64, u64)>>> {
+        Arc::clone(&self.dma_frees)
     }
 
     /// A shared handle to the `dma_quiesced` call count.
@@ -230,7 +274,7 @@ impl MockSyscalls {
 
     /// A shared handle to the most recent `mmio_map` `(offset, len)`, read
     /// after the mock moves into the host.
-    fn last_mmio(&self) -> Rc<Cell<(u64, usize)>> {
+    fn last_mmio(&self) -> Rc<Cell<(u64, usize, Option<RegionCaching>)>> {
         Rc::clone(&self.last_mmio)
     }
 }
@@ -247,58 +291,65 @@ unsafe impl GrantSyscalls for MockSyscalls {
         })
     }
 
-    fn mmio_map(&self, handle: u64, offset: u64, len: usize) -> i64 {
+    fn mmio_map(
+        &self,
+        handle: u64,
+        offset: u64,
+        len: usize,
+        caching: Option<RegionCaching>,
+    ) -> Result<NonNull<u8>, i64> {
         self.mmio_calls.set(self.mmio_calls.get() + 1);
-        self.last_mmio.set((offset, len));
-        let mut backings = self.backings.borrow_mut();
-        match backings.iter_mut().find(|b| b.handle == handle) {
-            // Mirror the kernel: the `[offset, offset + len)` sub-region must
-            // lie wholly inside the granted backing, and the returned VA is
-            // the sub-region's base (`backing_base + offset`), never the whole
-            // window's base.
-            Some(b) => {
-                let Some(end) = offset.checked_add(len as u64) else {
-                    return -i64::from(Errno::LengthOutOfRange.as_i32());
-                };
-                if len == 0 || end > b.buffer.len() as u64 {
-                    return -i64::from(Errno::OutOfRange.as_i32());
-                }
-                b.buffer.as_mut_ptr() as usize as i64 + offset as i64
-            }
-            None => -i64::from(Errno::NotFound.as_i32()),
-        }
-    }
-
-    fn dma_alloc(&self, handle: u64, len: usize, reach: DmaReach, device_out: &mut u64) -> i64 {
-        self.dma_calls.set(self.dma_calls.get() + 1);
-        self.dma_reaches.borrow_mut().push(reach);
-        let mut backings = self.backings.borrow_mut();
-        match backings.iter_mut().find(|b| b.handle == handle) {
-            Some(b) if len <= b.buffer.len() => {
-                *device_out = b.device_base;
-                b.buffer.as_mut_ptr() as usize as i64
-            }
-            Some(_) => -i64::from(Errno::OutOfMemory.as_i32()),
-            None => -i64::from(Errno::NotFound.as_i32()),
-        }
-    }
-
-    fn dma_free(&self, handle: u64, cpu_va: u64) -> i64 {
-        // Mirror the kernel: the carve must lie inside a backing the grant
-        // names, else fail closed. Record the freed base so a test can assert
-        // each slab released itself on drop.
+        self.last_mmio.set((offset, len, caching));
         let backings = self.backings.borrow();
         match backings.iter().find(|b| b.handle == handle) {
+            // Mirror the kernel: the `[offset, offset + len)` sub-region must
+            // lie wholly inside the granted backing, and the answered base is
+            // the sub-region's, never the whole window's.
             Some(b) => {
-                let base = b.buffer.as_ptr() as usize as u64;
-                let end = base + b.buffer.len() as u64;
-                if cpu_va < base || cpu_va >= end {
-                    return -i64::from(Errno::OutOfRange.as_i32());
+                let Some(end) = offset.checked_add(len as u64) else {
+                    return Err(-i64::from(Errno::LengthOutOfRange.as_i32()));
+                };
+                if len == 0 || end > b.buffer.len() as u64 {
+                    return Err(-i64::from(Errno::OutOfRange.as_i32()));
                 }
-                self.dma_frees.borrow_mut().push(cpu_va);
-                0
+                Ok(b.buffer.at(offset as usize))
             }
-            None => -i64::from(Errno::NotFound.as_i32()),
+            None => Err(-i64::from(Errno::NotFound.as_i32())),
+        }
+    }
+
+    fn mmio_unmap(&self, base: u64) -> i64 {
+        self.unmaps.borrow_mut().push(base);
+        self.unmap_error
+            .get()
+            .map_or(0, |err| -i64::from(err.as_i32()))
+    }
+
+    fn dma_alloc(
+        &self,
+        handle: u64,
+        len: usize,
+        reach: DmaReach,
+        device_out: &mut u64,
+    ) -> Result<NonNull<u8>, i64> {
+        self.dma_calls.set(self.dma_calls.get() + 1);
+        self.dma_reaches.borrow_mut().push(reach);
+        let backings = self.backings.borrow();
+        match backings.iter().find(|b| b.handle == handle) {
+            Some(b) if len <= b.buffer.len() => {
+                *device_out = b.device_base;
+                Ok(b.buffer.base())
+            }
+            Some(_) => Err(-i64::from(Errno::OutOfMemory.as_i32())),
+            None => Err(-i64::from(Errno::NotFound.as_i32())),
+        }
+    }
+
+    type Release = MockRelease;
+
+    fn dma_release(&self) -> MockRelease {
+        MockRelease {
+            frees: Arc::clone(&self.dma_frees),
         }
     }
 
@@ -352,19 +403,19 @@ unsafe impl GrantSyscalls for MockSyscalls {
         n as i64
     }
 
-    fn shm_map(&self, handle: u64, len_out: &mut u64) -> i64 {
-        // Map the whole granted shared region: return its backing buffer's
-        // base VA and report its length, mirroring the kernel mapping the
+    fn shm_map(&self, handle: u64, len_out: &mut u64) -> Result<NonNull<u8>, i64> {
+        // Map the whole granted shared region: answer its backing buffer's
+        // base and report its length, mirroring the kernel mapping the
         // region's frames into the caller and writing the registry's own
         // record of the size. An unknown handle fails closed `NotFound`
         // with `len_out` untouched.
-        let mut backings = self.backings.borrow_mut();
-        match backings.iter_mut().find(|b| b.handle == handle) {
+        let backings = self.backings.borrow();
+        match backings.iter().find(|b| b.handle == handle) {
             Some(b) => {
-                *len_out = b.buffer.len() as u64;
-                b.buffer.as_mut_ptr() as usize as i64
+                *len_out = self.shm_len.get().unwrap_or(b.buffer.len() as u64);
+                Ok(b.buffer.base())
             }
-            None => -i64::from(Errno::NotFound.as_i32()),
+            None => Err(-i64::from(Errno::NotFound.as_i32())),
         }
     }
 
@@ -441,7 +492,7 @@ fn maps_a_register_block_at_offset_zero() {
     assert_eq!(window.phys_base(), REGS_BASE);
     // A write through the window lands in the backing buffer at offset 0.
     window.write_u32(0, 0xDEAD_BEEF).expect("in-bounds write");
-    let readback = unsafe { (base as *const u32).read() };
+    let readback = unsafe { base.cast::<u32>().read() };
     assert_eq!(readback, 0xDEAD_BEEF);
 }
 
@@ -456,7 +507,7 @@ fn maps_a_sub_window_at_a_nonzero_offset() {
     assert_eq!(window.phys_base(), REGS_BASE + 0x100);
     window.write_u32(0, 0x0102_0304).expect("write");
     // The byte landed 0x100 into the backing buffer.
-    let readback = unsafe { (base as *const u32).byte_add(0x100).read() };
+    let readback = unsafe { base.byte_add(0x100).cast::<u32>().read() };
     assert_eq!(readback, 0x0102_0304);
 }
 
@@ -496,7 +547,7 @@ fn maps_a_framebuffer_scanout_window() {
     assert_eq!(window.phys_base(), FB_BASE);
     assert_eq!(window.len(), len);
     window.write_u32(0, 0x00FF_00FF).expect("in-bounds write");
-    let readback = unsafe { (base as *const u32).read() };
+    let readback = unsafe { base.cast::<u32>().read() };
     assert_eq!(readback, 0x00FF_00FF);
 }
 
@@ -520,14 +571,14 @@ fn translates_a_bar_inside_the_outbound_bus_window() {
     assert_eq!(window.phys_base(), bar_pcie);
     window.write_u32(0, 0xCAFE_F00D).expect("write");
     // The CPU access lands at the same offset into the mapped CPU window.
-    let readback = unsafe { (base as *const u32).byte_add(0x1_0000).read() };
+    let readback = unsafe { base.byte_add(0x1_0000).cast::<u32>().read() };
     assert_eq!(readback, 0xCAFE_F00D);
     // The host asked the kernel to map ONLY the BAR sub-region — its offset
     // into the outbound window and the BAR length — never the whole (here
     // 64 MiB, on metal 1 GiB) bus aperture. Mapping the whole grant is the
     // defect that exhausted the per-task MMIO window and failed closed with
     // `OutOfMemory`.
-    assert_eq!(last_mmio.get(), (0x1_0000, 0x1000));
+    assert_eq!(last_mmio.get(), (0x1_0000, 0x1000, None));
 }
 
 #[test]
@@ -729,14 +780,14 @@ fn dma_slab_frees_itself_on_drop_and_repeated_cycles_do_not_leak() {
     {
         let _slab = host.alloc_dma_zeroed(0x1000).expect("carve");
         assert!(
-            frees.borrow().is_empty(),
+            frees.lock().unwrap().is_empty(),
             "a live slab must not have freed its carve yet"
         );
     }
     // Dropping the slab released exactly its CPU base through `dma_free`.
     assert_eq!(
-        &*frees.borrow(),
-        &[base],
+        *frees.lock().unwrap(),
+        [(DMA_HANDLE, va(base))],
         "the slab freed its carve on drop"
     );
 
@@ -746,7 +797,7 @@ fn dma_slab_frees_itself_on_drop_and_repeated_cycles_do_not_leak() {
         let _ = host.alloc_dma_zeroed(0x1000).expect("carve");
     }
     assert_eq!(
-        frees.borrow().len(),
+        frees.lock().unwrap().len(),
         17,
         "every carve's slab freed itself exactly once across cycles"
     );
@@ -867,15 +918,39 @@ fn a_selected_dma_window_takes_every_carve_and_its_free() {
         let slab = host.alloc_dma_zeroed(0x1000).expect("carve");
         assert_eq!(slab.device_addr(), MEMORY_WINDOW_DEVICE_BASE);
     }
-    // The free went through the same window, which is the only one whose
-    // backing holds the carve.
-    assert_eq!(&*frees.borrow(), &[base]);
+    // The free went through the window it was carved under.
+    assert_eq!(*frees.lock().unwrap(), [(MEMORY_WINDOW_HANDLE, va(base))]);
     // Once a buffer exists its free is bound to the window it came from.
     let _held = host.alloc_dma_zeroed(0x1000).expect("carve");
     assert_eq!(
         host.select_dma_window(&peripheral_window().resource),
         Err(DriverError::Busy)
     );
+}
+
+/// A slab reaches nothing of the host that carved it: the host may be
+/// borrowed mutably, moved and dropped, and the slab dropped on another
+/// thread, and its free still goes out once, under its grant. A slab once
+/// freed through a pointer to the host itself, which the first two left
+/// dangling.
+#[test]
+fn a_slab_outlives_whatever_becomes_of_its_host() {
+    let mock = MockSyscalls::new();
+    let base = mock.back(DMA_HANDLE, 0x4000, DMA_DEVICE_BASE);
+    let frees = mock.dma_frees();
+    let mut host =
+        RtDriverHost::new(caps(&[CapabilityId::MEM_DMA]), mock, &[dma_grant()], None).unwrap();
+    let slab = host.alloc_dma_zeroed(0x1000).expect("carve");
+    assert_eq!(
+        host.select_dma_window(&dma_grant().resource),
+        Err(DriverError::Busy)
+    );
+    let moved = host;
+    drop(moved);
+    std::thread::spawn(move || drop(slab))
+        .join()
+        .expect("the slab drops on its own thread");
+    assert_eq!(*frees.lock().unwrap(), [(DMA_HANDLE, va(base))]);
 }
 
 #[test]
@@ -985,7 +1060,7 @@ fn from_grants_query_builds_the_table_the_kernel_delivered() {
     let window = host.map_window(REGS_BASE, 0x10).expect("regs map");
     assert_eq!(window.phys_base(), REGS_BASE);
     window.write_u32(0, 0x1234_5678).expect("write");
-    let readback = unsafe { (base as *const u32).read() };
+    let readback = unsafe { base.cast::<u32>().read() };
     assert_eq!(readback, 0x1234_5678);
     assert_eq!(
         host.alloc_dma_zeroed(0x1000).expect("carve").device_addr(),
@@ -1466,6 +1541,24 @@ fn a_shared_buffer_shorter_than_asked_is_refused() {
 }
 
 #[test]
+fn a_shared_region_no_slice_may_span_is_refused() {
+    let mock = MockSyscalls::new();
+    mock.back(SHM_HANDLE, 64, 0);
+    mock.shm_len.set(Some(isize::MAX as u64 + 1));
+    let host = RtDriverHost::new(
+        caps(&[CapabilityId::SHM]),
+        mock,
+        &[GrantedResource::new(SHM_HANDLE, HwResource::shared(0x5147))],
+        None,
+    )
+    .unwrap();
+    assert!(matches!(
+        host.shared_buffer(1),
+        Err(DriverError::LengthOutOfRange)
+    ));
+}
+
+#[test]
 fn map_shared_without_a_grant_is_not_found() {
     let mock = MockSyscalls::new();
     let host = RtDriverHost::new(caps(&[CapabilityId::SHM]), mock, &[regs_grant()], None).unwrap();
@@ -1540,4 +1633,148 @@ fn publishing_a_channel_settles_the_driver_once_it_is_in_the_tree() {
         None
     );
     assert_eq!(refused.calls, ["emit"], "nothing to settle for");
+}
+
+const REGION_HANDLE: u64 = 9;
+
+fn region() -> HwResource {
+    HwResource::memory_region(0x1_0000_0000, 0x4000, 1)
+}
+
+/// A host granted one memory region backed by the mock, with the base the
+/// mock maps it at.
+/// A host granted [`region`], the base its backing lies at, and the windows
+/// unmapped and the last mapping asked of the kernel.
+struct RegionHost {
+    host: RtDriverHost<MockSyscalls>,
+    base: NonNull<u8>,
+    unmaps: Rc<RefCell<Vec<u64>>>,
+    last_mmio: Rc<Cell<(u64, usize, Option<RegionCaching>)>>,
+}
+
+fn region_host(held: &[CapabilityId]) -> RegionHost {
+    let mock = MockSyscalls::new();
+    let base = mock.back(REGION_HANDLE, 0x4000, 0);
+    let unmaps = Rc::clone(&mock.unmaps);
+    let last_mmio = mock.last_mmio();
+    let host = RtDriverHost::new(
+        caps(held),
+        mock,
+        &[regs_grant(), GrantedResource::new(REGION_HANDLE, region())],
+        None,
+    )
+    .expect("grants fit");
+    RegionHost {
+        host,
+        base,
+        unmaps,
+        last_mmio,
+    }
+}
+
+#[test]
+fn a_memory_part_is_mapped_through_its_grant_and_handed_back() {
+    let RegionHost {
+        host,
+        base,
+        unmaps,
+        last_mmio,
+    } = region_host(&[CapabilityId::MMIO_MAP]);
+    let window = host
+        .map_memory(&region(), 0x1000, 0x2000, RegionCaching::WriteCombine)
+        .expect("maps");
+    assert_eq!(
+        last_mmio.get(),
+        (0x1000, 0x2000, Some(RegionCaching::WriteCombine)),
+        "the kernel is asked for the caching the device states"
+    );
+    assert_eq!((window.offset(), window.len()), (0x1000, 0x2000));
+    assert_eq!(va(base) + 0x1000, window.mapped_at() as u64);
+    window.write(0x10, b"part").expect("in bounds");
+    // SAFETY: the backing outlives the host, which the test still holds.
+    let landed = unsafe { core::slice::from_raw_parts(base.byte_add(0x1010).as_ptr(), 4) };
+    assert_eq!(landed, b"part");
+    let again = host
+        .map_memory(&region(), 0x1000, 0x2000, RegionCaching::WriteBack)
+        .expect("maps again");
+    assert_eq!(
+        again.mapped_at(),
+        window.mapped_at(),
+        "the mock maps a part where it lies; the kernel would place it afresh"
+    );
+    host.unmap_memory(window).expect("handed back");
+    host.unmap_memory(again).expect("handed back");
+    let part = va(base) + 0x1000;
+    assert_eq!(*unmaps.borrow(), [part, part]);
+}
+
+#[test]
+fn only_a_granted_region_is_mapped_and_only_with_the_capability() {
+    let host = region_host(&[CapabilityId::MMIO_MAP]).host;
+    let elsewhere = HwResource::memory_region(0x2_0000_0000, 0x4000, 1);
+    assert_eq!(
+        host.map_memory(&elsewhere, 0, 0x1000, RegionCaching::WriteBack)
+            .err(),
+        Some(DriverError::NotFound)
+    );
+    assert_eq!(
+        host.map_memory(
+            &HwResource::mmio(REGS_BASE, REGS_LEN),
+            0,
+            0x10,
+            RegionCaching::WriteBack
+        )
+        .err(),
+        Some(DriverError::NotFound),
+        "a register window is no memory region"
+    );
+    assert_eq!(
+        host.map_memory(&region(), 0x3000, 0x2000, RegionCaching::WriteBack)
+            .err(),
+        Some(DriverError::OutOfRange),
+        "the kernel's refusal of a part past the region"
+    );
+    let bare = region_host(&[]).host;
+    assert_eq!(
+        bare.map_memory(&region(), 0, 0x1000, RegionCaching::WriteBack)
+            .err(),
+        Some(DriverError::PermissionDenied)
+    );
+}
+
+#[test]
+fn a_part_the_kernel_will_not_unmap_comes_back_still_mapped() {
+    let mock = MockSyscalls::new();
+    let base = mock.back(REGION_HANDLE, 0x4000, 0);
+    mock.unmap_error.set(Some(Errno::NotFound));
+    let host = RtDriverHost::new(
+        caps(&[CapabilityId::MMIO_MAP]),
+        mock,
+        &[GrantedResource::new(REGION_HANDLE, region())],
+        None,
+    )
+    .expect("grants fit");
+    let window = host
+        .map_memory(&region(), 0, 0x1000, RegionCaching::Uncached)
+        .expect("maps");
+    let (kept, why) = host.unmap_memory(window).expect_err("refused");
+    assert_eq!(why, DriverError::NotFound);
+    assert_eq!(kept.mapped_at() as u64, va(base));
+    kept.write(0, &[1]).expect("still the caller's");
+}
+
+#[test]
+fn a_refused_or_baseless_mapping_answer_forms_no_pointer() {
+    let refused = -i64::from(Errno::PermissionDenied.as_i32());
+    assert_eq!(kernel_mapping(refused), Err(refused));
+    assert_eq!(kernel_mapping(i64::MIN), Err(i64::MIN));
+    assert_eq!(kernel_mapping(0), Err(0), "nothing is mapped at zero");
+}
+
+#[test]
+fn a_kernel_mapping_base_becomes_a_pointer_at_that_address() {
+    assert_eq!(
+        kernel_mapping(0x4000_0000).map(|base| base.addr().get()),
+        Ok(0x4000_0000)
+    );
 }

@@ -84,8 +84,8 @@ fn own_value(token: &[u8]) -> &[u8] {
         .unwrap_or(token)
 }
 
-/// `value` with `parameters` for `%0` onwards, into `out`: its length.
-fn substituted(value: &[u8], parameters: &[&[u8]], out: &mut [u8]) -> usize {
+/// `value` with `parameters` for `%0` onwards, into `out`.
+fn substituted(value: &[u8], parameters: &[&[u8]], out: &mut impl scan::Sink) {
     let mut given = [None; 4];
     for (slot, &parameter) in given.iter_mut().zip(parameters) {
         *slot = Some(parameter);
@@ -94,7 +94,7 @@ fn substituted(value: &[u8], parameters: &[&[u8]], out: &mut [u8]) -> usize {
         parameters: given,
         dictionary: &[],
     }
-    .expand(value, out)
+    .expand(value, out);
 }
 
 impl Os<'_> {
@@ -109,7 +109,9 @@ impl Os<'_> {
             return fail;
         }
         let mut bytes = [0; TEXT];
-        let length = substituted(own_value(error.token.as_bytes()), parameters, &mut bytes);
+        let mut text = scan::Filled::new(&mut bytes);
+        substituted(own_value(error.token.as_bytes()), parameters, &mut text);
+        let length = text.length;
         let buffer = self.world.errors.take();
         self.error_block(buffer, error.number, &bytes[..length])
     }
@@ -178,13 +180,11 @@ impl Os<'_> {
             owned.extend_from_slice(value);
             owned
         };
-        let room = value.len() + parameters.iter().map(|p| p.len()).sum::<usize>() * 2;
-        let mut out = Vec::new();
-        out.try_reserve_exact(room).map_err(|_| self.no_memory())?;
-        out.resize(room, 0);
-        let length = substituted(&value, parameters, &mut out);
-        out.truncate(length);
-        Ok(out)
+        let mut length = scan::Measured::default();
+        substituted(&value, parameters, &mut length);
+        let mut out = scan::Held::new(length.0).map_err(|_| self.no_memory())?;
+        substituted(&value, parameters, &mut out);
+        Ok(out.bytes)
     }
 
     /// The value of `token` in the kernel's file through MessageTrans, as it
@@ -305,4 +305,20 @@ pub const fn obey_error(error: tairix_obey::Error) -> Error {
         E::SystemHeapFull => (0x1E3, "SystemHeapFull"),
     };
     Error { number, token }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::memory::layout::RISC_OS_5;
+    use crate::memory::Bits;
+    use crate::testkit::with_application;
+
+    #[test]
+    fn a_message_is_given_whole_however_often_it_names_a_parameter() {
+        let mut s = with_application(&RISC_OS_5, Bits::Bit32);
+        assert_eq!(
+            s.kernel.os().message_with(b"%0 %0 %0", &[b"12345678"]),
+            Ok(b"12345678 12345678 12345678".to_vec())
+        );
+    }
 }

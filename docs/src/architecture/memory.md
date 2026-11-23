@@ -842,8 +842,9 @@ virtual window, one record per mapped run of slots — the gaps between runs
 are the free slots — and the per-region guard/data accounting) that maps a
 device window into a **borrowed** `&mut AddressSpace<P>`.
 Unlike [`DmaPool`][DmaPool] it allocates **no** frames — the physical
-address is fixed by the hardware, so it maps the *device's own* frames
-with caching disabled (`MapFlags::NO_CACHE`), never executable (W^X,
+address is fixed by the hardware, so it maps the *device's own* frames —
+a register block with caching disabled (`MapFlags::NO_CACHE`) — never
+executable (W^X,
 `AGENTS.md` §19.2), and the same unmapped guard-page bracketing the DMA
 pool uses; a part-way page-table failure unwinds every page it added
 (all-or-nothing, `AGENTS.md` §2.9), and a run whose record the heap cannot
@@ -864,7 +865,12 @@ P10 chunk 5d-0), which maps a granted device window into the caller's
 *own running* address space (§7e). A window lives only as long as its grant:
 when the device's node leaves the tree, `MmioWindowMap::retain` unmaps every
 window no remaining grant covers from the holder's space, and the kernel shoots
-each one down on every CPU before the removal returns.
+each one down on every CPU before the removal returns. A driver gives one back
+itself with `mmio_unmap` (`MmioWindowMap::unmap_at`, the same shootdown), which
+is how a device's memory region larger than the window is used a part at a
+time. Registers are mapped caching disabled; a scan-out surface,
+write-combining or write-back as its grant says; and a part of a device's
+memory region with the caching its device states for that part.
 
 The mapper is **capability-agnostic**; the gate is
 `kernel/sec::mmio`, whose `map_mmio` / `unmap_mmio` verify

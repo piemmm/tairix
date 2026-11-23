@@ -105,8 +105,17 @@ fn the_map_commands_set_a_table_from_its_sizes_blue_first_and_its_pairs_last_fir
     )
     .expect("mapped");
     assert_eq!(read_back(&mut session), THREE);
-    let short = command(&mut session, "ColourTransMap 0 &FF").expect_err("too few");
-    assert_eq!(error_number(&mut session, short), 0xDC);
+    call(&mut session, ct::SET_CALIBRATION, &[0]).expect("the default");
+    command(&mut session, "ColourTransMap &FF0000FF 0 &FF00FF 0").expect("the first line");
+    assert!(
+        read_back(&mut session).is_empty(),
+        "nothing set until all are given"
+    );
+    command(&mut session, "ColourTransMap &FF0000FF &20402080 &10101000").expect("the rest");
+    assert_eq!(read_back(&mut session), THREE, "the lines joined");
+    command(&mut session, "ColourTransMap 0 &FF").expect("a start toward another");
+    let over = command(&mut session, "ColourTransMap 1 2 3 4 5 6").expect_err("too many");
+    assert_eq!(error_number(&mut session, over), 0xDC);
 }
 
 #[test]
@@ -197,4 +206,152 @@ fn a_cie_answer_past_a_register_is_refused() {
     let refused =
         call(&mut session, ct::CONVERT_CIE_TO_RGB, &[0x7FFF_FFFF, 0, 0]).expect_err("refused");
     assert_eq!(error_number(&mut session, refused), 0xA01);
+}
+
+#[test]
+fn a_device_palette_is_converted_entry_by_entry_as_one_device_colour_is() {
+    let mut session = common::drivers(b"");
+    set_table(&mut session, &THREE).expect("set");
+    let devices = [0, 0x8080_8000, 0x1234_5600, 0xFFFF_FF00, 0x00FF_0000];
+    let (from, to) = (READ, READ + 0x100);
+    for (i, &device) in (0u32..).zip(&devices) {
+        session
+            .kernel
+            .os()
+            .write_word(from + 4 * i, device)
+            .expect("written");
+    }
+    let count = u32::try_from(devices.len()).expect("few");
+    call(
+        &mut session,
+        ct::CONVERT_DEVICE_PALETTE,
+        &[count, from, to, 0],
+    )
+    .expect("converted");
+    for (i, &device) in (0u32..).zip(&devices) {
+        let converted = session.kernel.os().read_word(to + 4 * i).expect("read");
+        assert_eq!(converted, device_colour(&mut session, device), "entry {i}");
+    }
+}
+
+#[test]
+fn a_calibration_written_to_a_file_sets_itself_again_when_obeyed() {
+    use tairix_riscos_kernel::swi::os::FIND;
+    let mut session = common::with_files(&[]);
+    set_table(&mut session, &THREE).expect("set");
+    let name = TABLE + 0x400;
+    session
+        .kernel
+        .os()
+        .write_bytes(name, b"HostFS:$.Cal\0")
+        .expect("written");
+    let handle = call(&mut session, FIND, &[0x83, name]).expect("opened").r[0];
+    let last = call(&mut session, ct::WRITE_CALIBRATION_TO_FILE, &[0, handle])
+        .expect("written")
+        .r[0];
+    call(&mut session, FIND, &[0, handle]).expect("closed");
+    assert_eq!(last, u32::from(b'\n'), "R0 the last character written");
+    call(&mut session, ct::SET_CALIBRATION, &[0]).expect("the default");
+    assert!(read_back(&mut session).is_empty());
+    command(&mut session, "Obey HostFS:$.Cal").expect("obeyed");
+    assert_eq!(read_back(&mut session), THREE);
+}
+
+#[test]
+fn a_size_no_list_may_hold_is_refused_and_gathers_nothing() {
+    let mut session = common::drivers(b"");
+    let refused = command(&mut session, "ColourTransMapSize 257 2 2").expect_err("refused");
+    assert_eq!(error_number(&mut session, refused), 0xA00);
+    let over = command(&mut session, "ColourTransMap 0 &FF").expect_err("nothing sized");
+    assert_eq!(error_number(&mut session, over), 0xDC);
+}
+
+/// The address of command `name`'s code in module `module`, as guest code
+/// finds it in the module's command table.
+fn command_code(session: &mut Session, module: &str, name: &str) -> u32 {
+    let mut text = module.as_bytes().to_vec();
+    text.push(0);
+    let os = &mut session.kernel.os();
+    os.write_bytes(common::COMMAND_AT, &text).expect("written");
+    let base = call(
+        session,
+        tairix_riscos_kernel::swi::os::MODULE,
+        &[18, common::COMMAND_AT],
+    )
+    .expect("found")
+    .r[3];
+    let os = &mut session.kernel.os();
+    let mut entry = base + os.read_word(base + 0x18).expect("its table");
+    loop {
+        let found = os.read_zstring(entry, 64).expect("a name");
+        assert!(!found.is_empty(), "{name} in {module}'s table");
+        let code = (entry + u32::try_from(found.len()).expect("short") + 1).next_multiple_of(4);
+        if found == name.as_bytes() {
+            return base + os.read_word(code).expect("its code");
+        }
+        entry = code + 16;
+    }
+}
+
+#[test]
+fn more_pairs_than_were_sized_are_refused_before_any_is_read() {
+    use tairix_riscos_kernel::memory::Bits;
+    use tairix_riscos_kernel::os::{Entry, Regs};
+    let mut session = common::drivers(b"");
+    command(&mut session, "ColourTransMapSize 2 2 2").expect("sized");
+    let code = command_code(&mut session, "ColourTrans", "ColourTransMap");
+    session
+        .kernel
+        .os()
+        .write_bytes(common::COMMAND_AT, b"0 &FF\r")
+        .expect("written");
+    let mut regs = Regs::default();
+    regs.r[..2].copy_from_slice(&[common::COMMAND_AT, 7]);
+    let over = session
+        .kernel
+        .os()
+        .call_routine(code, Bits::Bit32, Entry::Supervisor, &mut regs)
+        .expect_err("seven past six");
+    assert_eq!(error_number(&mut session, over), 0xDC);
+}
+
+#[test]
+fn a_pair_count_no_memory_backs_is_refused_before_the_host_holds_any() {
+    use tairix_riscos_kernel::memory::Bits;
+    use tairix_riscos_kernel::os::{Entry, Regs};
+    let mut session = common::drivers(b"");
+    command(&mut session, "ColourTransMapSize 2 2 2").expect("sized");
+    let code = command_code(&mut session, "ColourTrans", "ColourTransMap");
+    let mut regs = Regs::default();
+    regs.r[..2].copy_from_slice(&[common::COMMAND_AT, 0x3FFF_FFFF]);
+    let over = session
+        .kernel
+        .os()
+        .call_routine(code, Bits::Bit32, Entry::Supervisor, &mut regs)
+        .expect_err("past any list");
+    assert_eq!(error_number(&mut session, over), 0xDC);
+}
+
+#[test]
+fn a_calibration_the_guest_freed_is_replaced_without_complaint() {
+    use tairix_riscos_kernel::swi::os::{MODULE, READ_DYNAMIC_AREA};
+    let mut session = common::drivers(b"");
+    set_table(&mut session, &THREE).expect("set");
+    let rma = call(&mut session, READ_DYNAMIC_AREA, &[1]).expect("the RMA");
+    let (base, size) = (rma.r[0], rma.r[1]);
+    let mut held = vec![0u8; usize::try_from(size).expect("a size")];
+    session
+        .kernel
+        .os()
+        .read_bytes(base, &mut held)
+        .expect("read");
+    let words: Vec<u8> = THREE.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let at = held
+        .windows(words.len())
+        .position(|window| window == words.as_slice())
+        .expect("ColourTrans's copy");
+    let block = base + u32::try_from(at).expect("inside the RMA");
+    call(&mut session, MODULE, &[7, 0, block]).expect("freed by the guest");
+    set_table(&mut session, &THREE).expect("set again");
+    assert_eq!(read_back(&mut session), THREE);
 }

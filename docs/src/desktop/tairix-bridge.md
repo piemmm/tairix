@@ -1780,14 +1780,18 @@ there.
   its depth where that keeps its eigen factors and flags, else as a 640 by 480
   selector keeping them. A selector is shown where the monitor has timings for
   its size, or a module gives them; ScreenModes, after `*LoadModeFile`, gives
-  them for its file's modes and makes the monitor type 7. A change issues
+  them for its file's modes and makes the monitor type 7, which has no
+  numbered mode of its own: one is shown as the file's mode nearest its size,
+  at its depth, `Service_ModeTranslation`'s answer. A change issues
   `Service_PreModeChange`, `Service_ModeChanging` and `Service_ModeChange`.
   A selector's text not set by its variables is as many whole cells as fit
   the screen. One whose variables make no screen the drivers can draw — eigen
   factors past 3, colours its depth lacks, a pixel wider than a word or
   narrower than its colours, lines too short for their pixels, text past the
   screen, or Teletext in other than sixteen colours or past a page of 255 by
-  255 cells — is refused as a bad mode.
+  255 cells — is refused as a bad mode. An eight-bit mode holds 256 palette
+  entries of its own where its mode flags say so, whatever colour count it
+  states, and VIDC1's groups of sixteen otherwise.
 - **ScreenModes.** `*LoadModeFile` reads a monitor definition file as
   RISC OS 5 does: keys in any case, a line whose first character is `#` a
   comment, a mode's size its timings' display, which an `x_res` or `y_res`
@@ -1865,8 +1869,12 @@ it drew, which the replay holds the drivers to byte for byte.
 Sprites are the `vdu` crate's `sprite` module: `OS_SpriteOp` through
 `SpriteV`, whose default is the kernel's reasons and, while SpriteExtend is
 active, SpriteExtend's in front of them; SpriteExtend's JPEG SWIs; and the
-SpriteUtils commands. Areas, control blocks, mode words, palettes and masks
-are read through `lib/image`'s sprite structures.
+SpriteUtils commands. Areas', control blocks' and mode words' layouts, the
+sprite types and the mode word's forms are `lib/image`'s sprite structures;
+how a mode word's pixels are read is RISC OS 5.30's own, each rule recorded,
+a type it does not support read as thirty-two bits. A sprite made in a
+numbered mode RISC OS 5 lacks keeps that number, its pixels read from the
+module that describes the mode.
 
 - **Areas.** The system area is dynamic area 3, sized from
   `*Configure SpriteSize`, its header rewritten as it grows and its shrink
@@ -1874,8 +1882,17 @@ are read through `lib/image`'s sprite structures.
   &E8–&EF and `VDU 23,27` use the sprite it has selected. Names match
   case-blind in ASCII, twelve bytes at most, ended by any byte at or below a
   space. Every walk is held to the area's block before anything is trusted: a
-  sprite outside it, misaligned, or shorter than a control block is
-  "Unrecognised sprite data" (&71E), where RISC OS 5 reads on or aborts.
+  chain leaving it or a word is "Unrecognised sprite data" (&71E), where
+  RISC OS 5 reads on or aborts, and a sprite claiming no length ends a
+  lookup. A sprite is held whole before it is plotted or its shape changed —
+  its rows' bits within a word and its words holding its width, its image
+  and mask within it, and memory behind all of it — else &71E; reasons 41 to
+  44 take its control block as it stands, adding its offsets in a word, as
+  RISC OS 5's do. A module asked about a sprite's mode may change its area,
+  so a change reads the control block again once it has answered and
+  refuses one no longer as read; and a change first checks the area holds
+  all of it and memory takes it, so a change refused leaves the area as it
+  was.
 - **Editing and files.** Rows and columns are inserted in colour nought
   under a clear mask; masks are created solid; palettes are made from the
   depth's default or the screen's, as RISC OS 5 makes each; alpha masks and
@@ -1889,7 +1906,8 @@ are read through `lib/image`'s sprite structures.
 - **Output to a sprite** (60–62): every drawing path writes the destination
   — the screen or a sprite or its mask — in its own pixel form, with
   `Service_SwitchingOutputToSprite`; save areas hold the VDU state in the
-  drivers' own layout, validated before it is restored, and a mode change
+  drivers' own layout, validated before it is restored, every point in it
+  within the drivers' reach and its origin a VDU 29 one, and a mode change
   returns output to the screen, announced as a switch to it between
   `Service_ModeChanging` and `Service_ModeChange`, as RISC OS 5 announces it.
 - **The kernel's plots** (28, 34, 48, 49) copy the sprite's rows bit for bit
@@ -1945,7 +1963,8 @@ are read through `lib/image`'s sprite structures.
 - **JPEGs.** `JPEG_Info` and `JPEG_FileInfo` read the stored raster, the
   process, and the density, 90 times a pixel aspect where only that or none
   is stated, with RISC OS 5's workspace figure; `JPEG_Info` reads its header
-  past the length given, as far as memory goes, as RISC OS 5 does. A plot
+  past the length given, as far as memory goes and 64 KiB at most, as RISC
+  OS 5 does. A plot
   reads the whole length given, aborting where that runs past memory, and
   decodes the stored raster, EXIF orientation unapplied, through `lib/image`;
   a transformed plot is made only where its transform is a scaling, else
@@ -2012,8 +2031,10 @@ ColourTrans (`vdu/src/colourtrans.rs`) answers each of its 36 SWIs through
   - A refused table restores the default, and the refusal is announced with
     `Service_CalibrationChanged`, as a table set is.
   - `*ColourTransMapSize` and `*ColourTransMap` set a table: sizes blue first,
-    pairs last first. `WriteCalibrationToFile` and a saved desktop write the
-    table in that order.
+    pairs last first, the pairs on one line or gathered over several until
+    the sizes are filled, more than they give refused. `WriteCalibrationToFile`
+    and a saved desktop write the table in that order, a table too large for
+    one command line over as many lines as it needs.
 - **Tables.** A table from a palettised source gives a byte for each source
   colour, a wide pixel for a deep destination, or the source's palette.
   - A deep source gives a palettised destination a 32K table. Each
@@ -2032,7 +2053,9 @@ ColourTrans (`vdu/src/colourtrans.rs`) answers each of its 36 SWIs through
   each entry with its supremacy bit, and how it shows, in its words' low
   byte.
   - The current palette cannot be written while output goes to a sprite.
-  - A sprite written to without a palette is given one of its mode's size.
+  - A sprite written to without a palette is given one of its mode's size;
+    one whose palette stays shorter than its mode's colours is refused
+    (&A08) rather than written past.
   - A sprite's palette is read no further than its pixels' colours, however
     many entries it holds.
 - **Models.** HSV, CMYK and CIE XYZ, all as 16.16 numbers. CIE uses RISC OS
@@ -2079,8 +2102,8 @@ Known differences from RISC OS 5, each deliberate:
   RISC OS 5 reads words from address nought;
 - `ConvertDevicePalette` converts as documented, where RISC OS 5 branches
   through zero;
-- `*ColourTransMap` sets the table it is given, where RISC OS 5 aborts or
-  sets nothing;
+- `*ColourTransMap` sets the table it is given, over several lines where it
+  must, where RISC OS 5 aborts or sets nothing;
 - `WriteCalibrationToFile` writes `*ColourTransMapSize` with its sizes blue
   first. RISC OS 5 writes `*ColourTransMapColo`, with the sizes in the
   table's order.

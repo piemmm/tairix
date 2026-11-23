@@ -208,20 +208,11 @@ pub trait Report {
     /// Write an unsigned value as `0x`-prefixed lower-case hexadecimal,
     /// allocation-free.
     fn write_hex(&mut self, value: u64) {
-        const DIGITS: &[u8; 16] = b"0123456789abcdef";
         let mut buf = [0u8; 16];
-        let mut idx = buf.len();
-        let mut v = value;
-        loop {
-            idx -= 1;
-            buf[idx] = DIGITS[(v & 0xf) as usize];
-            v >>= 4;
-            if v == 0 {
-                break;
-            }
-        }
+        let digits = &mut buf[..tairix_util::hex::significant(value)];
+        tairix_util::hex::fill(digits, value);
         self.write_bytes(b"0x");
-        self.write_bytes(&buf[idx..]);
+        self.write_bytes(digits);
     }
 }
 

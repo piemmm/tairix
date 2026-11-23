@@ -2250,12 +2250,17 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-buildcfg",
+ "tairix-collections",
  "tairix-display",
+ "tairix-drv-display-gpu-virtio",
  "tairix-drvrt",
  "tairix-edid",
+ "tairix-fuzzseed",
+ "tairix-gpu",
  "tairix-inline",
  "tairix-log",
  "tairix-rt",
+ "tairix-util",
  "tairix-virtio",
 ]
 
@@ -3045,6 +3050,7 @@ version = "0.0.0"
 dependencies = [
  "proptest",
  "tairix-mix",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3089,12 +3095,26 @@ dependencies = [
  "tairix-collections",
  "tairix-colour",
  "tairix-fuzzseed",
+ "tairix-gpu",
  "tairix-inline",
  "tairix-parallel",
  "tairix-raster",
  "tairix-rt",
  "tairix-spirv",
  "tairix-util",
+]
+
+[[package]]
+name = "tairix-gpucheck"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-gpu",
+ "tairix-help",
+ "tairix-parallel",
+ "tairix-procinfo",
+ "tairix-rt",
 ]
 
 [[package]]
@@ -3197,6 +3217,7 @@ dependencies = [
  "tairix-curses",
  "tairix-fuzzseed",
  "tairix-rt",
+ "tairix-util",
  "tairix-vt",
 ]
 
@@ -4316,6 +4337,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-fuzzseed",
+ "tairix-util",
 ]
 
 [[package]]
@@ -4676,6 +4698,7 @@ dependencies = [
  "tairix-riscos-filing",
  "tairix-riscos-kernel",
  "tairix-softfloat",
+ "tairix-util",
  "tairix-vdu",
 ]
 
@@ -4731,6 +4754,8 @@ dependencies = [
  "tairix-fscopy",
  "tairix-fuzzseed",
  "tairix-image",
+ "tairix-obey",
+ "tairix-raster",
  "tairix-riscos-arm",
  "tairix-riscos-basic",
  "tairix-riscos-filing",
@@ -9160,6 +9185,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-venus-check"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-display",
+ "tairix-drv-display-gpu-virtio",
+ "tairix-drvrt",
+ "tairix-gpu",
+ "tairix-gpucheck",
+ "tairix-inline",
+ "tairix-log",
+ "tairix-rt",
+ "tairix-virtio",
+]
+
+[[package]]
 name = "tairix-test-vesa-qemu-x86-64"
 version = "0.0.0"
 dependencies = [
@@ -9240,6 +9282,17 @@ dependencies = [
  "tairix-kernel",
  "tairix-kernel-ipc",
  "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-virtio-gpu-venus-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-venus-check",
 ]
 
 [[package]]
@@ -9821,6 +9874,7 @@ name = "tairix-virtio"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-collections",
  "tairix-dma-barrier",
  "tairix-fuzzseed",
  "tairix-virtio",

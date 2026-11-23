@@ -217,10 +217,18 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     }
     // Headless by default (the test runner captures serial only); an
     // interactive windowed run omits `-display` here so the runner can append
-    // the windowing backend it selected at spawn time.
+    // the windowing backend it selected at spawn time. A Venus GPU's renderer
+    // needs an OpenGL display, which the headless EGL one is.
     if spec.session == SessionKind::HeadlessTest {
         argv.push("-display".into());
-        argv.push("none".into());
+        argv.push(
+            if spec.devices.display.venus() {
+                "egl-headless"
+            } else {
+                "none"
+            }
+            .into(),
+        );
     }
     argv.push("-serial".into());
     argv.push("stdio".into());
@@ -848,6 +856,7 @@ mod tests {
         spec.devices.display = Display::VirtioGpu {
             width: 1024,
             height: 768,
+            venus: false,
         };
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         let machine = argv
@@ -860,9 +869,37 @@ mod tests {
             .position(|a| a == "-vga")
             .expect("the VGA removed");
         assert_eq!(argv[vga + 1], "none");
-        assert!(argv
+        assert!(argv.iter().any(|a| a
+            == "virtio-gpu-pci,id=display0,xres=1024,yres=768,hostmem=67108864,disable-legacy=on"));
+        let display = argv
             .iter()
-            .any(|a| a == "virtio-gpu-pci,id=display0,xres=1024,yres=768,disable-legacy=on"));
+            .position(|a| a == "-display")
+            .expect("a display");
+        assert_eq!(argv[display + 1], "none");
+    }
+
+    #[test]
+    fn a_venus_gpu_runs_under_the_headless_opengl_display() {
+        let mut spec = fixture_spec(1);
+        spec.devices.display = Display::VirtioGpu {
+            width: 1024,
+            height: 768,
+            venus: true,
+        };
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let display = argv
+            .iter()
+            .position(|a| a == "-display")
+            .expect("a display");
+        assert_eq!(argv[display + 1], "egl-headless");
+        let vga = argv
+            .iter()
+            .position(|a| a == "-vga")
+            .expect("the VGA removed");
+        assert_eq!(argv[vga + 1], "none");
+        assert!(argv.iter().any(|a| a.starts_with(
+            "virtio-gpu-gl-pci,id=display0,xres=1024,yres=768,hostmem=67108864,venus=on,blob=on,"
+        )));
     }
 
     #[test]

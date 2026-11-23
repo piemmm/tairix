@@ -24,12 +24,12 @@ use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{
     call, emit_self_scope_omission, fetch_tree, for_each_audio_device, for_each_audio_stream,
     for_each_cpu_load, for_each_desktop_frame_report, for_each_dma_group, for_each_dma_node,
-    for_each_dma_unit, for_each_irq, for_each_process, for_each_raid_array, for_each_raid_member,
-    format_count, format_size, format_tenths, render_audio_device, render_audio_stream,
-    render_limit_bound, render_process, resolve, walk_records, Authorization, InfoValue, Metric,
-    MetricKind, Output, Producer, ResetBehavior, ResourceResponse, ResponsePayload, Sensitivity,
-    StreamScope, Transport, Unit, ValueKind, WalkStep, AUDIO_DEVICE_HEADER, AUDIO_STREAM_HEADER,
-    PROCESS_HEADER,
+    for_each_dma_unit, for_each_gpu_device, for_each_irq, for_each_process, for_each_raid_array,
+    for_each_raid_member, format_count, format_size, format_tenths, render_audio_device,
+    render_audio_stream, render_gpu_device, render_limit_bound, render_process, resolve,
+    walk_records, Authorization, InfoValue, Metric, MetricKind, Output, Producer, ResetBehavior,
+    ResourceResponse, ResponsePayload, Sensitivity, StreamScope, Transport, Unit, ValueKind,
+    WalkStep, AUDIO_DEVICE_HEADER, AUDIO_STREAM_HEADER, GPU_DEVICE_HEADER, PROCESS_HEADER,
 };
 
 use crate::command::Command;
@@ -58,6 +58,7 @@ queries:
   storage             per-volume I/O health and outcome counters (needs CAP_SYSINFO_KERNEL)
   raid                composed arrays and the devices they are made of (needs CAP_SYSINFO_HW)
   dma                 DMA translation units, groups, and nodes (needs CAP_SYSINFO_HW)
+  gpu                 the served GPUs and the channel each is opened on
   audio [--all]       sound devices and your streams (--all: every stream, needs CAP_SYSINFO_GLOBAL)
   show <ref>          read one info:/state:/stats: resource reference
   describe <ref>      report a reference's producer, authorization, and metric metadata
@@ -114,6 +115,7 @@ pub fn run(
         Command::Storage => run_storage(transport, out),
         Command::Raid => run_raid(transport, out),
         Command::Dma => run_dma(transport, out),
+        Command::Gpu => run_gpu(transport, out),
     }
 }
 
@@ -339,6 +341,16 @@ fn run_processes(
         emit_self_scope_omission(out, OWN_WORD, &[OWN_WORD, "processes", "--all"]);
     }
     Ok(())
+}
+
+/// List the served GPUs.
+fn run_gpu(transport: &dyn Transport, out: &dyn Output) -> Result<(), SysinfoError> {
+    emit(out, GPU_DEVICE_HEADER)?;
+    for_each_gpu_device(transport, |device| {
+        out.write_line(&render_gpu_device(device))
+            .map(|()| WalkStep::Continue)
+    })
+    .map_err(SysinfoError::from)
 }
 
 /// List the sound devices, then the sound streams: the caller's own, or with
@@ -1866,6 +1878,10 @@ mod tests {
                 page(payload, &fixture_graphics_devices(), |record| {
                     record.to_le_bytes().to_vec()
                 })
+            } else if header.query == SysinfoQueryId::GPU_DEVICES {
+                page(payload, &[fixture_gpu()], |record| {
+                    record.to_le_bytes().to_vec()
+                })
             } else if header.query == SysinfoQueryId::AUDIO_DEVICES {
                 page(payload, &[fixture_sink()], |record| {
                     record.to_le_bytes().to_vec()
@@ -2914,6 +2930,24 @@ mod tests {
         mappings: 2,
         mapped_bytes: 2 << 20,
     };
+
+    fn fixture_gpu() -> tairix_abi::gpu::GpuDeviceDescriptor {
+        tairix_abi::gpu::GpuDeviceDescriptor {
+            endpoint: tairix_abi::gpu::GPU_CHANNEL_ENDPOINTS.endpoint(9),
+            node: 9,
+        }
+    }
+
+    #[test]
+    fn gpu_lists_each_served_gpu_under_its_header() {
+        let fixture = Fixture::new(Vec::new());
+        let out = Recorder::new();
+        run(Command::Gpu, &fixture, &out).expect("gpu renders");
+        let lines = out.lines();
+        assert_eq!(lines.len(), 2, "lines: {lines:?}");
+        assert!(lines[0].starts_with("node") && lines[0].contains("channel"));
+        assert!(lines[1].starts_with("9 "), "row: {}", lines[1]);
+    }
 
     #[test]
     fn dma_renders_the_unit_group_and_node_tables() {

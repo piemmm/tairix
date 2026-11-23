@@ -121,15 +121,13 @@ impl TempNames {
     /// The name a file drawn as `slot` carries in this boot.
     #[must_use]
     fn name(&self, slot: [u8; TEMP_SLOT_LEN]) -> String {
-        const DIGITS: &[u8; 16] = b"0123456789abcdef";
         let mut name = String::with_capacity(BOOT_ID_HEX_LEN + 1 + TEMP_SLOT_LEN * 2);
         // Both halves are built a hex digit at a time, so no step of this can
         // fail and none of it needs a fallback that would name two files alike.
         name.extend(self.boot.iter().map(|digit| char::from(*digit)));
         name.push('-');
         for byte in slot {
-            name.push(char::from(DIGITS[usize::from(byte >> 4)]));
-            name.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
+            name.extend(tairix_util::hex::digits(byte).map(char::from));
         }
         name
     }

@@ -469,6 +469,10 @@ enum FsDisk {
     /// virtio-gpu driver ([`super::image_drivers::virtio_gpu_driver_store_files`]):
     /// the disk of a board whose only display is a virtio GPU.
     VirtioGpuRootDisk,
+    /// The [`Self::VirtioGpuRootDisk`] layout with the Venus check in the
+    /// display driver's place ([`super::image_drivers::venus_driver_store_files`]):
+    /// the disk of the Venus vertical.
+    VenusRootDisk,
     /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
     /// volume** additionally carries the test-only `memsoak` fixture bundle
     /// ([`super::image_apps::memsoak_store_files`]) — the memory-stability
@@ -748,12 +752,18 @@ impl FsDisk {
                 | Self::RtcRootDisk
                 | Self::GreeterRootDisk
                 | Self::VirtioGpuRootDisk
+                | Self::VenusRootDisk
         )
     }
 
     /// Whether the disk is the screen-capture vertical's, on either display.
     const fn captures(self) -> bool {
         matches!(self, Self::CaptureRootDisk | Self::CaptureVirtioGpuRootDisk)
+    }
+
+    /// Whether the disk's driver store carries the Venus check as its display.
+    const fn carries_venus_drivers(self) -> bool {
+        matches!(self, Self::VenusRootDisk)
     }
 
     /// Whether the disk's driver store carries the virtio-GPU board's drivers.
@@ -11487,6 +11497,34 @@ static TESTS: &[QemuTest] = &[
         "tairix-test-virtio-gpu-qemu-x86-64",
         X86_64_TARGET,
     ),
+    // `plans/GPU.md` GP5.2 and GP5.3: a q35 board whose only display is
+    // QEMU's Venus GPU over Mesa's software Vulkan driver, with the Venus
+    // check in the display driver's place: the guest passes on the check's
+    // own verdict that contexts, blobs and their mappings were made and let
+    // go, a blob's second mapping read what its first wrote, and the driver's
+    // Venus backend agreed with the software device.
+    QemuTest {
+        package: "tairix-test-virtio-gpu-venus-qemu-x86-64",
+        binary: "tairix-test-virtio-gpu-venus-qemu-x86-64",
+        target: X86_64_TARGET,
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: VENUS_GPU,
+        crypto: false,
+        fs_disk: FsDisk::VenusRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
     // `plans/NETWORK.md` N4e-riscv64 (first stage): the riscv64
     // driver-loading-by-discovery autoload vertical — the `virt`-board
     // virtio-mmio analogue of the aarch64 `autoload_input` vertical, reduced
@@ -13249,7 +13287,7 @@ fn on(area: tairix_geometry::Rect, x: u32, y: u32) -> bool {
 /// a board of `t`'s that shows it on a cursor plane QEMU's dump leaves out.
 fn pointer_off_plane(t: &QemuTest) -> Option<tairix_geometry::Rect> {
     match t.display {
-        Display::VirtioGpu { width, height } => Some(cursor_reach(seat_start((width, height)))),
+        Display::VirtioGpu { width, height, .. } => Some(cursor_reach(seat_start((width, height)))),
         _ => None,
     }
 }
@@ -13598,6 +13636,8 @@ pub(crate) struct StoreSet {
     autoload_drivers: &'static [AppStoreFile],
     /// The autoload set with the virtio-gpu driver as its display.
     virtio_gpu_drivers: &'static [AppStoreFile],
+    /// The autoload set with the Venus check as its display.
+    venus_drivers: &'static [AppStoreFile],
     /// The application/service bundles the stream vertical plants: the shared
     /// set plus the test-only `tcpecho` fixture bundle.
     apps_with_tcpecho: &'static [AppStoreFile],
@@ -13685,6 +13725,11 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
     } else {
         EMPTY
     };
+    let venus_drivers = if t.fs_disk.carries_venus_drivers() {
+        super::image_drivers::venus_driver_store_files(ctx, arch, profile)?
+    } else {
+        EMPTY
+    };
     let apps_with_tcpecho = match t.fs_disk {
         FsDisk::StreamRootDisk => super::image_apps::tcpecho_store_files(ctx, arch, profile)?,
         _ => EMPTY,
@@ -13723,6 +13768,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         apps_with_svgtext,
         autoload_drivers,
         virtio_gpu_drivers,
+        venus_drivers,
         apps_with_tcpecho,
         device_apps,
         device_drivers,
@@ -15413,10 +15459,30 @@ fn assert_booted_desktop_screendump(
 fn assert_virtio_gpu_console_screendump(
     t: &QemuTest,
     path: &Path,
-    _serial: &str,
+    serial: &str,
 ) -> Result<(), String> {
+    // q35's virtio GPU is a PCI function, the `virt` boards' a virtio-mmio
+    // slot, which no shared-memory region rides.
+    if t.target == X86_64_TARGET {
+        host_visible_region_recorded(serial)
+            .map_err(|what| format!("test --qemu ({}): {what}", t.package))?;
+    }
     let image = read_screendump(t, path)?;
     assert_virtio_gpu_console(t, path, &image)
+}
+
+/// The driver recorded the host-visible region its node was granted, the
+/// whole of the one QEMU's device carries.
+fn host_visible_region_recorded(serial: &str) -> Result<(), String> {
+    let size = format!("bytes={}", tairix_qemu::VIRTIO_GPU_HOST_VISIBLE);
+    serial
+        .lines()
+        .any(|line| {
+            line.contains(tairix_drv_display_gpu_virtio::HOST_VISIBLE_MESSAGE)
+                && line.split_whitespace().any(|field| field == size)
+        })
+        .then_some(())
+        .ok_or_else(|| format!("the GPU's driver recorded no host-visible region of {size}"))
 }
 
 /// [`assert_virtio_gpu_console_screendump`] over the dump at `path`, already
@@ -15431,7 +15497,7 @@ fn assert_virtio_gpu_console(
     const TEXT_PIXELS_MIN: usize = 256;
     /// Fewest of them along the left edge: a few lines' first glyphs.
     const MARGIN_TEXT_PIXELS_MIN: usize = 32;
-    let Display::VirtioGpu { width, height } = t.display else {
+    let Display::VirtioGpu { width, height, .. } = t.display else {
         return Err(format!(
             "test --qemu ({}): no virtio GPU to dump",
             t.package
@@ -18328,6 +18394,14 @@ fn desktop_hover_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, Strin
 const VIRTIO_GPU: Display = Display::VirtioGpu {
     width: tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX,
     height: tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX,
+    venus: false,
+};
+
+/// [`VIRTIO_GPU`] taking Venus work.
+const VENUS_GPU: Display = Display::VirtioGpu {
+    width: tairix_fwcfg::RAMFB_CONSOLE_WIDTH_PX,
+    height: tairix_fwcfg::RAMFB_CONSOLE_HEIGHT_PX,
+    venus: true,
 };
 
 /// The board's display extent, the screen every reconstructed layout and
@@ -20784,6 +20858,7 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
         | FsDisk::CaptureVirtioGpuRootDisk
         | FsDisk::GreeterRootDisk
         | FsDisk::VirtioGpuRootDisk
+        | FsDisk::VenusRootDisk
         | FsDisk::HoverRootDisk
         | FsDisk::SvgTextRootDisk
         | FsDisk::StreamRootDisk
@@ -20819,6 +20894,7 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, St
         apps_with_svgtext,
         autoload_drivers,
         virtio_gpu_drivers,
+        venus_drivers,
         apps_with_tcpecho,
         device_apps,
         device_drivers,
@@ -20839,6 +20915,7 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, St
         FsDisk::CaptureVirtioGpuRootDisk => (virtio_gpu_drivers, apps, CAPTURE_DISK_EXT),
         FsDisk::GreeterRootDisk => (autoload_drivers, apps, "greeter-root.img"),
         FsDisk::VirtioGpuRootDisk => (virtio_gpu_drivers, apps, "virtio-gpu-root.img"),
+        FsDisk::VenusRootDisk => (venus_drivers, apps, "venus-root.img"),
         FsDisk::HoverRootDisk => (autoload_drivers, apps_with_framestats, "hover-root.img"),
         FsDisk::SvgTextRootDisk => (autoload_drivers, apps_with_svgtext, "svgtext-root.img"),
         FsDisk::StreamRootDisk => (net_only_drivers, apps_with_tcpecho, "stream-root.img"),
@@ -21927,10 +22004,12 @@ mod enrolment_tests {
                     .ok()
             })
             .collect();
-        planters.push(
-            std::fs::read_to_string(root.join("tools/xtask/src/commands/image_apps.rs"))
-                .expect("the image builder's plantings"),
-        );
+        for builder in ["image_apps.rs", "image_drivers.rs"] {
+            planters.push(
+                std::fs::read_to_string(root.join("tools/xtask/src/commands").join(builder))
+                    .expect("the image builder's plantings"),
+            );
+        }
         let unplanted: Vec<&String> = crates
             .iter()
             .filter(|(leaf, _, _)| leaf.ends_with("_program"))
@@ -22417,7 +22496,7 @@ mod tests {
         assert_eq!(captures.len(), 2, "one ramfb board, one virtio GPU");
         for t in captures {
             match t.display {
-                super::Display::VirtioGpu { width, height } => {
+                super::Display::VirtioGpu { width, height, .. } => {
                     let area = super::pointer_off_plane(t).expect("a cursor plane");
                     let resting = super::cursor_footprint(super::seat_start((width, height)));
                     assert_eq!(area.intersection(&resting), resting, "{area:?}");
@@ -22425,6 +22504,30 @@ mod tests {
                 }
                 _ => assert_eq!(super::pointer_off_plane(t), None),
             }
+        }
+    }
+
+    /// The region is witnessed only by the driver's record of it at the size
+    /// the device was given.
+    #[test]
+    fn the_host_visible_region_is_witnessed_by_its_record_at_its_size() {
+        let record = |bytes: u64| {
+            format!(
+                "[ 1.0] [INFO] id=24924 {} bytes={bytes}",
+                tairix_drv_display_gpu_virtio::HOST_VISIBLE_MESSAGE
+            )
+        };
+        let whole = record(tairix_qemu::VIRTIO_GPU_HOST_VISIBLE);
+        assert_eq!(super::host_visible_region_recorded(&whole), Ok(()));
+        for refused in [
+            record(tairix_qemu::VIRTIO_GPU_HOST_VISIBLE / 2),
+            record(tairix_qemu::VIRTIO_GPU_HOST_VISIBLE * 10),
+            String::from("[ 1.0] [INFO] id=24923 display: the console is shown on the virtio GPU"),
+        ] {
+            assert!(
+                super::host_visible_region_recorded(&refused).is_err(),
+                "{refused}"
+            );
         }
     }
 

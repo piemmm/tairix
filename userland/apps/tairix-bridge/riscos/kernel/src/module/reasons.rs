@@ -150,21 +150,24 @@ impl Os<'_> {
         Ok(block)
     }
 
-    /// Frees each of `blocks` of the RMA, every one tried whatever the heap
-    /// refuses of the others.
+    /// The `length` bytes `fill` lays in the block of the RMA it is given,
+    /// copied out to the host and the block given back: how a file is read
+    /// through the filing SWIs, which load only into guest memory.
     ///
     /// # Errors
     ///
-    /// The heap's error for the first block it does not hold.
-    pub fn rma_free_all(&mut self, blocks: impl IntoIterator<Item = u32>) -> Result<(), Fail> {
-        let mut first = Ok(());
-        for block in blocks {
-            let freed = self.rma_free(block);
-            if first.is_ok() {
-                first = freed;
-            }
-        }
-        first
+    /// The RMA's "full" error, `fill`'s, or the heap's refusing the block
+    /// back, in that order.
+    pub fn read_through_rma(
+        &mut self,
+        length: u32,
+        fill: impl FnOnce(&mut Self, u32) -> Result<(), Fail>,
+    ) -> Result<Vec<u8>, Fail> {
+        let block = self.rma_claim(length.max(4))?;
+        let read = fill(self, block).and_then(|()| self.read_vec(block, length as usize));
+        let freed = self.rma_free(block);
+        let read = read?;
+        freed.map(|()| read)
     }
 
     /// `OS_Module` 1: the module file R1 names loaded into the RMA and

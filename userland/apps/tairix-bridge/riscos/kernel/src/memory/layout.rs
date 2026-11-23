@@ -10,6 +10,8 @@
 
 use core::ops::Range;
 
+use super::Bits;
+
 /// The bottom of application space, where every task's slot starts.
 pub const APPLICATION: u32 = 0x8000;
 /// The top of the 26-bit address space.
@@ -72,6 +74,19 @@ pub struct Layout {
     /// Where every other dynamic area is placed, upward from the start or
     /// the application-space limit, around the kernel's parts within it.
     pub areas: Range<u32>,
+}
+
+impl Layout {
+    /// The addressing the kernel's own callers take: 26-bit where the layout
+    /// admits it.
+    #[must_use]
+    pub const fn kernel_bits(&self) -> Bits {
+        if self.admits_26bit {
+            Bits::Bit26
+        } else {
+            Bits::Bit32
+        }
+    }
 }
 
 /// The shared session's layout, 26-bit code welcome.
@@ -193,5 +208,7 @@ mod tests {
         );
         assert!(!RISC_OS_5.admits_26bit);
         assert_eq!(RISC_OS_5.top_32bit, 512 * 1024 * 1024);
+        assert_eq!(RISC_OS_5.kernel_bits(), Bits::Bit32);
+        assert_eq!(shared.kernel_bits(), Bits::Bit26, "26-bit where admitted");
     }
 }

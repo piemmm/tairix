@@ -161,7 +161,7 @@ desktop uses the layers and the plane is [the window manager's](../desktop/wm.md
 |--------------|--------------------------------------|-------------------------------------------|------------------------|
 | framebuffer  | `tairix-drv-display-framebuffer` (Run process over `tairix_display::Framebuffer`) | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 & aarch64 `ramfb` QEMU verticals + wasm32 browser-canvas vertical |
 | vesa         | `tairix-drv-display-vesa`            | x86_64 VBE linear framebuffer (`ModeInfoBlock`) | host-side tests + x86_64 `ramfb` QEMU vertical |
-| gpu_virtio   | `tairix-drv-display-gpu-virtio`      | a virtio GPU's 2D device on virtio-mmio or virtio-PCI: frames are resource backings, the pointer its cursor, the console hosted on it | host-side tests against a model device + aarch64, riscv64 and x86_64 QEMU verticals |
+| gpu_virtio   | `tairix-drv-display-gpu-virtio`      | a virtio GPU on virtio-mmio or virtio-PCI: frames are resource backings, the pointer its cursor, the console hosted on it; where the device offers Venus, its contexts, host blobs in the host-visible region and command streams, and the GPU served on its node's channel | host-side tests against a model device and a model renderer, fuzz harnesses over its reading of the device's answers and the renderer's Venus replies, aarch64, riscv64 and x86_64 QEMU verticals, and the x86_64 Venus vertical |
 | bcm2711_hvs  | `tairix-drv-display-bcm2711-hvs`     | the Pi 4's HVS and HDMI pixel valves, driven natively, its encoders over `encoder-v1` | host-side tests against a register-level model |
 | bcm2711_hdmi | `tairix-drv-display-bcm2711-hdmi`    | not a surface: each Pi 4 HDMI block, an `encoder-v1` encoder of the display engine and an `audiochan-v1` audio device | host-side tests against a register-level model |
 
@@ -424,9 +424,10 @@ transport, the deliberate sibling of the riscv64 MMIO transport
 
 ### `tairix-drv-display-gpu-virtio`
 
-The 2D device of a virtio GPU (virtio 1.2 §5.7) as the seat's display, on
-either transport; one signed bundle binds both. Kernel discovery publishes
-device type 16 as a `Display` node, the first marked `ConsoleHost`.
+A virtio GPU (virtio 1.2 §5.7) as the seat's display, on either transport,
+and its 3D device served as a GPU where it offers Venus; one signed bundle
+binds both transports. Kernel discovery publishes device type 16 as a `Display` node,
+the first marked `ConsoleHost`.
 
 - **The output** is the first scanout the device reports enabled, at the size
   its display information states, else the preferred timing of the EDID it
@@ -439,12 +440,79 @@ device type 16 as a `Display` node, the first marked `ConsoleHost`.
   commands in any order and answer one before it has run it (virtio 1.2
   §2.6, §5.7.6), so every command carries `VIRTIO_GPU_FLAG_FENCE` — an
   answer without its fence is a device fault — and a present goes in stages,
-  each published with one notify (`RequestQueue::submit_all_and_wait`) once
-  every command before it has been answered: a new frame's creation, its
-  backing, a transfer per damage rectangle, the scan-out switch, then a flush
-  per rectangle beside the unreference of the frame it replaced. A present
-  that switches frames is three stages, one that does not is two, and it
-  answers `Shown` once the last has run.
+  each published with one notify once every command before it has been
+  answered: a new frame's creation, its backing, a transfer per damage
+  rectangle, the scan-out switch, then a flush per rectangle beside the
+  unreference of the frame it replaced. A present that switches frames is
+  three stages, one that does not is two, and it answers `Shown` once the
+  last has run.
+- **Many requests at once.** The control queue is a `TicketQueue` as deep as
+  the device lets it be (256 descriptors on QEMU's 3D device), each request
+  written in a command slot of its own, so the device answers each in its own
+  time and a stage waits for its own answers alone. The display path keeps
+  a batch's descriptors and slots, which no 3D work can take, so no fence,
+  however long, holds a display request back. A display request the device
+  leaves unanswered keeps its slot, and no display request is sent until the
+  device answers it — reminded meanwhile at most once a command's budget —
+  while 3D work goes on.
+- **3D work: Venus.** At bring-up the driver negotiates 3D commands, blob
+  resources and contexts initialised for a capset where offered, and reads
+  the device's capsets, at most sixteen; it takes Venus work where the device
+  lists the Venus capset (at most 1 KiB, read whole) and its node holds the
+  host-visible region, and records either way (events `24925`, `24926`).
+  `create_context`, `destroy_context`, `create_blob`, `destroy_blob`,
+  `map_blob`, `unmap_blob` and `submit_3d` each publish one command and
+  return; its answer comes back as a `Completion` carrying the tag its sender
+  gave it (`poll`, `completion`, `wait_for`), in the order sent among those
+  answered together. A context or blob is named only once the device answered
+  its making; a refusal leaves nothing behind, and an answer without its
+  fence leaves what it named unusable and its id never given again. Every
+  command but a submission is fenced on the device's own timeline; a
+  submission is fenced on its context's ring (`0`–`63`, ring `0` the
+  context's CPU timeline). The host never answers a ring fence on a context
+  that is gone, so `destroy_context` is refused while a submission to the
+  context is out. A blob is host memory (`BLOB_MEM_HOST3D`), mapped at a
+  page offset of the host-visible region that holds it whole, and the map's
+  answer states the caching the driver maps its part with. A submission's
+  stream is a whole number of words, at most 1 MiB, in the sender's DMA
+  memory until its answer. 3D work may hold the slots and descriptors the
+  display path leaves it, answers unread included; past that it is refused
+  `Busy`.
+- **The GPU it serves.** Where the device takes Venus work the driver serves
+  it on its node's channel ([`gpu-v1`](../abi/gpu.md)), binding the node's
+  channel block restricted to `CAP_GPU` and publishing a `tairix,gpu` child
+  once the GPU is made (events `24927`–`24929`). A thread of its own probes
+  the host — an instance, its first physical device, a queue family taking
+  transfers, its memory types — and states it through
+  `tairix_gpu::Device::hardware`, narrowed to transfers and stating a
+  host-visible memory type only where it is coherent, since the renderer
+  flushes nothing; `tairix_gpu::serve` hosts it for every client. Each
+  context is a virtio-gpu context of its own holding a Vulkan instance, a
+  device and a queue for each the device states, each on a ring of its own;
+  a 256 KiB shared blob holding its reply stream, an exchange area and its
+  job stream; and a feedback page. Every object is made in an exchange of
+  its own, answered before anything names it, because a failed creation
+  followed by a command naming its object is fatal to the context on the
+  host. Memory is one allocation with one buffer over it, zeroed before it
+  is answered — host-visible memory, a blob mapped into the region, through
+  the driver's mapping, device-local memory by a fill. A job is one command
+  buffer, a barrier before each command, its last command writing the job's
+  number into the feedback page; it crosses in parts of at most 96 KiB, the
+  last on its queue's ring and the rest on ring `0`, and is done only once
+  its number reads back, since the render server retires a dead worker's
+  fences as if they had landed. A context lost — a part refused, a number
+  that never landed, its watchdog — sends nothing more, answers the work it
+  still holds at once, and ends once nothing of it is with the device. A part
+  of the region is handed out again only once the device is known to map
+  nothing into it, and memory a blob may still name is never freed: a map or
+  unmap refused or answered unreadably leaves both kept. Control orders and
+  waited exchanges wait for the device's answer untimed, as Linux's
+  virtio-gpu driver waits for its control queue; only jobs, whose length a
+  client chooses, carry the watchdog. The display loop alone publishes to the
+  control queue: the GPU side's orders reach it through a desk it drains as
+  it services the device, roused by a message on a port
+  (`desk_endpoint_for`) only this process may send to, and an answer thread
+  hands each answer to the work waiting on it.
 - **Ordering across the queues.** The pointer image's transfer is fenced and
   answered before the cursor queue names it, as the specification requires
   of `UPDATE_CURSOR`.

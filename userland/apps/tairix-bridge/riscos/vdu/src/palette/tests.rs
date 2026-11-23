@@ -83,3 +83,22 @@ fn a_256_colour_mode_s_group_shares_its_base_colour() {
         "red's low bits from the base, its top bits from bit 4"
     );
 }
+
+#[test]
+fn a_palette_is_the_default_where_each_channel_s_kept_bits_are_its_own() {
+    let default = default_colours(3, 256);
+    assert!(is_default_256(&default, u8::MAX));
+    let mut low_nibbles = default.clone();
+    for colour in &mut low_nibbles {
+        colour.r |= 0x0F;
+    }
+    assert!(
+        is_default_256(&low_nibbles, VIDC1_CHANNEL),
+        "low nibbles not compared"
+    );
+    assert!(!is_default_256(&low_nibbles, u8::MAX), "every bit compared");
+    let mut moved = default.clone();
+    moved[1].r = 0x21;
+    assert!(!is_default_256(&moved, VIDC1_CHANNEL));
+    assert!(!is_default_256(&default[..16], VIDC1_CHANNEL));
+}

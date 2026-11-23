@@ -8,8 +8,10 @@ samplers and transfers of `plans/GPU.md` GP3.1; GP3.2's bind set layouts, bind
 sets, pipeline layouts and shader modules; GP3.3's compute pipelines, their
 dispatches and the interpreter that runs them; and GP3.4's render pipelines,
 passes and draws, direct and indirect, rasterised through `lib/raster`'s
-stages; and GP11.1's seam between the model and the backend its work runs on.
-Reaching a hardware device's driver arrives with GP11.2.
+stages; GP11.1's seam between the model and the backend its work runs on; and
+GP11.2's served device: a driver's own device brought through the public
+`Hardware` seam, served on its node's channel and reached by
+`Device::connect`.
 
 ## A device and what it is
 
@@ -442,6 +444,48 @@ pipeline's programs are made with it let go from what the model checked, and
 charged as they are filed. The software device is the first backend; a
 hardware backend is its driver's own.
 
+## A driver's device
+
+A driver implements `Hardware` for its own device and makes a `Device` of it
+with `Device::hardware`, stating its `DeviceInfo`, each queue family's engine
+depth and the clock its deadlines are read from. The model checks, charges,
+files and orders everything; the backend makes a context's form on the
+device and memory in a context, reads and writes host-visible memory, and
+runs each ready job. `run` is handed a `Job` — its context, its queue, its
+deadline and its commands, every range proved within the memories they name
+— and answers it with `Job::finish`, run to its end or lost. A job dropped
+unanswered loses its context as a fault, so none goes unaccounted. `run` is
+called without the model's lock and never waits; what the backend makes it
+may wait on its device for.
+
+No hardware device can stop a job once started, so the model watches each
+one: a job past its deadline is answered as overran, its context lost and the
+backend told through `lost`, and the job's own answer, when the device gives
+it, finds nothing to complete.
+
+The seam carries memory and transfers: copies, fills and updates
+(`JobCommand`). A description stating a format, a shader capability, a
+feature or a queue past transfers is refused (`Error::Malformed`), so a
+driver's device promises no image, bind set or pipeline it could not make.
+
+## A served device
+
+`serve` runs a device on its node's device channel for the life of the
+driver's process, speaking [`gpu-v1`](../abi/gpu.md) to every process holding
+`CAP_GPU`. Requests run on up to `MAX_SERVE_WORKERS` workers, so one client's
+slow request holds back no other; waits, client exits and the watchdog stay
+on the loop, whose wait is bounded by the soonest wait's timeout and the
+device's soonest job deadline. A client is its kernel-attested process: a
+context is found among its own before anything else is read, its exit lets go
+of everything it held, and its contexts, export tokens and memory are bounded
+as the channel's page states.
+
+`Device::connect` reaches a served device through a region the client grants:
+the same `Device`, each handle forwarding to the driver, so a program tells a
+served device from the software one only by what it states. An update's bytes
+stay the client's until its submission arrives, so the served device charges
+them then.
+
 ## The software device
 
 The software device runs its work on a thread of its own: a submission or a
@@ -861,6 +905,33 @@ fill of the whole heap runs far past a deadline.
   reached past every object — and their admitted mutants, and holds the
   interpreter total, never faulting, writing nothing outside its range, and
   giving the same bytes on one participant and several.
+- The hardware tests hold a probe backend to the model: a job reaching the
+  device whole and its fence landing once answered, an engine starting no
+  more jobs than its depth, a job answered with a loss or dropped unanswered
+  losing its context, the watchdog answering an overrun as overran and telling
+  the backend, a context going with the last of its memory and work, and a
+  description promising more than memory and transfers refused.
+- The served tests serve the software device in this process and compare
+  what a client sees with what the device answers directly — transfers,
+  refusals (bits no usage names among them), timelines and fences, imports,
+  image copies and a dispatch — and hold the runtime to a command buffer
+  longer than the region crossing in parts, no context of another client
+  named however its id is forged, a refused request changing nothing, waits
+  answered as their value lands, their context ends or their timeout passes
+  and a closing client's as destroyed, a client's exit letting go of
+  everything, its bound of contexts, regions outside the channel's bounds
+  refused, clients served at once seeing only their own work, and every
+  command but a pass fitting the smallest region.
+- `tests/fuzz_served.rs` (in `cargo xtask fuzz`) runs the submission sweeps
+  over a served device against the same references, and sends what a served
+  round's client sent again, changed and by another client: every request is
+  answered once by a reply naming its op, an unchanged journal as it was
+  answered, and the device holds nothing once its clients are gone. A fixed
+  session waiting on its timeline is sent first, whole and then misused, so
+  each run reaches every kind of answer — held, refused, foreign and
+  unframed — whatever it draws. Its
+  loopback runs every request on the caller's thread and adds no `unsafe`, so
+  it is left to the ordinary matrix.
 - `cargo xtask miri` interprets the crate's tests and the submission fuzz
   harness for the contention its threads put `lib/rt`'s lock and condition
   variable to, and for a dispatch's pieces and a pass's bins sharing memory as

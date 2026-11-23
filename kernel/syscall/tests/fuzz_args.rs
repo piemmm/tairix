@@ -26,6 +26,7 @@
 //! wall-clock budget" contract — while the logged seed keeps any crash reproducible.
 
 use core::cell::RefCell;
+use tairix_abi::driver::RegionCaching;
 use tairix_abi::netattach::FsserveCtl;
 use tairix_abi::seat::ReleaseSurface;
 use tairix_abi::{
@@ -449,6 +450,7 @@ impl SyscallHandlers for AcceptingHandlers {
         _handle: u64,
         _offset: u64,
         _len: usize,
+        _caching: Option<RegionCaching>,
     ) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
@@ -461,6 +463,10 @@ impl SyscallHandlers for AcceptingHandlers {
         _reach: tairix_abi::driver::DmaReach,
         _device_out: u64,
     ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn mmio_unmap(&self, _c: &CallerContext<'_>, _base: u64) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
@@ -1595,6 +1601,9 @@ const CLOSED_U32_ARGS: &[ClosedArg] = &[
     }),
     (SyscallNumber::CONSOLE_ADOPT, 3, |raw| {
         tairix_abi::driver::DmaReach::new(raw).is_some()
+    }),
+    (SyscallNumber::MMIO_MAP, 3, |raw| {
+        RegionCaching::from_arg(u64::from(raw)).is_ok()
     }),
 ];
 

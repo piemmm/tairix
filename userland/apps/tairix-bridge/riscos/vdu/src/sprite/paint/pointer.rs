@@ -6,16 +6,17 @@
 //! clear colour. The sprite's palette gives the pointer's three colours: its
 //! entries 1 to 3, or with a table the entries the table turns into them.
 
+use tairix_colour::Rgb;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
-use tairix_vdu::mode::var;
 
-use super::super::format::variable;
+use super::super::format::Pixels;
 use super::super::header::Sprite;
 use super::super::NO_DEEP_PALETTE;
-use super::source::Transparency;
-use super::{read, Scale};
+use super::source::{Source, Transparency};
+use super::Scale;
+use crate::mode::MOST_EIG;
 use crate::palette::{self, kind};
-use crate::pointer::Shape;
+use crate::pointer::{Shape, MOST_HEIGHT, MOST_WIDTH, PIXELS_PER_BYTE};
 use crate::state::{self, with};
 
 /// R3's bits: the shape, then what to leave alone.
@@ -23,10 +24,6 @@ const SHAPE_NUMBER: u32 = 0xF;
 const KEEP_IMAGE: u32 = 0x10;
 const KEEP_PALETTE: u32 = 0x20;
 const KEEP_SELECTION: u32 = 0x40;
-/// The pointer's pixels across and down at most.
-const MOST_SIDE: u32 = 32;
-/// The pointer's pixels to a byte.
-const PIXELS_PER_BYTE: u32 = 4;
 /// The pointer's colours past its clear one.
 const POINTER_COLOURS: u32 = 3;
 
@@ -35,7 +32,7 @@ const POINTER_COLOURS: u32 = 3;
 pub(crate) fn set_pointer(os: &mut Os<'_>, sprite: &Sprite, regs: &Regs) -> Result<(), Fail> {
     let [_, _, _, flags, active_x, active_y, scale, table, ..] = regs.r;
     let number = flags & SHAPE_NUMBER;
-    let source = read(os, sprite)?;
+    let source = Source::read(os, sprite)?;
     if !source.pixels.paletted() {
         return Err(os.error(NO_DEEP_PALETTE));
     }
@@ -51,7 +48,7 @@ pub(crate) fn set_pointer(os: &mut Os<'_>, sprite: &Sprite, regs: &Regs) -> Resu
     };
     if flags & KEEP_IMAGE == 0 && (1..=4).contains(&number) {
         let scale = if scale == 0 {
-            default_scale(os, sprite)?
+            default_scale(os, &source.pixels)?
         } else {
             match Scale::read(os, scale)? {
                 Some(scale) => scale,
@@ -78,7 +75,7 @@ pub(crate) fn set_pointer(os: &mut Os<'_>, sprite: &Sprite, regs: &Regs) -> Resu
             let Some(&word) = index.and_then(|i| source.palette.get(i)) else {
                 continue;
             };
-            let [_, r, g, b] = word.to_le_bytes();
+            let [r, g, b] = Rgb::from_riscos_word(word).to_array();
             let (logical, physical) = (logical.to_le_bytes()[0], kind::POINTER.to_le_bytes()[0]);
             palette::write_through(os, logical, physical, [r, g, b])?;
         }
@@ -94,16 +91,21 @@ pub(crate) fn set_pointer(os: &mut Os<'_>, sprite: &Sprite, regs: &Regs) -> Resu
 
 /// The factors the eigen factors of the sprite and the screen give: a pixel
 /// of the sprite as many of the screen's as its OS units cover.
-fn default_scale(os: &mut Os<'_>, sprite: &Sprite) -> Result<Scale, Fail> {
+fn default_scale(os: &mut Os<'_>, pixels: &Pixels) -> Result<Scale, Fail> {
     let (screen_x, screen_y) = state::with(os, |vdu, _| {
         Ok((vdu.format().x_eig(), vdu.format().y_eig()))
     })?;
-    let eig = |v| variable(sprite.mode, v).unwrap_or(1);
-    let factor =
-        |sprite_eig: u32, screen_eig: u32| (1u32 << sprite_eig.min(3), 1u32 << screen_eig.min(3));
-    let (mul_x, div_x) = factor(eig(var::X_EIG), screen_x);
-    let (mul_y, div_y) = factor(eig(var::Y_EIG), screen_y);
-    Ok(Scale::of((mul_x, mul_y), (div_x, div_y)))
+    let (eig_x, eig_y) = pixels.shown.eig;
+    let factor = |sprite_eig: u32, screen_eig: u32| {
+        (
+            1u32 << sprite_eig.min(MOST_EIG),
+            1u32 << screen_eig.min(MOST_EIG),
+        )
+    };
+    let (mul_x, div_x) = factor(eig_x, screen_x);
+    let (mul_y, div_y) = factor(eig_y, screen_y);
+    // Each factor a power of two, none is nought.
+    Ok(Scale::of((mul_x, mul_y), (div_x, div_y)).unwrap_or(Scale::UNIT))
 }
 
 /// The pointer image of `size` pixels scaled by `scale`, cut to 32 by 32,
@@ -117,7 +119,10 @@ fn image(
     auto_active: bool,
     given: (u32, u32),
 ) -> Shape {
-    let (width, height) = (size.0.min(MOST_SIDE), size.1.min(MOST_SIDE));
+    let (width, height) = (
+        size.0.min(u32::from(MOST_WIDTH) * PIXELS_PER_BYTE),
+        size.1.min(u32::from(MOST_HEIGHT)),
+    );
     let bytes = width.div_ceil(PIXELS_PER_BYTE);
     let mut data = alloc::vec![0u8; (bytes * height) as usize];
     let mut active = None;

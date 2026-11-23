@@ -13,6 +13,7 @@ use tairix_riscos_kernel::msgtrans::{Own, OwnFile};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, World};
 use tairix_riscos_kernel::swi::chunk;
 
+use crate::colourtrans::matching::Loadings;
 use crate::colourtrans::readwrite::named_colours;
 use crate::inverse::{self, fifteen};
 use crate::palette::EIGHT_BIT_COLOURS;
@@ -74,6 +75,9 @@ pub(crate) static BLEND_TABLE: Builtin = Builtin {
 struct State {
     own: Own,
     locked: Vec<u32>,
+    /// The last 256-colour destination's inverse table, built again only
+    /// for other colours.
+    inverse: inverse::Kept,
 }
 
 fn own(world: &mut World) -> Option<&mut Own> {
@@ -87,6 +91,7 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     os.hold_extension(State {
         own,
         locked: Vec::new(),
+        inverse: inverse::Kept::default(),
     })
 }
 
@@ -94,10 +99,12 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 /// private word.
 fn finalise(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     os.close_own(own)?;
-    match os.release_extension::<State>() {
-        Some(state) => os.rma_free_all(state.locked),
-        None => Ok(()),
+    if let Some(state) = os.release_extension::<State>() {
+        for block in state.locked {
+            os.free_rma_quietly(block);
+        }
     }
+    Ok(())
 }
 
 fn perform(os: &mut Os<'_>, offset: u32, regs: &mut Regs) -> Result<(), Fail> {
@@ -132,7 +139,23 @@ fn generate(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     if !lock && regs.r[6] == 0 {
         return Ok(());
     }
-    let Some(table) = blended(&source, &destination, translucency) else {
+    let inverse = if destination.len() == EIGHT_BIT_COLOURS {
+        let kept = os
+            .extension::<State>()
+            .and_then(|state| state.inverse.table(&destination));
+        let Some((table, _)) = kept else {
+            return Err(os.no_memory());
+        };
+        Some(table)
+    } else {
+        None
+    };
+    let Some(table) = blended(
+        &source,
+        &destination,
+        inverse.as_deref().map(Vec::as_slice),
+        translucency,
+    ) else {
         return Err(os.no_memory());
     };
     if !lock {
@@ -166,13 +189,14 @@ fn unlock(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 }
 
 /// Each source colour blended over each destination colour, the
-/// destination's colours outermost; none where there is no room.
-fn blended(source: &[Rgb], destination: &[Rgb], translucency: u32) -> Option<Vec<u8>> {
-    let inverse = if destination.len() == EIGHT_BIT_COLOURS {
-        Some(inverse::table(destination)?)
-    } else {
-        None
-    };
+/// destination's colours outermost, a 256-colour destination's found
+/// through its `inverse` table; none where there is no room.
+fn blended(
+    source: &[Rgb],
+    destination: &[Rgb],
+    inverse: Option<&[u8]>,
+    translucency: u32,
+) -> Option<Vec<u8>> {
     let mut table = Vec::new();
     table
         .try_reserve_exact(source.len() * destination.len())
@@ -180,7 +204,7 @@ fn blended(source: &[Rgb], destination: &[Rgb], translucency: u32) -> Option<Vec
     for &under in destination {
         for &over in source {
             let mixed = mix(over, under, translucency);
-            table.push(match &inverse {
+            table.push(match inverse {
                 Some(inverse) => inverse[fifteen(mixed)],
                 None => nearest_last(destination, mixed),
             });
@@ -206,12 +230,7 @@ pub(crate) fn mix(over: Rgb, under: Rgb, translucency: u32) -> Rgb {
 pub(crate) fn nearest_last(colours: &[Rgb], wanted: Rgb) -> u8 {
     let mut best = (u32::MAX, 0);
     for (number, &colour) in (0..=u8::MAX).zip(colours) {
-        let error: u32 = colour
-            .to_array()
-            .iter()
-            .zip(wanted.to_array())
-            .map(|(&a, b)| u32::from(a.abs_diff(b)).pow(2))
-            .sum();
+        let error = Loadings::UNIT.error(colour, wanted);
         if error <= best.0 {
             best = (error, number);
         }

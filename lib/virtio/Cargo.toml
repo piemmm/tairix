@@ -18,6 +18,8 @@ workspace = true
 # the stable ABI types in `lib/abi`, so it builds for every Tier-1 target.
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The free runs of a shared-memory region are the gaps between its held parts.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
 tairix-dma-barrier = { path = "../dma-barrier", version = "=0.0.0" }
 
 [features]

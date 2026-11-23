@@ -29,6 +29,9 @@ lint = []
 [dependencies]
 tairix-vt = { path = "../vt", version = "=0.0.0" }
 tairix-curses = { path = "../curses", version = "=0.0.0" }
+# The shared `getopt` and quoting a help-only command line is read and
+# refused with.
+tairix-util = { path = "../util", version = "=0.0.0" }
 
 # For the `rt` feature's `BundleHelp` only: the bundle-entry and
 # `Errno`/`DirEntry` vocabulary (`tairix-abi`), the one shared bundle

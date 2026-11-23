@@ -19,8 +19,6 @@ use crate::sprite::{Naming, Sprite};
 
 /// The flags both take.
 mod flag {
-    /// R1 points at the sprite rather than naming it.
-    pub(super) const SPRITE_POINTER: u32 = 1;
     /// Each entry's two flash states, the first first.
     pub(super) const FLASHING: u32 = 1 << 1;
 }
@@ -37,11 +35,15 @@ const SWITCHED: Error = Error {
     token: "Switched",
 };
 
-/// `OS_SpriteOp` 37 making a palette: its R3, and its top bit asking an
-/// eight-bit sprite's to hold 256 entries.
-const MAKE_PALETTE: u32 = 37;
+/// `OS_SpriteOp` 37's R3 making a palette.
 const NEW_PALETTE: u32 = 1;
-const FULL_PALETTE: u32 = 1 << 31;
+
+/// A sprite whose palette, made as `OS_SpriteOp` 37 makes it, still holds
+/// fewer entries than the palette given.
+const SHORT_PALETTE: Error = Error {
+    number: 0xA08,
+    token: "ShortPalette",
+};
 
 /// A depth of display with no palette.
 pub(super) const NO_PALETTE: Error = Error {
@@ -52,7 +54,7 @@ pub(super) const NO_PALETTE: Error = Error {
 /// `ColourTrans_ReadPalette`: the palette R0 and R1 name written to R2's
 /// buffer of R3 bytes, R2 and R3 left past it; R2 nought for its size in R3.
 pub(super) fn read_palette(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    let by_pointer = regs.r[4] & flag::SPRITE_POINTER != 0;
+    let by_pointer = regs.r[4] & super::SPRITE_POINTER != 0;
     let pairs = named_pairs(os, regs.r[0], regs.r[1], by_pointer)?;
     let flashing = regs.r[4] & flag::FLASHING != 0;
     let words = if flashing { 2 } else { 1 };
@@ -91,8 +93,9 @@ pub(crate) fn named_pairs(
 ) -> Result<Vec<[u32; 2]>, Fail> {
     if r0 != CURRENT && palettes::names_sprite(os, r0)? {
         let sprite = palettes::sprite_of(os, r0, r1, by_pointer)?;
-        if sprite.named_entries() != 0 {
-            return palettes::sprite_pairs(os, &sprite);
+        let pairs = palettes::sprite_pairs(os, &sprite)?;
+        if !pairs.is_empty() {
+            return Ok(pairs);
         }
         let holding = palettes::holding_of(os, sprite.mode)?;
         return Ok(palettes::default_pairs(with_palette(os, holding)?));
@@ -133,8 +136,9 @@ pub(crate) fn named_colours(
 /// `ColourTrans_WritePalette`: R2's words made the palette R0 and R1 name,
 /// every register kept: the current palette, refused while output goes to
 /// a sprite, or a sprite's, given a palette of its mode's size where it has
-/// fewer. The words are kept as given, and ColourTrans's own reading of the
-/// current palette is not made stale, as RISC OS 5 leaves both.
+/// none and refused where one of its own is shorter. The words are kept as
+/// given, and ColourTrans's own reading of the current palette is not made
+/// stale, as RISC OS 5 leaves both.
 pub(super) fn write_palette(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let flashing = regs.r[4] & flag::FLASHING != 0;
     if regs.r[0] == CURRENT {
@@ -145,17 +149,18 @@ pub(super) fn write_palette(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail
         let count = len32(with_palette(os, holding)?.colours());
         return write_current(os, count, regs.r[2], flashing);
     }
-    let by_pointer = regs.r[4] & flag::SPRITE_POINTER != 0;
+    let by_pointer = regs.r[4] & super::SPRITE_POINTER != 0;
     let sprite = palettes::sprite_of(os, regs.r[0], regs.r[1], by_pointer)?;
     let holding = palettes::holding_of(os, sprite.mode)?;
     let count = with_palette(os, holding)?.colours();
-    let sprite = if (sprite.palette_entries() as usize) < count {
+    let pairs = given_pairs(os, regs.r[2], count, flashing)?;
+    if (sprite.palette_entries() as usize) < count {
         let full = if matches!(holding, Holding::Grouped | Holding::Full) {
-            FULL_PALETTE
+            crate::sprite::reason::PALETTE_FULL
         } else {
             0
         };
-        let make = MAKE_PALETTE | Naming::Pointer.value();
+        let make = crate::sprite::reason::PALETTE | Naming::Pointer.value();
         let mut call = Regs::new([
             make,
             regs.r[0],
@@ -172,11 +177,14 @@ pub(super) fn write_palette(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail
             0,
         ]);
         os.perform(X | SPRITE_OP, &mut call)?;
-        Sprite::read(os, sprite.at)?
-    } else {
-        sprite
-    };
-    let pairs = given_pairs(os, regs.r[2], count, flashing)?;
+    }
+    // Op 37, a claimant of SpriteV, or a module asked about the sprite's mode
+    // may have changed it: a palette still short has no room for the rest,
+    // which would land on the image.
+    let sprite = Sprite::read(os, sprite.at)?;
+    if (sprite.palette_entries() as usize) < count {
+        return Err(os.own_error(own, SHORT_PALETTE, &[]));
+    }
     os.write_bytes(sprite.address(SPRITE_HEADER_LEN), &pairs)
 }
 

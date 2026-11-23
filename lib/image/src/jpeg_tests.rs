@@ -1452,6 +1452,37 @@ fn a_frame_states_its_stored_raster_its_turn_and_its_density() {
 }
 
 #[test]
+fn an_extended_frame_is_its_process_and_each_process_numbers_its_marker() {
+    let mut extended = two_tone_landscape();
+    let sof = extended
+        .windows(2)
+        .position(|w| w == [0xFF, 0xC0])
+        .expect("a frame header");
+    extended[sof + 1] = 0xC1;
+    let frame = crate::jpeg_frame(&extended).expect("a frame");
+    assert_eq!(frame.process, crate::JpegProcess::Extended);
+    assert!(!frame.process.progressive());
+    assert_eq!(
+        decode(&extended, &ROOMY).expect("decodes").pixels(),
+        decode(&two_tone_landscape(), &ROOMY)
+            .expect("decodes")
+            .pixels(),
+        "eight-bit extended sequential decodes as baseline does"
+    );
+    for process in [
+        crate::JpegProcess::Baseline,
+        crate::JpegProcess::Extended,
+        crate::JpegProcess::Progressive,
+    ] {
+        assert_eq!(
+            crate::JpegProcess::of_number(process.number()),
+            Some(process)
+        );
+    }
+    assert_eq!(crate::JpegProcess::of_number(3), None, "no fourth process");
+}
+
+#[test]
 fn a_huffman_table_listing_more_symbols_than_there_are_bytes_is_refused() {
     let table = |longest: u8| {
         let mut payload = vec![0x00];

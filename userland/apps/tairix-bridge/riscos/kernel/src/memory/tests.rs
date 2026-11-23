@@ -544,3 +544,37 @@ fn the_application_limit_moves_only_over_nothing() {
     );
     assert_eq!(memory.slot_limit(slot), Some(0x0800_0000 - APPLICATION));
 }
+
+#[test]
+fn a_range_grants_rights_exactly_where_its_report_has_them_all() {
+    use super::check::{PRIVILEGED_READ, PRIVILEGED_WRITE, USER_WRITE};
+    let mut memory = shared();
+    let slot = memory.create_slot(Bits::Bit32).unwrap();
+    memory.set_slot_size(slot, 0x1_0000).unwrap();
+    memory.switch_slot(slot).unwrap();
+    let top = u64::from(APPLICATION) + 0x1_0000;
+    let ranges = [
+        (APPLICATION, top),
+        (APPLICATION, top + 1),
+        (APPLICATION + 0xFFFF, u64::from(APPLICATION) + 0xFFFF),
+        (APPLICATION, 1 << 32),
+        (APPLICATION, u64::MAX),
+        (u32::MAX, 1 << 32),
+        (0, 0x100),
+        (SHARED.host.start, u64::from(SHARED.host.start) + 8),
+    ];
+    for (start, end) in ranges {
+        for rights in [
+            PRIVILEGED_READ,
+            PRIVILEGED_READ | PRIVILEGED_WRITE,
+            USER_WRITE,
+        ] {
+            let reported = memory.check_access(start, end) & rights == rights;
+            assert_eq!(
+                memory.grants(start, end, rights),
+                reported,
+                "{start:#X}..{end:#X} rights {rights:#X}"
+            );
+        }
+    }
+}

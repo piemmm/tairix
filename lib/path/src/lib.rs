@@ -1005,7 +1005,6 @@ pub fn staging_name(
     leaf: &[u8],
     tag: [u8; STAGING_TAG_LEN],
 ) -> Result<Vec<u8>, alloc::collections::TryReserveError> {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
     const SUFFIX: &[u8] = b".new";
     let tagged = 1 + 2 * STAGING_TAG_LEN + SUFFIX.len();
     let stem = if leaf.len() + tagged <= MAX_COMPONENT_LEN {
@@ -1018,8 +1017,7 @@ pub fn staging_name(
     staged.extend_from_slice(stem);
     staged.push(b'.');
     for byte in tag {
-        staged.push(HEX[usize::from(byte >> 4)]);
-        staged.push(HEX[usize::from(byte & 0x0f)]);
+        staged.extend_from_slice(&tairix_util::hex::digits(byte));
     }
     staged.extend_from_slice(SUFFIX);
     Ok(staged)

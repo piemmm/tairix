@@ -692,3 +692,198 @@ fn the_dictionary_is_the_kernel_s_and_a_bad_swi_names_messagetrans() {
         (0x110, b"Module MessageTrans provides no such SWI".to_vec())
     );
 }
+
+/// A session holding `file` as the test's messages, opened through the
+/// test's descriptor.
+fn with_messages(file: &[u8]) -> Session {
+    let mut s = session();
+    register(&mut s, BLOCK, &[("Test.Messages", file)]);
+    open(&mut s, "Resources:$.Test.Messages").expect("opened");
+    s
+}
+
+#[test]
+fn a_lookup_holds_no_more_of_its_expansion_than_it_writes_whatever_room_it_names() {
+    let mut s = with_file();
+    s.write(TOKEN, b"Hello\0");
+    s.write(TOKEN + 0x80, b"world\0");
+    let mut registers = [0; 13];
+    registers[..5].copy_from_slice(&[DESCRIPTOR, TOKEN, BUFFER, u32::MAX, TOKEN + 0x80]);
+    let regs = swi(&mut s, LOOKUP, registers).expect("expanded");
+    assert_eq!(regs.r[3], 13);
+    assert_eq!(s.read(BUFFER, 14), b"Hello, world!\0");
+
+    let value: Vec<u8> = (0..1500u32).map(|n| b'a' + (n % 26) as u8).collect();
+    let mut file = b"Long:".to_vec();
+    file.extend_from_slice(&value);
+    file.extend_from_slice(b"\nPad:to be indexed, past the least an index takes\n");
+    let mut s = with_messages(&file);
+    s.write(TOKEN, b"Long\0");
+    let far = DATA + 0x8000;
+    for (room, held) in [(1000, 999), (u32::MAX, 1500)] {
+        let regs = swi(
+            &mut s,
+            LOOKUP,
+            [DESCRIPTOR, TOKEN, far, room, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        )
+        .expect("expanded");
+        assert_eq!(regs.r[3], held, "room {room:#x}");
+        assert_eq!(s.read(far, held as usize), &value[..held as usize]);
+        assert_eq!(s.read(far + held, 1), [0], "terminated");
+    }
+}
+
+#[test]
+fn an_expansion_into_a_buffer_running_off_memory_stops_at_the_abort() {
+    let mut s = session();
+    let end = crate::memory::layout::APPLICATION + crate::testkit::SLOT_BYTES;
+    let mut os = s.kernel.os();
+    let mut sink = super::IntoBuffer {
+        os: &mut os,
+        buffer: end - 100,
+        room: u32::MAX,
+        written: 0,
+        piece: [0; super::PIECE],
+        held: 0,
+        fault: None,
+    };
+    assert!(!super::scan::Sink::take(&mut sink, &[b'x'; 2000]));
+    assert!(matches!(sink.fault, Some(crate::os::Fail::Unwind(_))));
+    assert_eq!(sink.written, 0, "nothing counted past the abort");
+}
+
+#[test]
+fn an_indexed_value_is_measured_across_pieces_an_escape_carried_between_them() {
+    let mut value = alloc::vec![b'v'; 1100];
+    value[511] = crate::dictionary::ESCAPE;
+    value[512] = b'\n';
+    let mut file = b"Long:".to_vec();
+    file.extend_from_slice(&value);
+    file.extend_from_slice(b"\nPad:to be indexed, past the least an index takes\nOpen:never ended");
+    let mut s = with_messages(&file);
+    s.write(TOKEN, b"Long\0");
+    let regs = swi(
+        &mut s,
+        LOOKUP,
+        [DESCRIPTOR, TOKEN, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    )
+    .expect("found in place");
+    assert_eq!(regs.r[3], 1100, "the escaped line feed does not end it");
+    s.write(TOKEN, b"Open\0");
+    assert!(
+        swi(
+            &mut s,
+            LOOKUP,
+            [DESCRIPTOR, TOKEN, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        )
+        .is_err(),
+        "a value the file ends inside is not there"
+    );
+}
+
+#[test]
+fn enumeration_read_a_piece_at_a_time_gives_what_the_whole_file_does() {
+    let mut file = Vec::new();
+    for n in 0..400usize {
+        let line = match n % 7 {
+            0 => alloc::format!("# comment {n}: {}\n", "pad ".repeat(n % 9)),
+            1 => alloc::format!("Alias{n}/Other{n}:aliased\n"),
+            2 => alloc::format!("Alone{n}\nShared{n}:shared value\n"),
+            _ => alloc::format!("Tok{n}:value {n} {}\n", "x".repeat(n % 50)),
+        };
+        file.extend_from_slice(line.as_bytes());
+    }
+    let mut s = with_messages(&file);
+    for pattern in [
+        &b"*"[..],
+        b"Tok*",
+        b"Tok1?",
+        b"T?k2*",
+        b"Alias*",
+        b"Other39*",
+        b"Shared*",
+        b"Nothing*",
+        b"Tok399",
+    ] {
+        let mut expected = Vec::new();
+        let mut at = 0;
+        while let Some((token, next)) = super::scan::next_token(&file, pattern, at) {
+            expected.push(file[token].to_vec());
+            at = next;
+        }
+        let mut text = pattern.to_vec();
+        text.push(0);
+        s.write(TOKEN, &text);
+        let mut seen = Vec::new();
+        let mut at = 0;
+        loop {
+            let regs = swi(
+                &mut s,
+                ENUMERATE_TOKENS,
+                [DESCRIPTOR, TOKEN, BUFFER, 32, at, 0, 0, 0, 0, 0, 0, 0, 0],
+            )
+            .expect("walked");
+            if regs.r[2] == 0 {
+                break;
+            }
+            seen.push(s.read(BUFFER, regs.r[3] as usize));
+            at = regs.r[4];
+        }
+        assert_eq!(
+            seen,
+            expected,
+            "{}",
+            alloc::string::String::from_utf8_lossy(pattern)
+        );
+    }
+}
+
+#[test]
+fn a_lookup_no_index_serves_read_a_piece_at_a_time_finds_what_the_whole_file_does() {
+    let mut file = Vec::new();
+    for n in 0..400usize {
+        let line = match n % 5 {
+            0 => alloc::format!("# comment {n}: {}\n", "pad ".repeat(n % 9)),
+            1 => alloc::format!("Alias{n}/Other{n}:aliased {n}\n"),
+            2 => alloc::format!("Wild{}?:wild {n}\n", n / 10),
+            _ => alloc::format!("Tok{n}:value {n} {}\n", "x".repeat(n % 50)),
+        };
+        file.extend_from_slice(line.as_bytes());
+    }
+    let mut s = session();
+    register(&mut s, BLOCK, &[("Test.Messages", &file)]);
+    s.write(NAME, b"Resources:$.Test.Messages\0");
+    let mut slow = [0; 13];
+    slow[..4].copy_from_slice(&[DESCRIPTOR, NAME, 0, u32::from_le_bytes(*b"SLOW")]);
+    swi(&mut s, OPEN_FILE, slow).expect("opened unindexed");
+    for token in [
+        &b"Tok3"[..],
+        b"Tok123",
+        b"Other391",
+        b"Tok399",
+        b"Wild397",
+        b"Nothing",
+    ] {
+        let expected = super::scan::find(&file, token).and_then(|at| {
+            let length = super::scan::value_length(&file, at)?;
+            Some(file[at..at + length].to_vec())
+        });
+        assert_eq!(expected.is_some(), token != b"Nothing", "the file as built");
+        let mut text = token.to_vec();
+        text.push(0);
+        s.write(TOKEN, &text);
+        let found = swi(
+            &mut s,
+            LOOKUP,
+            [DESCRIPTOR, TOKEN, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        )
+        .ok()
+        .map(|regs| s.read(regs.r[2], regs.r[3] as usize));
+        assert_eq!(
+            found,
+            expected,
+            "{}",
+            alloc::string::String::from_utf8_lossy(token)
+        );
+    }
+}

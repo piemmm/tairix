@@ -2,12 +2,7 @@ use super::*;
 
 /// Mode 12's default palette, its flashing colours in their first state.
 fn mode_12() -> Against {
-    let words: alloc::vec::Vec<u32> = default_words(2, false)
-        .iter()
-        .take(16)
-        .map(|[first, _]| *first)
-        .collect();
-    Against::of_words(Holding::Palette(2), &words)
+    default_against(2)
 }
 
 #[test]

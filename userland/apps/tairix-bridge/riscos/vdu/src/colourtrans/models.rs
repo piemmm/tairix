@@ -120,12 +120,18 @@ fn transform(matrix: &[[i64; 3]; 3], vector: [i32; 3]) -> Option<[i32; 3]> {
 
 /// `a` over `b` in 16.16, cut toward nought.
 fn ratio(a: i32, b: i32) -> i32 {
-    i32::try_from((i64::from(a) << 16) / i64::from(b)).unwrap_or(i32::MAX)
+    wrapped((i64::from(a) << 16) / i64::from(b))
 }
 
 /// `a` times `b` in 16.16, cut toward minus infinity.
 fn times(a: i32, b: i32) -> i32 {
-    i32::try_from((i64::from(a) * i64::from(b)) >> 16).unwrap_or(i32::MAX)
+    wrapped((i64::from(a) * i64::from(b)) >> 16)
+}
+
+/// `wide`'s low word, as the processor keeps a result that passes one.
+fn wrapped(wide: i64) -> i32 {
+    let [b0, b1, b2, b3, ..] = wide.to_le_bytes();
+    i32::from_le_bytes([b0, b1, b2, b3])
 }
 
 #[cfg(test)]

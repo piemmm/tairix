@@ -81,8 +81,8 @@ only when a real consumer needs it — never speculatively.
   with its mode-flags channel order and alpha, 1/2/4/8/16/24/32 bits per
   pixel across the 1:5:5:5, 5:6:5, 4:4:4:4, 8:8:8, and 8:8:8:8 packings,
   sprite palettes including the full 256-entry form and the short VIDC1
-  ones, and all three mask forms — an old-format mask at the image's own
-  depth, a new-format 1-bit mask, and a wide 8-bit alpha mask.
+  ones, and all three mask forms — an old-format mask in each pixel's field,
+  a new-format 1-bit mask, and a wide 8-bit alpha mask.
 - **TIFF** (`ImageFormat::Tiff`, TIFF 6.0): both byte orders; the chain of
   image file directories, each an independent page; strips *and* tiles;
   chunky and planar plane arrangements; bit depths 1, 2, 4, 8, 16, and 32

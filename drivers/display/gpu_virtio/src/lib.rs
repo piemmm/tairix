@@ -38,13 +38,25 @@
 //! hardware only through the grants its matched node requested.
 
 #![no_std]
+#![feature(allocator_api)]
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-#[cfg(test)]
 extern crate alloc;
 
+#[cfg(test)]
+extern crate std;
+
+#[cfg(freestanding)]
+pub mod program;
+mod three_d;
+mod venus;
 pub mod wire;
+
+pub use three_d::{Blob, Completion, Context, Done, NoVenus, Stream, SUBMIT_MAX};
+#[cfg(any(test, feature = "test-support"))]
+pub use venus::testing;
+pub use venus::Venus;
 
 use tairix_abi::display_ipc::DISPLAY_MAX_BUFFERS;
 use tairix_abi::driver::display::{
@@ -62,10 +74,11 @@ use tairix_display::{
 use tairix_drvrt::Recorder;
 use tairix_inline::ArrayVec;
 use tairix_virtio::{
-    ChainSegment, Direction, RequestQueue, SplitQueue, Status, Transport, VirtioError,
-    TRANSPORT_FEATURES,
+    ChainSegment, Direction, RequestQueue, SplitQueue, Status, Ticket, TicketQueue, Transport,
+    VirtioError, TRANSPORT_FEATURES,
 };
 
+use three_d::ThreeD;
 use wire::{Format, Request};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
@@ -77,8 +90,8 @@ const BIND_PRIORITY: u16 = 10;
 
 /// The capabilities the driver runs with, which its signed manifest requests:
 /// the transport's windows, the buffers and console its device reads, the
-/// device interrupt, granting the buffers, the seat's display endpoint, and
-/// the decisions it records.
+/// device interrupt, granting the buffers, the seat's display endpoint, the
+/// decisions it records, and publishing its GPU's channel.
 pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
     CapabilityId::MMIO_MAP,
     CapabilityId::MEM_DMA,
@@ -86,6 +99,7 @@ pub const REQUIRED_CAPABILITIES: &[CapabilityId] = &[
     CapabilityId::SHM,
     CapabilityId::IPC_BIND_PRIVILEGED,
     CapabilityId::LOG_EMIT,
+    CapabilityId::HW_EMIT,
 ];
 
 /// This driver's hardware bind table: a virtio GPU on either transport.
@@ -119,43 +133,45 @@ const BATCH_MAX: usize = 2 * MAX_DAMAGE_RECTS + 4;
 /// its transfers, the scan-out switch, then its flushes.
 const STAGES_MAX: usize = 5;
 
-/// Bytes one command's request slot holds.
-const REQUEST_SLOT: usize = 64;
+/// Bytes one command's request slot holds: the longest request.
+const REQUEST_SLOT: usize = wire::REQUEST_MAX;
 
-/// Bytes one command's response slot holds: a header.
-const RESPONSE_SLOT: usize = 32;
+/// Bytes one command's answer slot holds: the longest answer that is not a
+/// long one.
+const RESPONSE_SLOT: usize = wire::CAPSET_INFO_LEN;
 
-const _: () = assert!(wire::REQUEST_MAX <= REQUEST_SLOT && wire::HEADER_LEN <= RESPONSE_SLOT);
+const _: () = assert!(wire::MAP_INFO_LEN <= RESPONSE_SLOT);
 
-/// Where the command area's response slots start.
-const RESPONSES_AT: usize = BATCH_MAX * REQUEST_SLOT;
+/// Bytes of one command slot: a request and its answer.
+const SLOT_LEN: usize = REQUEST_SLOT + RESPONSE_SLOT;
 
-/// Where the one long response — display information or an EDID — lands.
-const LONG_AT: usize = RESPONSES_AT + BATCH_MAX * RESPONSE_SLOT;
-
-/// The longest response the driver reads.
-const LONG_LEN: usize = if wire::EDID_LEN > wire::DISPLAY_INFO_LEN {
-    wire::EDID_LEN
-} else {
-    wire::DISPLAY_INFO_LEN
+/// The longest answer the driver reads: display information, an EDID or a
+/// capset.
+const LONG_LEN: usize = {
+    let capset = wire::HEADER_LEN + wire::CAPSET_MAX;
+    let mut longest = wire::EDID_LEN;
+    if wire::DISPLAY_INFO_LEN > longest {
+        longest = wire::DISPLAY_INFO_LEN;
+    }
+    if capset > longest {
+        longest = capset;
+    }
+    longest
 };
 
-/// Where the cursor queue's one request lies.
-const CURSOR_AT: usize = LONG_AT + LONG_LEN;
+/// Descriptors the control queue is programmed with at most: as deep as a
+/// device takes it, so many requests are carried at once.
+const CONTROL_QUEUE_SIZE: u16 = 256;
 
-/// Bytes of the command area.
-const COMMAND_AREA: usize = CURSOR_AT + REQUEST_SLOT;
+/// Command slots at most: every request's chain takes two descriptors.
+const SLOTS_MAX: usize = CONTROL_QUEUE_SIZE as usize / 2;
 
-/// Descriptors one batch occupies on the control queue: a request and its
-/// response per command.
+/// Descriptors the display path keeps, a batch's: no work in flight elsewhere
+/// can take them, so none holds a display request back.
 #[allow(clippy::cast_possible_truncation)] // A few dozen, asserted to fit below.
-const CONTROL_DESCRIPTORS: u16 = (2 * BATCH_MAX) as u16;
+const DISPLAY_DESCRIPTORS: u16 = (2 * BATCH_MAX) as u16;
 
-const _: () = assert!(2 * BATCH_MAX <= u16::MAX as usize);
-
-/// Descriptors the control queue is programmed with: a batch's, in the power
-/// of two the split ring wants.
-const CONTROL_QUEUE_SIZE: u16 = CONTROL_DESCRIPTORS.next_power_of_two();
+const _: () = assert!(2 * BATCH_MAX <= CONTROL_QUEUE_SIZE as usize);
 
 /// Times one service reads the output again for changes raised while it read
 /// it: past that, a device raising them without end waits for the next.
@@ -167,6 +183,15 @@ const CURSOR_QUEUE_SIZE: u16 = 4;
 /// What the driver logs once the console is on the device's screen, which a
 /// harness keys a look at that screen on.
 pub const CONSOLE_SHOWN_MESSAGE: &str = "display: the console is shown on the virtio GPU";
+
+/// What the driver logs of the host-visible region its node was granted.
+pub const HOST_VISIBLE_MESSAGE: &str = "display: the virtio GPU's host-visible region";
+
+/// What the driver logs once it finds the device takes Venus work.
+pub const VENUS_MESSAGE: &str = "display: the virtio GPU takes Venus work";
+
+/// What the driver logs once it finds the device takes no Venus work.
+pub const NO_VENUS_MESSAGE: &str = "display: the virtio GPU draws in 2D alone";
 
 /// A decision the engine records.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -193,6 +218,16 @@ pub enum Record {
     ConsoleUnshown {
         /// Why.
         reason: DriverError,
+    },
+    /// The device takes Venus work.
+    Venus {
+        /// The version of the Venus capset it states.
+        version: u32,
+    },
+    /// The device takes no Venus work: it draws in 2D alone.
+    NoVenus {
+        /// Why.
+        why: NoVenus,
     },
 }
 
@@ -336,21 +371,19 @@ struct Pointer {
     shown: bool,
 }
 
-/// The device's answers to one batch, read once it is back.
-struct Answers<'a> {
-    area: &'a [u8],
-    count: usize,
+/// The device's verdict on each command of one batch.
+#[derive(Default)]
+struct Answers {
+    verdicts: ArrayVec<Result<(), DriverError>, BATCH_MAX>,
 }
 
-impl Answers<'_> {
+impl Answers {
     /// The answer to the command at `at`.
     fn answer(&self, at: usize) -> Result<(), DriverError> {
-        let start = RESPONSES_AT + at * RESPONSE_SLOT;
-        wire::ok_nodata(
-            self.area
-                .get(start..start + wire::HEADER_LEN)
-                .ok_or(DriverError::DeviceFault)?,
-        )
+        self.verdicts
+            .get(at)
+            .copied()
+            .unwrap_or(Err(DriverError::DeviceFault))
     }
 
     /// Whether the command at `at` was done.
@@ -362,11 +395,87 @@ impl Answers<'_> {
     /// resource already gone — a batch that answered late took it — counts
     /// as done.
     fn verdict(&self, retire: Option<usize>) -> Result<(), DriverError> {
-        (0..self.count).try_for_each(|at| match self.answer(at) {
+        (0..self.verdicts.len()).try_for_each(|at| match self.answer(at) {
             Err(DriverError::NotFound) if retire == Some(at) => Ok(()),
             answer => answer,
         })
     }
+}
+
+/// A slot of the command area: a request and its answer.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Slot(u16);
+
+/// Where the command area holds each thing, with `slots` command slots.
+#[derive(Copy, Clone, Debug)]
+struct Layout {
+    slots: u16,
+}
+
+impl Layout {
+    const fn request_at(slot: Slot) -> usize {
+        slot.0 as usize * SLOT_LEN
+    }
+
+    const fn response_at(slot: Slot) -> usize {
+        Self::request_at(slot) + REQUEST_SLOT
+    }
+
+    /// Where the one long answer lands.
+    const fn long_at(self) -> usize {
+        self.slots as usize * SLOT_LEN
+    }
+
+    /// Where the cursor queue's one request lies.
+    const fn cursor_at(self) -> usize {
+        self.long_at() + LONG_LEN
+    }
+
+    /// Bytes of the command area.
+    const fn len(self) -> usize {
+        self.cursor_at() + REQUEST_SLOT
+    }
+}
+
+/// The command slots no request holds.
+struct Slots {
+    free: ArrayVec<Slot, SLOTS_MAX>,
+}
+
+impl Slots {
+    fn new(count: u16) -> Self {
+        let mut free = ArrayVec::new();
+        for slot in (0..count).rev() {
+            let _ = free.try_push(Slot(slot));
+        }
+        Self { free }
+    }
+
+    fn take(&mut self) -> Result<Slot, DriverError> {
+        self.free.pop().ok_or(DriverError::Busy)
+    }
+
+    fn put(&mut self, slot: Slot) {
+        let _ = self.free.try_push(slot);
+    }
+}
+
+/// A request with the device: its ticket, the slot it is written in, and the
+/// fence its answer must carry.
+#[derive(Copy, Clone, Debug)]
+struct Sent {
+    ticket: Ticket,
+    slot: Slot,
+    fence: u64,
+}
+
+/// Where a request's answer lands.
+#[derive(Copy, Clone, Debug)]
+enum AnswerIn {
+    /// Its slot's answer.
+    Slot,
+    /// The first `len` bytes of the one long answer.
+    Long(usize),
 }
 
 /// Commands for the device, in stages: a stage's commands depend on no other
@@ -437,9 +546,20 @@ impl Batch {
 pub struct VirtioGpu<'h, T: Transport, M: BufferMemory, C, L> {
     transport: T,
     host: &'h dyn VirtioHost,
-    control: RequestQueue,
+    control: TicketQueue,
     cursor_queue: RequestQueue,
     commands: DmaSlab,
+    layout: Layout,
+    slots: Slots,
+    /// Display requests the device has not answered: no display request is
+    /// sent until it has, so none runs beside one it may still run.
+    display_held: ArrayVec<Sent, BATCH_MAX>,
+    /// When the device was last reminded of them, on the host's clock.
+    display_reminded_ns: u64,
+    /// The device's 3D state, where it takes Venus work.
+    three_d: Option<ThreeD>,
+    /// The GPU's desk, where its orders are served.
+    desk: Option<venus::display::DeskLink<'h, M::Region>>,
     memory: M,
     console: Option<C>,
     log: L,
@@ -458,7 +578,10 @@ pub struct VirtioGpu<'h, T: Transport, M: BufferMemory, C, L> {
     power: DisplayPower,
     hosting: Hosting,
     pointer: Pointer,
-    /// The fence the next command carries.
+    /// The fence the next command carries. One counter serves the device's
+    /// timeline and every context ring, so a fence numbered past a command's
+    /// was sent after it: a host that compares fences across timelines, as
+    /// QEMU's asynchronous fence path does, answers early only what has run.
     fence: u64,
 }
 
@@ -541,7 +664,9 @@ where
     L: Recorder<Record>,
 {
     /// Bring the device up: features negotiated, both queues programmed, the
-    /// output read, and the console, where the node hosts one, shown on it.
+    /// output read, the console, where the node hosts one, shown on it, and
+    /// what 3D work the device takes learnt — Venus where it offers it and
+    /// the node holds its `host_visible` region of that many bytes.
     ///
     /// # Errors
     ///
@@ -553,28 +678,37 @@ where
         memory: M,
         console: Option<C>,
         log: L,
+        host_visible: Option<u64>,
     ) -> Result<Self, DriverError> {
         let negotiated = tairix_virtio::negotiate::<_, DriverError>(
             &mut transport,
             || host.device_quiesced(),
-            |offered| Ok(offered & (TRANSPORT_FEATURES | wire::FEATURE_EDID)),
+            |offered| Ok(offered & (TRANSPORT_FEATURES | wire::FEATURE_EDID | three_d::FEATURES)),
         )?;
         if transport.num_queues() <= wire::CURSOR_QUEUE {
             return Err(DriverError::DeviceFault);
         }
         let program = |transport: &mut T, index, size, needed| {
             SplitQueue::new(transport, host, index, size, needed)
-                .map(RequestQueue::new)
                 .map_err(VirtioError::as_driver_error)
         };
         let control = program(
             &mut transport,
             wire::CONTROL_QUEUE,
             CONTROL_QUEUE_SIZE,
-            CONTROL_DESCRIPTORS,
+            DISPLAY_DESCRIPTORS,
         )?;
-        let cursor_queue = program(&mut transport, wire::CURSOR_QUEUE, CURSOR_QUEUE_SIZE, 1)?;
-        let commands = host.alloc_dma_zeroed(COMMAND_AREA)?;
+        let layout = Layout {
+            slots: control.size() / 2,
+        };
+        let control = TicketQueue::new(control).map_err(VirtioError::as_driver_error)?;
+        let cursor_queue = RequestQueue::new(program(
+            &mut transport,
+            wire::CURSOR_QUEUE,
+            CURSOR_QUEUE_SIZE,
+            1,
+        )?);
+        let commands = host.alloc_dma_zeroed(layout.len())?;
         let image = host.alloc_dma_zeroed(CURSOR_BYTES as usize)?;
         transport.set_status(negotiated.status.with(Status::DRIVER_OK));
         let mut gpu = Self {
@@ -583,6 +717,12 @@ where
             control,
             cursor_queue,
             commands,
+            layout,
+            slots: Slots::new(layout.slots),
+            display_held: ArrayVec::new(),
+            display_reminded_ns: 0,
+            three_d: None,
+            desk: None,
             memory,
             console,
             log,
@@ -612,6 +752,7 @@ where
         if gpu.hosting.hosted().is_some() {
             gpu.show_or_record(Shown::Console);
         }
+        gpu.offer_venus(negotiated.features, host_visible);
         Ok(gpu)
     }
 
@@ -646,69 +787,68 @@ where
         raised != 0
     }
 
-    /// Publish `batch`, each command fenced in its own slot, a stage at a
-    /// time, and wait for every answer.
+    /// Publish `batch`, each command fenced in a slot of its own, a stage at
+    /// a time, waiting for each stage's own answers.
     ///
     /// A command the device refuses does not stop the stages after it: the
-    /// answers say what was done.
+    /// answers say what was done. A command the device does not answer in
+    /// time keeps its slot, and no display request is sent until the device
+    /// answers it; no other work waits on it.
     ///
     /// # Errors
     ///
-    /// The queue's refusal, or a device that did not answer in time: the
-    /// commands' memory may then still be read. [`DriverError::DeviceFault`]
+    /// A display request still unanswered from before, the queue's refusal,
+    /// or a device that did not answer in time. [`DriverError::DeviceFault`]
     /// for an answer without its command's fence.
-    fn submit(&mut self, batch: &Batch) -> Result<Answers<'_>, DriverError> {
-        self.control.settle(&mut self.transport, self.host)?;
-        let first = self.fence;
-        self.fence = first.wrapping_add(batch.len() as u64);
-        let fence_of = |at: usize| first.wrapping_add(at as u64);
-        let area = self.commands.as_bytes_mut();
-        for (at, request) in batch.requests.iter().enumerate() {
-            let slot = &mut area[at * REQUEST_SLOT..(at + 1) * REQUEST_SLOT];
-            let bytes = request.as_bytes();
-            slot[..bytes.len()].copy_from_slice(bytes);
-            wire::fence(header_of(slot)?, fence_of(at));
-            let response = RESPONSES_AT + at * RESPONSE_SLOT;
-            area[response..response + RESPONSE_SLOT].fill(0);
-        }
+    fn submit(&mut self, batch: &Batch) -> Result<Answers, DriverError> {
+        self.settle_display()?;
+        let first = self.take_fences(batch.len());
+        let mut answers = Answers::default();
         for stage in batch.stages() {
-            let mut chains: ArrayVec<[ChainSegment; 2], BATCH_MAX> = ArrayVec::new();
-            for at in stage.clone() {
-                let len = batch.requests[at].as_bytes().len();
-                let chain = [
-                    self.segment(at * REQUEST_SLOT, len, Direction::DeviceRead)?,
-                    self.segment(
-                        RESPONSES_AT + at * RESPONSE_SLOT,
-                        wire::HEADER_LEN,
-                        Direction::DeviceWrite,
-                    )?,
-                ];
-                chains
-                    .try_push(chain)
-                    .map_err(|_| DriverError::LengthOutOfRange)?;
-            }
-            let mut requests: ArrayVec<&[ChainSegment], BATCH_MAX> = ArrayVec::new();
-            for chain in &chains {
-                requests
-                    .try_push(chain)
-                    .map_err(|_| DriverError::LengthOutOfRange)?;
-            }
-            self.control.submit_all_and_wait(
-                &mut self.transport,
-                self.host,
-                &requests,
-                COMMAND_TIMEOUT_NS,
-            )?;
-            let area = self.commands.as_bytes();
+            let mut sent: ArrayVec<Sent, BATCH_MAX> = ArrayVec::new();
+            let mut tickets: ArrayVec<Ticket, BATCH_MAX> = ArrayVec::new();
+            let mut published = Ok(());
             for at in stage {
-                let response = RESPONSES_AT + at * RESPONSE_SLOT;
-                wire::fenced(&area[response..response + RESPONSE_SLOT], fence_of(at))?;
+                match self.send(
+                    &batch.requests[at],
+                    first.wrapping_add(at as u64),
+                    AnswerIn::Slot,
+                ) {
+                    Ok(one) => {
+                        let _ = sent.try_push(one);
+                        let _ = tickets.try_push(one.ticket);
+                    }
+                    Err(refused) => {
+                        published = Err(refused);
+                        break;
+                    }
+                }
+            }
+            if !sent.is_empty() {
+                self.control.kick(&mut self.transport);
+            }
+            let waited = published.and_then(|()| {
+                self.control
+                    .wait(&mut self.transport, self.host, &tickets, COMMAND_TIMEOUT_NS)
+            });
+            let mut unfenced = false;
+            for one in sent {
+                let Some(written) = self.answered(one) else {
+                    continue;
+                };
+                let at = Layout::response_at(one.slot);
+                let response = &self.commands.as_bytes()[at..at + said(written, RESPONSE_SLOT)];
+                unfenced |= wire::fenced(response, one.fence).is_err();
+                let _ = answers.verdicts.try_push(wire::ok_nodata(response));
+                self.slots.put(one.slot);
+            }
+            waited?;
+            if unfenced {
+                return Err(DriverError::DeviceFault);
             }
         }
-        Ok(Answers {
-            area: self.commands.as_bytes(),
-            count: batch.len(),
-        })
+        self.take_3d_answers();
+        Ok(answers)
     }
 
     /// Run `batch` and read the device's verdict on it.
@@ -716,11 +856,142 @@ where
         self.submit(batch)?.verdict(None)
     }
 
+    /// Take the fences the next `count` commands carry, answering the first.
+    fn take_fences(&mut self, count: usize) -> u64 {
+        let first = self.fence;
+        self.fence = first.wrapping_add(count as u64);
+        first
+    }
+
     /// The fence a command carries next, taken.
     fn take_fence(&mut self) -> u64 {
-        let fence = self.fence;
-        self.fence = fence.wrapping_add(1);
-        fence
+        self.take_fences(1)
+    }
+
+    /// Write `request`, fenced with `fence`, into a free slot and publish it,
+    /// its answer landing `answer_in`; the device is not yet notified.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::Busy`] for no free slot or descriptors, else the
+    /// queue's refusal.
+    fn send(
+        &mut self,
+        request: &Request,
+        fence: u64,
+        answer_in: AnswerIn,
+    ) -> Result<Sent, DriverError> {
+        let slot = self.slots.take()?;
+        let ticket = self.publish(
+            slot,
+            request,
+            |header| wire::fence(header, fence),
+            None,
+            answer_in,
+        );
+        match ticket {
+            Ok(ticket) => Ok(Sent {
+                ticket,
+                slot,
+                fence,
+            }),
+            Err(refused) => {
+                self.slots.put(slot);
+                Err(refused)
+            }
+        }
+    }
+
+    /// Write `request` into `slot`, fence it with `fence`, and publish it with
+    /// `stream` between it and its answer, which lands `answer_in`.
+    ///
+    /// # Errors
+    ///
+    /// The queue's refusal.
+    fn publish(
+        &mut self,
+        slot: Slot,
+        request: &Request,
+        fence: impl FnOnce(&mut [u8; wire::HEADER_LEN]),
+        stream: Option<ChainSegment>,
+        answer_in: AnswerIn,
+    ) -> Result<Ticket, DriverError> {
+        let bytes = request.as_bytes();
+        let at = Layout::request_at(slot);
+        let (answer_at, answer_len) = match answer_in {
+            AnswerIn::Slot => (Layout::response_at(slot), RESPONSE_SLOT),
+            AnswerIn::Long(len) => (self.layout.long_at(), len),
+        };
+        let area = self.commands.as_bytes_mut();
+        let written = &mut area[at..at + REQUEST_SLOT];
+        written[..bytes.len()].copy_from_slice(bytes);
+        fence(header_of(written)?);
+        area[answer_at..answer_at + answer_len].fill(0);
+        let mut chain: ArrayVec<ChainSegment, 3> = ArrayVec::new();
+        let _ = chain.try_push(self.segment(at, bytes.len(), Direction::DeviceRead)?);
+        if let Some(stream) = stream {
+            let _ = chain.try_push(stream);
+        }
+        let _ = chain.try_push(self.segment(answer_at, answer_len, Direction::DeviceWrite)?);
+        self.control.publish(&chain)
+    }
+
+    /// The bytes the device says it wrote into display request `sent`'s answer
+    /// once it has answered, the answer then the caller's to read and the slot
+    /// the caller's to free; one the device still holds is kept with it until
+    /// it answers.
+    fn answered(&mut self, sent: Sent) -> Option<u32> {
+        match self.control.retire(sent.ticket) {
+            Ok(written) => Some(written),
+            Err(DriverError::Busy) => {
+                if self.display_held.is_empty() {
+                    self.display_reminded_ns = self.host.now_ns();
+                }
+                let _ = self.display_held.try_push(sent);
+                None
+            }
+            // A ticket the queue no longer carries names nothing to take back.
+            Err(_) => None,
+        }
+    }
+
+    /// Take back the display requests the device has answered since a batch
+    /// left them with it; while one is still out, no display request is
+    /// sent.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceOffline`] while one is still with the device,
+    /// which is reminded of them at most once a command's budget; the queue's
+    /// refusal of an answer it had no right to post.
+    fn settle_display(&mut self) -> Result<(), DriverError> {
+        if self.display_held.is_empty() {
+            return Ok(());
+        }
+        self.control.drain()?;
+        let mut at = 0;
+        while let Some(&sent) = self.display_held.get(at) {
+            match self.control.retire(sent.ticket) {
+                Ok(_) => {
+                    self.slots.put(sent.slot);
+                    self.display_held.swap_remove(at);
+                }
+                Err(DriverError::Busy) => at += 1,
+                Err(_) => {
+                    self.display_held.swap_remove(at);
+                }
+            }
+        }
+        self.take_3d_answers();
+        if self.display_held.is_empty() {
+            return Ok(());
+        }
+        let now = self.host.now_ns();
+        if now.saturating_sub(self.display_reminded_ns) >= COMMAND_TIMEOUT_NS {
+            self.display_reminded_ns = now;
+            self.control.kick(&mut self.transport);
+        }
+        Err(DriverError::DeviceOffline)
     }
 
     /// `backing` with any doubt settled: a resource an unanswered batch may
@@ -760,21 +1031,22 @@ where
     /// Send `request`, whose answer is up to `len` bytes, and answer those
     /// bytes.
     fn ask(&mut self, request: &Request, len: usize) -> Result<&[u8], DriverError> {
-        self.control.settle(&mut self.transport, self.host)?;
+        self.settle_display()?;
         let fence = self.take_fence();
-        let bytes = request.as_bytes();
-        let area = self.commands.as_bytes_mut();
-        let slot = &mut area[..REQUEST_SLOT];
-        slot[..bytes.len()].copy_from_slice(bytes);
-        wire::fence(header_of(slot)?, fence);
-        area[LONG_AT..LONG_AT + len].fill(0);
-        let chain = [
-            self.segment(0, bytes.len(), Direction::DeviceRead)?,
-            self.segment(LONG_AT, len, Direction::DeviceWrite)?,
-        ];
-        self.control
-            .submit_and_wait(&mut self.transport, self.host, &chain, COMMAND_TIMEOUT_NS)?;
-        let answer = &self.commands.as_bytes()[LONG_AT..LONG_AT + len];
+        let sent = self.send(request, fence, AnswerIn::Long(len))?;
+        self.control.kick(&mut self.transport);
+        let waited = self.control.wait(
+            &mut self.transport,
+            self.host,
+            &[sent.ticket],
+            COMMAND_TIMEOUT_NS,
+        );
+        let Some(written) = self.answered(sent) else {
+            return Err(waited.err().unwrap_or(DriverError::DeviceOffline));
+        };
+        self.slots.put(sent.slot);
+        let long = self.layout.long_at();
+        let answer = &self.commands.as_bytes()[long..long + said(written, len)];
         wire::fenced(answer, fence)?;
         Ok(answer)
     }
@@ -805,7 +1077,11 @@ where
     /// A resource id no live resource carries.
     fn fresh_resource(&mut self) -> u32 {
         loop {
-            self.next_resource = self.next_resource.wrapping_add(1).max(1);
+            // A presenter's resources keep below the blobs'.
+            self.next_resource = match self.next_resource.checked_add(1) {
+                Some(next) if next < three_d::BLOB_RESOURCES => next,
+                _ => 1,
+            };
             let id = self.next_resource;
             let in_use = self
                 .buffers
@@ -1112,8 +1388,9 @@ where
     fn cursor_command(&mut self, request: &Request) -> Result<(), DriverError> {
         self.cursor_queue.settle(&mut self.transport, self.host)?;
         let bytes = request.as_bytes();
-        self.commands.as_bytes_mut()[CURSOR_AT..CURSOR_AT + bytes.len()].copy_from_slice(bytes);
-        let chain = [self.segment(CURSOR_AT, bytes.len(), Direction::DeviceRead)?];
+        let at = self.layout.cursor_at();
+        self.commands.as_bytes_mut()[at..at + bytes.len()].copy_from_slice(bytes);
+        let chain = [self.segment(at, bytes.len(), Direction::DeviceRead)?];
         self.cursor_queue
             .submit_and_wait(&mut self.transport, self.host, &chain, COMMAND_TIMEOUT_NS)
             .map(|_| ())
@@ -1157,6 +1434,12 @@ where
     }
 }
 
+/// Bytes of an answer of up to `len` the device says it wrote `written` of:
+/// none past what it wrote is read as its answer.
+fn said(written: u32, len: usize) -> usize {
+    usize::try_from(written).map_or(len, |written| written.min(len))
+}
+
 /// The header of the request written at the start of `slot`.
 fn header_of(slot: &mut [u8]) -> Result<&mut [u8; wire::HEADER_LEN], DriverError> {
     slot.get_mut(..wire::HEADER_LEN)
@@ -1182,8 +1465,12 @@ where
 
     fn service_events(&mut self) -> Result<Serviced, DriverError> {
         self.transport.ack_interrupt();
-        // A batch abandoned to a slow device is taken back once it answers.
-        let _ = self.control.settle(&mut self.transport, self.host);
+        // What the device answered since is taken back: a display batch left
+        // to a slow device, and 3D commands.
+        let _ = self.control.drain();
+        let _ = self.settle_display();
+        self.take_3d_answers();
+        self.serve_desk();
         let _ = self.cursor_queue.settle(&mut self.transport, self.host);
         // A change raised while the output is read is read again, its
         // interrupt taken by the read's own wait; a read that failed is owed
@@ -1439,7 +1726,8 @@ where
         }
         // A transfer the device has not answered may still be reading the
         // image.
-        self.control.settle(&mut self.transport, self.host)?;
+        self.settle_display()?;
+        let buffer = &self.buffers[at];
         // The image is the driver's own once copied, so the presenter may
         // draw the next into its buffer at once.
         let image = self.pointer.image.as_bytes_mut();

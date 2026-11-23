@@ -3,10 +3,12 @@
 //! it, and which words making a sprite accepts. The word's fields are
 //! `lib/image`'s one reading of its form.
 
-use tairix_image::{sprite_dpi_of_eig, sprite_type, SpriteModeWord};
+use tairix_image::{
+    sprite_dpi_of_eig, sprite_eig_of_dpi, sprite_type, SpriteMaskDepth, SpriteMode, SpriteModeWord,
+};
 use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::os::{Fail, Os};
-use tairix_vdu::mode::var;
+use tairix_vdu::mode::{var, Flags};
 
 use crate::mode::Format;
 use crate::select::{self, Outcome, Spec};
@@ -28,13 +30,15 @@ pub(crate) const UNKNOWN_MODE: Error = Error {
     token: "UnknownSpriteMode",
 };
 
-/// The flag bits of a RISC OS 5 word's eight that RISC OS 5 reads: the red and
-/// blue channels exchanged, and alpha in the top field.
-const RGB_AND_ALPHA: u8 = 0xC0;
+/// The flag bits of a RISC OS 5 word's eight, the mode flags' second byte,
+/// that RISC OS 5 reads: the red and blue channels exchanged, and alpha in
+/// the top field.
+const RGB_AND_ALPHA: u8 = (Flags::RGB.bits() | Flags::ALPHA.bits()).to_le_bytes()[1];
 /// The colour space field of those eight: RGB where clear.
 const COLOUR_SPACE: u8 = 0x30;
-/// The 5:6:5 mode flag type 10 brings.
-const FIVE_SIX_FIVE: u32 = 0x80;
+/// The 5:6:5 mode flag type 10 brings: in a sixteen-bit mode, the flag a full
+/// palette sets in an eight-bit one.
+const FIVE_SIX_FIVE: u32 = Flags::FULL_PALETTE.bits();
 
 /// How a sprite holds its pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,16 +53,35 @@ pub(crate) struct Pixels {
     pub(crate) old_format: bool,
     /// Its mask is eight bits a pixel of alpha.
     pub(crate) wide_mask: bool,
+    /// How its pixels show.
+    pub(crate) shown: Shown,
+}
+
+/// How a sprite's pixels show, as a screen of them would: its eigen factors,
+/// and the mode flags, colours and line shift a screen of them reads, a
+/// numbered mode's its own, whatever describes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Shown {
+    pub(crate) eig: (u32, u32),
+    pub(crate) flags: u32,
+    pub(crate) ncolour: u32,
+    pub(crate) y_shift: u32,
 }
 
 impl Pixels {
     /// A numbered mode's.
-    pub(crate) const fn numbered(format: &Format) -> Self {
+    pub(crate) fn numbered(format: &Format) -> Self {
         Self {
             log2_bpp: format.log2_bpp(),
             log2_field: format.log2_bpc(),
             old_format: true,
             wide_mask: false,
+            shown: Shown {
+                eig: (format.x_eig(), format.y_eig()),
+                flags: format.flags(),
+                ncolour: format.ncolour(),
+                y_shift: format.var(var::Y_SHIFT).unwrap_or(0),
+            },
         }
     }
 
@@ -80,7 +103,7 @@ impl Pixels {
                 sprite_type,
                 wide_mask,
                 ..
-            } => Ok(Self::typed(sprite_type, wide_mask)),
+            } => Ok(Self::typed(word, sprite_type, wide_mask)),
             SpriteModeWord::Eig {
                 sprite_type,
                 flags,
@@ -90,7 +113,7 @@ impl Pixels {
                 if flags & COLOUR_SPACE != 0 {
                     return Err(BAD_MODE_WORD);
                 }
-                Ok(Self::typed(sprite_type, wide_mask))
+                Ok(Self::typed(word, sprite_type, wide_mask))
             }
         }
     }
@@ -105,6 +128,12 @@ impl Pixels {
                     log2_field: 0,
                     old_format: true,
                     wide_mask: false,
+                    shown: Shown {
+                        eig: (1, 1),
+                        flags: 0,
+                        ncolour: crate::mode::default_ncolour(0),
+                        y_shift: 0,
+                    },
                 })
             }
             SpriteModeWord::Dpi {
@@ -116,18 +145,29 @@ impl Pixels {
                 sprite_type,
                 wide_mask,
                 ..
-            } => Self::typed(sprite_type, wide_mask),
+            } => Self::typed(word, sprite_type, wide_mask),
         }
     }
 
-    /// A new-format sprite's of `sprite_type`.
-    const fn typed(sprite_type: u8, wide_mask: bool) -> Self {
+    /// A new-format sprite's of `sprite_type`, its mode word `word`.
+    fn typed(word: u32, sprite_type: u8, wide_mask: bool) -> Self {
         let log2_bpp = type_reading(sprite_type).log2_bpp;
+        let (x_eig, y_eig) = drawn_eig(word);
         Self {
             log2_bpp,
             log2_field: log2_bpp,
             old_format: false,
             wide_mask,
+            shown: Shown {
+                eig: (u32::from(x_eig), u32::from(y_eig)),
+                flags: variable(word, var::MODE_FLAGS).unwrap_or(0),
+                ncolour: if log2_bpp <= 3 {
+                    crate::mode::default_ncolour(log2_bpp)
+                } else {
+                    variable(word, var::N_COLOUR).unwrap_or(u32::MAX)
+                },
+                y_shift: 0,
+            },
         }
     }
 
@@ -157,19 +197,13 @@ impl Pixels {
 
     /// The bits a pixel of its mask takes.
     pub(crate) const fn mask_bits(&self) -> u32 {
-        if self.old_format {
-            self.field_bits()
-        } else if self.wide_mask {
-            8
-        } else {
-            1
-        }
+        SpriteMaskDepth::of(self.old_format, self.wide_mask).bits(self.field_bits())
     }
 }
 
 /// The word as RISC OS 5 reads it: a RISC OS 5 word lacking its fixed pattern
 /// is taken in RISC OS 3.5's form.
-fn reading(word: u32) -> SpriteModeWord {
+pub(crate) fn reading(word: u32) -> SpriteModeWord {
     match SpriteModeWord::of(word) {
         SpriteModeWord::Eig {
             well_formed: false, ..
@@ -206,17 +240,47 @@ const fn type_reading(sprite_type: u8) -> TypeReading {
     }
 }
 
+/// The standard screen's eigen factor: a pixel two OS units across.
+pub(crate) const STANDARD_EIG: u8 = 1;
+/// The standard screen's resolution, which a JPEG stating none and a
+/// decoded picture take.
+pub(crate) const STANDARD_DPI: u32 = sprite_dpi_of_eig(STANDARD_EIG);
+
 /// The highest RISC OS 5 type `OS_ReadModeVariable` answers for.
 const LAST_READ_TYPE: u8 = sprite_type::YCBCR_422;
 
+/// The largest eigen factor a mode variable read of a resolution answers.
+const MOST_READ_EIG: u8 = crate::mode::MOST_EIG.to_le_bytes()[0];
+
 /// The eigen factor a resolution names: none for one no eigen factor gives.
+/// The coarsest's 22.5 dots an inch is written either way.
 const fn eig_of_dpi(dpi: u16) -> Option<u32> {
-    match dpi {
-        180 => Some(0),
-        90 => Some(1),
-        45 => Some(2),
-        22 | 23 => Some(3),
-        _ => None,
+    let dpi = if dpi == 23 { 22 } else { dpi as u32 };
+    let mut eig = 0;
+    while eig <= MOST_READ_EIG {
+        if sprite_dpi_of_eig(eig) == dpi {
+            return Some(eig as u32);
+        }
+        eig += 1;
+    }
+    None
+}
+
+/// The eigen factors sprite mode word `word`'s pixels are drawn at: a
+/// numbered mode RISC OS 5 knows its own, an eigen-factor word's as stated,
+/// and for each of a resolution word's resolutions the finest factor not
+/// finer than it, rounding down. A mode variable read of such a word answers
+/// only resolutions a factor names exactly. A numbered mode a module
+/// describes is drawn at that mode's, as [`Pixels::shown`] holds them.
+pub(crate) fn drawn_eig(word: u32) -> (u8, u8) {
+    match reading(word) {
+        SpriteModeWord::Number(_) => SpriteMode::from_value(word).map_or((1, 1), |mode| mode.eig()),
+        SpriteModeWord::Dpi { dpi, .. } => (
+            sprite_eig_of_dpi(u32::from(dpi.0)),
+            sprite_eig_of_dpi(u32::from(dpi.1)),
+        ),
+        SpriteModeWord::Eig { eig, .. } => eig,
+        SpriteModeWord::Selector => (1, 1),
     }
 }
 
@@ -275,7 +339,7 @@ pub(crate) fn variable(word: u32, number: u32) -> Option<u32> {
 pub(crate) fn for_new_sprite(os: &mut Os<'_>, r6: u32) -> Result<(Pixels, u32), Fail> {
     match reading(r6) {
         SpriteModeWord::Number(number) => {
-            let format = numbered_format(os, number)?;
+            let format = numbered_format(os, number)?.map_err(|error| os.error(error))?;
             Ok((Pixels::numbered(&format), r6))
         }
         SpriteModeWord::Selector => {
@@ -299,7 +363,7 @@ pub(crate) fn for_new_sprite(os: &mut Os<'_>, r6: u32) -> Result<(Pixels, u32), 
             if !named {
                 return Err(os.error(BAD_MODE_WORD));
             }
-            Ok((Pixels::typed(sprite_type, wide_mask), r6))
+            Ok((Pixels::typed(r6, sprite_type, wide_mask), r6))
         }
         SpriteModeWord::Eig {
             sprite_type,
@@ -310,7 +374,7 @@ pub(crate) fn for_new_sprite(os: &mut Os<'_>, r6: u32) -> Result<(Pixels, u32), 
             if sprite_type == 0 || !flags_allowed(sprite_type, flags) {
                 return Err(os.error(BAD_MODE_WORD));
             }
-            Ok((Pixels::typed(sprite_type, wide_mask), r6))
+            Ok((Pixels::typed(r6, sprite_type, wide_mask), r6))
         }
     }
 }
@@ -326,21 +390,54 @@ const fn flags_allowed(sprite_type: u8, flags: u8) -> bool {
 }
 
 /// Numbered mode `number`'s format: RISC OS 5's own, or one a module
-/// describes for a number it does not know.
-fn numbered_format(os: &mut Os<'_>, number: u8) -> Result<Format, Fail> {
+/// describes for a number it does not know; else why no sprite is in it.
+fn numbered_format(os: &mut Os<'_>, number: u8) -> Result<Result<Format, Error>, Fail> {
     if let Some(mode) = tairix_vdu::mode::numbered(u32::from(number & 0x7F)) {
-        if !mode.graphic() || number >= 0x80 {
-            return Err(os.error(BAD_SPRITE_MODE));
-        }
-        return Ok(Format::numbered(mode));
+        return Ok(if mode.graphic() && number < 0x80 {
+            Ok(Format::numbered(mode))
+        } else {
+            Err(BAD_SPRITE_MODE)
+        });
+    }
+    if number >= 0x80 {
+        return Ok(Err(UNKNOWN_MODE));
     }
     let monitor = crate::state::with(os, |vdu, _| Ok(vdu.monitor))?;
-    match select::resolve(os, &Spec::Number(u32::from(number)), monitor)? {
-        Outcome::Valid(resolved) if number < 0x80 && resolved.format.graphic() => {
-            Ok(resolved.format)
-        }
-        _ => Err(os.error(UNKNOWN_MODE)),
+    Ok(
+        match select::resolve(os, &Spec::Number(u32::from(number)), monitor)? {
+            Outcome::Valid(resolved) if resolved.format.graphic() => Ok(resolved.format),
+            _ => Err(UNKNOWN_MODE),
+        },
+    )
+}
+
+/// The pixels a stored sprite's word gives, as [`Pixels::stored`] takes
+/// them, a numbered mode RISC OS 5 does not know read from the module that
+/// describes it, as RISC OS 5 reads one.
+///
+/// # Errors
+///
+/// As [`Pixels::stored`], and "Bad mode for sprite" for a number nothing
+/// describes.
+pub(crate) fn stored_pixels(os: &mut Os<'_>, word: u32) -> Result<Pixels, Fail> {
+    match reading(word) {
+        SpriteModeWord::Number(number) => match numbered_format(os, number)? {
+            Ok(format) => Ok(Pixels::numbered(&format)),
+            Err(_) => Err(os.error(BAD_SPRITE_MODE)),
+        },
+        _ => Pixels::stored(word).map_err(|error| os.error(error)),
     }
+}
+
+/// As [`Pixels::verified`] takes a word, a numbered mode RISC OS 5 does not
+/// know read from the module that describes it.
+pub(crate) fn verified_pixels(os: &mut Os<'_>, word: u32) -> Result<Pixels, Fail> {
+    if let SpriteModeWord::Number(number) = reading(word) {
+        if let Ok(format) = numbered_format(os, number)? {
+            return Ok(Pixels::numbered(&format));
+        }
+    }
+    Ok(Pixels::verified(word))
 }
 
 /// The most backward-compatible sprite mode word for a screen of `format`:
@@ -361,7 +458,7 @@ pub(crate) fn word_for(format: &Format) -> Option<u32> {
         _ => return None,
     };
     let (x_eig, y_eig) = (format.x_eig(), format.y_eig());
-    let eig_fits = x_eig <= 3 && y_eig <= 3;
+    let eig_fits = x_eig <= crate::mode::MOST_EIG && y_eig <= crate::mode::MOST_EIG;
     let paletted = format.log2_bpp() <= 3;
     if (paletted && high != 0) || !eig_fits || high & !RGB_AND_ALPHA != 0 {
         return None;

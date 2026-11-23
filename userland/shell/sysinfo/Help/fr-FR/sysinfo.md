@@ -105,6 +105,9 @@ Les requêtes :
   pour un propriétaire — son unité et son groupe, la génération et l'état de
   son propriétaire, ses flux, et les mappages de son domaine et les octets
   qu'ils couvrent (requiert `CAP_SYSINFO_HW`).
+- `gpu` — les GPU servis : une ligne par GPU qu'un pilote sert — le nœud de
+  son périphérique dans l'arbre matériel, et le canal par lequel un programme
+  l'ouvre.
 - `audio`, `sound` — les périphériques audio : une ligne par sortie et par
   entrée — son identifiant, s'il est le choix par défaut de son sens, son
   niveau et sa mise en sourdine, la fréquence mesurée de son horloge pendant
