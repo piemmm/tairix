@@ -240,6 +240,11 @@ pub const TARGETS: &[Target] = &[
         description: "userland/apps/tairix-bridge/riscos/draw DrawFile: Draw files of every object type with hostile fields — sizes past what holds them, font tables twice or naming nothing, sprites of any mode, groups and tagged objects nesting deep, text areas with any commands — or a sound file's bytes changed, rendered, measured and their fonts declared under hostile flags, matrices, clips and lengths, and *Render with hostile arguments; every refusal a value, a call asking endless work stopped by its host, every error block readable, the drivers still answering, the modules a render reaches re-initialised holding none of the RMA they took",
     },
     Target {
+        package: "tairix-riscos-font",
+        test: "fuzz_fonts",
+        description: "userland/apps/tairix-bridge/riscos/font Font Manager: guest fonts on Font$Path — metrics, outlines, encodings and bitmap files, whole or damaged — found under hostile identifiers, a sound one measured and painted, then every SWI with hostile registers over salted strings of every control sequence, blocks and matrices, in screens of every depth; every refusal a value, a call asking endless work stopped by its host, every error block readable, the drivers still answering, the module re-initialised holding none of the RMA it took",
+    },
+    Target {
         package: "tairix-riscos-filing",
         test: "fuzz_hostfs",
         description: "userland/apps/tairix-bridge/riscos/filing HostFS relay: hostile requests from the session worker against the server, over a tree with roots and files beside them, each answered by a reply that answers it and nothing changed outside the writable root; every message that decodes re-encoding to its own bytes; a session whose relay fails or damages its replies still answering",

@@ -2076,7 +2076,12 @@ ColourTrans (`vdu/src/colourtrans.rs`) answers each of its 36 SWIs through
   foreground's. Each colour in it lies nearer than a whole step to the shade
   between background and foreground it stands for. In a deeper mode the words
   are left to the Font Manager: R2 is nought, and R3 must lie between -14 and
-  14 (&206).
+  14 (&206). `SetFontColours` sets them through the Font Manager: by
+  `Font_SetFontColours`, or in a deeper mode by `Font_SetPalette` with the
+  background's word in R1 and the words as given. Refused, it is made again
+  as `Font_SetFontColours` with the registers as given, whose refusal is the
+  call's. The words and offset asked for are recorded as the font's RGB
+  colours.
 
 InverseTable (`vdu/src/inversetable.rs`) gives a 256-colour palette's colours
 in fifteen-bit form and its 32K table. It keeps the current destination's
@@ -2170,14 +2175,28 @@ The `userland/apps/tairix-bridge/riscos/draw` crate is RISC OS 5.30's Draw
     `ColourTrans_SetGCOL`;
   - sprites through `OS_SpriteOp` 40, `ColourTrans_SelectTable` and 56;
   - JPEGs through `JPEG_PlotTransformed`;
-  - text in the system font a character at a time through a work sprite,
-    as RISC OS 5.30 draws it with no Font Manager, which leaves it unseen;
-  - text areas' colours through `Font_SetFontColours`, refused with no Font
-    Manager (&1E6);
+  - text in a font its table names through the Font Manager: found at its
+    sizes, coloured by `ColourTrans_SetFontColours`, painted in OS units
+    through the render's matrix, a transformed text's own after it, and lost.
+    Text in no font, or one the Font Manager refuses, the refusal kept, is
+    drawn in the system font a character at a time through a work sprite,
+    which leaves it unseen, as RISC OS 5.30's DrawFile does;
+  - text areas laid out through the Font Manager as RISC OS 5.30's DrawFile
+    lays them out. Each paragraph is built as Font Manager text and codes in
+    a buffer of 255 bytes and broken into lines at its column's width by
+    `Font_ScanString`, the columns filled in turn. Each line is painted by
+    `Font_Paint` in millipoints through the render's matrix. Margins take
+    effect from a line's first character, leading from the next line, and
+    alignment as the line goes out. A font a `\F` defines is found there and
+    lost at the end, an earlier font of the same number not. A malformed
+    command is refused (&20C08), a font no `\F` defines (&20C09), a version
+    but 1 (&20C0A) and a text with none (&20C0B);
   - with flag bit 0, each object's box, dotted.
 
   An object of an unknown type is passed over. Rendering goes on past an
   error, the first returned once it is done, and every register is kept.
+  Each render and `DrawFile_DeclareFonts` asks `Font_CacheAddr` once the
+  file is checked.
 - **Nesting.** Each walk of a file's groups and tagged objects runs on the
   supervisor stack, as genuine DrawFile's does, and overflows it as RISC OS
   5.30's did called from BASIC: the check every call makes past 162 groups
@@ -2197,12 +2216,11 @@ The corpus `draw/tests/riscos5/screens.txt` holds Draw's screens to RISC OS
 tips, which the crate's own tests hold to the cases recorded for them:
 57 dashings, 205 thickenings and 16 Draw files.
 
-Known differences from RISC OS 5:
+Known differences from RISC OS 5, each deliberate and accepted:
 
 - a thick line's edge, a long mitre's tip and a width of three units or
   less differ in low bits: 142 of the 205 recorded thickenings are exact,
-  the rest within six units and a 20000th of the distance from the origin
-  (accepted);
+  the rest within six units and a 20000th of the distance from the origin;
 - a dash along a slant drifts up to six units from RISC OS 5's;
 - a mitre on a line 2^20 units wide is tested without the overflow RISC OS
   5's limit test meets, so it mitres or bevels where RISC OS 5 does not;
@@ -2217,16 +2235,97 @@ Known differences from RISC OS 5:
 - a Draw file object whose size is smaller than its header or not whole
   words is refused as too big (&20C05 to &20C07), where RISC OS 5 misreads
   what follows;
-- `*Render`'s fractions are rounded to the nearest unit, and a transformed
-  text object's characters are plotted through its own matrix composed with
-  the render's; neither is pinned to RISC OS 5;
-- a font a file names and the Font Manager finds is not used: the text is
-  drawn in the system font, until the Font Manager (RO25) answers;
+- `*Render`'s fractions are rounded to the nearest unit, which is not pinned
+  to RISC OS 5;
+- a text area's last command may end at the text's end, where RISC OS 5.30
+  reads on past it for the command's end;
+- a line too long for a text area's buffer is painted in pieces, and
+  `Font_CacheAddr` is asked after the file is checked, each inferred from
+  the recorded cases rather than recorded;
 - SpriteExtend's R4 and R7 handed to Draw follow rules read from a handful
   of observations;
 - nesting overflows at the depths RISC OS 5.30 overflowed at from BASIC with
   a path innermost, where RISC OS's own depend on what its stack already
   holds and on what the innermost object calls.
+
+## The Font Manager
+
+The `userland/apps/tairix-bridge/riscos/font` crate is RISC OS 5.30's Font
+Manager 3.80 and `ROMFonts`, the fonts and encodings ResourceFS holds.
+
+- **Fonts.** A font is found through the catalogue `Font$Path` reaches:
+  each element's Messages file where it has one, else a scan of its tree.
+  The catalogue reads at most the path's first 64 elements and 16,384
+  entries of their directories and Messages files, a tree 16 levels deep and
+  identifiers of 255 characters, and lists nothing past them; a directory
+  read that finds nothing, or claims a record it did not complete, ends that
+  directory's listing.
+  RISC OS's own families in ResourceFS — Trinity, Homerton and Corpus — are
+  TAIRiX faces. Each glyph is the font service's outline of the first
+  character it stands for, asked by the generic kind `lib/drawing` maps the
+  family to. A guest's Acorn font is its metrics file, its outlines or
+  bitmaps, and its encoding files, read as hostile: a font whose files do not
+  hold together is refused as it is found (&226).
+- **The desktop font.** `Desktop` — `Desktop.Medium`, `Desktop.Bold` and
+  their `.Oblique`s — is the TAIRiX desktop's interface face, in the family
+  the session's host gives, the shipped themes' where it gives none. At its
+  start the Font Manager sets `Wimp$Font` to `Desktop.Medium`, and
+  `Wimp$FontSize` and `Wimp$FontWidth` to the size the host gives, each where
+  it is unset; with no size, the Wimp's own twelve points stand. CMOS's
+  desktop font setting resets to nought, the variables.
+- **Measuring.** A string is walked as RISC OS 5.30 walks it: each
+  character by its metrics, its kerning, the justification offsets and the
+  matrices, the control sequences obeyed.
+- **Painting.** A start in OS units is floored to its pixel. Each glyph is
+  put at the pixel its pen is in, or at the quarter of it where `FontMax4`
+  and `FontMax5` place its size so; in Draw objects always at the quarter.
+  Glyphs are drawn at their font's resolution, a pixel to a pixel of the
+  screen: from a bitmap file of their size where one serves, else
+  anti-aliased in sixteen levels through the colour table up to `FontMax2`
+  and `FontMax3`, in whole pixels past `FontMax2`, and past `FontMax3` filled
+  as Draw fills their outlines. In a
+  mode of up to sixteen colours the levels are a run of logical colours; in
+  a deeper one they are the pseudo palette's entry for the foreground, which
+  `Font_SetPalette` fills.
+- **Draw objects.** `Font_SwitchOutputToBuffer` writes text as Draw path
+  objects: a rub-out box between the nearest pixels, an underline's bar ahead
+  of the first character it runs under, and each glyph's outline. An outline
+  is drawn in 512ths of a pixel of its font's resolution, a matrix's
+  translation moving it by the nearest 512th, and each point made Draw's
+  units in one rounding. As RISC OS 5.30 writes them, an outline is copied
+  into as many bytes as the pen's position across after the character is in
+  millipoints. A character whose step ends at or near the screen's left edge
+  fails (&1E4) with its object part written, and the word after the
+  terminator is what the last copy left there.
+- **The cache** is the session's, bounded by its memory policy; the area the
+  guest sees is its size. A saved cache is the fonts the handles hold, in
+  TAIRiX Bridge's own format.
+
+The corpus `font/tests/riscos5/screens.txt` holds what the Font Manager reads
+and writes to RISC OS 5.30's, through Draw objects rather than the screen,
+whose anti-aliasing is RISC OS's own rasteriser.
+
+Known differences from RISC OS 5, each deliberate and accepted:
+
+- a glyph's anti-aliased levels are TAIRiX's scan converter's, not RISC OS's
+  rasteriser's;
+- the `Desktop` family and the variables set at the start are TAIRiX
+  Bridge's own;
+- in a mode of 256 colours or more, `Font_CurrentFont` gives the offset
+  `Font_SetPalette` was given, where RISC OS 5.30 gives a smaller one once
+  the colour table is read, by a rule not derived;
+- `Font_SetColourTable` in a mode of up to sixteen colours leaves the
+  offset as it was, where RISC OS 5.30 derives one from the table;
+- `Font_MakeBitmap` for a font found in an encoding not its own writes its
+  file in that encoding's directory, where painting reads it; RISC OS 5.30
+  deletes the font directory's file and fails (&DE);
+- outlines take no hints, having none, so `Font_SwitchOutputToBuffer`'s
+  hints flag changes nothing;
+- blending with supremacy in a mode of 4096 colours follows the 16 million
+  colour modes' rule, which is the one recorded;
+- `ColourTrans_SetFontColours` reaches the Font Manager directly, where RISC
+  OS 5.30's ColourTrans calls its own SWIs through `ColourV` and reads the
+  palette through `PaletteV` on the way, which a claimant of either sees.
 
 ## The reference harness
 
@@ -2281,10 +2380,14 @@ directory the machine boots from (`*Configure FileSystem HostFS`,
   formats are the crate's `corpus` module's, so the harness and the replays
   read them alike.
 - **Screens.** Then BASIC V runs each screen case, the VDU drivers'
-  (`vdu/tests/riscos5/screens.txt`) and then the Draw modules'
-  (`draw/tests/riscos5/screens.txt`), numbered on from them, each framed as
-  `tairix_riscos_vdu::corpus` frames it; what each read and the screen it
-  left go to its corpus's `drawn.txt` (`tools/xtask/src/commands/riscos/screens.rs`).
+  (`vdu/tests/riscos5/screens.txt`), the Draw modules'
+  (`draw/tests/riscos5/screens.txt`) and the Font Manager's
+  (`font/tests/riscos5/screens.txt`), each corpus numbered on from the one
+  before, each framed as `tairix_riscos_vdu::corpus` frames it; what each
+  read and the screen it left go to its corpus's `drawn.txt`
+  (`tools/xtask/src/commands/riscos/screens.rs`). The Font Manager's cases
+  paint from the first-party fonts `tairix_riscos_font::build` makes, staged
+  as `FntLib`.
   A case prints a pointer only as a token for what it points at, so neither
   its place in the run nor what the machine holds moves a reading.
 - **Running.** Where `<dir>` holds RPCEmu, it runs headless, as one of the

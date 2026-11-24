@@ -5,6 +5,8 @@ use tairix_abi::fs::Filetype;
 
 /// `Obey`: commands, a line each.
 pub const OBEY: u32 = 0xFEB;
+/// `Font`: a font's metrics, outlines or bitmaps.
+pub const FONT: u32 = 0xFF6;
 /// `Absolute`: code loaded at the application space's start and run there.
 pub const ABSOLUTE: u32 = 0xFF8;
 /// `Sprite`: a sprite area's sprites.

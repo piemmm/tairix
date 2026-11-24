@@ -7,7 +7,7 @@ use tairix_riscos_kernel::os::{Fail, Os, Regs};
 
 use crate::canvas::Block;
 use crate::plot::{ink_block, Ink};
-use crate::spans::plot;
+use crate::render::plot;
 
 /// The routine.
 pub(crate) fn routine(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {

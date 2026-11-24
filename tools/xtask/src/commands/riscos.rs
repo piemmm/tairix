@@ -1,6 +1,7 @@
 //! `cargo xtask riscos --reference <dir>`: TAIRiX Bridge's reference
 //! harness (`plans/RISCOS-EMULATOR.md` §17). `--write-sprites` draws the
-//! Wimp's file-type sprites its ResourceFS holds ([`sprites`]).
+//! Wimp's file-type sprites its ResourceFS holds ([`sprites`]), and
+//! `--write-encodings` writes the ROM fonts' encoding files.
 //!
 //! `<dir>` is a genuine RISC OS a developer holds, laid out as RPCEmu lays
 //! its own out: `roms/` the ROM images, `hostfs/` the directory the machine
@@ -78,7 +79,8 @@ const VARIABLES: [&str; REGISTERS as usize] =
     ["A%", "B%", "C%", "D%", "E%", "F%", "G%", "H%", "I%", "J%"];
 
 pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
-    let usage = "riscos: usage: cargo xtask riscos --reference <dir> | --write-sprites";
+    let usage =
+        "riscos: usage: cargo xtask riscos --reference <dir> | --write-sprites | --write-encodings";
     let args: Vec<&str> = args
         .iter()
         .map(|a| a.to_str().ok_or(usage))
@@ -86,8 +88,24 @@ pub fn run(ctx: &Context, args: &[std::ffi::OsString]) -> Result<(), String> {
     match args.as_slice() {
         ["--reference", dir] => reference(ctx, Path::new(dir)),
         ["--write-sprites"] => sprites::write(ctx),
+        ["--write-encodings"] => write_encodings(ctx),
         _ => Err(usage.into()),
     }
+}
+
+/// Where the ROM fonts' encoding files are committed, from the workspace's
+/// root.
+const ENCODINGS: &str = "userland/apps/tairix-bridge/riscos/font/resources/ROMFonts/Encodings";
+
+/// `--write-encodings`: each encoding file made afresh and written over
+/// its committed copy, its leaf's `/` left off the file's name.
+fn write_encodings(ctx: &Context) -> Result<(), String> {
+    let directory = ctx.workspace_root.join(ENCODINGS);
+    for (leaf, bytes) in tairix_riscos_font::encoding_files() {
+        let path = directory.join(leaf.trim_start_matches('/'));
+        std::fs::write(&path, bytes).map_err(|e| format!("riscos: {}: {e}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// A corpus group: its scenarios, their source and its fixtures file.
@@ -199,6 +217,7 @@ fn reference(ctx: &Context, dir: &Path) -> Result<(), String> {
             .chain(&screens_staged)
             .map(|(name, bytes)| (name.as_str(), bytes.clone())),
     );
+    let library = screens::library();
     let mut commands = language::run(&corpora.language);
     commands.extend(assembler::run(&corpora.assembler));
     commands.extend(session::run(&corpora.sessions));
@@ -209,7 +228,7 @@ fn reference(ctx: &Context, dir: &Path) -> Result<(), String> {
     let left = corpora.left();
     let left = || left.iter().map(String::as_str);
     let (observed, answers) = if dir.join(EMULATOR).exists() {
-        write_harness(&groups, &staged, left(), &hostfs, &harness, &ours)?;
+        write_harness(&groups, &staged, &library, left(), &hostfs, &harness, &ours)?;
         let ran = run_emulator(ctx, dir, &hostfs);
         remove_harness(&hostfs, &harness, &ours)?;
         ran?;
@@ -221,7 +240,7 @@ fn reference(ctx: &Context, dir: &Path) -> Result<(), String> {
         remove_harness(&hostfs, &harness, &ours)?;
         texts
     } else {
-        write_harness(&groups, &staged, left(), &hostfs, &harness, &ours)?;
+        write_harness(&groups, &staged, &library, left(), &hostfs, &harness, &ours)?;
         return outln!(
             "riscos: the harness is in {}: boot the machine from it, then run this again to import what it records",
             hostfs.display()
@@ -431,11 +450,13 @@ fn left() -> impl Iterator<Item = &'static str> {
     ["Done", "Observed"].into_iter().chain(obey::LEFT)
 }
 
-/// Writes the harness, the files it and BASIC read beside it, and `ours`, the
-/// `!Boot` that runs them, clearing what an earlier run left.
+/// Writes the harness, the files it and BASIC read beside it, the typed
+/// `library` files each at its own path, and `ours`, the `!Boot` that runs
+/// them, clearing what an earlier run left.
 fn write_harness<'a>(
     groups: &[Group],
     staged: &[(&str, Vec<u8>)],
+    library: &[(String, Vec<u8>)],
     left: impl IntoIterator<Item = &'a str>,
     hostfs: &Path,
     harness: &Path,
@@ -448,6 +469,14 @@ fn write_harness<'a>(
     std::fs::write(harness, program).map_err(|e| format!("riscos: {}: {e}", harness.display()))?;
     for (name, bytes) in staged {
         let path = hostfs.join(format!("{name},fff"));
+        std::fs::write(&path, bytes).map_err(|e| format!("riscos: {}: {e}", path.display()))?;
+    }
+    for (name, bytes) in library {
+        let path = hostfs.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("riscos: {}: {e}", parent.display()))?;
+        }
         std::fs::write(&path, bytes).map_err(|e| format!("riscos: {}: {e}", path.display()))?;
     }
     let boot = hostfs.join("!Boot,feb");
@@ -1060,7 +1089,7 @@ mod tests {
         let staged = [(obey::STAGED, cases.as_bytes().to_vec())];
         let left = || ["Done", obey::RECORDED];
         let ours = boot(&[]);
-        let refused = write_harness(&[], &staged, left(), &hostfs, &harness, &ours)
+        let refused = write_harness(&[], &staged, &[], left(), &hostfs, &harness, &ours)
             .expect_err("the machine's own");
         assert!(refused.contains("move it aside"), "{refused}");
         assert!(!harness.exists());
@@ -1074,8 +1103,8 @@ mod tests {
         );
         std::fs::remove_file(hostfs.join("!Boot,feb")).unwrap();
         std::fs::write(hostfs.join(format!("{},fff", obey::RECORDED)), "= stale\n").unwrap();
-        write_harness(&[], &staged, left(), &hostfs, &harness, &ours).unwrap();
-        write_harness(&[], &staged, left(), &hostfs, &harness, &ours).unwrap();
+        write_harness(&[], &staged, &[], left(), &hostfs, &harness, &ours).unwrap();
+        write_harness(&[], &staged, &[], left(), &hostfs, &harness, &ours).unwrap();
         assert!(find(&hostfs, "!Boot").is_some() && harness.exists());
         assert!(
             find(&hostfs, obey::RECORDED).is_none(),

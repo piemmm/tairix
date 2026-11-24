@@ -1,0 +1,60 @@
+[package]
+name = "tairix-riscos-font"
+description = "TAIRiX Bridge's Font Manager and ROM fonts: RISC OS 5's Font Manager over guest memory, its standard families TAIRiX's own faces and a guest's Acorn fonts read from Font$Path. no_std, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The first-party Acorn fonts the tests and the reference corpus are made of.
+test-support = []
+
+[dependencies]
+# The kernel: guest memory, SWIs, the module seam, MessageTrans and CMOS.
+tairix-riscos-kernel = { path = "../kernel", version = "=0.0.0" }
+# RISC OS's font families and the TAIRiX faces they map to.
+tairix-drawing = { path = "../../../../../lib/drawing", version = "=0.0.0" }
+# Unsigned decimal, which *FontList writes resolutions in, and the float
+# rounding a face's metrics are made with.
+tairix-util = { path = "../../../../../lib/util", version = "=0.0.0" }
+# The font service's requests, which the ROM fonts' glyphs are asked with.
+tairix-abi = { path = "../../../../../lib/abi", version = "=0.0.0" }
+# The service's outline replies read as owned outlines, and as paths.
+tairix-font = { path = "../../../../../lib/font", version = "=0.0.0", default-features = false, features = ["outlines"] }
+# Paths: a face's outlines, their bounds, and the curves a glyph is
+# flattened from.
+tairix-bezier = { path = "../../../../../lib/bezier", version = "=0.0.0" }
+# TAIRiX's scan converter, which a glyph's levels of coverage come from.
+tairix-raster = { path = "../../../../../lib/raster", version = "=0.0.0" }
+# The VDU drivers: where output goes, the pixels a paint writes, and the
+# palette a colour range is set in.
+tairix-riscos-vdu = { path = "../vdu", version = "=0.0.0" }
+# Draw's fill, which a glyph too big to anti-alias is filled with.
+tairix-riscos-draw = { path = "../draw", version = "=0.0.0" }
+# The session's reclaimable cache the fonts' data is kept in, its hash and
+# the log it records to.
+tairix-reclaim = { path = "../../../../../lib/reclaim", version = "=0.0.0" }
+tairix-hash = { path = "../../../../../lib/hash", version = "=0.0.0" }
+tairix-log = { path = "../../../../../lib/log", version = "=0.0.0" }
+
+[dev-dependencies]
+# Its own first-party fonts, which the fuzz harness damages.
+tairix-riscos-font = { path = ".", features = ["test-support"] }
+# Draw files made to order, which DrawFile paints through the Font Manager.
+tairix-riscos-draw = { path = "../draw", version = "=0.0.0", features = ["test-support"] }
+# BASIC, which the reference corpus's recorded programs run under.
+tairix-riscos-basic = { path = "../basic", version = "=0.0.0" }
+# The seeded generator the fuzz harnesses draw from.
+tairix-fuzzseed = { path = "../../../../../tests/fuzzseed", version = "=0.0.0" }
+# The filing system and the session a test makes, its disc a test's tree.
+tairix-riscos-filing = { path = "../filing", version = "=0.0.0", features = ["test-support"] }
+# The in-memory tree a test's HostFS disc is served over.
+tairix-fscopy = { path = "../../../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }
+# The CRC-32 the vendored glyph lists are pinned by.
+tairix-crc32 = { path = "../../../../../lib/crc32", version = "=0.0.0" }

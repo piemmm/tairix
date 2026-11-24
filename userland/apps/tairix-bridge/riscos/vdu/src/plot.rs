@@ -907,7 +907,7 @@ fn rectangle(a: Point, b: Point, window: Rect) -> impl Iterator<Item = Span> {
 }
 
 /// A box widened over another.
-fn widen(drawn: Option<Rect>, r: Rect) -> Rect {
+pub(crate) fn widen(drawn: Option<Rect>, r: Rect) -> Rect {
     match drawn {
         None => r,
         Some(d) => Rect {

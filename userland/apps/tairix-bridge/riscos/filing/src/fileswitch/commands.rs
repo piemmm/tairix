@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use tairix_riscos_kernel::cmos::{FILESWITCH_OPTIONS, FILE_LANG};
 use tairix_riscos_kernel::error::{Error, BAD_COMMAND, BAD_NUMBER};
-use tairix_riscos_kernel::module::{value_padding, Command, CommandKind, Help, VALUE_COLUMN};
+use tairix_riscos_kernel::module::{Asked, Command, CommandKind, Help};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::read_unsigned::{BYTE_SIZED, DECIMAL, TERMINATED};
 use tairix_riscos_kernel::swi::os::{
@@ -503,36 +503,11 @@ fn list_into(
     })
 }
 
-/// A configuration keyword's request: its syntax, its status, or a value.
-enum Asked {
-    Syntax,
-    Status,
-    Set(u32),
-}
-
-const fn asked(r0: u32) -> Asked {
-    match r0 {
-        0 => Asked::Syntax,
-        1 => Asked::Status,
-        text => Asked::Set(text),
-    }
-}
-
-/// A status line: the keyword, then its value from the value column, then
-/// `end`.
-fn status_line(os: &mut Os<'_>, keyword: &[u8], value: &[u8], end: &[u8]) -> Result<(), Fail> {
-    const SPACES: [u8; VALUE_COLUMN] = [b' '; VALUE_COLUMN];
-    os.write_text(keyword)?;
-    os.write_text(&SPACES[..value_padding(keyword.len())])?;
-    os.write_text(value)?;
-    os.write_text(end)
-}
-
 /// `*Configure FileSystem`: the filing system selected at start. A value
 /// that starts with a letter names it, whole and ignoring case; any other is
 /// its number, which ends at a space or the line's end and is at most 255.
 fn configure_file_system(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    match asked(regs.r[0]) {
+    match Asked::of(regs.r[0]) {
         Asked::Syntax => os.write_line(b"FileSystem <fs name>|<fs number>"),
         Asked::Status => {
             let number = os.read_cmos(FILE_LANG)?;
@@ -542,7 +517,7 @@ fn configure_file_system(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
                 super::listing::decimal(&mut digits, u32::from(number));
                 digits
             });
-            status_line(os, b"FileSystem", &value, b"\n\r")
+            os.write_status(b"FileSystem", &value, b"\n\r")
         }
         Asked::Set(at) => {
             let (first, start) = os.skip_spaces(at)?;
@@ -571,7 +546,7 @@ fn configure_file_system(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 /// status line ends as RISC OS 5's does, its return first.
 fn configure_truncate(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let options = os.read_cmos(FILESWITCH_OPTIONS)?;
-    match asked(regs.r[0]) {
+    match Asked::of(regs.r[0]) {
         Asked::Syntax => os.write_line(b"Truncate On|Off"),
         Asked::Status => {
             let value: &[u8] = if options & TRUNCATE_BIT != 0 {
@@ -579,7 +554,7 @@ fn configure_truncate(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
             } else {
                 b"Off"
             };
-            status_line(os, b"Truncate", value, b"\r\n")
+            os.write_status(b"Truncate", value, b"\r\n")
         }
         Asked::Set(at) => {
             let (_, start) = os.skip_spaces(at)?;

@@ -80,9 +80,16 @@ an application's own documents folder, the reference harness);
 | RO23.5 | Font colours: `ReturnFontColours`, `SetFontColours` | done |
 | RO23.6 | ColourTrans's match taken by sprite blends, JPEGs and colour mapping onto palettised destinations, and the InverseTable and BlendTable modules that serve them | done |
 | RO24.1 | Draw: every SWI through `DrawV`, `Draw_ProcessPath`'s stages in RISC OS's order and every destination, the fill's pixel classes, rules and clip, dashing, thickening and flattening by the recorded rules, with the known differences §8 states | done |
-| RO24.2 | DrawFile: the file checked whole before anything is drawn, every object rendered through Draw, ColourTrans and SpriteExtend, `DrawFile_BBox`, `DrawFile_DeclareFonts` and `*Render`, as RISC OS 5.30 does with no Font Manager; `lib/drawing`'s Draw format layer the one definition of the file | done |
+| RO24.2 | DrawFile: the file checked whole before anything is drawn, every object rendered through Draw, ColourTrans and SpriteExtend, text through the Font Manager (RO25.7), `DrawFile_BBox`, `DrawFile_DeclareFonts` and `*Render`; `lib/drawing`'s Draw format layer the one definition of the file | done |
 | RO24.3 | SpriteExtend's matrix plots (55, 56) as the parallelogram Draw makes of the source rectangle through `Draw_TransformPath`, as RISC OS 5's are | done |
-| RO25 | The Font Manager: TAIRiX faces through the font service, Acorn outline fonts, painting, the cache; DrawFile's text and text areas through it, pinned against genuine RISC OS | planned |
+| RO25.1 | The Font Manager's frame: the `font` crate and module, handles and their use counts, font identifiers and their `\F`, `\E` and `\M` fields, `Font$Path` and `Messages` files, the catalogue (`Font_ListFonts`, `Font_DecodeMenu`, `*FontCat`, `*FontList`, `*FontInstall`, `*FontRemove`, `*FontLibrary`), scale factors and conversions, the cache's SWIs and commands, thresholds, errors | done |
+| RO25.2 | Faces: the standard families as TAIRiX faces through a glyph relay to the font service; a guest's Acorn outline fonts on `Font$Path` (IntMetrics, Outlines, encodings) decoded in the worker; Base0, the Latin sets, Symbol and UTF-8 encodings | done |
+| RO25.3 | Measuring: `Font_ScanString` and the calls built on it (`StringWidth`, `FindCaret`, `FindCaretJ`, `StringBBox`, `CharBBox`, `ReadInfo`, `ReadFontMetrics`), control sequences, kerning, justification and matrices | done |
+| RO25.4 | Painting: `Font_Paint` through the worker's scan converter, anti-aliasing to the colour ranges (`SetFontColours`, `SetPalette`, colour tables, RGB colours), rub-out, underlining, the caret, the cache bounded by the memory policy | done |
+| RO25.5 | `Font_SwitchOutputToBuffer`: text written as Draw path objects | done |
+| RO25.6 | ColourTrans's `SetFontColours` through `Font_SetPalette` in modes of 256 colours or more, pinned | done |
+| RO25.7 | DrawFile's text and text areas through the Font Manager, pinned against genuine RISC OS | done |
+| RO25.8 | The desktop font as the TAIRiX interface face, the Font Manager's half: the session's desktop face, the `Desktop` ROM family resolved to it, and the Wimp's `Wimp$Font` variables naming it; the front end gives the desktop's text (RO28) and the Wimp reads it (RO39) | done |
 | RO26 | SharedCLibrary; the FPEmulator, VFPSupport, CallASWI and DDEUtils SWIs | planned |
 | RO27 | The session worker and its protocol: contexts, scheduling, pacing, the relays, containment | planned |
 | RO28 | The front end: launches, single-tasking screens, fullscreen, input, settings, the session window, the bundle | planned |
@@ -1241,7 +1248,7 @@ is fuzzed.
     pieces are not RISC OS's; the fill scan-converts to RISC OS's pixel
     classes, its store bounded by the memory policy.
   - DrawFile checks a file whole, then renders each object through Draw,
-    ColourTrans and SpriteExtend, as RISC OS 5.30 does with no Font Manager.
+    ColourTrans, SpriteExtend and the Font Manager.
     Each walk of nested groups and tagged objects overflows its supervisor
     stack where RISC OS 5.30's does, so no file nests deeper than the host's
     own stack follows.
@@ -1262,10 +1269,17 @@ is fuzzed.
     `ColourTrans_SetFontColours` in a mode of 256 colours or more calls
     `Font_SetPalette`. What it passes there is pinned with the Font Manager.
   - **The cache.** Bounded by the memory policy.
-  - **The desktop font.** It is the TAIRiX interface face.
+  - **The desktop font.** It is the TAIRiX interface face. The session's
+    `Config` carries it — the font service's family and a size in sixteenths
+    of a point, the shipped themes' family and no size where the host has no
+    desktop. The `Desktop` ROM family resolves to it, and the Font Manager
+    sets `Wimp$Font` to `Desktop.Medium` and the size variables where unset.
+    The front end (RO28) fills it from the desktop notice's text, its size in
+    points through the family's line box. The Wimp (RO39) reads the variables,
+    answers `Wimp_ReadSysInfo` 8, and broadcasts `Message_FontChanged` when
+    the desktop's text changes, the faces found again.
   - **DrawFile's text** and text areas go through it, pinned against genuine
-    RISC OS: until it answers, DrawFile renders as RISC OS 5.30 does with no
-    Font Manager.
+    RISC OS.
 
 ## 9. The Wimp and the Toolbox (RO39–RO45)
 
@@ -1911,6 +1925,10 @@ that request could produce.
   `FormDialog`, as both emulators' settings are: the look, the button order,
   the memory ceiling, the network for the shared session, always-isolate, and
   the territory if it should differ from the locale.
+- **The desktop font.** A session's `desktop_font` is the desktop notice's
+  text: its family, and its size in sixteenths of a point through the
+  family's line box. A change of the desktop's text reaches the session for
+  the Wimp's `Message_FontChanged` (RO39).
 - **The bundle.**
   - **Manifest.** `AppInfo` requests `CAP_SANDBOX_SPAWN`, `CAP_SHM`,
     `CAP_JIT_MAP_EXEC`, `CAP_NET`, `CAP_LOG_EMIT` and `CAP_CONSOLE_WRITE`.

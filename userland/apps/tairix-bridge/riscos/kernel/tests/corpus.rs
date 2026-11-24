@@ -57,8 +57,10 @@ fn kernel() -> Kernel {
         vdu: None,
         modules: &[],
         zone: uk_time(),
+        desktop_font: tairix_riscos_kernel::desktop::DesktopFont::SHIPPED,
         pressure: &tairix_reclaim::pressure::Unpressured,
         log: &tairix_log::DiscardSink,
+        cache_key: tairix_hash::HashSeed::UNKEYED,
     };
     Kernel::new(config).expect("a kernel")
 }

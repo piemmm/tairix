@@ -64,12 +64,31 @@ const MONOSPACE: &str = "monospace";
 const SANS_SERIF: &str = "sans-serif";
 
 /// RISC OS's own font families: each with the generic kind the drawing names
-/// it by, and the style its slanted faces are named with.
-const FAMILIES: [(&str, &str, &str); 3] = [
-    ("Trinity", "serif", ".Italic"),
-    ("Homerton", SANS_SERIF, ".Oblique"),
-    ("Corpus", MONOSPACE, ".Oblique"),
+/// it by, and the slant its slanted faces have.
+const FAMILIES: [(&str, &str, Slant); 3] = [
+    ("Trinity", "serif", Slant::Italic),
+    ("Homerton", SANS_SERIF, Slant::Oblique),
+    ("Corpus", MONOSPACE, Slant::Oblique),
 ];
+
+/// How a family's slanted faces slant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slant {
+    /// Cursive letterforms of their own.
+    Italic,
+    /// The upright letterforms leaned.
+    Oblique,
+}
+
+impl Slant {
+    /// The style a font's name gives a face with this slant.
+    const fn style(self) -> &'static str {
+        match self {
+            Self::Italic => ".Italic",
+            Self::Oblique => ".Oblique",
+        }
+    }
+}
 
 /// Whether `bytes` begin as a Draw file does.
 #[must_use]
@@ -146,21 +165,66 @@ fn face_of(name: &str) -> Result<Face, ReadError> {
         }
         list.push_str(SANS_SERIF);
     }
-    let mut face = Face {
+    let (weight, italic) = styles(parts);
+    Ok(Face {
         family: SharedStr::try_from_string(list)?,
-        weight: 400,
-        italic: false,
-    };
+        weight,
+        italic,
+    })
+}
+
+/// The weight and slant a font name's styles — the parts past its family —
+/// give it: regular and upright unless a style says otherwise.
+fn styles<'a>(parts: impl Iterator<Item = &'a str>) -> (u16, bool) {
+    let mut weight = 400;
+    let mut italic = false;
     for style in parts {
-        if let Some(&(_, weight)) = WEIGHTS
+        if let Some(&(_, named)) = WEIGHTS
             .iter()
             .find(|(names, _)| names.iter().any(|name| name.eq_ignore_ascii_case(style)))
         {
-            face.weight = weight;
+            weight = named;
         }
-        face.italic |= SLANTS.iter().any(|name| name.eq_ignore_ascii_case(style));
+        italic |= SLANTS.iter().any(|name| name.eq_ignore_ascii_case(style));
     }
-    Ok(face)
+    (weight, italic)
+}
+
+/// One of RISC OS's own fonts as the face it is set in: its family's
+/// generic kind, its weight, and its slant, if it slants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RiscosFace {
+    /// The generic family, as [`riscos_family_generic`] gives it.
+    pub generic: &'static str,
+    /// The weight, from 100 to 900.
+    pub weight: u16,
+    /// Its family's slant, where it slants.
+    pub slant: Option<Slant>,
+}
+
+/// The face RISC OS's own font `name` — a family and its styles, dot apart,
+/// as in `Homerton.Bold.Oblique` — is set in; none for a family RISC OS does
+/// not ship.
+#[must_use]
+pub fn riscos_face(name: &str) -> Option<RiscosFace> {
+    let family = name.split('.').next()?.trim();
+    let &(_, generic, slant) = FAMILIES
+        .iter()
+        .find(|(own, _, _)| own.eq_ignore_ascii_case(family))?;
+    let (weight, slanted) = riscos_styles(name);
+    Some(RiscosFace {
+        generic,
+        weight,
+        slant: slanted.then_some(slant),
+    })
+}
+
+/// The weight, from 100 to 900, and whether it slants, that the styles of
+/// RISC OS font `name` — the parts past its family, as in
+/// `Homerton.Bold.Oblique` — give it, whatever its family.
+#[must_use]
+pub fn riscos_styles(name: &str) -> (u16, bool) {
+    styles(name.split('.').map(str::trim).skip(1))
 }
 
 /// The styles a RISC OS font's name gives its weight by, with the weight.
@@ -223,7 +287,7 @@ impl Font {
         [
             family,
             if self.bold { ".Bold" } else { ".Medium" },
-            if self.italic { slant } else { "" },
+            if self.italic { slant.style() } else { "" },
         ]
     }
 }

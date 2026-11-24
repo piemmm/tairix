@@ -7,7 +7,9 @@ mod common;
 use common::{call, command, error_number};
 use tairix_riscos_kernel::swi::chunk::FONT;
 use tairix_riscos_kernel::swi::colour_trans as ct;
-use tairix_riscos_kernel::swi::font::{SET_FONT_COLOURS, SET_PALETTE};
+use tairix_riscos_kernel::swi::font::{
+    SET_COLOUR_TABLE, SET_FONT_COLOURS, SET_PALETTE, TRUE_COLOURS,
+};
 use tairix_riscos_kernel::swi::os::{READ_VDU_VARIABLES, SET_COLOUR};
 
 /// Where the tests write in the application slot.
@@ -336,38 +338,74 @@ fn a_gcol_table_on_a_sixteen_colour_screen_is_its_colour_number_table() {
 }
 
 /// A 32-bit guest module standing in for the Font Manager: each SWI it is
-/// called with records R0 to R5 and its number within the chunk, from
-/// [`FONT_RECORD`] past its base.
+/// called with records R0 to R6 and its number within the chunk, from
+/// [`FONT_RECORD`] past its base, `Font_SetColourTable` in a record of its
+/// own after the one every other call shares.
 fn font_recorder() -> Vec<u8> {
-    let header = [0, 0, 0, 0, 0x60, 0x60, 0, FONT, 0x34, 0, 0, 0, 0x40];
+    let header = [0, 0, 0, 0, 0x8C, 0x8C, 0, FONT, 0x34, 0, 0, 0, 0x48];
     let handler = [
-        0xE28F_A008, // ADR R10, record
-        0xE88A_083F, // STMIA R10, {R0-R5, R11}
+        0xE28F_A010, // ADR R10, record
+        0xE35B_0022, // CMP R11, #&22
+        0x028A_A020, // ADDEQ R10, R10, #32
+        0xE88A_087F, // STMIA R10, {R0-R6, R11}
         0xE1A0_F00E, // MOV PC, R14
     ];
     let flags = [1];
-    let record = [0; 7];
+    let records = [0; 16];
     let mut image: Vec<u8> = header
         .iter()
         .chain(&handler)
         .chain(&flags)
-        .chain(&record)
+        .chain(&records)
         .flat_map(|w: &u32| w.to_le_bytes())
         .collect();
     image.extend_from_slice(b"FontRec\0");
     image
 }
 
-/// Where [`font_recorder`] records, from its base.
-const FONT_RECORD: u32 = 0x44;
+/// Where [`font_recorder`] records, from its base: the calls but one, and
+/// `Font_SetColourTable`.
+const FONT_RECORD: u32 = 0x4C;
+const TABLE_RECORD: u32 = FONT_RECORD + 32;
 
-/// What the stand-in Font Manager at `base` was last handed.
-fn font_call(session: &mut tairix_riscos_filing::session::Session, base: u32) -> [u32; 7] {
+/// What the stand-in Font Manager at `base` was last handed in the record
+/// at `record`.
+fn font_call(
+    session: &mut tairix_riscos_filing::session::Session,
+    base: u32,
+    record: u32,
+) -> [u32; 8] {
     let os = &mut session.kernel.os();
     core::array::from_fn(|i| {
-        os.read_word(base + FONT_RECORD + 4 * u32::try_from(i).expect("small"))
+        os.read_word(base + record + 4 * u32::try_from(i).expect("small"))
             .expect("readable")
     })
+}
+
+#[test]
+fn set_font_colours_refused_is_made_again_as_font_set_font_colours_whose_refusal_it_gives() {
+    // With no Font Manager, RISC OS 5.30's call ends "SWI &40092 not known"
+    // in a deep mode, where its first call was Font_SetPalette, as in mode 12.
+    let mut session = common::drivers(b"");
+    for mode in [28, 12] {
+        common::vdu(&mut session, &[22, mode]).expect("the mode");
+        let refused = call(
+            &mut session,
+            ct::SET_FONT_COLOURS,
+            &[0, 0xFFFF_FF00, 0xFF00, 14],
+        );
+        let Err(tairix_riscos_kernel::os::Fail::Error(block)) = refused else {
+            panic!("mode {mode}: refused, not {refused:?}");
+        };
+        let mut os = session.kernel.os();
+        assert_eq!(
+            os.read_word(block).expect("its number"),
+            0x1E6,
+            "mode {mode}"
+        );
+        let (text, _) = os.read_until(block + 4, 64, |b| b == 0).expect("its text");
+        assert_eq!(text, b"SWI &40092 not known", "mode {mode}");
+    }
 }
 
 #[test]
@@ -385,7 +423,7 @@ fn set_font_colours_hands_the_font_manager_its_match_or_else_its_words() {
     .r;
     call(&mut session, ct::SET_FONT_COLOURS, &[5, white, black, 14]).expect("set");
     assert_eq!(
-        font_call(&mut session, base),
+        font_call(&mut session, base, FONT_RECORD),
         [
             5,
             chosen[1],
@@ -393,14 +431,31 @@ fn set_font_colours_hands_the_font_manager_its_match_or_else_its_words() {
             chosen[3],
             0,
             0,
+            0,
             SET_FONT_COLOURS - FONT
         ]
+    );
+    let recorded = [5, 0, white, black, 14, 0, 0, SET_COLOUR_TABLE - FONT];
+    assert_eq!(
+        font_call(&mut session, base, TABLE_RECORD),
+        recorded,
+        "the words recorded as RGB colours"
     );
     common::select_depth(&mut session, 5).expect("32 bits a pixel");
     call(&mut session, ct::SET_FONT_COLOURS, &[5, white, black, 14]).expect("set");
     assert_eq!(
-        font_call(&mut session, base),
-        [5, 0, 0, 14, white, black, SET_PALETTE - FONT]
+        font_call(&mut session, base, FONT_RECORD),
+        [
+            5,
+            white,
+            0,
+            14,
+            white,
+            black,
+            TRUE_COLOURS,
+            SET_PALETTE - FONT
+        ],
+        "the words as given, the background in R1 too, as RISC OS 5.30 hands them"
     );
 }
 

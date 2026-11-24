@@ -71,7 +71,7 @@ const MESSAGES_FILE: OwnFile = OwnFile::named(b"Resources:$.Resources.Draw.Messa
 
 /// The fill styles a call gives for nought: a fill's, the thinnest line's
 /// and a thick line's.
-const FILL_STYLE: u32 = 0x30;
+pub(crate) const FILL_STYLE: u32 = 0x30;
 const THIN_STYLE: u32 = 0x18;
 const THICK_STYLE: u32 = 0x30;
 /// The style bits the convenience calls take; a stroke's top bit plots its
@@ -216,7 +216,7 @@ fn refuse(os: &mut Os<'_>, refusal: Refusal) -> Fail {
 
 /// What processing's stop raises: Draw's refusals in its words; a
 /// flattening that never ends as RISC OS's does, overflowing the stack.
-fn raise(os: &mut Os<'_>, stop: Stop) -> Fail {
+pub(crate) fn raise(os: &mut Os<'_>, stop: Stop) -> Fail {
     match stop {
         Stop::Refused(refusal) => refuse(os, refusal),
         Stop::Fail(fail) => fail,
@@ -235,7 +235,7 @@ impl Guest for Os<'_> {
     }
 
     fn plot(&mut self, spans: &[Span]) -> Result<(), Fail> {
-        tairix_riscos_vdu::spans::plot_foreground(self, spans)
+        tairix_riscos_vdu::render::plot_foreground(self, spans)
     }
 
     fn yield_point(&mut self) -> Result<(), Fail> {
@@ -246,17 +246,8 @@ impl Guest for Os<'_> {
 /// Where output goes now, as a fill sees it: nowhere, where it cannot show
 /// graphics.
 fn surface(os: &mut Os<'_>) -> Surface {
-    match tairix_riscos_vdu::spans::surface(os) {
-        Some(surface) => Surface {
-            eig: surface.eig,
-            origin: surface.origin,
-            window: Window {
-                left: surface.window.left,
-                bottom: surface.window.bottom,
-                right: surface.window.right,
-                top: surface.window.top,
-            },
-        },
+    match tairix_riscos_vdu::render::surface(os) {
+        Some(surface) => Surface::of(&surface),
         None => Surface {
             eig: (0, 0),
             origin: (0, 0),

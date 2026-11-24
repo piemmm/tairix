@@ -5,11 +5,14 @@
 /// A point of a path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Point {
+    /// Across.
     pub x: i32,
+    /// Up.
     pub y: i32,
 }
 
 impl Point {
+    /// The point `x` across and `y` up.
     #[must_use]
     pub const fn new(x: i32, y: i32) -> Self {
         Self { x, y }

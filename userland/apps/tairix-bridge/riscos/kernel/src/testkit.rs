@@ -69,6 +69,10 @@ impl Host for TestHost {
         false
     }
 
+    fn font(&mut self, _request: &[u8], _reply: &mut alloc::vec::Vec<u8>) -> bool {
+        false
+    }
+
     fn wait(&mut self, until: Option<u64>, _: Ending) -> Pulse {
         let arrival = self.input.borrow().front().map(|&(at, _)| at);
         if arrival.is_none() && self.stop_without_input.get() {
@@ -150,8 +154,10 @@ pub(crate) fn boot_with(
         vdu: None,
         modules,
         zone,
+        desktop_font: crate::desktop::DesktopFont::SHIPPED,
         pressure: &tairix_reclaim::pressure::Unpressured,
         log: &tairix_log::DiscardSink,
+        cache_key: tairix_hash::HashSeed::UNKEYED,
     };
     let kernel = match Kernel::new(config) {
         Ok(kernel) => kernel,

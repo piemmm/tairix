@@ -17,7 +17,9 @@ use alloc::vec::Vec;
 use tairix_riscos_arm::psr;
 
 use crate::error::Error;
-use crate::module::{Builtin, Command, CommandKind, Help, Resource, Services, Swis};
+use crate::module::{
+    Asked, Builtin, Command, CommandKind, Help, Refused, Resource, Services, Swis,
+};
 use crate::msgtrans::Own;
 use crate::os::{len32, Fail, Os, Regs, Unwind, World};
 use crate::service;
@@ -691,12 +693,6 @@ fn loaded(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     Ok(())
 }
 
-/// Writes `text` and a new line.
-fn line(os: &mut Os<'_>, text: &[u8]) -> Result<(), Fail> {
-    os.write_text(text)?;
-    os.write_text(b"\n\r")
-}
-
 /// `*Territories`: each loaded territory's number and name, the newest
 /// first.
 /// `*Territory`: the territory named or numbered selected, or the current
@@ -705,10 +701,10 @@ fn territory_command(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     if regs.r[1] == 0 {
         let current = os.world.territory.current;
         let name = os.territory_name(current)?;
-        return line(os, &name);
+        return os.write_line(&name);
     }
     let Some(number) = os.name_or_number(regs.r[0])? else {
-        return Err(Fail::Error(crate::cli::configure::TOO_MANY_PARAMETERS));
+        return Err(os.error(crate::cli::commands::TOO_MANY));
     };
     os.select_territory(number)
 }
@@ -728,25 +724,9 @@ fn territories_command(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
             .to_vec();
         out.push(b' ');
         out.extend_from_slice(&text);
-        line(os, &out)?;
+        os.write_line(&out)?;
     }
     Ok(())
-}
-
-/// What a configuration keyword's R0 says: list its syntax, give its state,
-/// or set it from the text.
-enum Asked {
-    Syntax,
-    Status,
-    Set(u32),
-}
-
-const fn asked(r0: u32) -> Asked {
-    match r0 {
-        0 => Asked::Syntax,
-        1 => Asked::Status,
-        text => Asked::Set(text),
-    }
 }
 
 /// A token of the Manager's messages, written with a new line.
@@ -754,21 +734,20 @@ fn message_line(os: &mut Os<'_>, token: &[u8]) -> Result<(), Fail> {
     let buffer = os.world.territory.own.reply();
     let length = os.own_lookup(own, token, buffer, crate::msgtrans::REPLY_ROOM)?;
     let text = os.read_until(buffer, length as usize, |_| false)?.0;
-    line(os, &text)
+    os.write_line(&text)
 }
 
 fn configure_territory(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    match asked(regs.r[0]) {
+    match Asked::of(regs.r[0]) {
         Asked::Syntax => message_line(os, b"ConfigureTerritorySyntax"),
         Asked::Status => {
             let configured = os.read_cmos(TERRITORY_CMOS)? ^ 1;
-            let mut out = b"Territory  ".to_vec();
-            out.extend_from_slice(crate::convert::Decimal::of(i32::from(configured)).as_bytes());
-            line(os, &out)
+            let number = crate::convert::Decimal::of(i32::from(configured));
+            os.write_status(b"Territory", number.as_bytes(), b"\n\r")
         }
         Asked::Set(text) => {
             let Some(wanted) = os.name_or_number(text)? else {
-                return Err(Fail::Error(crate::cli::configure::TOO_MANY_PARAMETERS));
+                return Err(Refused::TooMany.fail());
             };
             os.write_cmos(TERRITORY_CMOS, u8::try_from(wanted).unwrap_or(u8::MAX) ^ 1)
         }
@@ -776,52 +755,50 @@ fn configure_territory(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 }
 
 fn configure_dst(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    match asked(regs.r[0]) {
+    match Asked::of(regs.r[0]) {
         Asked::Syntax => message_line(os, b"ConfigureDstSyntax"),
         Asked::Status => {
             let state = os.dst_state()?;
-            line(
-                os,
-                if state & dst::AUTOMATIC != 0 {
-                    b"AutoDST"
-                } else if state != 0 {
-                    b"DST"
-                } else {
-                    b"NoDST"
-                },
-            )
+            os.write_line(if state & dst::AUTOMATIC != 0 {
+                b"AutoDST"
+            } else if state != 0 {
+                b"DST"
+            } else {
+                b"NoDST"
+            })
         }
         Asked::Set(_) => os.set_dst(true),
     }
 }
 
 fn configure_no_dst(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    match asked(regs.r[0]) {
+    match Asked::of(regs.r[0]) {
         Asked::Syntax | Asked::Status => Ok(()),
         Asked::Set(_) => os.set_dst(false),
     }
 }
 
 fn configure_auto_dst(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    match asked(regs.r[0]) {
+    match Asked::of(regs.r[0]) {
         Asked::Syntax | Asked::Status => Ok(()),
         Asked::Set(_) => os.set_dst_state(dst::AUTOMATIC),
     }
 }
 
 fn configure_time_zone(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    match asked(regs.r[0]) {
+    match Asked::of(regs.r[0]) {
         Asked::Syntax => message_line(os, b"ConfigureTimeZoneSyntax"),
         Asked::Status => {
             let minutes = 15 * i32::from(os.read_cmos(TIME_ZONE_CMOS)?.cast_signed());
             let sign = if minutes < 0 { b'-' } else { b'+' };
             let (hours, rest) = (minutes.unsigned_abs() / 60, minutes.unsigned_abs() % 60);
-            let mut out = b"TimeZone   ".to_vec();
-            out.push(sign);
-            out.extend_from_slice(crate::convert::Decimal::of(hours.cast_signed()).as_bytes());
-            out.push(b':');
-            out.extend([rest / 10, rest % 10].map(|digit| b'0' + u8::try_from(digit).unwrap_or(0)));
-            line(os, &out)
+            let mut value = alloc::vec![sign];
+            value.extend_from_slice(crate::convert::Decimal::of(hours.cast_signed()).as_bytes());
+            value.push(b':');
+            value.extend(
+                [rest / 10, rest % 10].map(|digit| b'0' + u8::try_from(digit).unwrap_or(0)),
+            );
+            os.write_status(b"TimeZone", &value, b"\n\r")
         }
         Asked::Set(text) => {
             let first = os.read_byte(text)?;

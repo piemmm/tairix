@@ -284,48 +284,9 @@ fn generic_of(key: FamilyKey) -> Option<FamilyKey> {
 /// furnish applied; `None` for an outline of no em.
 #[must_use]
 pub fn glyph_of(outline: &OwnedOutline) -> Option<Glyph> {
-    use tairix_bezier::offset::{grown, Join};
-    use tairix_bezier::{FillRule, Path, PathEl, Point, QuadBez, Subpath};
-    use tairix_font::OwnedSegment;
-
-    let em = f64::from(outline.units_per_em);
-    if em <= 0.0 {
-        return None;
-    }
-    let shear = outline.synthetic_shear;
-    let place = |(x, y): (f64, f64)| Point::new((x + shear * y) / em, -y / em);
-    let mut path = Path::new();
-    path.subpaths.try_reserve(outline.contours.len()).ok()?;
-    for contour in &outline.contours {
-        let mut subpath = Subpath::new(place(contour.start));
-        subpath.elements.try_reserve(contour.segments.len()).ok()?;
-        let mut from = subpath.start;
-        for segment in &contour.segments {
-            let element = match *segment {
-                OwnedSegment::Line { to } => PathEl::Line(place(to)),
-                OwnedSegment::Quadratic { control, to } => {
-                    let curve = QuadBez::new(from, place(control), place(to)).raised();
-                    PathEl::Cubic(curve.p1, curve.p2, curve.p3)
-                }
-            };
-            from = element.end();
-            subpath.elements.push(element);
-        }
-        subpath.closed = true;
-        path.subpaths.push(subpath);
-    }
-    if outline.synthetic_bold > 0.0 {
-        path = grown(
-            &path,
-            FillRule::NonZero,
-            outline.synthetic_bold / 2.0,
-            Join::Round,
-            4.0,
-            1e-3,
-        )
-        .ok()?;
-    }
-    Some(Glyph::new(path, outline.advance / em))
+    let downward = tairix_bezier::Affine::scale(1.0, -1.0);
+    let path = outline.path()?.transformed(downward).ok()?;
+    Some(Glyph::new(path, outline.advance_em()?))
 }
 
 #[cfg(test)]

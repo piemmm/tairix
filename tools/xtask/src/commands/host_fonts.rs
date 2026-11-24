@@ -10,17 +10,15 @@
 //! resolution, per-scalar fallback, weight instancing or outline decoding is
 //! re-implemented here; only the on-disk reading is.
 
-use std::fs;
-use std::io::{Read as _, Seek as _, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use tairix_abi::font_ipc::{
     decode_outlines_reply, FamilyKey, FontRequest, FontStretch, FontStyle, FontWeight, GlyphRun,
     FONT_MAX_OUTLINE_REPLY,
 };
-use tairix_abi::Errno;
 use tairix_font::{seam_outlines, OutlineReply};
-use tairix_fontd::discovery::{discover, FaceLoad, FontStore, HandleFace, StoreFile};
+use tairix_fontd::discovery::discover;
+use tairix_fontd::host::DirectoryStore;
 use tairix_fontd::FontService;
 use tairix_log::{Event, Sink};
 use tairix_reclaim::{PressureBand, ReportedPressure};
@@ -46,56 +44,6 @@ impl Sink for DiscardSink {
     fn write_event(&self, _event: &Event<'_>) {}
 }
 
-/// The committed font store as the service's own discovery reads it.
-struct AssetStore {
-    root: PathBuf,
-}
-
-impl FontStore<'static> for AssetStore {
-    fn family_dirs(&mut self) -> Result<Vec<String>, Errno> {
-        let mut dirs = Vec::new();
-        for entry in fs::read_dir(&self.root).map_err(|_| Errno::NotFound)? {
-            let entry = entry.map_err(|_| Errno::NotFound)?;
-            if entry.path().is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    dirs.push(String::from(name));
-                }
-            }
-        }
-        Ok(dirs)
-    }
-
-    fn read_manifest(&mut self, dir: &str) -> Option<String> {
-        fs::read_to_string(self.root.join(dir).join("FontFamily")).ok()
-    }
-
-    fn face_loader(&mut self, dir: &str, face: &str) -> Box<dyn FaceLoad<'static> + 'static> {
-        let file = fs::File::open(self.root.join(dir).join(face))
-            .ok()
-            .map(HostFile);
-        Box::new(HandleFace::new(file))
-    }
-}
-
-/// A face file in the committed store, read where the service asks.
-struct HostFile(fs::File);
-
-impl StoreFile for HostFile {
-    fn size(&self) -> Result<u64, Errno> {
-        self.0
-            .metadata()
-            .map(|meta| meta.len())
-            .map_err(|_| Errno::DeviceFault)
-    }
-
-    fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, Errno> {
-        let mut file = &self.0;
-        file.seek(SeekFrom::Start(offset))
-            .and_then(|_| file.read(buf))
-            .map_err(|_| Errno::DeviceFault)
-    }
-}
-
 /// The build's font provider: the real service, over the committed store.
 pub struct HostFonts {
     service: FontService<'static>,
@@ -116,9 +64,7 @@ impl HostFonts {
         let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
         gauge.report(PressureBand::Normal);
         let cache = tairix_fontd::glyph_cache(HOST_RAM_BYTES, gauge, &SINK, HOST_HASH_KEY);
-        let mut store = AssetStore {
-            root: assets_root.to_path_buf(),
-        };
+        let mut store = DirectoryStore::new(assets_root.to_path_buf());
         let service = discover(&mut store, cache, &SINK).map_err(|err| {
             format!(
                 "font store at {} is unusable: {err:?}",
@@ -220,11 +166,10 @@ impl FontProvider for HostFonts {
 mod tests {
     use std::path::PathBuf;
 
-    use tairix_fontd::discovery::FontStore as _;
     use tairix_svg::font::{FaceRequest, FontProvider, FontStyle};
 
     use super::super::font_store::ASSETS_DIR;
-    use super::{AssetStore, HostFonts};
+    use super::HostFonts;
 
     fn committed_store() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -250,20 +195,6 @@ mod tests {
             .expect("outlines");
         assert_eq!(outlines.len(), 3);
         assert!(outlines.iter().all(|glyph| glyph.advance > 0.0));
-    }
-
-    #[test]
-    fn a_face_is_read_when_first_asked_for_not_when_discovered() {
-        let root = std::env::temp_dir().join(format!("xtask-hostfonts-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("family")).expect("scratch store");
-        let face = root.join("family").join("face.ttf");
-        std::fs::write(&face, b"as discovered").expect("a face");
-        let mut loader = AssetStore { root: root.clone() }.face_loader("family", "face.ttf");
-
-        std::fs::write(&face, b"as first asked for").expect("rewritten in place");
-
-        assert_eq!(loader.load().expect("read"), b"as first asked for");
-        std::fs::remove_dir_all(&root).expect("clean up");
     }
 
     #[test]

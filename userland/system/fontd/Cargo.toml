@@ -20,6 +20,9 @@ workspace = true
 [features]
 default = ["program"]
 program = ["dep:tairix-rt", "dep:tairix-procinfo"]
+# The store as a directory on the host (`host::DirectoryStore`), for host
+# tools and tests that serve fonts through the service itself.
+host-store = []
 
 # The package is both the `tairix-fontd` dispatcher library (the host-testable
 # `FontService` rasteriser + bounded glyph cache) and the `Run` entry-point

@@ -260,7 +260,8 @@ fn names(typed: &[u8], name: &str) -> bool {
 
 /// The character `alphabet` puts at `code`; none where it has none or knows
 /// no such alphabet.
-pub(crate) fn character(alphabet: u32, code: u8) -> Option<char> {
+#[must_use]
+pub fn character(alphabet: u32, code: u8) -> Option<char> {
     if code < 0x80 {
         return Some(char::from(code));
     }
@@ -495,12 +496,6 @@ fn answer(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     }
 }
 
-/// Writes `text` and a new line.
-fn line(os: &mut Os<'_>, text: &[u8]) -> Result<(), Fail> {
-    os.write_text(text)?;
-    os.write_text(b"\n\r")
-}
-
 /// The name a command was given, asked of every module as `reason`.
 fn named(os: &mut Os<'_>, reason: u32, text: u32) -> Result<Option<u32>, Fail> {
     Ok(os
@@ -512,7 +507,7 @@ fn alphabet_command(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     if regs.r[1] == 0 {
         let current = os.read_alphabet()?;
         let name = os.international_name(reason::ALPHABET_NAME, current)?;
-        return line(os, &name);
+        return os.write_line(&name);
     }
     let number = match named(os, reason::ALPHABET_NUMBER, regs.r[0])? {
         Some(number) => Some(number),
@@ -529,7 +524,7 @@ fn keyboard_command(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     if regs.r[1] == 0 {
         let current = os.os_byte(ALPHABET_BYTE, READ_KEYBOARD)?;
         let name = os.international_name(reason::COUNTRY_NAME, current)?;
-        return line(os, &name);
+        return os.write_line(&name);
     }
     let Some(number) = named(os, reason::COUNTRY_NUMBER, regs.r[0])? else {
         return Err(os.own_error(own, UNKNOWN_KEYBOARD, &[]));
@@ -542,7 +537,7 @@ fn country_command(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     if regs.r[1] == 0 {
         let current = os.os_byte(COUNTRY_BYTE, READ_COUNTRY)?;
         let name = os.international_name(reason::COUNTRY_NAME, current)?;
-        return line(os, &name);
+        return os.write_line(&name);
     }
     let Some(number) = named(os, reason::COUNTRY_NUMBER, regs.r[0])? else {
         return Err(os.own_error(own, UNKNOWN_COUNTRY, &[]));
@@ -590,21 +585,18 @@ fn countries_command(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
 
 /// `*Configure Country`, and its lines in the listings.
 fn configure_country(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    match regs.r[0] {
-        0 => {
+    match crate::module::Asked::of(regs.r[0]) {
+        crate::module::Asked::Syntax => {
             let text = os.international_message(b"ConfigureCountrySyntax")?;
-            line(os, &text)
+            os.write_line(&text)
         }
-        1 => {
+        crate::module::Asked::Status => {
             let configured = os.read_cmos(COUNTRY_CMOS)?;
-            let mut out = os.international_message(b"CountryKeyword")?;
-            out.extend_from_slice(b"    ");
-            out.extend_from_slice(
-                &os.international_name(reason::COUNTRY_NAME, u32::from(configured))?,
-            );
-            line(os, &out)
+            let keyword = os.international_message(b"CountryKeyword")?;
+            let name = os.international_name(reason::COUNTRY_NAME, u32::from(configured))?;
+            os.write_status(&keyword, &name, b"\n\r")
         }
-        text => {
+        crate::module::Asked::Set(text) => {
             let Some(number) = named(os, reason::COUNTRY_NUMBER, text)? else {
                 return Err(os.own_error(own, UNKNOWN_COUNTRY, &[]));
             };

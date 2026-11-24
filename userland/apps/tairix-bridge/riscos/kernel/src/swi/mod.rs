@@ -101,15 +101,30 @@ pub mod chunk {
 pub mod font {
     use super::chunk::FONT;
 
+    /// `Font_CacheAddr`.
+    pub const CACHE_ADDR: u32 = FONT;
     /// `Font_FindFont`.
     pub const FIND_FONT: u32 = FONT + 0x01;
     /// `Font_LoseFont`.
     pub const LOSE_FONT: u32 = FONT + 0x02;
+    /// `Font_Paint`.
+    pub const PAINT: u32 = FONT + 0x06;
 
     /// `Font_SetFontColours`.
     pub const SET_FONT_COLOURS: u32 = FONT + 0x12;
     /// `Font_SetPalette`.
     pub const SET_PALETTE: u32 = FONT + 0x13;
+    /// The word `Font_SetPalette`'s R6 holds, "True", for colours taken as
+    /// given rather than each channel's top nibble repeated.
+    pub const TRUE_COLOURS: u32 = u32::from_le_bytes(*b"True");
+    /// `Font_MakeBitmap`.
+    pub const MAKE_BITMAP: u32 = FONT + 0x19;
+    /// `Font_SwitchOutputToBuffer`.
+    pub const SWITCH_OUTPUT_TO_BUFFER: u32 = FONT + 0x1E;
+    /// `Font_ScanString`.
+    pub const SCAN_STRING: u32 = FONT + 0x21;
+    /// `Font_SetColourTable`, ColourTrans's own call.
+    pub const SET_COLOUR_TABLE: u32 = FONT + 0x22;
 }
 
 /// ColourTrans's SWIs, and their flag for the background.

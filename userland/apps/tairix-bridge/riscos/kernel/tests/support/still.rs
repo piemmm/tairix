@@ -33,6 +33,10 @@ impl Host for Still {
         false
     }
 
+    fn font(&mut self, _request: &[u8], _reply: &mut Vec<u8>) -> bool {
+        false
+    }
+
     fn wait(&mut self, until: Option<u64>, _: Ending) -> Pulse {
         if let Some(until) = until {
             self.clock.set(self.clock.get().max(until));

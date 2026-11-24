@@ -662,6 +662,24 @@ impl Memory {
         if number <= SYSTEM {
             return Err(AreaError::BadDynamicArea);
         }
+        self.unmake_area(number, guest)
+    }
+
+    /// Removes one of the kernel's own areas, numbered among those no
+    /// program may remove, as its owner does when it is finalised.
+    pub fn remove_kernel_area<G: Guest + ?Sized>(
+        &mut self,
+        number: u32,
+        guest: &mut G,
+    ) -> Result<(), AreaError> {
+        self.unmake_area(number, guest)
+    }
+
+    fn unmake_area<G: Guest + ?Sized>(
+        &mut self,
+        number: u32,
+        guest: &mut G,
+    ) -> Result<(), AreaError> {
         if self.areas.resizing {
             return Err(AreaError::NotAllMoved);
         }

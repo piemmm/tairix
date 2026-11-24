@@ -87,7 +87,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-#[cfg(any(feature = "render", feature = "glyph-cache"))]
+#[cfg(any(feature = "render", feature = "glyph-cache", feature = "outlines"))]
 extern crate alloc;
 
 #[cfg(test)]
@@ -104,6 +104,8 @@ pub mod glyph;
 pub mod glyph_cache;
 #[cfg(feature = "render")]
 mod measure;
+#[cfg(feature = "outlines")]
+pub mod outline;
 #[cfg(feature = "render")]
 pub mod outline_cache;
 #[cfg(feature = "render")]
@@ -118,8 +120,7 @@ mod tests;
 pub use client::{
     cached_outline, defer_fetches, families, fetch_deferred, has_deferred, install_caches,
     outline_run, set_font_transport, set_glyph_cache, set_outline_cache, text_generation,
-    trim_glyph_cache, FontTransport, GlyphCache, GlyphKey, OutlineReply, OwnedContour,
-    OwnedOutline, OwnedSegment,
+    trim_glyph_cache, FontTransport, GlyphCache, GlyphKey,
 };
 #[cfg(feature = "test-util")]
 pub use client::{glyph_cache_holds, install_test_transport, note_text_landed, SolidTestTransport};
@@ -131,10 +132,11 @@ pub use glyph_cache::{
     client_glyph_cache_budget, glyph_cache_budget, glyph_cache_candidate, CachedGlyph,
     GLYPH_CACHE_ENTRY_METADATA_BYTES,
 };
+#[cfg(feature = "outlines")]
+pub use outline::{FaceMetrics, OutlineReply, OwnedContour, OwnedOutline, OwnedSegment};
 #[cfg(feature = "render")]
 pub use outline_cache::{
-    outline_cache_budget, outline_cache_candidate, CachedOutline, FaceMetrics, OutlineCache,
-    OutlineKey,
+    outline_cache_budget, outline_cache_candidate, CachedOutline, OutlineCache, OutlineKey,
 };
 #[cfg(feature = "render")]
 pub use shadow::{KeptShadow, TextShadow};

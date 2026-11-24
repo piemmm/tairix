@@ -10,7 +10,10 @@ use tairix_bezier::{Affine, FillRule, Point};
 use tairix_colour::Rgba;
 use tairix_softfloat::fpa_words;
 
-use super::{face_of, read, recognised, riscos_family_generic, write, Dropped, Font};
+use super::{
+    face_of, read, recognised, riscos_face, riscos_family_generic, riscos_styles, write, Dropped,
+    Font, RiscosFace, Slant,
+};
 use crate::children::Children;
 use crate::drawing::{Drawing, Grid, Page, Unit, PAPER};
 use crate::id::Ids;
@@ -1435,4 +1438,49 @@ fn each_run_of_a_line_is_an_object_and_each_glyph_along_a_path_one_turned_with_i
             "turned down the path: {x_axis:?}"
         );
     }
+}
+
+#[test]
+fn risc_os_s_own_fonts_are_their_families_kinds_at_their_weights_and_slants() {
+    assert_eq!(
+        riscos_face("Homerton.Bold.Oblique"),
+        Some(RiscosFace {
+            generic: "sans-serif",
+            weight: 700,
+            slant: Some(Slant::Oblique),
+        })
+    );
+    assert_eq!(
+        riscos_face("trinity.medium"),
+        Some(RiscosFace {
+            generic: "serif",
+            weight: 400,
+            slant: None,
+        })
+    );
+    assert_eq!(
+        riscos_face("Corpus.Medium.Oblique").map(|face| (face.generic, face.slant)),
+        Some(("monospace", Some(Slant::Oblique)))
+    );
+    assert_eq!(riscos_face("Selwyn"), None);
+    assert_eq!(
+        riscos_face("Trinity.Medium.Italic").map(|face| face.slant),
+        Some(Some(Slant::Italic))
+    );
+}
+
+#[test]
+fn any_font_s_styles_give_its_weight_and_slant_whatever_its_family() {
+    assert_eq!(riscos_styles("Selwyn.Bold.Italic"), (700, true));
+    assert_eq!(riscos_styles("Desktop.Medium"), (400, false));
+    assert_eq!(
+        riscos_styles("Bold"),
+        (400, false),
+        "a family alone has no styles"
+    );
+    assert_eq!(
+        riscos_styles("A. heavy .slanted"),
+        (900, true),
+        "each part trimmed"
+    );
 }

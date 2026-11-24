@@ -3,8 +3,9 @@
 TAIRiX Bridge is TAIRiX's compatibility layer: it runs other systems'
 applications on the TAIRiX desktop, one subtree for each system. RISC OS is
 the first, in `riscos/`, one crate per subsystem: `arm/`, the ARM processor;
-`kernel/`, the RISC OS kernel; and `filing/`, FileSwitch and its filing
-systems. The design and its staging are `plans/RISCOS-EMULATOR.md`; the
+`kernel/`, the RISC OS kernel; `filing/`, FileSwitch and its filing systems;
+`basic/`, BBC BASIC V and VI; `vdu/`, the VDU drivers; `draw/`, Draw and
+DrawFile; and `font/`, the Font Manager and the ROM fonts. The design and its staging are `plans/RISCOS-EMULATOR.md`; the
 description is `docs/src/desktop/tairix-bridge.md`.
 
 <!-- ANCHOR: notices -->

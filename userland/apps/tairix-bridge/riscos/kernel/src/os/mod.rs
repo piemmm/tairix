@@ -134,6 +134,12 @@ pub trait Host {
     /// appended to `reply`; false where the session has no such side or the
     /// relay failed, which the guest sees as a filing system with no discs.
     fn relay(&mut self, request: &[u8], reply: &mut Vec<u8>) -> bool;
+
+    /// `request`, a font service request, carried to the font service, its
+    /// reply appended to `reply`; false where the session has no font
+    /// service or the relay failed, which the guest sees as RISC OS's own
+    /// fonts having no glyphs.
+    fn font(&mut self, request: &[u8], reply: &mut Vec<u8>) -> bool;
 }
 
 /// What a session is made with.
@@ -154,11 +160,16 @@ pub struct Config {
     pub modules: &'static [&'static crate::module::Builtin],
     /// The TAIRiX locale's time zone, which the territory's zone is.
     pub zone: tairix_tz::Zone<'static>,
+    /// The TAIRiX desktop's interface text, which the desktop font is.
+    pub desktop_font: crate::desktop::DesktopFont,
     /// The machine's memory pressure, which the session's caches give way
     /// to.
     pub pressure: &'static (dyn tairix_reclaim::PressureGauge + 'static),
     /// Where the session's caches record what they decide.
     pub log: &'static (dyn tairix_log::Sink + Sync),
+    /// The key a session's cache hashes the keys a guest chooses under:
+    /// the host process's own, drawn from its CSPRNG.
+    pub cache_key: tairix_hash::HashSeed,
 }
 
 /// The control register's soft copy at reset: the MMU, caches and write
@@ -340,8 +351,10 @@ pub struct World {
     pub(crate) keyboard: crate::keyboard::Keyboard,
     pub(crate) uk: crate::territory::uk::State,
     pub(crate) zone: tairix_tz::Zone<'static>,
+    pub(crate) desktop_font: crate::desktop::DesktopFont,
     pub(crate) pressure: &'static (dyn tairix_reclaim::PressureGauge + 'static),
     pub(crate) log: &'static (dyn tairix_log::Sink + Sync),
+    pub(crate) cache_key: tairix_hash::HashSeed,
     pub(crate) extensions: crate::extension::Extensions,
 }
 
@@ -475,8 +488,10 @@ impl Kernel {
             keyboard: crate::keyboard::Keyboard::new(),
             uk: crate::territory::uk::State::new(),
             zone: config.zone,
+            desktop_font: config.desktop_font,
             pressure: config.pressure,
             log: config.log,
+            cache_key: config.cache_key,
             extensions: crate::extension::Extensions::new(),
         };
         let mut kernel = Self { memory, world };

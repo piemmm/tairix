@@ -338,3 +338,30 @@ fn an_open_whose_buffer_there_is_no_room_for_leaves_nothing_open() {
         "nothing left open by the refusal"
     );
 }
+
+#[test]
+fn open_files_are_counted_up_from_the_first_for_a_handle_of_nought_or_below() {
+    let mut kernel = with_disc();
+    let mut os = kernel.os();
+    save(&mut os, b"RAM:$.A", 0xFFF, b"a").expect("saved");
+    save(&mut os, b"RAM:$.B", 0xFFF, b"b").expect("saved");
+    let one = open(&mut os, OPEN_IN, b"RAM:$.A").expect("opened");
+    let other = open(&mut os, OPEN_IN, b"RAM:$.B").expect("opened");
+    let (first, second) = (one.min(other), one.max(other));
+    let next = |os: &mut Os<'_>, after: u32| {
+        let regs = call(os, FS_CONTROL, &[fs_control::NEXT_OPEN, after]).expect("counted");
+        (regs.r[1], regs.r[2])
+    };
+    let (handle, info) = next(&mut os, u32::MAX);
+    assert_eq!(handle, first, "-1 starts from the first");
+    assert_eq!(
+        info & 0xFF,
+        u32::from(ramfs::NUMBER),
+        "its filing system's information word"
+    );
+    assert_eq!(next(&mut os, 0).0, first, "and so does nought");
+    assert_eq!(next(&mut os, first).0, second);
+    assert_eq!(next(&mut os, second).0, u32::MAX, "-1 after the last");
+    close(&mut os, second);
+    close(&mut os, first);
+}

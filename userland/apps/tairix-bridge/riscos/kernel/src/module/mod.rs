@@ -164,6 +164,52 @@ pub const fn value_padding(keyword: usize) -> usize {
     }
 }
 
+/// What a configuration keyword's code is asked, by its R0: to write its
+/// syntax, to write its status, or to set it from the text at the address.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Asked {
+    /// Write the keyword's syntax.
+    Syntax,
+    /// Write the keyword's status line.
+    Status,
+    /// Set it from the text at the address.
+    Set(u32),
+}
+
+impl Asked {
+    /// What R0 `r0` asks.
+    #[must_use]
+    pub const fn of(r0: u32) -> Self {
+        match r0 {
+            0 => Self::Syntax,
+            1 => Self::Status,
+            text => Self::Set(text),
+        }
+    }
+}
+
+/// The kernel's errors a configuration keyword's code names by number in
+/// place of an error block of its own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Refused {
+    /// "Bad configure option".
+    BadOption = 0,
+    /// "Numeric parameter needed".
+    NumberNeeded = 1,
+    /// "Configure parameter too big".
+    TooBig = 2,
+    /// "Too many parameters".
+    TooMany = 3,
+}
+
+impl Refused {
+    /// The failure a configuration keyword's code answers with to name it.
+    #[must_use]
+    pub const fn fail(self) -> Fail {
+        Fail::Error(self as u32)
+    }
+}
+
 /// A built-in module's `*` command, or a keyword it has help on.
 #[derive(Debug)]
 pub struct Command {

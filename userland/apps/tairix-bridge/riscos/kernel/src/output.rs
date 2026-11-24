@@ -194,6 +194,20 @@ impl Os<'_> {
         self.write_text(b"\n\r")
     }
 
+    /// Writes a `*Status` line: `keyword`, `value` from the listings' value
+    /// column, then `end`.
+    ///
+    /// # Errors
+    ///
+    /// What `WrchV`'s claimants give.
+    pub fn write_status(&mut self, keyword: &[u8], value: &[u8], end: &[u8]) -> Result<(), Fail> {
+        const SPACES: [u8; crate::module::VALUE_COLUMN] = [b' '; crate::module::VALUE_COLUMN];
+        self.write_text(keyword)?;
+        self.write_text(&SPACES[..crate::module::value_padding(keyword.len())])?;
+        self.write_text(value)?;
+        self.write_text(end)
+    }
+
     /// Writes the string at `start` to its zero, a byte at a time so a
     /// long one costs no host memory: the address past the zero.
     fn write_until_zero(&mut self, start: u32) -> Result<u32, Fail> {

@@ -826,7 +826,8 @@ tairix/
 │   │           ├── filing/ #   FileSwitch and the filing systems it calls.
 │   │           ├── basic/  #   BBC BASIC V and VI: their numbers and interpreter.
 │   │           ├── vdu/    #   The VDU drivers: modes, the VDU stream, OS_Plot, palettes.
-│   │           └── draw/   #   Draw and DrawFile: paths filled and stroked, Draw files.
+│   │           ├── draw/   #   Draw and DrawFile: paths filled and stroked, Draw files.
+│   │           └── font/   #   The Font Manager and the ROM fonts: faces, guest fonts, text.
 │   └── games/           # Games. A leaf subtree: its crates compose each other
 │       │                #   and `lib/*`, and NOTHING outside it may depend on
 │       │                #   them, so game code never enters the OS libraries.

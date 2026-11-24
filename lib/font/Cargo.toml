@@ -20,8 +20,10 @@ tairix-raster = { path = "../raster", version = "=0.0.0", optional = true }
 tairix-vt = { path = "../vt", version = "=0.0.0", optional = true }
 # The font-service wire protocol shared by this client and the `fontd` service:
 # the render path parses TrueType nowhere, it asks `fontd` for glyph
-# coverage over `FONT_ENDPOINT`. Only the `render` blitter needs it.
+# coverage over `FONT_ENDPOINT`. The blitter and the outline decode need it.
 tairix-abi = { path = "../abi", version = "=0.0.0", optional = true }
+# Outlines as paths: quadratics raised, a synthetic bold grown.
+tairix-bezier = { path = "../bezier", version = "=0.0.0", optional = true }
 # The futex mutex guarding the process-global font-service client, and (under
 # `rt`) the `ipc_call` transport the render path reaches `fontd` with. The lock
 # is held across that round trip, so it has to be one a waiter parks on rather
@@ -81,6 +83,7 @@ default = ["render"]
 # The `lib/raster`-backed glyph blitter (`font::BitmapFont`). Disable
 # default features for the atlas-only, allocator-free view.
 render = [
+    "outlines",
     "dep:tairix-raster",
     "dep:tairix-vt",
     "dep:tairix-rt",
@@ -91,6 +94,9 @@ render = [
     "dep:tairix-visible",
     "glyph-cache",
 ]
+# The font service's outline replies as owned values (`outline`) alone, for
+# a client that draws geometry with no need of the blitter.
+outlines = ["dep:tairix-abi", "dep:tairix-bezier"]
 # The shared cached-glyph declaration (`glyph_cache`) alone, with none of
 # `render`'s drawing dependencies. `fontd` enables just this, since it
 # rasterises glyphs itself and never draws through this crate's blitter.

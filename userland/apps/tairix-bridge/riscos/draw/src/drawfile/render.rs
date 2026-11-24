@@ -7,15 +7,15 @@
 //! - **Paths** are filled then stroked by `Draw_Fill` and `Draw_Stroke`,
 //!   each colour set by `ColourTrans_SetGCOL`, the flatness 128 unless the
 //!   call gives one.
-//! - **Text** in the system font is drawn a character at a time into a work
-//!   sprite's mask, then plotted through it; text in a named font asks the
-//!   Font Manager for the font first, the system font standing in for one
-//!   it does not give.
+//! - **Text** in a named font is painted by the Font Manager: found at its
+//!   sizes, coloured through ColourTrans, painted in OS units through the
+//!   render's matrix, its own after it, and let go. Text in no font, or one
+//!   the Font Manager refuses, the refusal kept, is drawn in the system font
+//!   a character at a time into a work sprite's mask, then plotted through it.
 //! - **Sprites** are plotted by `OS_SpriteOp` 56 through a table
 //!   ColourTrans selects, scaled to fill their bounds, or through their own
 //!   matrix; a **JPEG** by `JPEG_PlotTransformed`.
-//! - **Text areas** are read through their commands, then painted through
-//!   the Font Manager.
+//! - **Text areas** are laid out and painted through the Font Manager.
 //!
 //! An object whose bounds miss the clipping box, in draw units, is passed
 //! over; with the boxes flag each object's bounds are drawn dotted in red
@@ -82,6 +82,25 @@ const JPEG_BY_MATRIX: u32 = 1;
 const TEXT_FIELDS: usize = 28;
 /// A transformed text's matrix and flags come first.
 const TRANSFORMED_TEXT_FIELDS: usize = format::MATRIX + 4;
+/// A transformed text's kerning and right-to-left flags, and how far up
+/// `Font_Paint`'s flags they move.
+const TEXT_FLAGS: u32 = 0b11;
+const PAINT_TEXT_FLAGS_SHIFT: u32 = 9;
+/// `Font_Paint`'s flags DrawFile paints a text with: OS units, R6 a
+/// matrix, R0 the font.
+const PAINT_OS_UNITS: u32 = 1 << 4;
+const PAINT_MATRIX: u32 = 1 << 6;
+const PAINT_HANDLE: u32 = 1 << 8;
+/// A text's sizes are in draw units, the Font Manager's in sixteenths of
+/// a point.
+const DRAW_UNITS_A_SIXTEENTH: i32 = 40;
+/// The offset every text and text area asks its colours for.
+pub(super) const FONT_COLOUR_OFFSET: u8 = 14;
+/// What system-font text writes into the work sprite's mask before each
+/// character, as `OS_WriteN` gives it: `GCOL 3,0`.
+const MASK_GCOL: [u8; 3] = [18, 3, 0];
+/// Where the character is then written from: `MOVE 0,32`.
+const MASK_MOVE: (u32, u32) = (0, 32);
 /// The box flag's colour, red, and the dot pattern it is drawn in.
 const BOX_COLOUR: u32 = 0x0000_DD00;
 const BOX_PATTERN: [u8; 10] = [23, 6, 0xCC, 0, 0xCC, 0, 0xCC, 0, 0xCC, 0];
@@ -232,12 +251,13 @@ impl<'f> Renderer<'f> {
             TEXT => self.text(os, object, None),
             TRANSFORMED_TEXT => {
                 let matrix = matrix_in(object.bytes, OBJECT_HEADER);
-                self.text(os, object, Some(matrix))
+                let flags = format::word(object.bytes, OBJECT_HEADER + format::MATRIX).unwrap_or(0);
+                self.text(os, object, Some((matrix, flags)))
             }
             SPRITE => self.sprite(os, object),
             TRANSFORMED_SPRITE => self.transformed_sprite(os, object),
             JPEG => self.jpeg(os, object),
-            _ => text_area(os, object),
+            _ => self.text_area(os, object),
         };
         self.keep(os, drawn)
     }
@@ -306,53 +326,121 @@ impl<'f> Renderer<'f> {
         Ok(())
     }
 
-    /// A text or transformed text: `matrix` the latter's own.
+    /// A text or transformed text, `own` the latter's matrix and flags:
+    /// painted by the Font Manager in its named font, or in the system font
+    /// where it names none or the Font Manager refuses it, the refusal kept.
     fn text(
         &mut self,
         os: &mut Os<'_>,
         object: Object<'_>,
-        matrix: Option<Matrix>,
+        own: Option<(Matrix, u32)>,
     ) -> Result<(), Fail> {
         let base = OBJECT_HEADER
-            + if matrix.is_some() {
+            + if own.is_some() {
                 TRANSFORMED_TEXT_FIELDS
             } else {
                 0
             };
         let field = |at| format::int(object.bytes, base + at).unwrap_or(0);
-        let colour = field(0).cast_unsigned();
+        let text = Text {
+            foreground: field(0).cast_unsigned(),
+            background: field(4).cast_unsigned(),
+            sizes: (field(12), field(16)),
+            at: Point::new(field(20), field(24)),
+            string: self.address(object.at + base + TEXT_FIELDS),
+        };
         let number = field(8).cast_unsigned() & format::FONT_NUMBER;
-        let sizes = (field(12), field(16));
-        let at = Point::new(field(20), field(24));
-        let characters = terminated(object.bytes, base + TEXT_FIELDS);
-        let mut missing = Ok(());
-        if number != 0 {
-            missing = self.find_font(os, number, sizes);
+        if let Some(name) = self.fonts.named(number).filter(|_| number != 0) {
+            match self.font_text(os, self.address(name), &text, own) {
+                Ok(()) => return Ok(()),
+                Err(Fail::Error(block)) => self.keep(os, Err(Fail::Error(block)))?,
+                Err(unwind) => return Err(unwind),
+            }
         }
-        let through = compose(&self.asked.matrix, matrix.as_ref());
-        let drawn = self.system_text(os, characters, colour, sizes, at, &through);
-        self.keep(os, missing)?;
-        drawn
+        let characters = terminated(object.bytes, base + TEXT_FIELDS);
+        let through = compose(&self.asked.matrix, own.as_ref().map(|(matrix, _)| matrix));
+        self.system_text(
+            os,
+            characters,
+            text.foreground,
+            text.sizes,
+            text.at,
+            &through,
+        )
     }
 
-    /// The Font Manager asked for font `number`; the font it gives is let
-    /// go, the system font standing in, as for one it does not give.
-    fn find_font(
+    /// `text` painted in the font named at `name`: found at its sizes, its
+    /// colours set through ColourTrans, painted, and let go even where
+    /// painting is refused.
+    fn font_text(
         &mut self,
         os: &mut Os<'_>,
-        number: u32,
-        (sx, sy): (i32, i32),
+        name: u32,
+        text: &Text,
+        own: Option<(Matrix, u32)>,
     ) -> Result<(), Fail> {
-        let Some(name) = self.fonts.named(number) else {
-            return Ok(());
+        let sixteenths = |size: i32| (size / DRAW_UNITS_A_SIXTEENTH).cast_unsigned();
+        let mut find = Regs::default();
+        find.r[1..4].copy_from_slice(&[name, sixteenths(text.sizes.0), sixteenths(text.sizes.1)]);
+        os.perform(X | font::FIND_FONT, &mut find)?;
+        let handle = find.r[0];
+        let painted = self.paint_text(os, handle, text, own);
+        let mut release = Regs::default();
+        release.r[0] = handle;
+        let lost = os.perform(X | font::LOSE_FONT, &mut release);
+        painted.and(lost)
+    }
+
+    /// `text` painted in `handle` at its base point through the render's
+    /// matrix, in OS units, its own matrix after the render's where it has one.
+    fn paint_text(
+        &mut self,
+        os: &mut Os<'_>,
+        handle: u32,
+        text: &Text,
+        own: Option<(Matrix, u32)>,
+    ) -> Result<(), Fail> {
+        let mut colours = Regs::default();
+        colours.r[..4].copy_from_slice(&[
+            handle,
+            text.background,
+            text.foreground,
+            u32::from(FONT_COLOUR_OFFSET),
+        ]);
+        os.perform(X | colour_trans::SET_FONT_COLOURS, &mut colours)?;
+        let render = &self.asked.matrix;
+        let painted = match own {
+            None => Matrix {
+                e: 0,
+                f: 0,
+                ..*render
+            },
+            Some((matrix, _)) => {
+                let moved = os_units(render.apply_truncating(Point::new(matrix.e, matrix.f)));
+                Matrix {
+                    e: moved.x,
+                    f: moved.y,
+                    ..compose(render, Some(&matrix))
+                }
+            }
         };
-        let sixteenths = |size: i32| (size / 40).cast_unsigned();
-        let mut regs = Regs::default();
-        regs.r[1..4].copy_from_slice(&[self.address(name), sixteenths(sx), sixteenths(sy)]);
-        os.perform(X | font::FIND_FONT, &mut regs)?;
-        let mut lose = Regs::default();
-        lose.r[0] = regs.r[0];
-        os.perform(X | font::LOSE_FONT, &mut lose)
+        let matrix_at = self.workspace + workspace::MATRIX;
+        write_words(os, matrix_at, &painted.words())?;
+        let at = os_units(render.apply_truncating(text.at));
+        let flags = own.map_or(0, |(_, flags)| {
+            (flags & TEXT_FLAGS) << PAINT_TEXT_FLAGS_SHIFT
+        });
+        let mut paint = Regs::default();
+        paint.r[..7].copy_from_slice(&[
+            handle,
+            text.string,
+            PAINT_OS_UNITS | PAINT_MATRIX | PAINT_HANDLE | flags,
+            at.x.cast_unsigned(),
+            at.y.cast_unsigned(),
+            0,
+            matrix_at,
+        ]);
+        os.perform(X | font::PAINT, &mut paint)
     }
 
     /// `characters` in the system font, one at a time: each drawn into the
@@ -373,9 +461,7 @@ impl<'f> Renderer<'f> {
             let mut switch = Regs::default();
             switch.r[..4].copy_from_slice(&[OUTPUT_TO_MASK, area, sprite, 0]);
             os.perform(X | kos::SPRITE_OP, &mut switch)?;
-            let drawn = [18, 3, 0, 25, 4, 0, 0, 32, 0, character]
-                .into_iter()
-                .try_for_each(|byte| write_c(os, byte));
+            let drawn = self.mask_character(os, character);
             let mut back = Regs::default();
             back.r[..4].copy_from_slice(&switch.r[..4]);
             os.perform(X | kos::SPRITE_OP, &mut back)?;
@@ -391,6 +477,19 @@ impl<'f> Renderer<'f> {
             self.plot_sprite(os, sprite, &compose(through, Some(&cell)), Source::Palette)?;
         }
         Ok(())
+    }
+
+    /// `character` written into the work sprite's mask as RISC OS 5.30's
+    /// DrawFile writes it: `GCOL 3,0` by `OS_WriteN`, a move by `OS_Plot`,
+    /// the character by `OS_WriteC`.
+    fn mask_character(&mut self, os: &mut Os<'_>, character: u8) -> Result<(), Fail> {
+        let gcol = self.workspace + workspace::MASK_GCOL;
+        os.write_bytes(gcol, &MASK_GCOL)?;
+        let mut write = Regs::default();
+        write.r[..2].copy_from_slice(&[gcol, u32::try_from(MASK_GCOL.len()).unwrap_or(0)]);
+        os.perform(X | kos::WRITE_N, &mut write)?;
+        plot(os, MOVE, MASK_MOVE.0, MASK_MOVE.1)?;
+        write_c(os, character)
     }
 
     /// Sprite `sprite` plotted through `matrix`, its colours through the
@@ -485,6 +584,18 @@ impl<'f> Renderer<'f> {
         self.plot_sprite(os, sprite, &through, source)
     }
 
+    /// A text area, painted through the Font Manager.
+    fn text_area(&mut self, os: &mut Os<'_>, object: Object<'_>) -> Result<(), Fail> {
+        let places = text_area::Places {
+            buffer: self.workspace + workspace::TEXT,
+            block: self.workspace + workspace::COORDINATES,
+            matrix: self.workspace + workspace::MATRIX,
+            name: self.workspace + workspace::NAME,
+            name_bytes: workspace::NAME_BYTES as usize,
+        };
+        text_area::paint(os, &Area::of(object), &self.asked.matrix, places)
+    }
+
     /// A JPEG through its own matrix.
     fn jpeg(&mut self, os: &mut Os<'_>, object: Object<'_>) -> Result<(), Fail> {
         let own = matrix_in(object.bytes, JPEG_MATRIX);
@@ -500,6 +611,39 @@ impl<'f> Renderer<'f> {
         regs.r[..4].copy_from_slice(&[data, JPEG_BY_MATRIX, matrix_at, length]);
         os.perform(X | jpeg::PLOT_TRANSFORMED, &mut regs)
     }
+}
+
+/// A text object's fields DrawFile paints it by.
+#[derive(Clone, Copy, Debug)]
+struct Text {
+    foreground: u32,
+    background: u32,
+    /// Its width and height, in draw units.
+    sizes: (i32, i32),
+    /// Its base point.
+    at: Point,
+    /// Where its characters are.
+    string: u32,
+}
+
+/// The Font Manager's cache asked after, as RISC OS 5.30's DrawFile asks
+/// before rendering a file or declaring its fonts, the answer unused even
+/// when there is no Font Manager to give one.
+///
+/// # Errors
+///
+/// What unwinds.
+pub(super) fn ask_font_cache(os: &mut Os<'_>) -> Result<(), Fail> {
+    match os.perform(X | font::CACHE_ADDR, &mut Regs::default()) {
+        Ok(()) | Err(Fail::Error(_)) => Ok(()),
+        Err(unwind) => Err(unwind),
+    }
+}
+
+/// A point in draw units in OS units, cut toward nought.
+fn os_units(p: Point) -> Point {
+    let units = 1 << UNIT_SHIFT;
+    Point::new(p.x / units, p.y / units)
 }
 
 /// Where a sprite's colours come from.
@@ -521,22 +665,6 @@ fn draw_box(os: &mut Os<'_>, [x0, y0, x1, y1]: [i32; 4]) -> Result<(), Fail> {
         plot(os, DOTTED, units(x), units(y))?;
     }
     Ok(())
-}
-
-/// A text area: its colours set through the Font Manager, then its
-/// commands read, as RISC OS's are.
-fn text_area(os: &mut Os<'_>, object: Object<'_>) -> Result<(), Fail> {
-    let area = Area::of(object);
-    let mut regs = Regs::default();
-    regs.r[..4].copy_from_slice(&[
-        0,
-        area.background,
-        area.foreground,
-        text_area::COLOUR_OFFSET,
-    ]);
-    os.perform(X | font::SET_FONT_COLOURS, &mut regs)?;
-    area.read()
-        .map_err(|refusal| text_area::refuse(os, refusal))
 }
 
 /// The matrix six words of `bytes` from `at` hold.

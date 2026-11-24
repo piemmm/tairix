@@ -11,6 +11,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Draw files made to order, for the tests that render them.
+test-support = []
+
 [dependencies]
 # The kernel: guest memory, SWIs, vectors and the module seam.
 tairix-riscos-kernel = { path = "../kernel", version = "=0.0.0" }

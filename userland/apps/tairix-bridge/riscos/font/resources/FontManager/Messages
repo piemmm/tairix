@@ -1,0 +1,31 @@
+# The Font Manager's messages, in TAIRiX Bridge's own words.
+UnnamedSize:No bitmap file can be named for that size
+UndefinedColour:No colours are set for the font's foreground in this mode
+BadColours:The anti-aliasing colours are out of range
+InvalidColour:A font colour is not one of the mode's
+Undefined:That font handle holds no font
+OutOfRange:Font handle out of range
+NotFound:Font '%0' not found
+NoData:Font '%0' has no outlines or bitmaps for its encoding
+NoHandles:Every font handle is in use
+CtrlChar:A font string holds a control character it may not
+Reserved:A flag or field that must be nought is not
+BadMatrix:The font's matrix is not six numbers
+ZeroSize:A font cannot be nought points
+Transformed:A transformed font's metrics cannot be read
+NoRGB:The font colours were not set as RGB colours
+NoEncoding:Encoding '%0' not found
+NoSupremacy:Text cannot blend with the screen's supremacy in this mode
+Illegal:A file of font '%0' is not a font file
+NotPath:A font directory must end with a full stop
+FontsClaimed:Fonts are in use, so the font cache cannot be loaded
+NotCache:That file is not a saved font cache
+FontList:Font List
+Regular:(Regular)
+SystemFont:System Font
+ListHeading:     Font                   Size                 Dots/inch  Uses Memory
+ListRule:     ----                   ----                 ---------  ---- ------
+MasterFace:master, a TAIRiX face
+MasterFiles:master, outlines
+CacheSize:Cache size:
+CacheFree:      free:

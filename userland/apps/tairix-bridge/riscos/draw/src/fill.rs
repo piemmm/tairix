@@ -29,6 +29,21 @@ pub(crate) struct Surface {
 }
 
 impl Surface {
+    /// The VDU drivers' `surface` as a fill plots on it.
+    pub(crate) const fn of(surface: &tairix_riscos_vdu::render::Surface) -> Self {
+        let window = surface.window;
+        Self {
+            eig: surface.eig,
+            origin: surface.origin,
+            window: Window {
+                left: window.left,
+                bottom: window.bottom,
+                right: window.right,
+                top: window.top,
+            },
+        }
+    }
+
     /// A point in Draw's internal units, in 256ths of a pixel from the
     /// bottom left.
     fn place(self, x: i32, y: i32) -> (i64, i64) {

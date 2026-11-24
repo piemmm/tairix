@@ -64,9 +64,8 @@ use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::font_ipc::{
-    decode_families_reply, decode_glyphs_reply, decode_metrics_reply, decode_outlines_reply,
-    FamilyEntry, FamilyKey, FontMetrics, FontRequest, FontStretch, FontStyle, FontWeight,
-    GlyphOutline, GlyphRun, GlyphSegment, OutlineBatch, FONT_FAMILY_KEY_LEN,
+    decode_families_reply, decode_glyphs_reply, decode_metrics_reply, FamilyEntry, FamilyKey,
+    FontMetrics, FontRequest, FontStretch, FontStyle, FontWeight, GlyphRun, FONT_FAMILY_KEY_LEN,
     FONT_MAX_FAMILIES_REPLY, FONT_MAX_GLYPH_REPLY, FONT_MAX_GLYPH_RUN, FONT_MAX_OUTLINE_REPLY,
     FONT_METRICS_REPLY_LEN,
 };
@@ -80,7 +79,8 @@ use tairix_vt::char_width;
 use crate::atlas;
 use crate::glyph_cache::CachedGlyph;
 use crate::measure::{self, MeasureCache, MeasureEpoch, MeasuredText};
-use crate::outline_cache::{CachedOutline, FaceMetrics, OutlineCache, OutlineKey};
+use crate::outline::{FaceMetrics, OutlineReply, OwnedOutline};
+use crate::outline_cache::{CachedOutline, OutlineCache, OutlineKey};
 
 /// One synchronous font-service call: send one request frame, receive one
 /// reply frame. The `ipc_call` syscall behind a seam, so the render path is
@@ -579,7 +579,7 @@ pub(crate) trait FontClient {
                 .and_then(|cache| cache.get_or_build(&(), key, || None))
             {
                 if reply.units_per_em == 0 {
-                    reply.state(hit.face);
+                    state(&mut reply, hit.face);
                 }
                 served.push(hit.outline.clone());
                 at += 1;
@@ -593,7 +593,7 @@ pub(crate) trait FontClient {
                 return None;
             }
             let face = fetched.face();
-            reply.state(face);
+            state(&mut reply, face);
             for (offset, glyph) in fetched.glyphs.into_iter().enumerate() {
                 let key = OutlineKey::new(family, missing[offset], weight, style, stretch);
                 served.push(glyph.clone());
@@ -1135,138 +1135,15 @@ pub(crate) fn fetch_outlines(
     }
     .to_le_bytes();
     let len = transport.call(&request, reply).ok()?;
-    let frame = reply.get(..len)?;
-    let batch = decode_outlines_reply(frame).ok()?;
-    // The reply bound admits a batch as long as any run, so only the caller
-    // knows how long *this* run was.
-    if batch.glyphs().len() > scalars.len() {
-        return None;
-    }
-    Some(OutlineReply::from_batch(&batch))
+    OutlineReply::decode(reply.get(..len)?, scalars.len())
 }
 
-/// One decoded outline record, owned so it outlives the reply frame.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct OwnedOutline {
-    /// The resolved face's em.
-    pub units_per_em: u32,
-    /// The pen advance in that face's font units.
-    pub advance: f64,
-    /// A synthetic bold stroke the face could not furnish, as a fraction of
-    /// the em.
-    pub synthetic_bold: f64,
-    /// A synthetic oblique shear the face could not furnish.
-    pub synthetic_shear: f64,
-    /// The closed contours, in font units with y up.
-    pub contours: Vec<OwnedContour>,
-}
-
-/// One closed contour of an owned outline.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct OwnedContour {
-    /// Where the contour begins and ends.
-    pub start: (f64, f64),
-    /// The segments, in order.
-    pub segments: Vec<OwnedSegment>,
-}
-
-/// One segment of an owned contour.
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub enum OwnedSegment {
-    /// A straight line.
-    Line {
-        /// Where the segment ends.
-        to: (f64, f64),
-    },
-    /// A quadratic Bézier.
-    Quadratic {
-        /// The off-curve control point.
-        control: (f64, f64),
-        /// Where the segment ends.
-        to: (f64, f64),
-    },
-}
-
-/// The requested family's own geometry and the run of outlines answered.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct OutlineReply {
-    /// The primary face's em.
-    pub units_per_em: u32,
-    /// The primary face's ascender, in its own font units.
-    pub ascent: i32,
-    /// The primary face's descender magnitude, in its own font units.
-    pub descent: i32,
-    /// The primary face's extra leading, in its own font units.
-    pub line_gap: i32,
-    /// The glyphs answered, a prefix of the run in order.
-    pub glyphs: Vec<OwnedOutline>,
-}
-
-impl OutlineReply {
-    /// The metrics of the face the batch is drawn from.
-    #[must_use]
-    pub const fn face(&self) -> FaceMetrics {
-        FaceMetrics {
-            units_per_em: self.units_per_em,
-            ascent: self.ascent,
-            descent: self.descent,
-            line_gap: self.line_gap,
-        }
-    }
-
-    /// State `face` as the metrics of the face the batch is drawn from.
-    const fn state(&mut self, face: FaceMetrics) {
-        self.units_per_em = face.units_per_em;
-        self.ascent = face.ascent;
-        self.descent = face.descent;
-        self.line_gap = face.line_gap;
-    }
-
-    /// Copy a decoded batch out of the frame it borrows, so it outlives the
-    /// receive buffer.
-    ///
-    /// The one place the wire form becomes an owned one: the client's own
-    /// fetch and the build-time verification that drives the service
-    /// directly both go through it, so neither can read a reply the other
-    /// would read differently.
-    #[must_use]
-    pub fn from_batch(batch: &OutlineBatch<'_>) -> Self {
-        Self {
-            units_per_em: batch.units_per_em,
-            ascent: batch.ascent,
-            descent: batch.descent,
-            line_gap: batch.line_gap,
-            glyphs: batch.glyphs().iter().map(owned_outline).collect(),
-        }
-    }
-}
-
-/// Copy one borrowed outline record out of the reply frame.
-fn owned_outline(glyph: &GlyphOutline<'_>) -> OwnedOutline {
-    OwnedOutline {
-        units_per_em: glyph.units_per_em,
-        advance: glyph.advance.to_f64(),
-        synthetic_bold: glyph.synth.bold_fraction(),
-        synthetic_shear: glyph.synth.shear(),
-        contours: glyph
-            .contours()
-            .map(|contour| OwnedContour {
-                start: (contour.start.0.to_f64(), contour.start.1.to_f64()),
-                segments: contour
-                    .segments()
-                    .map(|segment| match segment {
-                        GlyphSegment::Line { to } => OwnedSegment::Line {
-                            to: (to.0.to_f64(), to.1.to_f64()),
-                        },
-                        GlyphSegment::Quadratic { control, to } => OwnedSegment::Quadratic {
-                            control: (control.0.to_f64(), control.1.to_f64()),
-                            to: (to.0.to_f64(), to.1.to_f64()),
-                        },
-                    })
-                    .collect(),
-            })
-            .collect(),
-    }
+/// State `face` as the metrics of the face `reply`'s batch is drawn from.
+const fn state(reply: &mut OutlineReply, face: FaceMetrics) {
+    reply.units_per_em = face.units_per_em;
+    reply.ascent = face.ascent;
+    reply.descent = face.descent;
+    reply.line_gap = face.line_gap;
 }
 
 /// Fetch `family`'s line metrics at `pixel_height` in `weight` over

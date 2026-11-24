@@ -23,13 +23,22 @@ pub static MODULES: LazyLock<Vec<&'static Builtin>> = LazyLock::new(|| {
     ])
 });
 
-/// How each case of `cases` ran in a session with [`MODULES`] differs from
-/// `answers`, genuine RISC OS's recording of them.
-pub fn differences(cases: &str, answers: &str) -> Vec<String> {
+/// How each case of `cases` ran in a session of `modules` differs from
+/// `answers`, genuine RISC OS's recording of them, its disc holding `files`
+/// besides the cases: each one's path on the disc and its bytes.
+pub fn differences(
+    cases: &str,
+    answers: &str,
+    modules: &'static [&'static Builtin],
+    files: &[(String, Vec<u8>)],
+) -> Vec<String> {
     let cases = corpus::cases(cases).expect("the cases");
     let answers: Vec<Answer> = corpus::parse_answers(answers).expect("the answers");
     assert_eq!(cases.len(), answers.len(), "a recording of every case");
     let mut tree = Tree::new().dir(DISC);
+    for (path, bytes) in files {
+        tree = tree.file(&format!("{DISC}/{path}"), bytes);
+    }
     for (n, case) in cases.iter().enumerate() {
         tree = tree.file(
             &format!("{DISC}/{},fff", corpus::program_name(n)),
@@ -38,7 +47,7 @@ pub fn differences(cases: &str, answers: &str) -> Vec<String> {
     }
     let mut session = session(&Setup {
         vdu: Some(tairix_riscos_vdu::DRIVERS),
-        modules: MODULES.as_slice(),
+        modules,
         bytes: SLOT_BYTES,
         keys: &[],
         disc: Some(&tree),

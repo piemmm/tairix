@@ -45,6 +45,10 @@ impl Host for StillHost {
         false
     }
 
+    fn font(&mut self, _request: &[u8], _reply: &mut alloc::vec::Vec<u8>) -> bool {
+        false
+    }
+
     fn wait(&mut self, _: Option<u64>, _: Ending) -> Pulse {
         Pulse::Stop
     }

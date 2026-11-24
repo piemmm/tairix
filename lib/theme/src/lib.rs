@@ -67,7 +67,7 @@ pub use motion::{
 pub use palette::{Palette, SignalRole};
 pub use registry::{Grounds, ThemeError, ThemeRegistry};
 pub use syntax::{SyntaxPalette, SyntaxRole};
-pub use theme::{Accessibility, Appearance, SurfaceGround, Theme, ThemeId};
+pub use theme::{Accessibility, Appearance, SurfaceGround, Theme, ThemeId, UI_FAMILY};
 pub use typography::{
     lifted, line_box_px, points_of, DesktopText, FamilyKey, FontSpec, FontWeight, Fonts, TextRole,
     TEXT_WEIGHT_LIFT,

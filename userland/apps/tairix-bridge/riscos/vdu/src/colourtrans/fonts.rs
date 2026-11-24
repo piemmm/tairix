@@ -6,7 +6,9 @@
 
 use tairix_colour::Rgb;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
-use tairix_riscos_kernel::swi::font::{SET_FONT_COLOURS, SET_PALETTE};
+use tairix_riscos_kernel::swi::font::{
+    SET_COLOUR_TABLE, SET_FONT_COLOURS, SET_PALETTE, TRUE_COLOURS,
+};
 use tairix_riscos_kernel::swi::X;
 
 use super::matching::{Loadings, Look};
@@ -41,9 +43,14 @@ pub(super) fn return_font_colours(os: &mut Os<'_>, regs: &mut Regs) -> Result<()
 }
 
 /// `ColourTrans_SetFontColours`: as `ReturnFontColours`, then the colours
-/// set through the Font Manager, by `Font_SetPalette` in a deeper mode.
+/// set through the Font Manager, by `Font_SetPalette` with the words as
+/// given in a deeper mode, as RISC OS 5.30 sets them, and the words and
+/// offset asked for recorded with it as the font's RGB colours. Refused,
+/// the call is made again as `Font_SetFontColours` with the registers as
+/// given, and that one's refusal is the call's.
 pub(super) fn set_font_colours(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    let words = [regs.r[1], regs.r[2]];
+    let given = [regs.r[0], regs.r[1], regs.r[2], regs.r[3]];
+    let [_, background, foreground, asked] = given;
     let Some(chosen) = chosen(os, regs)? else {
         return Ok(());
     };
@@ -51,13 +58,24 @@ pub(super) fn set_font_colours(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), F
     let mut call = Regs::default();
     call.r[..4].copy_from_slice(&regs.r[..4]);
     let swi = if deep {
-        call.r[1..3].copy_from_slice(&[0, 0]);
-        call.r[4..6].copy_from_slice(&words);
+        call.r[1..3].copy_from_slice(&[background, 0]);
+        call.r[4..7].copy_from_slice(&[background, foreground, TRUE_COLOURS]);
         SET_PALETTE
     } else {
         SET_FONT_COLOURS
     };
-    os.perform(X | swi, &mut call)
+    match os.perform(X | swi, &mut call) {
+        Ok(()) => {}
+        Err(Fail::Error(_)) => {
+            let mut again = Regs::default();
+            again.r[..4].copy_from_slice(&given);
+            os.perform(X | SET_FONT_COLOURS, &mut again)?;
+        }
+        Err(unwind) => return Err(unwind),
+    }
+    let mut record = Regs::default();
+    record.r[..5].copy_from_slice(&[regs.r[0], 0, background, foreground, asked]);
+    os.perform(X | SET_COLOUR_TABLE, &mut record)
 }
 
 /// The colours chosen for R1 to R3; none while ColourTrans holds nothing.

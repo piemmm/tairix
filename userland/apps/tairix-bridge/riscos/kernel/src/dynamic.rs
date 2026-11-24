@@ -81,6 +81,21 @@ impl Os<'_> {
         }
     }
 
+    /// Removes one of the kernel's own areas, made by
+    /// [`create_kernel_area`](Self::create_kernel_area), as its owner does
+    /// when it is finalised.
+    ///
+    /// # Errors
+    ///
+    /// The error `OS_DynamicArea` 1 gives for the same refusal.
+    pub fn remove_kernel_area(&mut self, number: u32) -> Result<(), Fail> {
+        let removed = self.memory.remove_kernel_area(number, self.world);
+        self.unwinding()?;
+        removed.map_err(|e| self.fail_area(e))?;
+        self.drop_title(number);
+        Ok(())
+    }
+
     /// Dynamic area `number`'s base and size now, the area named by its plain
     /// number: none of `OS_ReadDynamicArea`'s other spellings of one.
     ///

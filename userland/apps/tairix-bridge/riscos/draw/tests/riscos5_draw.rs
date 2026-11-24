@@ -12,7 +12,7 @@ const DRAWN: &str = include_str!("riscos5/drawn.txt");
 
 #[test]
 fn every_draw_screen_is_read_and_drawn_as_genuine_risc_os_did() {
-    let wrong = replay::differences(CASES, DRAWN);
+    let wrong = replay::differences(CASES, DRAWN, replay::MODULES.as_slice(), &[]);
     assert!(
         wrong.is_empty(),
         "{} cases differ from genuine RISC OS:\n{}",

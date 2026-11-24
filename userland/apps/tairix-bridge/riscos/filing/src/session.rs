@@ -44,7 +44,15 @@ struct ScriptHost {
     keys: Rc<RefCell<VecDeque<u8>>>,
     words: Rc<Cell<Option<u32>>>,
     disc: Option<Server<Handle>>,
+    fonts: Fonts,
 }
+
+/// The font service a test's session serves font requests through, if it
+/// has been given one.
+type Fonts = Rc<RefCell<Option<FontService>>>;
+
+/// A font service: a request, and the reply it appends; whether it answered.
+pub type FontService = Box<dyn FnMut(&[u8], &mut Vec<u8>) -> bool>;
 
 impl Host for ScriptHost {
     fn monotonic(&mut self) -> u64 {
@@ -92,6 +100,13 @@ impl Host for ScriptHost {
             None => false,
         }
     }
+
+    fn font(&mut self, request: &[u8], reply: &mut Vec<u8>) -> bool {
+        match self.fonts.borrow_mut().as_mut() {
+            Some(service) => service(request, reply),
+            None => false,
+        }
+    }
 }
 
 /// What a test's session is made with.
@@ -108,15 +123,22 @@ pub struct Setup<'a> {
     pub disc: Option<&'a Tree>,
 }
 
-/// A test's session: its kernel, and the clock and words its host keeps.
+/// A test's session: its kernel, and the clock, words and font service its
+/// host keeps.
 pub struct Session {
     /// Its kernel.
     pub kernel: Kernel,
     clock: Rc<Cell<u64>>,
     words: Rc<Cell<Option<u32>>>,
+    fonts: Fonts,
 }
 
 impl Session {
+    /// Serves the session's font requests through `service` from now on.
+    pub fn serve_fonts(&self, service: FontService) {
+        *self.fonts.borrow_mut() = Some(service);
+    }
+
     /// Lets work go on for `words` more of the host's words, each after a
     /// slice of work, before the host stops it; `None` never stops it.
     pub fn allow_words(&self, words: Option<u32>) {
@@ -143,6 +165,7 @@ impl Session {
 pub fn session(setup: &Setup<'_>) -> Session {
     let clock = Rc::new(Cell::new(0));
     let words = Rc::new(Cell::new(None));
+    let fonts: Fonts = Rc::new(RefCell::new(None));
     let keys = Rc::new(RefCell::new(setup.keys.iter().copied().collect()));
     let disc = setup.disc.map(|tree| {
         let given = Given {
@@ -161,12 +184,15 @@ pub fn session(setup: &Setup<'_>) -> Session {
             keys,
             words: Rc::clone(&words),
             disc,
+            fonts: Rc::clone(&fonts),
         }),
         vdu: setup.vdu,
         modules: setup.modules,
         zone: tairix_tz::Zone::UTC,
+        desktop_font: tairix_riscos_kernel::desktop::DesktopFont::SHIPPED,
         pressure: &tairix_reclaim::pressure::Unpressured,
         log: &tairix_log::DiscardSink,
+        cache_key: tairix_hash::HashSeed::UNKEYED,
     };
     let mut kernel = Kernel::new(config).expect("a kernel");
     application_slot(&mut kernel, setup.bytes);
@@ -174,6 +200,7 @@ pub fn session(setup: &Setup<'_>) -> Session {
         kernel,
         clock,
         words,
+        fonts,
     }
 }
 

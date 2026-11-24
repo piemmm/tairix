@@ -8,26 +8,36 @@ use crate::geometry::Point;
 /// An element of a path, but its end and continuations, which a reader
 /// follows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Element {
+pub enum Element {
     /// A new subpath from `to`, adding to the winding number or not.
     Move {
+        /// Where the subpath starts.
         to: Point,
+        /// Whether its segments count toward the winding number.
         winds: bool,
     },
     /// The subpath closed back to its start, by a line or by a gap.
     Close {
+        /// Whether by a gap, never stroked.
         gap: bool,
     },
+    /// A cubic Bézier curve.
     Curve {
+        /// Its first control point.
         c1: Point,
+        /// Its second.
         c2: Point,
+        /// Where it ends.
         to: Point,
     },
     /// An invisible segment: it winds but is never stroked.
     Gap {
+        /// Where it ends.
         to: Point,
     },
+    /// A straight line.
     Line {
+        /// Where it ends.
         to: Point,
     },
 }

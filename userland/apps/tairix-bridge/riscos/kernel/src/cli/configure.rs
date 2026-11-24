@@ -18,7 +18,7 @@ use super::commands::TOO_MANY;
 use super::table::{Item, Wanted, CONFIGURE, FILING};
 use crate::cmos::{self, Spread};
 use crate::error::{Error, SYNTAX};
-use crate::module::ModuleKey;
+use crate::module::{ModuleKey, Refused};
 use crate::os::{Fail, Os, Regs};
 use crate::service;
 use crate::swi::os::read_unsigned::DECIMAL;
@@ -29,9 +29,6 @@ use crate::swi::X;
 const SET_POINTER_TYPE: u32 = 1;
 /// The unit the font cache's size counts in, whatever the page size.
 const FONT_UNIT: u32 = 4096;
-/// What a configuration's code returns in R0 for the kernel's errors.
-const OWN_ERRORS: u32 = 3;
-
 /// "Bad configure option".
 const BAD_OPTION: Error = Error {
     number: SYNTAX,
@@ -53,10 +50,15 @@ const BAD_STATUS: Error = Error {
     token: "UnknownStatusOption",
 };
 
-/// The errors a configuration's code names by number.
-const NUMBERED: [Error; 4] = [BAD_OPTION, NOT_NUMERIC, TOO_BIG, TOO_MANY];
-/// The number a configuration's code answers for too many parameters.
-pub(crate) const TOO_MANY_PARAMETERS: u32 = 3;
+/// The errors a configuration's code names by number, each where its
+/// [`Refused`] says.
+const NUMBERED: [Error; 4] = {
+    let mut errors = [BAD_OPTION; 4];
+    errors[Refused::NumberNeeded as usize] = NOT_NUMERIC;
+    errors[Refused::TooBig as usize] = TOO_BIG;
+    errors[Refused::TooMany as usize] = TOO_MANY;
+    errors
+};
 
 /// A field of a CMOS byte: its location, its lowest bit and its width.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -708,8 +710,8 @@ impl Os<'_> {
     /// kernel's own for the numbers that name them, else the block.
     fn configure_error(&mut self, answer: u32) -> Fail {
         match NUMBERED.get(answer as usize) {
-            Some(&error) if answer <= OWN_ERRORS => self.error(error),
-            _ => Fail::Error(answer),
+            Some(&error) => self.error(error),
+            None => Fail::Error(answer),
         }
     }
 

@@ -1,7 +1,8 @@
 //! DrawFile's workspace in the RMA: its messages, the matrices and the cap
 //! and join block it hands the Draw module, the table ColourTrans selects
-//! into, the work sprite text is drawn through, and the first error a
-//! render met, kept where a later one cannot overwrite it.
+//! into, the work sprite text is drawn through, the first error a render
+//! met, kept where a later one cannot overwrite it, and what a text area is
+//! painted from.
 
 use tairix_riscos_kernel::msgtrans::OwnFile;
 use tairix_riscos_kernel::os::{Fail, Os};
@@ -35,8 +36,14 @@ const ERROR_BYTES: u32 = 256;
 pub(super) const NAME: u32 = ERROR + ERROR_BYTES;
 /// The longest such name, its terminator included.
 pub(super) const NAME_BYTES: u32 = 256;
+/// A text area's paragraph, as the Font Manager is given it.
+pub(super) const TEXT: u32 = NAME + NAME_BYTES;
+/// The coordinate block a text area's line is painted with.
+pub(super) const COORDINATES: u32 = TEXT + super::text_area::BUFFER_BYTES.next_multiple_of(4);
+/// What system-font text writes before each character, for `OS_WriteN`.
+pub(super) const MASK_GCOL: u32 = COORDINATES + super::text_area::BLOCK_BYTES;
 /// The whole workspace.
-pub(super) const BYTES: u32 = NAME + NAME_BYTES;
+pub(super) const BYTES: u32 = MASK_GCOL + 4;
 
 /// The workspace laid out at `at`, the identity written.
 pub(super) fn lay_out(os: &mut Os<'_>, at: u32) -> Result<(), Fail> {

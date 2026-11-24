@@ -11,10 +11,9 @@ the screen the kernel and the VDU drivers give them.
   itself, or the fill, which plots through the VDU drivers' spans. Every
   element is a step the host may stop a call at.
 - **DrawFile**: a file checked whole before anything is drawn, then each
-  object rendered through Draw, ColourTrans and SpriteExtend;
-  `DrawFile_BBox`, `DrawFile_DeclareFonts` and `*Render`. Text is drawn as
-  RISC OS 5.30 draws it with no Font Manager, until the Font Manager (RO25)
-  answers.
+  object rendered through Draw, ColourTrans, SpriteExtend and the Font
+  Manager, text areas laid out as RISC OS 5.30's DrawFile lays them out;
+  `DrawFile_BBox`, `DrawFile_DeclareFonts` and `*Render`.
 
 Every rule is held to genuine RISC OS 5.30 by the screen corpus in
 `tests/riscos5/` and by the cases recorded in the crate's own tests, but the

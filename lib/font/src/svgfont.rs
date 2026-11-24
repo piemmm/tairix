@@ -24,7 +24,7 @@ use tairix_svg::font::{
     GlyphOutline, OutlineContour, OutlineSegment,
 };
 
-use crate::client::{OutlineReply, OwnedContour, OwnedOutline, OwnedSegment};
+use crate::outline::{OutlineReply, OwnedContour, OwnedOutline, OwnedSegment};
 
 /// The scalar a face is probed with, chosen because every face maps it and
 /// a run of text almost always needs it.
@@ -185,7 +185,7 @@ pub fn seam_outlines(reply: OutlineReply) -> Vec<GlyphOutline> {
 #[cfg(test)]
 mod tests {
     use super::{seam_outline, wire_style, ServiceFonts, MAX_FACES};
-    use crate::client::{OwnedContour, OwnedOutline, OwnedSegment};
+    use crate::outline::{OwnedContour, OwnedOutline, OwnedSegment};
     use alloc::vec;
     use tairix_abi::font_ipc::FontStyle;
     use tairix_svg::font::{FaceId, FontProvider, FontStyle as SvgStyle, OutlineSegment};

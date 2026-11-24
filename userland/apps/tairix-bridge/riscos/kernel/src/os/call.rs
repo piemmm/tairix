@@ -165,16 +165,35 @@ impl Os<'_> {
         (self.world.pressure, self.world.log)
     }
 
+    /// The key a cache over keys the guest chooses hashes them under, so a
+    /// guest cannot flood one with keys it knows collide.
+    #[must_use]
+    pub const fn cache_key(&self) -> tairix_hash::HashSeed {
+        self.world.cache_key
+    }
+
     /// The session's memory ceiling, in bytes.
     #[must_use]
     pub fn ceiling_bytes(&self) -> u64 {
         self.memory.ram()
     }
 
+    /// The session's desktop font: the TAIRiX desktop's interface text.
+    #[must_use]
+    pub fn desktop_font(&self) -> crate::desktop::DesktopFont {
+        self.world.desktop_font
+    }
+
     /// `request` carried to the side holding the session's files, its reply
     /// appended to `reply`: whether the host carried it.
     pub fn relay(&mut self, request: &[u8], reply: &mut alloc::vec::Vec<u8>) -> bool {
         self.world.host.relay(request, reply)
+    }
+
+    /// `request` carried to the font service, its reply appended to
+    /// `reply`: whether the host carried it.
+    pub fn font_relay(&mut self, request: &[u8], reply: &mut alloc::vec::Vec<u8>) -> bool {
+        self.world.host.font(request, reply)
     }
 
     /// Calls the guest code at `target`, entered as `entry` says with `regs`,

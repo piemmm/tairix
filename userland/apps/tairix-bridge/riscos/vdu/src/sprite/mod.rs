@@ -35,6 +35,7 @@ use crate::plot::Ink;
 use crate::state;
 
 pub(crate) use format::{variable as mode_variable, UNKNOWN_MODE};
+pub(crate) use paint::Palettised;
 pub(crate) use system::{
     area_handler as system_area_handler, make_area as make_system_area, selected_size,
     size as system_size, Sprites,

@@ -45,8 +45,10 @@ fn configured(host: Box<dyn Host>, bytes: u64) -> Kernel {
         vdu: None,
         modules: &tairix_riscos_filing::MODULES,
         zone: tairix_tz::Zone::UTC,
+        desktop_font: tairix_riscos_kernel::desktop::DesktopFont::SHIPPED,
         pressure: &tairix_reclaim::pressure::Unpressured,
         log: &tairix_log::DiscardSink,
+        cache_key: tairix_hash::HashSeed::UNKEYED,
     };
     Kernel::new(config).expect("a kernel")
 }

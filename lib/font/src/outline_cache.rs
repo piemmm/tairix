@@ -16,7 +16,7 @@ use tairix_reclaim::{
     ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
 };
 
-use crate::client::{OwnedContour, OwnedOutline, OwnedSegment};
+use crate::outline::{FaceMetrics, OwnedContour, OwnedOutline, OwnedSegment};
 
 /// Everything a retained outline depends on: which face answered, and which
 /// scalar of it.
@@ -63,20 +63,6 @@ pub struct CachedOutline {
     pub outline: OwnedOutline,
     /// Its face's metrics, as the batch it came in stated them.
     pub face: FaceMetrics,
-}
-
-/// The metrics of the face a batch of outlines is drawn from, in its own
-/// font units.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-pub struct FaceMetrics {
-    /// The em.
-    pub units_per_em: u32,
-    /// The ascender.
-    pub ascent: i32,
-    /// The descender's magnitude.
-    pub descent: i32,
-    /// The extra leading.
-    pub line_gap: i32,
 }
 
 impl CachedBytes for CachedOutline {

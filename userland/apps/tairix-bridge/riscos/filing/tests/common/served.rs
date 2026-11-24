@@ -44,6 +44,10 @@ impl<F: FnMut(&[u8], &mut Vec<u8>) -> bool> Host for Relay<F> {
     fn relay(&mut self, request: &[u8], reply: &mut Vec<u8>) -> bool {
         (self.answer)(request, reply)
     }
+
+    fn font(&mut self, _request: &[u8], _reply: &mut Vec<u8>) -> bool {
+        false
+    }
 }
 
 /// A served session, its server, and how many reads of a file's bytes have

@@ -316,6 +316,9 @@ impl Host for Damaging {
         });
         true
     }
+    fn font(&mut self, request: &[u8], reply: &mut Vec<u8>) -> bool {
+        self.still.font(request, reply)
+    }
 }
 
 /// The names a session's calls are given.

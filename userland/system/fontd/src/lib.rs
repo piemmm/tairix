@@ -75,12 +75,14 @@
 
 extern crate alloc;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "host-store"))]
 extern crate std;
 
 pub mod discovery;
 mod embolden;
 pub mod events;
+#[cfg(feature = "host-store")]
+pub mod host;
 pub mod service;
 
 pub use service::{glyph_cache, FontService, GlyphCache, GlyphKey};

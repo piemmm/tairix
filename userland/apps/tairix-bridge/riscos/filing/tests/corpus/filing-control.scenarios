@@ -2693,9 +2693,9 @@ show r0 r1 v
 call XOS_Find r0=&40 r1="TxLog:$.onef"
 show v
 keep r0 h
-call XOS_FSControl r0=58 r1=&FFFFFFFF r2=$buf r3=0 r4=0 r5=256
-show r0 r1-h r2 v
-call XOS_FSControl r0=58 r1=0 r2=$buf r3=0 r4=0 r5=256
+# Counted on from the handle below its own: from the first, the harness's own
+# open files would come first, numbered as everything before them left them.
+call XOS_FSControl r0=58 r1=$h-1 r2=$buf r3=0 r4=0 r5=256
 show r0 r1-h r2 v
 call XOS_Find r0=0 r1=$h
 show v

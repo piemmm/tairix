@@ -8,7 +8,7 @@ use tairix_riscos_arm::psr;
 
 use super::header::Field;
 use super::inventory::{Held, INVENTORY};
-use super::{value_padding, CommandKind, Help, VALUE_COLUMN};
+use super::{value_padding, Asked, CommandKind, Help, Refused, VALUE_COLUMN};
 use crate::filing::filetype;
 use crate::filing::fs::stamp;
 use crate::memory::layout::{APPLICATION, RISC_OS_5, SHARED};
@@ -1353,4 +1353,12 @@ fn a_block_given_back_quietly_is_freed_and_one_the_heap_lacks_ignored() {
         Err(0x185),
         "freed by the first"
     );
+}
+
+#[test]
+fn a_configuration_keyword_is_asked_its_syntax_status_or_a_value() {
+    assert_eq!(Asked::of(0), Asked::Syntax);
+    assert_eq!(Asked::of(1), Asked::Status);
+    assert_eq!(Asked::of(0x8000), Asked::Set(0x8000));
+    assert!(matches!(Refused::TooMany.fail(), Fail::Error(3)));
 }

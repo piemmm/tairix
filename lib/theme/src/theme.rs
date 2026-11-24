@@ -460,7 +460,7 @@ const BASE_TEXT_SIZE_PX: u16 = 16;
 /// A spelling the key grammar refuses would leave the desktop with no UI
 /// family at all, so the fallback is the fixed-pitch family every image
 /// ships; the crate's tests assert the shipped spelling resolves.
-const UI_FAMILY: FamilyKey = match FamilyKey::new("inter") {
+pub const UI_FAMILY: FamilyKey = match FamilyKey::new("inter") {
     Ok(key) => key,
     Err(_) => FamilyKey::MONO,
 };

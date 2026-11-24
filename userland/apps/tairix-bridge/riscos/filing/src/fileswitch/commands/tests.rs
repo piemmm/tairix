@@ -33,10 +33,3 @@ fn the_default_wipe_and_count_options_are_risc_os_5s() {
     );
     assert_eq!(apply_options(COUNT_OPTIONS, COUNT_LETTERS, 0), Some(1 << 0));
 }
-
-#[test]
-fn a_configuration_keyword_is_asked_its_syntax_status_or_a_value() {
-    assert!(matches!(asked(0), Asked::Syntax));
-    assert!(matches!(asked(1), Asked::Status));
-    assert!(matches!(asked(0x8000), Asked::Set(0x8000)));
-}

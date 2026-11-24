@@ -1,0 +1,35 @@
+% Cyrillic, over the base encoding of RISC OS's own fonts
+%%RISCOS_BasedOn 0
+%%RISCOS_Alphabet 105
+/.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef
+/.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef
+/.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef
+/.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef
+/space /exclam /quotedbl /numbersign /dollar /percent /ampersand /quotesingle
+/parenleft /parenright /asterisk /plus /comma /hyphen /period /slash
+/zero /one /two /three /four /five /six /seven
+/eight /nine /colon /semicolon /less /equal /greater /question
+/at /A /B /C /D /E /F /G
+/H /I /J /K /L /M /N /O
+/P /Q /R /S /T /U /V /W
+/X /Y /Z /bracketleft /backslash /bracketright /asciicircum /underscore
+/grave /a /b /c /d /e /f /g
+/h /i /j /k /l /m /n /o
+/p /q /r /s /t /u /v /w
+/x /y /z /braceleft /bar /braceright /asciitilde /.notdef
+/.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef
+/.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef
+/.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef
+/.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef /.notdef
+/space /Iocyrillic /Djecyrillic /Gjecyrillic /Ecyrillic /Dzecyrillic /Icyrillic /Yicyrillic
+/Jecyrillic /Ljecyrillic /Njecyrillic /Tshecyrillic /Kjecyrillic /sfthyphen /hyphen /Dzhecyrillic
+/Acyrillic /Becyrillic /Vecyrillic /Gecyrillic /Decyrillic /Iecyrillic /Zhecyrillic /Zecyrillic
+/Iicyrillic /Iishortcyrillic /Kacyrillic /Elcyrillic /Emcyrillic /Encyrillic /Ocyrillic /Pecyrillic
+/Ercyrillic /Escyrillic /Tecyrillic /Ucyrillic /Efcyrillic /Khacyrillic /Tsecyrillic /Checyrillic
+/Shacyrillic /Shchacyrillic /Hardsigncyrillic /Yericyrillic /Softsigncyrillic /Ereversedcyrillic /IUcyrillic /IAcyrillic
+/acyrillic /afii10066 /afii10067 /afii10068 /afii10069 /afii10070 /afii10072 /afii10073
+/afii10074 /afii10075 /afii10076 /afii10077 /afii10078 /afii10079 /afii10080 /afii10081
+/afii10082 /afii10083 /afii10084 /afii10085 /afii10086 /afii10087 /afii10088 /afii10089
+/afii10090 /afii10091 /afii10092 /afii10093 /afii10094 /afii10095 /afii10096 /afii10097
+/afii61352 /afii10071 /afii10099 /afii10100 /afii10101 /afii10102 /afii10103 /afii10104
+/afii10105 /afii10106 /afii10107 /afii10108 /afii10109 /section /afii10110 /afii10193

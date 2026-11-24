@@ -7,8 +7,8 @@
 //! - [`DRIVERS`]: the drivers, as the kernel reaches them.
 //! - [`MODULES`]: the built-in modules this crate provides.
 //! - [`display`]: what a front end shows of a screen.
-//! - [`spans`]: runs of pixels plotted for a module that scan converts its
-//!   own shapes.
+//! - [`render`]: what a module drawing its own shapes and glyphs reaches:
+//!   where output goes, pixels plotted and painted, logical colours set.
 //! - [`corpus`]: the recorded screen programs and their answers.
 //!
 //! The drivers keep one screen's state, the session's, as a kernel
@@ -41,11 +41,11 @@ mod palette;
 mod plot;
 mod pointer;
 mod raster;
+pub mod render;
 mod saved;
 mod screen;
 mod screenmodes;
 mod select;
-pub mod spans;
 mod sprite;
 mod state;
 mod stream;

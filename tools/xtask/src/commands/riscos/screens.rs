@@ -1,9 +1,11 @@
-//! The reference harness's part for the VDU drivers and the Draw modules:
-//! each case of each corpus in [`CORPORA`] run by genuine RISC OS 5's BASIC V
-//! on the screen, framed as `tairix_riscos_vdu::corpus::program` frames it
-//! and numbered on from the corpus before it, and what each recorded and
-//! the screen it drew written to its corpus's answers, which that corpus's
-//! replay holds the modules to.
+//! The reference harness's part for the VDU drivers, the Draw modules and
+//! the Font Manager: each case of each corpus in [`CORPORA`] run by genuine
+//! RISC OS 5's BASIC V on the screen, framed as
+//! `tairix_riscos_vdu::corpus::program` frames it and numbered on from the
+//! corpus before it, and what each recorded and the screen it drew written
+//! to its corpus's answers, which that corpus's replay holds the modules to.
+//! The Font Manager's cases paint from a first-party font library staged
+//! beside them.
 
 use std::path::Path;
 
@@ -19,7 +21,7 @@ pub(super) struct Corpus {
 }
 
 /// The screen corpora, in the order their cases are numbered.
-pub(super) const CORPORA: [Corpus; 2] = [
+pub(super) const CORPORA: [Corpus; 3] = [
     Corpus {
         cases: "userland/apps/tairix-bridge/riscos/vdu/tests/riscos5/screens.txt",
         answers: "userland/apps/tairix-bridge/riscos/vdu/tests/riscos5/drawn.txt",
@@ -28,7 +30,25 @@ pub(super) const CORPORA: [Corpus; 2] = [
         cases: "userland/apps/tairix-bridge/riscos/draw/tests/riscos5/screens.txt",
         answers: "userland/apps/tairix-bridge/riscos/draw/tests/riscos5/drawn.txt",
     },
+    Corpus {
+        cases: "userland/apps/tairix-bridge/riscos/font/tests/riscos5/screens.txt",
+        answers: "userland/apps/tairix-bridge/riscos/font/tests/riscos5/drawn.txt",
+    },
 ];
+
+/// The font library the Font Manager's cases paint from, each file under
+/// HostFS at its own path and type.
+pub(super) fn library() -> Vec<(String, Vec<u8>)> {
+    tairix_riscos_font::build::corpus_library()
+        .into_iter()
+        .map(|(path, bytes)| {
+            (
+                format!("{}/{path}", tairix_riscos_font::build::CORPUS_LIBRARY),
+                bytes,
+            )
+        })
+        .collect()
+}
 
 /// The screen corpora as read: each one's text and its cases, in
 /// [`CORPORA`]'s order.

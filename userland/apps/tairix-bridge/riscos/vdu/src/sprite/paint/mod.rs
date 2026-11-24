@@ -32,6 +32,7 @@ use crate::raster::Point;
 use crate::state;
 
 pub(crate) use blit::{plot_mask, plot_shape, put};
+pub(crate) use colours::Palettised;
 pub(crate) use pointer::set_pointer;
 pub(crate) use scaled::{paint_character, plot_mask_scaled, put_picture, put_scaled, tile};
 pub(crate) use transformed::{plot_mask_transformed, put_transformed, scaling_of};

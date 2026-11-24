@@ -2914,6 +2914,7 @@ name = "tairix-font"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-bezier",
  "tairix-crc32c",
  "tairix-font",
  "tairix-geometry",
@@ -4741,6 +4742,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-riscos-font"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-bezier",
+ "tairix-crc32",
+ "tairix-drawing",
+ "tairix-font",
+ "tairix-fscopy",
+ "tairix-fuzzseed",
+ "tairix-hash",
+ "tairix-log",
+ "tairix-raster",
+ "tairix-reclaim",
+ "tairix-riscos-basic",
+ "tairix-riscos-draw",
+ "tairix-riscos-filing",
+ "tairix-riscos-font",
+ "tairix-riscos-kernel",
+ "tairix-riscos-vdu",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-riscos-kernel"
 version = "0.0.0"
 dependencies = [
@@ -4748,11 +4773,13 @@ dependencies = [
  "tairix-collections",
  "tairix-fsmeta",
  "tairix-fuzzseed",
+ "tairix-hash",
  "tairix-inline",
  "tairix-log",
  "tairix-obey",
  "tairix-reclaim",
  "tairix-riscos-arm",
+ "tairix-theme",
  "tairix-tz",
  "tairix-tzcompile",
  "tairix-unicode",
@@ -10272,6 +10299,7 @@ dependencies = [
  "tairix-reclaim",
  "tairix-riscos-arm",
  "tairix-riscos-basic",
+ "tairix-riscos-font",
  "tairix-riscos-kernel",
  "tairix-riscos-vdu",
  "tairix-sandbox",

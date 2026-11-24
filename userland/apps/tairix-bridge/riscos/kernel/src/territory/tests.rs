@@ -15,7 +15,7 @@ use super::{calendar, CHUNK, CONVERT_TIME_FORMATS, DAYLIGHT_RULES, DAYLIGHT_SAVI
 use crate::memory::layout::RISC_OS_5;
 use crate::memory::Bits;
 use crate::msgtrans::tests::swi;
-use crate::os::MILLENNIUM;
+use crate::os::{Fail, Regs, MILLENNIUM};
 use crate::service::{POST_INIT, TERRITORY_STARTED, TIME_ZONE_CHANGED};
 use crate::swi::os::{BYTE, SERVICE_CALL};
 use crate::swi::X;
@@ -712,6 +712,20 @@ fn the_territory_command_names_or_selects_the_current_territory() {
         cli(&mut s, "Territory UK extra").map_err(|(n, _)| n),
         Err(0xDC)
     );
+}
+
+#[test]
+fn a_number_followed_by_more_is_too_many_parameters_as_a_real_error() {
+    let mut s = session_in("Europe/London", (2026, 7, 1, 12, 0));
+    let text = DATA;
+    s.write(text, b"1 x\r");
+    let mut regs = Regs::default();
+    regs.r[..2].copy_from_slice(&[text, 1]);
+    let failed = super::territory_command(&mut s.kernel.os(), &mut regs);
+    let Err(Fail::Error(block)) = failed else {
+        panic!("refused: {failed:?}");
+    };
+    assert_eq!(s.peek(block), 0xDC, "the kernel's own error block");
 }
 
 #[test]

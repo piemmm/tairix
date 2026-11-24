@@ -4,9 +4,9 @@
 //!
 //! Its errors are RISC OS's numbers in TAIRiX Bridge's words. It issues no
 //! service for an object it does not know, which it passes over, as RISC OS
-//! 5.30's does. Text in a named font asks the Font Manager for the font; one
-//! it gives is let go and the system font draws the text, as for one it
-//! does not, until the Font Manager item (RO25) paints it.
+//! 5.30's does. Text in a named font and text areas are painted by the Font
+//! Manager; text in no font, or one the Font Manager refuses, is drawn in the
+//! system font.
 
 mod check;
 mod render;
@@ -212,6 +212,7 @@ fn matrix_of(os: &mut Os<'_>, at: u32, workspace: u32) -> Result<(Matrix, u32), 
 /// `DrawFile_Render`.
 fn render(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let (bytes, fonts) = checked(os, regs)?;
+    render::ask_font_cache(os)?;
     let at = workspace(os);
     let (matrix, matrix_at) = matrix_of(os, regs.r[3], at)?;
     let clip = if regs.r[4] == 0 {
@@ -260,6 +261,7 @@ fn bbox(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 /// R0's bit 0 asking that none be downloaded.
 fn declare_fonts(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let (bytes, fonts) = checked(os, regs)?;
+    render::ask_font_cache(os)?;
     let objects = &bytes[format::HEADER..];
     let mut declaring = Declaring {
         file: regs.r[1],
