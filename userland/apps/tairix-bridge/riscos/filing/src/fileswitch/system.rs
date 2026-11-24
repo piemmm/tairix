@@ -149,6 +149,21 @@ pub(crate) const fn name_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
+/// A block's `words` with each offset from `base` made an address, but for
+/// the words `kept` picks out and those of nought, which name nothing.
+fn made_absolute<const N: usize>(
+    base: u32,
+    mut words: [u32; N],
+    kept: impl Fn(usize) -> bool,
+) -> [u32; N] {
+    for (i, word) in words.iter_mut().enumerate() {
+        if !kept(i) && *word != 0 {
+            *word = base.wrapping_add(*word);
+        }
+    }
+    words
+}
+
 impl System {
     /// The filing system whose information block is at `offset` from its
     /// module at `base`, its entries given `workspace` in R12 and run in
@@ -166,14 +181,10 @@ impl System {
     ) -> Result<Result<Self, Refused>, Fail> {
         let block = base.wrapping_add(offset);
         let mut words = [0; BLOCK_WORDS as usize];
-        let mut at = block;
-        for word in &mut words[..block::EXTRA] {
-            *word = os.read_word(at)?;
-            at = at.wrapping_add(4);
-        }
+        os.read_words(block, &mut words[..block::EXTRA])?;
         let info = words[block::INFO];
         if info & info::EXTRA != 0 {
-            words[block::EXTRA] = os.read_word(at)?;
+            words[block::EXTRA] = os.read_word(block.wrapping_add(4 * len32(block::EXTRA)))?;
         }
         let name_at = base.wrapping_add(words[block::NAME]);
         let (name, ended) = os.read_until(name_at, NAME_MOST, |b| b == 0)?;
@@ -192,16 +203,8 @@ impl System {
             *slot = (offset != 0).then(|| base.wrapping_add(offset));
         }
         let copy = os.rma_claim(4 * BLOCK_WORDS)?;
-        let mut at = copy;
-        for (i, &word) in words.iter().enumerate() {
-            let absolute = match i {
-                block::INFO | block::EXTRA => word,
-                _ if word == 0 => 0,
-                _ => base.wrapping_add(word),
-            };
-            os.write_word(at, absolute)?;
-            at += 4;
-        }
+        let absolute = made_absolute(base, words, |i| matches!(i, block::INFO | block::EXTRA));
+        os.write_words(copy, &absolute)?;
         Ok(Ok(Self {
             number,
             name,
@@ -299,11 +302,7 @@ impl ImageSystem {
     ) -> Result<Self, Fail> {
         let block = base.wrapping_add(offset);
         let mut words = [0; IMAGE_WORDS as usize];
-        let mut at = block;
-        for word in &mut words {
-            *word = os.read_word(at)?;
-            at = at.wrapping_add(4);
-        }
+        os.read_words(block, &mut words)?;
         let mut targets = [None; 8];
         for (&point, &offset) in IMAGE_ENTRIES.iter().zip(&words[2..]) {
             targets[point as usize] = (offset != 0).then(|| Target {
@@ -313,18 +312,7 @@ impl ImageSystem {
             });
         }
         let copy = os.rma_claim(4 * IMAGE_WORDS)?;
-        let mut at = copy;
-        for (i, &word) in words.iter().enumerate() {
-            os.write_word(
-                at,
-                if i < 2 || word == 0 {
-                    word
-                } else {
-                    base.wrapping_add(word)
-                },
-            )?;
-            at += 4;
-        }
+        os.write_words(copy, &made_absolute(base, words, |i| i < 2))?;
         Ok(Self {
             kind: words[1] & 0xFFF,
             info: words[0],
@@ -353,4 +341,15 @@ impl ImageSystem {
 pub fn enter(os: &mut Os<'_>, target: Target, regs: &mut Regs) -> Result<(), Fail> {
     regs.r[12] = target.workspace;
     os.call_routine(target.address, target.bits, Entry::Supervisor, regs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::made_absolute;
+
+    #[test]
+    fn offsets_become_addresses_but_kept_words_and_noughts_stay() {
+        let made = made_absolute(0x20, [0x40, 0x10, 0, 0xFFFF_FFF0], |i| i == 1);
+        assert_eq!(made, [0x60, 0x10, 0, 0x10]);
+    }
 }

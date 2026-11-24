@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_riscos_kernel::filing::fs::stamp;
+use tairix_riscos_kernel::filing::fs::{stamp, Layout};
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::{self as swi, file, gbpb};
 use tairix_riscos_kernel::swi::X;
@@ -14,7 +14,7 @@ pub(crate) use tairix_riscos_kernel::filing::fs::kind::{DIRECTORY, FILE, IMAGE};
 
 /// The room one read of a listing is given: a record's catalogue words and
 /// a leaf of the longest a filing system gives.
-const ROOM: u32 = 20 + 256;
+const ROOM: u32 = Layout::Info.name_at() + 256;
 /// The most objects a listing holds: a containment bound on what one
 /// directory's walk costs.
 const MOST: usize = 1 << 16;
@@ -89,11 +89,12 @@ pub(crate) fn objects(os: &mut Os<'_>, directory: &[u8]) -> Result<Vec<Object>, 
                 if found.len() >= MOST || found.try_reserve(1).is_err() {
                     return Err(os.no_memory());
                 }
+                let info = os.read_listed(record)?;
                 found.push(Object {
-                    leaf: os.read_zstring(record.wrapping_add(20), 256)?,
-                    kind: os.read_word(record.wrapping_add(16))?,
-                    load: os.read_word(record)?,
-                    exec: os.read_word(record.wrapping_add(4))?,
+                    leaf: os.read_zstring(record.wrapping_add(Layout::Info.name_at()), 256)?,
+                    kind: info.kind,
+                    load: info.load,
+                    exec: info.exec,
                 });
             }
             Err(os.no_memory())

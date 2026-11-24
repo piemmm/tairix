@@ -103,9 +103,14 @@ fn write_encodings(ctx: &Context) -> Result<(), String> {
     let directory = ctx.workspace_root.join(ENCODINGS);
     for (leaf, bytes) in tairix_riscos_font::encoding_files() {
         let path = directory.join(leaf.trim_start_matches('/'));
-        std::fs::write(&path, bytes).map_err(|e| format!("riscos: {}: {e}", path.display()))?;
+        write(&path, bytes)?;
     }
     Ok(())
+}
+
+/// Writes `contents` to `path`, a failure naming it.
+fn write(path: &Path, contents: impl AsRef<[u8]>) -> Result<(), String> {
+    std::fs::write(path, contents).map_err(|e| format!("riscos: {}: {e}", path.display()))
 }
 
 /// A corpus group: its scenarios, their source and its fixtures file.
@@ -328,7 +333,7 @@ fn import(
     .chain(drawn)
     {
         let path = ctx.workspace_root.join(path);
-        std::fs::write(&path, text).map_err(|e| format!("riscos: {}: {e}", path.display()))?;
+        write(&path, text)?;
     }
     remove_found(&hostfs, corpora.left().iter().map(String::as_str))?;
     outln!(
@@ -466,10 +471,9 @@ fn write_harness<'a>(
     harness_boot(hostfs, ours)?;
     remove_found(hostfs, left)?;
     let program = harness_program(groups.iter().flat_map(|group| &group.scenarios))?;
-    std::fs::write(harness, program).map_err(|e| format!("riscos: {}: {e}", harness.display()))?;
+    write(harness, program)?;
     for (name, bytes) in staged {
-        let path = hostfs.join(format!("{name},fff"));
-        std::fs::write(&path, bytes).map_err(|e| format!("riscos: {}: {e}", path.display()))?;
+        write(&hostfs.join(format!("{name},fff")), bytes)?;
     }
     for (name, bytes) in library {
         let path = hostfs.join(name);
@@ -477,10 +481,9 @@ fn write_harness<'a>(
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("riscos: {}: {e}", parent.display()))?;
         }
-        std::fs::write(&path, bytes).map_err(|e| format!("riscos: {}: {e}", path.display()))?;
+        write(&path, bytes)?;
     }
-    let boot = hostfs.join("!Boot,feb");
-    std::fs::write(&boot, ours).map_err(|e| format!("riscos: {}: {e}", boot.display()))
+    write(&hostfs.join("!Boot,feb"), ours)
 }
 
 /// Removes the harness and `ours`, the `!Boot` that runs it, so the machine
@@ -1019,8 +1022,7 @@ fn write_fixtures(
         })?;
         fixtures.push(fixture);
     }
-    std::fs::write(&group.fixtures, format_observations(header, &fixtures))
-        .map_err(|e| format!("riscos: {}: {e}", group.fixtures.display()))
+    write(&group.fixtures, format_observations(header, &fixtures))
 }
 
 /// The bytes of every quoted string in `text`, a case's fields or an

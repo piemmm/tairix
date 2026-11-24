@@ -9,20 +9,14 @@
 //! is reported so too, where RISC OS reads on into what follows it.
 
 use tairix_drawing::riscos::format::{
-    self, Misframed, Object, Objects, BARE_HEADER, FONT_NUMBER, FONT_TABLE, GROUP, GROUP_NAME,
-    HEADER, MAGIC, MAJOR_VERSION, OBJECT_HEADER, TAGGED, TEXT, TRANSFORMED_TEXT,
+    Misframed, Object, Objects, BARE_HEADER, FONT_NUMBER, FONT_TABLE, GROUP, HEADER,
+    HEADER_VERSION, MAGIC, MAJOR_VERSION, TAGGED, TEXT, TEXT_STYLE, TRANSFORMED_TEXT,
+    TRANSFORMED_TEXT_FIELDS,
 };
+use tairix_util::endian::le_u32;
 
+use super::render::terminated;
 use super::stack::{self, Depth, Level};
-
-/// A transformed text's matrix and flags, before the fields a text holds.
-const TRANSFORMED_TEXT_FIELDS: usize = format::MATRIX + 4;
-/// Where a text holds its style, after its colours.
-const TEXT_STYLE: usize = OBJECT_HEADER + 8;
-/// Where a group's objects begin.
-pub(super) const GROUP_OBJECTS: usize = OBJECT_HEADER + GROUP_NAME;
-/// Where a tagged object's object begins, after its tag.
-pub(super) const TAGGED_OBJECT: usize = OBJECT_HEADER + 4;
 
 /// What holds an object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,10 +69,7 @@ impl Fonts {
                 break;
             }
             let name = at + 1;
-            let length = table.bytes[name..]
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(table.bytes.len() - name);
+            let length = terminated(table.bytes, name).len();
             tairix_util::fallible::try_push(&mut self.names, (number, table.at + name))
                 .map_err(|_| NoRoom)?;
             at = name + length + 1;
@@ -117,16 +108,16 @@ pub(super) fn check(bytes: &[u8]) -> Result<Fonts, Stop> {
     if bytes.len() < HEADER || !bytes.starts_with(MAGIC) {
         return Err(Refusal::NotDraw.into());
     }
-    let major = format::word(bytes, MAGIC.len()).unwrap_or(0);
+    let major = le_u32(bytes, HEADER_VERSION).unwrap_or(0);
     if major > MAJOR_VERSION {
         return Err(Refusal::Version(major).into());
     }
     let mut checker = Checker {
         fonts: Fonts::default(),
         after: None,
-        depth: Depth::default(),
     };
-    checker.run(&bytes[HEADER..], HEADER, Within::File)?;
+    let objects = Objects::new(&bytes[HEADER..], HEADER);
+    checker.run(objects, Within::File, Depth::default())?;
     Ok(checker.fonts)
 }
 
@@ -134,13 +125,12 @@ struct Checker {
     fonts: Fonts,
     /// The last object accepted.
     after: Option<usize>,
-    depth: Depth,
 }
 
 impl Checker {
-    fn run(&mut self, run: &[u8], at: usize, within: Within) -> Result<(), Stop> {
-        for object in Objects::new(run, at) {
-            self.object(object, within)?;
+    fn run(&mut self, objects: Objects<'_>, within: Within, depth: Depth) -> Result<(), Stop> {
+        for object in objects {
+            self.object(object, within, depth)?;
         }
         Ok(())
     }
@@ -149,6 +139,7 @@ impl Checker {
         &mut self,
         object: Result<Object<'_>, Misframed>,
         within: Within,
+        depth: Depth,
     ) -> Result<(), Stop> {
         let Ok(object) = object else {
             return Err(Refusal::TooBig {
@@ -172,8 +163,7 @@ impl Checker {
                 } else {
                     TRANSFORMED_TEXT_FIELDS
                 };
-                let number =
-                    format::word(object.bytes, TEXT_STYLE + fields).unwrap_or(0) & FONT_NUMBER;
+                let number = le_u32(object.bytes, TEXT_STYLE + fields).unwrap_or(0) & FONT_NUMBER;
                 if number != 0 && self.fonts.named(number).is_none() {
                     return Err(Refusal::NoSuchFont {
                         number,
@@ -183,25 +173,17 @@ impl Checker {
                 }
             }
             GROUP => {
-                let objects = object.bytes.get(GROUP_OBJECTS..).unwrap_or(&[]);
-                let taken = self
-                    .depth
+                let deeper = depth
                     .enter(stack::CHECK, Level::Group)
                     .ok_or(Stop::Overflowed)?;
-                let checked = self.run(objects, object.at + GROUP_OBJECTS, Within::Group);
-                self.depth.leave(taken);
-                checked?;
+                self.run(stack::group_objects(object), Within::Group, deeper)?;
             }
             TAGGED => {
-                let wrapped = object.bytes.get(TAGGED_OBJECT..).unwrap_or(&[]);
-                if let Some(inner) = Objects::new(wrapped, object.at + TAGGED_OBJECT).next() {
-                    let taken = self
-                        .depth
+                if let Some(inner) = stack::tagged_object(object) {
+                    let deeper = depth
                         .enter(stack::CHECK, Level::Tagged)
                         .ok_or(Stop::Overflowed)?;
-                    let checked = self.object(inner, Within::Tagged);
-                    self.depth.leave(taken);
-                    checked?;
+                    self.object(inner, Within::Tagged, deeper)?;
                 }
             }
             _ => {}

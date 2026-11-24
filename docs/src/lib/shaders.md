@@ -28,10 +28,12 @@ is a change to its committed bytes.
 | `coverage` | Writes a scan-converted shape's alpha a pixel to a plane, from the converter's pieces of each row | `CoverageRows::row` |
 | `mask` | Lays an ink through a plane of coverage, at nearest | `cover_span`, `Surface::blit_tinted`, `Surface::fill_polygon_subpixel` and `fill_polygon` (with `coverage`), `Surface::stroke_polyline` (each of `stroke_quads` in turn) |
 | `picture` | Lays a picture cut to a rounded rectangle, or toned toward grey and weakened | `Surface::blit_rounded`, `Surface::blit_desaturated` |
+| `indirect_counts` | Holds an indirect dispatch's three counts to the device's: past them on any axis, every axis zeroed and the slot's fault word set, else both kept | what the software device judges as the dispatch runs |
 
-Every pass is a compute entry point `main` over workgroups `GROUP` (8)
-invocations square, one a pixel or cell; `groups(width, height)` covers a
-grid. Its buffers are words at set 0 — a pixel is one word, red in its low
+Every pass but `indirect_counts`, a single invocation a hardware backend runs
+before an indirect dispatch (`plans/GPU.md` GP5.4), is a compute entry point
+`main` over workgroups `GROUP` (8) invocations square, one a pixel or cell;
+`groups(width, height)` covers a grid. Its buffers are words at set 0 — a pixel is one word, red in its low
 byte, as `tairix_raster::Pixel` lies in memory — and its push constants are
 its `Push`'s `WORDS` words. An invocation outside the extent its push names
 reads and writes nothing. The modules are SPIR-V 1.3, the Vulkan 1.1
@@ -67,6 +69,14 @@ disagree about a constant. A device runs the frost as `frost_reduce`, then
 `frost_blur` along the rows and down the columns at half the frost's radius,
 then `frost_spread` into a field and `frost_mix` over the surface; the
 desktop drawing through them on a device is `plans/GPU.md` GD11.
+
+## Samples
+
+Each entry of `SET` carries `sample`: the pass run on a known input — every
+binding's words, its push and its workgroups — built by its description
+type, a pass laying over a surface laying over one of 24 × 20 premultiplied
+pixels. `gpucheck` runs every sample on each served GPU and on the software
+device and holds the two to the bit.
 
 ## The drift guard
 
@@ -104,6 +114,10 @@ bytes in.
   pictures rounded and toned, partly off the surface, against the `Surface`
   calls each is.
 - Each description is refused just past each bound and taken at it.
+- `indirect_counts` keeps counts at the device's and zeroes every axis of a
+  slot past them on any one, setting its fault, never clearing an earlier
+  fault, and touching no other slot.
+- Every sample runs on the software device and changes what it was given.
 
 ## Stability
 

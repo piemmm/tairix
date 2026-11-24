@@ -11,28 +11,37 @@
 //! `\F` defines is found there and let go at the end, an earlier font of the
 //! same number not, as RISC OS 5.30 leaves it.
 
+use tairix_drawing::riscos::format::FIXED_ONE;
+use tairix_drawing::riscos::units::{DRAW_UNITS_PER_POINT, MILLIPOINTS_PER_POINT};
+use tairix_geometry::saturate_i32;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
+use tairix_riscos_kernel::swi::font::code;
 use tairix_riscos_kernel::swi::{colour_trans, font, X};
 
 use super::parse::{Align, Command, Piece, Reader, FONTS};
 use super::{Area, Columns, Refusal};
-use crate::drawfile::render::{write_words, FONT_COLOUR_OFFSET};
+use crate::drawfile::workspace::write_name;
 use crate::geometry::Matrix;
 
-/// The buffer in guest memory: room before the text for a line's underline
-/// code, the paragraph's 255 bytes and their terminator.
-pub(in crate::drawfile) const BUFFER_BYTES: u32 = 3 + 255 + 1;
+/// Room before a line's text for its underline code: the code, a position
+/// and a thickness.
 const PREFIX: usize = 3;
-const CAPACITY: usize = BUFFER_BYTES as usize - PREFIX - 1;
+/// A paragraph's longest text.
+const CAPACITY: usize = 255;
+/// The buffer in guest memory: the underline code, the paragraph and its
+/// terminator.
+#[expect(clippy::cast_possible_truncation, reason = "a few hundred bytes")]
+pub(in crate::drawfile) const BUFFER_BYTES: u32 = (PREFIX + CAPACITY + 1) as u32;
 /// The coordinate block's eight words.
 pub(in crate::drawfile) const BLOCK_BYTES: u32 = 32;
 
 /// Draw units, millipoints and points in the sixteenths of a millipoint
 /// the layout is reckoned in: a draw unit is 25/16 of a millipoint.
-const PER_DRAW_UNIT: i64 = 25;
+const PER_DRAW_UNIT: i64 =
+    MILLIPOINTS_PER_POINT as i64 * PER_MILLIPOINT / DRAW_UNITS_PER_POINT as i64;
 const PER_MILLIPOINT: i64 = 16;
 /// Millipoints a point.
-const MILLIPOINTS: i64 = 1000;
+const MILLIPOINTS: i64 = MILLIPOINTS_PER_POINT as i64;
 /// The least margin and leading, a point; the least paragraph leading.
 const LEAST_MARGIN: i32 = 1;
 const LEAST_PARAGRAPH: i32 = 0;
@@ -41,30 +50,21 @@ const MARGIN: i32 = 1;
 const LEADING: i32 = 10;
 const PARAGRAPH: i32 = 10;
 
-/// The Font Manager's codes a paragraph is built from.
-mod code {
-    pub(super) const COMMENT: u8 = 21;
-    pub(super) const MOVE: u8 = 11;
-    pub(super) const COLOURS: u8 = 19;
-    pub(super) const UNDERLINE: u8 = 25;
-    pub(super) const FONT: u8 = 26;
-
-    /// How many bytes the code `byte` takes, or none for text.
-    pub(super) fn length(byte: u8) -> Option<usize> {
-        match byte {
-            FONT | COMMENT => Some(2),
-            UNDERLINE => Some(3),
-            MOVE => Some(4),
-            COLOURS => Some(8),
-            _ => None,
-        }
+/// How many bytes the Font Manager's code `byte` takes in a paragraph, or
+/// none for text.
+fn code_length(byte: u8) -> Option<usize> {
+    match byte {
+        code::FONT | code::COMMENT => Some(2),
+        code::UNDERLINE => Some(PREFIX),
+        code::MOVE_UP => Some(4),
+        code::RGB => Some(8),
+        _ => None,
     }
 }
 
-/// `Font_ScanString`'s and `Font_Paint`'s flags DrawFile passes: R7 a
-/// length; R5 a coordinate block and R6 a matrix besides for painting.
-const BY_LENGTH: u32 = 1 << 7;
-const PAINT_FLAGS: u32 = (1 << 5) | (1 << 6) | BY_LENGTH;
+/// `Font_Paint`'s flags DrawFile paints a line with: R5 a coordinate block,
+/// R6 a matrix and R7 a length.
+const PAINT_FLAGS: u32 = font::flag::BLOCK | font::flag::MATRIX | font::flag::LENGTH;
 /// No limit, to measure a line.
 const NO_LIMIT: u32 = 0x7FFF_FFFF;
 
@@ -95,11 +95,10 @@ pub(in crate::drawfile) fn paint(
     colours.r[1..4].copy_from_slice(&[
         area.background,
         area.foreground,
-        u32::from(FONT_COLOUR_OFFSET),
+        font::MOST_OFFSET.cast_unsigned(),
     ]);
     os.perform(X | colour_trans::SET_FONT_COLOURS, &mut colours)?;
-    write_words(
-        os,
+    os.write_words(
         places.matrix,
         &Matrix {
             e: 0,
@@ -280,7 +279,8 @@ impl<'a> Painter<'a> {
                 }
                 let [br, bg, bb] = self.settings.background;
                 let [fr, fg, fb] = self.settings.foreground;
-                Codes::new(&[code::COLOURS, br, bg, bb, fr, fg, fb, FONT_COLOUR_OFFSET])
+                let offset = font::MOST_OFFSET.to_le_bytes()[0];
+                Codes::new(&[code::RGB, br, bg, bb, fr, fg, fb, offset])
             }
             Command::Underline(underline) => {
                 self.settings.underline = underline;
@@ -289,7 +289,7 @@ impl<'a> Painter<'a> {
             }
             Command::Move(points) => {
                 let moved = (i64::from(points) * MILLIPOINTS).to_le_bytes();
-                Codes::new(&[code::MOVE, moved[0], moved[1], moved[2]])
+                Codes::new(&[code::MOVE_UP, moved[0], moved[1], moved[2]])
             }
             Command::Define {
                 number,
@@ -380,7 +380,8 @@ impl<'a> Painter<'a> {
     fn gap(&mut self, paragraphs: u32) {
         if self.lines > 0 {
             if let Some(y) = &mut self.y {
-                *y -= i64::from(paragraphs) * self.settings.paragraph * PER_MILLIPOINT;
+                let gap = i64::from(paragraphs).saturating_mul(self.settings.paragraph);
+                *y = y.saturating_sub(gap.saturating_mul(PER_MILLIPOINT));
             }
         }
     }
@@ -490,7 +491,7 @@ impl<'a> Painter<'a> {
         let mut i = self.start;
         while i <= split && i < self.len {
             let byte = self.buffer[PREFIX + i];
-            if let Some(length) = code::length(byte) {
+            if let Some(length) = code_length(byte) {
                 if byte == code::COMMENT && i < split {
                     last = Some((i, true));
                 }
@@ -540,7 +541,7 @@ impl<'a> Painter<'a> {
     /// line holds that nothing fits.
     fn first_character_end(&self, mut at: usize) -> usize {
         while at < self.len {
-            match code::length(self.buffer[PREFIX + at]) {
+            match code_length(self.buffer[PREFIX + at]) {
                 Some(length) => at += length,
                 None => return (at + 1).min(self.len),
             }
@@ -552,7 +553,7 @@ impl<'a> Painter<'a> {
     fn has_text(&self, from: usize, to: usize) -> bool {
         let mut i = from;
         while i < to {
-            match code::length(self.buffer[PREFIX + i]) {
+            match code_length(self.buffer[PREFIX + i]) {
                 Some(length) => i += length,
                 None => return true,
             }
@@ -589,11 +590,11 @@ impl<'a> Painter<'a> {
         regs.r[1] = self.address(from);
         match (limit, length) {
             (Some(width), _) => {
-                regs.r[3] = clamped(width).cast_unsigned();
+                regs.r[3] = saturate_i32(width).cast_unsigned();
                 regs.r[4] = NO_LIMIT;
             }
             (None, length) => {
-                regs.r[2] = BY_LENGTH;
+                regs.r[2] = font::flag::LENGTH;
                 regs.r[3] = NO_LIMIT;
                 regs.r[4] = NO_LIMIT;
                 regs.r[7] = u32::try_from(length.unwrap_or(0)).unwrap_or(0);
@@ -670,16 +671,16 @@ impl<'a> Painter<'a> {
         let mut from = self.address(self.start);
         let mut painted = length;
         if let Some((position, thickness)) = self.underline {
-            let prefix = [code::UNDERLINE, position.to_le_bytes()[0], thickness];
+            let prefix: [u8; PREFIX] = [code::UNDERLINE, position.to_le_bytes()[0], thickness];
             from -= u32::try_from(PREFIX).unwrap_or(0);
             painted += PREFIX;
             os.write_bytes(from, &prefix)?;
         }
         let kept = self.buffer[PREFIX + end];
         os.write_bytes(self.address(end), &[0])?;
-        let mut block = [0u32; 8];
-        block[0] = clamped(spacing).cast_unsigned();
-        write_words(os, self.places.block, &block)?;
+        let mut block = [0u32; BLOCK_BYTES as usize / 4];
+        block[0] = saturate_i32(spacing).cast_unsigned();
+        os.write_words(self.places.block, &block)?;
         let (px, py) = self.millipoints(x, y);
         let mut regs = Regs::default();
         regs.r[1..8].copy_from_slice(&[
@@ -725,7 +726,7 @@ impl<'a> Painter<'a> {
         let mut count = 0;
         let mut i = from;
         while i < to {
-            if let Some(length) = code::length(self.buffer[PREFIX + i]) {
+            if let Some(length) = code_length(self.buffer[PREFIX + i]) {
                 i += length;
             } else {
                 count += i64::from(self.buffer[PREFIX + i] == b' ');
@@ -742,7 +743,7 @@ impl<'a> Painter<'a> {
         let mut i = from;
         while i < to {
             let byte = self.buffer[PREFIX + i];
-            match code::length(byte) {
+            match code_length(byte) {
                 Some(length) => {
                     if byte == code::UNDERLINE {
                         let argument =
@@ -764,8 +765,8 @@ impl<'a> Painter<'a> {
         let axis = |p: i32, q: i32, t: i32| {
             let sum = i128::from(p) * i128::from(x)
                 + i128::from(q) * i128::from(y)
-                + i128::from(t) * i128::from(PER_DRAW_UNIT) * 65536;
-            let value = sum / (i128::from(PER_MILLIPOINT) * 65536);
+                + i128::from(t) * i128::from(PER_DRAW_UNIT) * i128::from(FIXED_ONE);
+            let value = sum / (i128::from(PER_MILLIPOINT) * i128::from(FIXED_ONE));
             i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
         };
         (axis(m.a, m.c, m.e), axis(m.b, m.d, m.f))
@@ -780,9 +781,7 @@ impl<'a> Painter<'a> {
         width: u32,
         height: u32,
     ) -> Result<u32, Fail> {
-        let length = name.len().min(self.places.name_bytes - 1);
-        os.write_bytes(self.places.name, &name[..length])?;
-        os.write_bytes(self.places.name + u32::try_from(length).unwrap_or(0), &[0])?;
+        write_name(os, self.places.name, self.places.name_bytes, name)?;
         let mut regs = Regs::default();
         regs.r[1..4].copy_from_slice(&[self.places.name, width, height]);
         os.perform(X | font::FIND_FONT, &mut regs)?;
@@ -823,11 +822,6 @@ impl Codes {
     fn bytes(&self) -> &[u8] {
         &self.bytes[..self.len]
     }
-}
-
-/// `value` within a word.
-fn clamped(value: i64) -> i32 {
-    i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
 }
 
 #[cfg(test)]

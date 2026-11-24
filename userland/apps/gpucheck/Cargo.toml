@@ -1,6 +1,6 @@
 [package]
 name = "tairix-gpucheck"
-description = "TAIRiX `gpucheck` CLI: run the same work on each served GPU and on the software device and answer where they differ (`plans/GPU.md` GP11.2)."
+description = "TAIRiX `gpucheck` CLI: run the same work — transfers, every pass of the pinned set, the image work, the render work, and an indirect dispatch past the device's counts — on each served GPU and on the software device and answer where they differ (`plans/GPU.md` GP11.2, GP5.4–GP5.6)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -29,6 +29,10 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-gpu = { path = "../../../lib/gpu", version = "=0.0.0" }
 # The runner the software device shares its work across: one thread.
 tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", default-features = false }
+# The pinned set, each pass run on its sample.
+tairix-shaders = { path = "../../../lib/shaders", version = "=0.0.0" }
+# The passes' modules, admitted to read the layout each states.
+tairix-spirv = { path = "../../../lib/spirv", version = "=0.0.0" }
 # The short help read from the bundle's own Help/ tree.
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", optional = true }
 # The served GPUs, listed by the System Information API.

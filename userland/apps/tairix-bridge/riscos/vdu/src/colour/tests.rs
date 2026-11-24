@@ -176,3 +176,12 @@ fn a_colour_number_s_nibbles_widen_as_risc_os_5_widens_them() {
     let eight = Direct::of_parts(5, u32::MAX, 0);
     assert_eq!(eight.pack_nibbles([0xA, 0x5, 0x1]), 0x11_55AA);
 }
+
+#[test]
+fn only_4k_and_16m_colours_keep_a_value_beside_their_colour() {
+    assert!(Direct::of_parts(5, u32::MAX, 0).tagged(), "16M");
+    assert!(Direct::of_parts(4, 0xFFF, 0).tagged(), "4K");
+    assert!(!Direct::of_parts(4, 0xFFFF, 0).tagged(), "32K");
+    let five_six_five = Direct::of_parts(4, 0xFFFF, Flags::FULL_PALETTE.bits());
+    assert!(!five_six_five.tagged(), "64K");
+}

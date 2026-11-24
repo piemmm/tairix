@@ -30,6 +30,16 @@ pub const fn grouped(base: [u8; 3], pixel: u8) -> [u8; 3] {
     ]
 }
 
+/// The bits of a channel VIDC1 held a colour in: its top four.
+pub const VIDC1_CHANNEL: u8 = 0xF0;
+
+/// `channel` as VIDC1 showed it: its [`VIDC1_CHANNEL`] bits, repeated below
+/// them.
+#[must_use]
+pub const fn vidc1_channel(channel: u8) -> u8 {
+    (channel & VIDC1_CHANNEL) | (channel >> 4)
+}
+
 /// The default palette's colour for 256-colour pixel `pixel`: four bits of
 /// each channel, widened to eight, its top bit red's, green's or blue's own
 /// and its low two, the tint, shared.
@@ -44,7 +54,14 @@ pub const fn default_256(pixel: u8) -> [u8; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_256, grouped};
+    use super::{default_256, grouped, vidc1_channel};
+
+    #[test]
+    fn vidc1_shows_a_channel_s_top_four_bits_twice() {
+        assert_eq!(vidc1_channel(0xAB), 0xAA);
+        assert_eq!(vidc1_channel(0x0F), 0x00);
+        assert_eq!(vidc1_channel(0xF0), 0xFF);
+    }
 
     #[test]
     fn a_group_keeps_its_base_s_low_bits_as_risc_os_5_reads_them_back() {

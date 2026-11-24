@@ -51,8 +51,10 @@ pub(crate) const PRINTER_BUFFER: u8 = 0x19;
 pub(crate) const MOUSE_TYPE: u8 = 0x1D;
 /// The monitor type and sync.
 pub(crate) const VDU: u8 = 0x85;
-/// The font cache, in 4 KiB units.
+/// The font cache, in [`FONT_SIZE_UNIT`]s.
 pub const FONT_SIZE: u8 = 0x86;
+/// The bytes a unit of [`FONT_SIZE`] stands for, whatever the page size.
+pub const FONT_SIZE_UNIT: u32 = 4096;
 /// The pages of the screen, the RAM disc, the system heap and the RMA
 /// beyond what they start with, and the system sprite area.
 pub(crate) const SCREEN_SIZE: u8 = 0x8F;

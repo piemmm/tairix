@@ -44,7 +44,8 @@ pub enum Error {
     NoSuchQueue,
     /// Past what the device takes: an allocation past its largest, an image,
     /// view, texel buffer, workgroup, working set or program past its limits,
-    /// or a module whose constants or lowering pass their fixed bounds.
+    /// a copy's row pitch past its bound, or a module whose constants or
+    /// lowering pass their fixed bounds.
     TooLarge,
     /// A size of zero, or a usage of none.
     Empty,
@@ -94,6 +95,10 @@ pub enum Error {
     EntryPoint,
     /// The layout does not provide what the entry point uses.
     Disagreement(tairix_spirv::Disagreement),
+    /// The entry point samples the image at the first set and binding through
+    /// the sampler at the second in a way their layout's sample and sampler
+    /// types do not take.
+    Sampling((u32, u32), (u32, u32)),
     /// The module refused the specialization values: one no constant takes,
     /// one given twice or wider than its constant, or a workgroup size they
     /// make zero.
@@ -146,6 +151,9 @@ impl fmt::Display for Error {
             Self::Bindings => "the bindings are not one apiece, in order, as the layout says",
             Self::EntryPoint => "the module has no such entry point",
             Self::Disagreement(_) => "the layout does not provide what the entry point uses",
+            Self::Sampling(..) => {
+                "the layout's sample and sampler types do not take how an image is sampled"
+            }
             Self::Specialization(_) => "the module refused the specialization values",
             Self::Interface => {
                 "the stages, targets or attachments disagree on what passes between them"

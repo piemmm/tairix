@@ -119,6 +119,10 @@ impl Validator<'_> {
                 if self.ty(r).holds.any(Holds::OPAQUE) {
                     if let Some(result) = args.result {
                         self.set_root(result, root);
+                        // A combined image sampler is its own sampler.
+                        if matches!(self.ty(r).ty, Ty::SampledImage { .. }) {
+                            self.set_sampler(result, root.slot);
+                        }
                     }
                     return Ok(());
                 }

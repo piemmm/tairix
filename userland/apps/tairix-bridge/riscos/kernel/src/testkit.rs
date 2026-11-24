@@ -218,9 +218,7 @@ impl Session {
     /// Writes `words` at `at`.
     pub(crate) fn poke(&mut self, at: u32, words: &[u32]) {
         let mut os = self.kernel.os();
-        for (i, &word) in (0..).zip(words) {
-            os.write_word(at + 4 * i, word).expect("writable");
-        }
+        os.write_words(at, words).expect("writable");
     }
 
     /// The word at `at`.

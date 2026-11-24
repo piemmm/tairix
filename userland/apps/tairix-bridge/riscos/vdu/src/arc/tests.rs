@@ -63,6 +63,13 @@ fn the_arc_runs_anticlockwise_from_its_start_to_its_end() {
 }
 
 #[test]
+fn the_furthest_vectors_are_compared_without_overflowing() {
+    let most = (i32::MIN, i32::MIN);
+    assert!(!reflex(most, most), "no turn at all");
+    assert!(reflex(most, (i32::MAX, i32::MAX)), "pointing opposite ways");
+}
+
+#[test]
 fn a_quarter_sector_fills_between_its_rays() {
     let spans = sector(&circle((10, 0)), (10, 0), (0, 10), EVERY_ROW).unwrap();
     assert_eq!(row(&spans, 0), (0..=10).collect::<Vec<_>>());

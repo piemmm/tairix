@@ -1,16 +1,19 @@
-//! The font service's outline replies as owned values: the one place the
-//! wire form becomes an owned one, which every client of the protocol reads
-//! a reply through, so none can read a reply the others would read
-//! differently.
+//! The font service's outline protocol as every client speaks it: the one
+//! request, the one paging of a run through it, and the one place a reply
+//! becomes an owned value, so no client can ask or read differently from
+//! the others.
 
 use alloc::vec::Vec;
 
-use tairix_abi::font_ipc::{decode_outlines_reply, GlyphOutline, GlyphSegment, OutlineBatch};
+use tairix_abi::font_ipc::{
+    decode_outlines_reply, FamilyKey, FontRequest, FontStretch, FontStyle, FontWeight,
+    GlyphOutline, GlyphRun, GlyphSegment, FONT_MAX_GLYPH_RUN,
+};
 use tairix_bezier::offset::{grown, Join};
 use tairix_bezier::{FillRule, Path, PathEl, Point, QuadBez, Subpath};
 
-/// The longest a synthetic bold's round joins may reach, in strokes, and the
-/// tolerance its curves are grown to, in ems.
+/// The miter limit a synthetic bold is grown under, which its round joins
+/// never consult, and the tolerance its curves are grown to, in ems.
 const BOLD_MITER_LIMIT: f64 = 4.0;
 const BOLD_TOLERANCE: f64 = 1e-3;
 
@@ -128,59 +131,84 @@ pub enum OwnedSegment {
 /// The requested family's own geometry and the run of outlines answered.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OutlineReply {
-    /// The primary face's em.
-    pub units_per_em: u32,
-    /// The primary face's ascender, in its own font units.
-    pub ascent: i32,
-    /// The primary face's descender magnitude, in its own font units.
-    pub descent: i32,
-    /// The primary face's extra leading, in its own font units.
-    pub line_gap: i32,
+    /// The primary face's metrics, in its own font units.
+    pub face: FaceMetrics,
     /// The glyphs answered, a prefix of the run in order.
     pub glyphs: Vec<OwnedOutline>,
 }
 
 impl OutlineReply {
-    /// The metrics of the face the batch is drawn from.
-    #[must_use]
-    pub const fn face(&self) -> FaceMetrics {
-        FaceMetrics {
-            units_per_em: self.units_per_em,
-            ascent: self.ascent,
-            descent: self.descent,
-            line_gap: self.line_gap,
-        }
-    }
-
     /// The reply `frame` answering a run of `asked` scalars, owned; none for
     /// a frame that does not decode or a batch answering more than was asked,
     /// which the reply bound alone cannot rule out.
-    #[must_use]
-    pub fn decode(frame: &[u8], asked: usize) -> Option<Self> {
+    fn decode(frame: &[u8], asked: usize) -> Option<Self> {
         let batch = decode_outlines_reply(frame).ok()?;
         if batch.glyphs().len() > asked {
             return None;
         }
-        Some(Self::from_batch(&batch))
-    }
-
-    /// Copy a decoded batch out of the frame it borrows, so it outlives the
-    /// receive buffer.
-    ///
-    /// The one place the wire form becomes an owned one: the client's own
-    /// fetch and the build-time verification that drives the service
-    /// directly both go through it, so neither can read a reply the other
-    /// would read differently.
-    #[must_use]
-    pub fn from_batch(batch: &OutlineBatch<'_>) -> Self {
-        Self {
-            units_per_em: batch.units_per_em,
-            ascent: batch.ascent,
-            descent: batch.descent,
-            line_gap: batch.line_gap,
+        Some(Self {
+            face: FaceMetrics {
+                units_per_em: batch.units_per_em,
+                ascent: batch.ascent,
+                descent: batch.descent,
+                line_gap: batch.line_gap,
+            },
             glyphs: batch.glyphs().iter().map(owned_outline).collect(),
-        }
+        })
     }
+}
+
+/// Ask the font service once for the outlines of a prefix of `scalars` from
+/// `family`, instanced at `instance`: `call` carries the request frame and
+/// leaves the reply at the head of `reply`, answering its length.
+///
+/// None for a run the protocol will not carry, a failed call, a length past
+/// the buffer, or a frame that does not decode or answers more than was asked.
+pub fn ask_outlines(
+    scalars: &[char],
+    family: FamilyKey,
+    instance: (FontWeight, FontStyle, FontStretch),
+    reply: &mut Vec<u8>,
+    call: impl FnOnce(&[u8], &mut Vec<u8>) -> Option<usize>,
+) -> Option<OutlineReply> {
+    let (weight, style, stretch) = instance;
+    let request = FontRequest::Outlines {
+        family,
+        scalars: GlyphRun::new(scalars).ok()?,
+        weight,
+        style,
+        stretch,
+    }
+    .to_le_bytes();
+    let len = call(&request, reply)?;
+    OutlineReply::decode(reply.get(..len)?, scalars.len())
+}
+
+/// Fetch the outline of every scalar of `scalars`, in order: `fetch` is asked
+/// for runs of at most [`FONT_MAX_GLYPH_RUN`] and, as a reply answers a prefix
+/// of its run, again for whatever it leaves; `land` takes each reply with the
+/// index of the first scalar it answers. Both are handed `context`.
+///
+/// None once a fetch fails or answers nothing or more than was asked, so the
+/// caller draws nothing rather than glyphs paired with the wrong characters.
+pub fn page_outlines<C: ?Sized>(
+    context: &mut C,
+    scalars: &[char],
+    mut fetch: impl FnMut(&mut C, &[char]) -> Option<OutlineReply>,
+    mut land: impl FnMut(&mut C, usize, OutlineReply),
+) -> Option<()> {
+    let mut at = 0;
+    while at < scalars.len() {
+        let run = &scalars[at..scalars.len().min(at + FONT_MAX_GLYPH_RUN)];
+        let reply = fetch(context, run)?;
+        let answered = reply.glyphs.len();
+        if answered == 0 || answered > run.len() {
+            return None;
+        }
+        land(context, at, reply);
+        at += answered;
+    }
+    Some(())
 }
 
 /// Copy one borrowed outline record out of the reply frame.
@@ -208,5 +236,170 @@ fn owned_outline(glyph: &GlyphOutline<'_>) -> OwnedOutline {
                     .collect(),
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use tairix_abi::font_ipc::{
+        FamilyKey, FontRequest, FontStretch, FontStyle, FontUnits, FontWeight, GlyphRun,
+        OutlineBatchWriter, OutlineSource, Synthesis, FONT_MAX_GLYPH_RUN, FONT_MAX_OUTLINE_REPLY,
+    };
+
+    use super::{ask_outlines, page_outlines, FaceMetrics, OutlineReply, OwnedOutline};
+
+    /// The instance every request here asks for.
+    const INSTANCE: (FontWeight, FontStyle, FontStretch) =
+        (FontWeight::BOLD, FontStyle::Italic, FontStretch::NORMAL);
+
+    /// [`ask_outlines`] for `run` from the monospace family, through `call`.
+    fn ask(
+        run: &[char],
+        call: impl FnOnce(&[u8], &mut Vec<u8>) -> Option<usize>,
+    ) -> Option<OutlineReply> {
+        ask_outlines(run, FamilyKey::MONO, INSTANCE, &mut Vec::new(), call)
+    }
+
+    /// A frame in `reply` answering `glyphs` scalars with outlines of no ink,
+    /// and its length.
+    fn frame(reply: &mut Vec<u8>, glyphs: usize) -> Option<usize> {
+        reply.resize(FONT_MAX_OUTLINE_REPLY, 0);
+        let mut writer = OutlineBatchWriter::new(reply, 1000, 800, 200, 0).ok()?;
+        let blank = OutlineSource {
+            units_per_em: 1000,
+            advance: FontUnits::from_raw(0),
+            synth: Synthesis::NONE,
+            contours: &[],
+        };
+        for _ in 0..glyphs {
+            writer.push(&blank).ok()?;
+        }
+        writer.finish().ok()
+    }
+
+    /// A reply answering `glyphs` scalars.
+    fn answering(glyphs: usize) -> OutlineReply {
+        OutlineReply {
+            glyphs: vec![OwnedOutline::default(); glyphs],
+            ..OutlineReply::default()
+        }
+    }
+
+    #[test]
+    fn a_request_names_its_run_and_instance_and_its_reply_is_read_whole() {
+        let run = ['a', 'b'];
+        let answered = ask(&run, |request, reply| {
+            let asked = FontRequest::Outlines {
+                family: FamilyKey::MONO,
+                scalars: GlyphRun::new(&run).ok()?,
+                weight: INSTANCE.0,
+                style: INSTANCE.1,
+                stretch: INSTANCE.2,
+            };
+            assert_eq!(FontRequest::from_bytes(request), Ok(asked));
+            frame(reply, 1)
+        })
+        .expect("answered");
+        assert_eq!(
+            answered.face,
+            FaceMetrics {
+                units_per_em: 1000,
+                ascent: 800,
+                descent: 200,
+                line_gap: 0,
+            }
+        );
+        assert_eq!(answered.glyphs.len(), 1);
+    }
+
+    #[test]
+    fn a_run_the_protocol_cannot_carry_or_a_reply_it_did_not_ask_for_is_refused() {
+        let mut sent = 0;
+        let long = ['a'; FONT_MAX_GLYPH_RUN + 1];
+        for run in [&[][..], &long[..]] {
+            let asked = ask(run, |_, _| {
+                sent += 1;
+                None
+            });
+            assert_eq!(asked, None);
+        }
+        assert_eq!(sent, 0, "neither run is sent");
+        assert_eq!(
+            ask(&['a'], |_, reply| Some(reply.len() + 1)),
+            None,
+            "a length past the buffer"
+        );
+        assert_eq!(
+            ask(&['a'], |_, reply| frame(reply, 2)),
+            None,
+            "a frame answering more than was asked"
+        );
+    }
+
+    #[test]
+    fn what_a_reply_leaves_is_asked_for_again_from_where_it_stopped() {
+        let mut asked = Vec::new();
+        let mut landed = Vec::new();
+        let paged = page_outlines(
+            &mut landed,
+            &['a', 'b', 'c'],
+            |_, run| {
+                asked.push(run.to_vec());
+                Some(answering(1))
+            },
+            |landed, first, _| landed.push(first),
+        );
+        assert_eq!(paged, Some(()));
+        assert_eq!(asked, [vec!['a', 'b', 'c'], vec!['b', 'c'], vec!['c']]);
+        assert_eq!(landed, [0, 1, 2]);
+    }
+
+    #[test]
+    fn a_run_longer_than_one_request_carries_is_asked_for_in_runs_it_does() {
+        let long = ['x'; FONT_MAX_GLYPH_RUN + 1];
+        let mut asked = Vec::new();
+        let paged = page_outlines(
+            &mut asked,
+            &long,
+            |asked, run| {
+                asked.push(run.len());
+                Some(answering(run.len()))
+            },
+            |_, _, _| {},
+        );
+        assert_eq!(paged, Some(()));
+        assert_eq!(asked, [FONT_MAX_GLYPH_RUN, 1]);
+    }
+
+    #[test]
+    fn a_reply_answering_more_than_was_asked_is_refused_rather_than_sliced_past() {
+        let mut landed = 0;
+        let paged = page_outlines(
+            &mut landed,
+            &['a', 'b'],
+            |_, run| Some(answering(run.len() + 1)),
+            |landed, _, _| *landed += 1,
+        );
+        assert_eq!(paged, None);
+        assert_eq!(landed, 0, "nothing of a corrupt reply is kept");
+    }
+
+    #[test]
+    fn a_reply_answering_nothing_is_refused_rather_than_asked_for_forever() {
+        let mut fetches = 0;
+        let paged = page_outlines(
+            &mut fetches,
+            &['a'],
+            |fetches, _| {
+                *fetches += 1;
+                Some(answering(0))
+            },
+            |_, _, _| {},
+        );
+        assert_eq!(paged, None);
+        assert_eq!(fetches, 1);
     }
 }

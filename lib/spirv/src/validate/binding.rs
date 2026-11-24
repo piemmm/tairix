@@ -118,6 +118,39 @@ pub struct Binding {
     pub stages: Stages,
 }
 
+tairix_util::flags! {
+    /// The ways an entry point samples an image through a sampler.
+    pub struct SampleForms(u8) {
+        /// A depth-reference sample or gather: the sampler compares.
+        const COMPARE = 1;
+        /// Any other sample or gather: the sampler reads texels.
+        const READ = 1 << 1;
+        /// At the level of detail its derivatives give.
+        const IMPLICIT = 1 << 2;
+        /// Through projective coordinates.
+        const PROJECTIVE = 1 << 3;
+        /// With a level-of-detail bias.
+        const BIAS = 1 << 4;
+        /// With a texel offset.
+        const OFFSET = 1 << 5;
+        /// A gather of four texels.
+        const GATHER = 1 << 6;
+    }
+}
+
+/// An image an entry point samples, the sampler it samples it through, and
+/// every way it does.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Sampling {
+    /// The image's set and binding.
+    pub image: (u32, u32),
+    /// The sampler's set and binding: the image's own for a combined image
+    /// sampler.
+    pub sampler: (u32, u32),
+    /// How.
+    pub forms: SampleForms,
+}
+
 /// What a pipeline's layout provides: its bindings, by ascending set and
 /// binding, and the bytes of push constants it holds and the stages that see
 /// them.
@@ -286,6 +319,43 @@ impl Validator<'_> {
             return Err(Rule::Resource);
         }
         Ok((bindings, push_constants))
+    }
+
+    /// The images the call tree samples and the samplers it samples them
+    /// through, by the set and binding of each, ascending and once apiece.
+    pub(crate) fn samplings(&self, reach: &Reach) -> Result<Vec<Sampling>, Rule> {
+        let place = |slot: u32| -> Result<(u32, u32), Rule> {
+            let &(id, _) = self
+                .m
+                .definitions
+                .get(slot as usize)
+                .ok_or(Rule::OpaqueUse)?;
+            let set = self
+                .decoration_value_of(id, NONE, Decoration::DESCRIPTOR_SET)
+                .ok_or(Rule::Resource)?;
+            let binding = self
+                .decoration_value_of(id, NONE, Decoration::BINDING)
+                .ok_or(Rule::Resource)?;
+            Ok((set, binding))
+        };
+        let mut samplings: Vec<Sampling> =
+            super::with_capacity(reach.samplings.len()).map_err(|r| r.rule)?;
+        for &(image, sampler, forms) in &reach.samplings {
+            samplings.push(Sampling {
+                image: place(image)?,
+                sampler: place(sampler)?,
+                forms,
+            });
+        }
+        samplings.sort_unstable_by_key(|s| (s.image, s.sampler));
+        samplings.dedup_by(|later, kept| {
+            let same = (later.image, later.sampler) == (kept.image, kept.sampler);
+            if same {
+                kept.forms = kept.forms.with(later.forms);
+            }
+            same
+        });
+        Ok(samplings)
     }
 
     /// The kind of descriptor a variable of `class` holding `element`

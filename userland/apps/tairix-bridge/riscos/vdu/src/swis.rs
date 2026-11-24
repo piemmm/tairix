@@ -143,20 +143,14 @@ fn set_colour(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
             })))
         })?;
         match words {
-            Ok(pattern) => {
-                for (i, word) in (0u32..).zip(pattern) {
-                    os.write_word(regs.r[1].wrapping_add(4 * i), word)?;
-                }
-            }
+            Ok(pattern) => os.write_words(regs.r[1], &pattern)?,
             Err(colour) => regs.r[1] = colour,
         }
         return Ok(());
     }
     let pattern = if flags & set_colour::PATTERN != 0 {
         let mut words = [0; 8];
-        for (i, word) in (0u32..).zip(words.iter_mut()) {
-            *word = os.read_word(regs.r[1].wrapping_add(4 * i))?;
-        }
+        os.read_words(regs.r[1], &mut words)?;
         Some(words)
     } else {
         None

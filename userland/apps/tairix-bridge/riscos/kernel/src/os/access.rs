@@ -283,6 +283,25 @@ impl Os<'_> {
         self.write_bytes(address, &value.to_le_bytes())
     }
 
+    /// Fills `out` with the words from `address` on, each read as
+    /// [`Os::read_word`] reads it, the address wrapping past the top of
+    /// memory.
+    pub fn read_words(&mut self, address: u32, out: &mut [u32]) -> Result<(), Fail> {
+        for (i, word) in (0u32..).zip(out) {
+            *word = self.read_word(address.wrapping_add(4 * i))?;
+        }
+        Ok(())
+    }
+
+    /// Writes `words` from `address` on, each as [`Os::write_word`] writes
+    /// it, the address wrapping past the top of memory.
+    pub fn write_words(&mut self, address: u32, words: &[u32]) -> Result<(), Fail> {
+        for (i, &word) in (0u32..).zip(words) {
+            self.write_word(address.wrapping_add(4 * i), word)?;
+        }
+        Ok(())
+    }
+
     /// The byte at `address` if a privileged mode may read it, without
     /// aborting: for the kernel's reading of what the guest may have
     /// overwritten.

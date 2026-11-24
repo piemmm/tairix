@@ -10,7 +10,9 @@ use core::fmt::Write as _;
 
 use tairix_spirv::assemble::admit;
 use tairix_spirv::enumerant::{Dim, ImageFormat};
-use tairix_spirv::{Access, BindingKind, Component, ImageShape, Stages};
+use tairix_spirv::{Access, Component, ImageShape, Stages};
+
+use crate::{DescriptorType, SampleType, SamplerType};
 
 use super::f;
 use crate::device_tests::{context, device, memory, over, queue, submit};
@@ -105,7 +107,7 @@ pub(in crate::software::shader::tests) fn stores(values: &[&str], lane_base: boo
 /// A binding a test makes: its kind and its resources, as many as its
 /// count.
 pub(in crate::software::shader::tests) struct Bound<'a>(
-    pub(super) BindingKind,
+    pub(super) DescriptorType,
     pub(super) Vec<Resource<'a>>,
 );
 
@@ -124,7 +126,7 @@ pub(in crate::software::shader::tests) fn dispatch(
         .expect("a module");
     let mut bindings = alloc::vec![LayoutBinding {
         binding: 0,
-        kind: BindingKind::StorageBuffer,
+        kind: DescriptorType::StorageBuffer,
         count: 1,
         access: Access::READ.with(Access::WRITE),
         stages: Stages::COMPUTE,
@@ -132,9 +134,9 @@ pub(in crate::software::shader::tests) fn dispatch(
     for (at, Bound(kind, resources)) in (1u32..).zip(bound) {
         let writable = matches!(
             kind,
-            BindingKind::StorageImage(_)
-                | BindingKind::StorageBuffer
-                | BindingKind::StorageTexelBuffer(_)
+            DescriptorType::StorageImage(_)
+                | DescriptorType::StorageBuffer
+                | DescriptorType::StorageTexelBuffer(_)
         );
         bindings.push(LayoutBinding {
             binding: at,
@@ -432,7 +434,7 @@ fn a_storage_image_is_written_read_and_added_to_texel_by_texel() {
         &storage_body(),
         16,
     );
-    let kind = BindingKind::StorageImage(shape(Component::Uint, ImageFormat::R32UI, false));
+    let kind = DescriptorType::StorageImage(shape(Component::Uint, ImageFormat::R32UI, false));
     let out = dispatch(
         &context,
         &text,
@@ -519,7 +521,7 @@ fn a_texel_of_fewer_components_writes_zero_to_the_rest() {
         "OpCapability ImageQuery\nOpCapability StorageImageReadWithoutFormat\nOpCapability StorageImageWriteWithoutFormat",
         1,
     );
-    let kind = BindingKind::StorageImage(shape(Component::Uint, ImageFormat::UNKNOWN, false));
+    let kind = DescriptorType::StorageImage(shape(Component::Uint, ImageFormat::UNKNOWN, false));
     let out = dispatch(
         &context,
         &text,
@@ -623,16 +625,23 @@ fn a_float_image_is_fetched_sampled_gathered_and_queried() {
         &text,
         &[
             Bound(
-                BindingKind::SampledImage(float_image),
+                DescriptorType::SampledImage(float_image, SampleType::Float),
                 alloc::vec![Resource::Image(&texels)],
             ),
-            Bound(BindingKind::Sampler, alloc::vec![Resource::Sampler(&point)]),
             Bound(
-                BindingKind::Sampler,
+                DescriptorType::Sampler(SamplerType::NonFiltering),
+                alloc::vec![Resource::Sampler(&point)],
+            ),
+            Bound(
+                DescriptorType::Sampler(SamplerType::Filtering),
                 alloc::vec![Resource::Sampler(&linear)],
             ),
             Bound(
-                BindingKind::CombinedImageSampler(float_image),
+                DescriptorType::CombinedImageSampler(
+                    float_image,
+                    SampleType::Float,
+                    SamplerType::NonFiltering,
+                ),
                 alloc::vec![Resource::ImageSampler(&texels, &point)],
             ),
         ],
@@ -714,8 +723,11 @@ fn a_depth_image_is_compared_against_sampled_projected_and_gathered() {
         &depth_body(),
         1,
     );
-    let kind =
-        BindingKind::CombinedImageSampler(shape(Component::Float, ImageFormat::UNKNOWN, false));
+    let kind = DescriptorType::CombinedImageSampler(
+        shape(Component::Float, ImageFormat::UNKNOWN, false),
+        SampleType::UnfilterableDepth,
+        SamplerType::NonFilteringComparison,
+    );
     let out = dispatch(
         &context,
         &text,
@@ -812,10 +824,14 @@ fn a_cube_is_gathered_from_its_face_and_the_face_beside_it() {
         &cube_body(),
         1,
     );
-    let kind = BindingKind::CombinedImageSampler(ImageShape {
-        dim: Dim::CUBE,
-        ..shape(Component::Float, ImageFormat::UNKNOWN, false)
-    });
+    let kind = DescriptorType::CombinedImageSampler(
+        ImageShape {
+            dim: Dim::CUBE,
+            ..shape(Component::Float, ImageFormat::UNKNOWN, false)
+        },
+        SampleType::UnfilterableFloat,
+        SamplerType::NonFiltering,
+    );
     let out = dispatch(
         &context,
         &text,
@@ -874,7 +890,10 @@ fn a_multisampled_image_counts_its_samples() {
         &samples_body(),
         1,
     );
-    let kind = BindingKind::SampledImage(shape(Component::Float, ImageFormat::UNKNOWN, true));
+    let kind = DescriptorType::SampledImage(
+        shape(Component::Float, ImageFormat::UNKNOWN, true),
+        SampleType::UnfilterableFloat,
+    );
     let out = dispatch(
         &context,
         &text,

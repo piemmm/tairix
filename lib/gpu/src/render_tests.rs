@@ -585,6 +585,264 @@ fn a_pipeline_whose_stages_and_targets_disagree_is_refused() {
     );
 }
 
+/// [`painting`], its output red, green and blue alone; and with `second` a
+/// second colour of those three at location 0, index 1, for a dual-source
+/// blend.
+fn painting_three(second: bool) -> String {
+    let painted = painting("")
+        .replace(
+            "%v4 = OpTypeVector %float 4",
+            "%v4 = OpTypeVector %float 4\n%v3 = OpTypeVector %float 3",
+        )
+        .replace(
+            "%out_v4 = OpTypePointer Output %v4",
+            "%out_v4 = OpTypePointer Output %v4\n%out_v3 = OpTypePointer Output %v3",
+        )
+        .replace(
+            "OpStore %out_colour %c",
+            "%rgb = OpVectorShuffle %v3 %c %c 0 1 2\nOpStore %out_colour %rgb",
+        );
+    if second {
+        painted
+            .replace("%in_colour %out_colour", "%in_colour %out_colour %out_second")
+            .replace(
+                "%out_colour = OpVariable %out_v4 Output",
+                "%out_colour = OpVariable %out_v4 Output\n%out_second = OpVariable %out_v3 Output",
+            )
+            .replace(
+                "OpDecorate %out_colour Location 0",
+                "OpDecorate %out_colour Location 0\nOpDecorate %out_second Location 0\nOpDecorate %out_second Index 1",
+            )
+            .replace(
+                "OpStore %out_colour %rgb",
+                "OpStore %out_colour %c\nOpStore %out_second %rgb",
+            )
+    } else {
+        painted.replace(
+            "%out_colour = OpVariable %out_v4 Output",
+            "%out_colour = OpVariable %out_v3 Output",
+        )
+    }
+}
+
+/// A blend factor reading a channel no output writes has no meaning a host
+/// shares, so the pipeline is refused; one reading only what is written, or
+/// taking a lesser or greater of two, which reads no factor, is made.
+#[test]
+fn a_blend_reading_a_channel_no_output_writes_is_refused() {
+    use crate::{Blend, BlendFactor, BlendOp, Error};
+    let device = rendering();
+    let context = context(&device);
+    let vertex = passing(VEC4, "");
+    let (three, second) = (painting_three(false), painting_three(true));
+    let adding = Blend {
+        source_color: BlendFactor::One,
+        destination_color: BlendFactor::One,
+        color: BlendOp::Add,
+        source_alpha: BlendFactor::One,
+        destination_alpha: BlendFactor::One,
+        alpha: BlendOp::Add,
+    };
+    let by_alpha = Blend {
+        source_color: BlendFactor::SourceAlpha,
+        destination_color: BlendFactor::OneMinusSourceAlpha,
+        ..adding
+    };
+    let colour = ColourMask::RED
+        .with(ColourMask::GREEN)
+        .with(ColourMask::BLUE);
+    let by_second = |source_color| Blend {
+        source_color,
+        ..adding
+    };
+    for (what, blend, mask, fragment, made_or) in [
+        ("a sum", adding, ColourMask::ALL, &three, Ok(())),
+        (
+            "scaled by the held alpha",
+            by_second(BlendFactor::DestinationAlpha),
+            ColourMask::ALL,
+            &three,
+            Ok(()),
+        ),
+        (
+            "the lesser of two",
+            Blend {
+                color: BlendOp::Min,
+                ..by_alpha
+            },
+            ColourMask::ALL,
+            &three,
+            Ok(()),
+        ),
+        (
+            "scaled by an unwritten alpha",
+            by_alpha,
+            ColourMask::ALL,
+            &three,
+            Err(Error::Interface),
+        ),
+        (
+            "its colour alone written",
+            by_alpha,
+            colour,
+            &three,
+            Err(Error::Interface),
+        ),
+        (
+            "by the second colour's channels",
+            by_second(BlendFactor::Source1Color),
+            ColourMask::ALL,
+            &second,
+            Ok(()),
+        ),
+        (
+            "by the second colour's unwritten alpha",
+            by_second(BlendFactor::Source1Alpha),
+            ColourMask::ALL,
+            &second,
+            Err(Error::Interface),
+        ),
+    ] {
+        let targets = [ColourTarget {
+            format: Format::Rgba8Unorm,
+            blend: Some(blend),
+            write_mask: mask,
+        }];
+        let stages = ((vertex.as_str(), fragment.as_str()), &ATTRIBUTES[..]);
+        let made = made(&context, &triangles(&targets), stages, |_| {});
+        assert_eq!(made.map(drop), made_or, "{what}");
+    }
+    let beside = [
+        ColourTarget {
+            format: Format::Rgba8Unorm,
+            blend: Some(by_second(BlendFactor::Source1Color)),
+            write_mask: ColourMask::ALL,
+        },
+        plain(Format::Rgba8Unorm),
+    ];
+    let stages = ((vertex.as_str(), second.as_str()), &ATTRIBUTES[..]);
+    assert_eq!(
+        made(&context, &triangles(&beside), stages, |_| {}).map(drop),
+        Err(Error::Interface),
+        "a second colour read beside another target"
+    );
+}
+
+/// A vertex attribute is read at a whole number of its alignment, its
+/// channel's bytes or a packed format's whole texel's, so its offset and its
+/// buffer's stride are each refused off it.
+#[test]
+fn an_attribute_off_its_alignment_is_refused() {
+    use crate::Error;
+    const STRIDED: [VertexBuffer<'static>; 1] = [VertexBuffer {
+        stride: 34,
+        step: VertexStep::Vertex,
+        attributes: &ATTRIBUTES,
+    }];
+    let device = rendering();
+    let context = context(&device);
+    let (vertex, fragment) = (passing(VEC4, ""), painting(""));
+    let targets = [plain(Format::Rgba8Unorm)];
+    let shape = triangles(&targets);
+    let stages = (vertex.as_str(), fragment.as_str());
+    let at = |format, offset| {
+        let attributes = [
+            ATTRIBUTES[0],
+            VertexAttribute {
+                location: 1,
+                format,
+                offset,
+            },
+        ];
+        made(&context, &shape, (stages, &attributes), |_| {}).map(drop)
+    };
+    for (what, format, offset, made_or) in [
+        (
+            "a word's channels at half a word",
+            Format::Rgba32Float,
+            18,
+            Err(Error::Misaligned),
+        ),
+        ("a byte's channels anywhere", Format::Rgba8Unorm, 17, Ok(())),
+        (
+            "a packed format at half its texel",
+            Format::Rgb10A2Unorm,
+            18,
+            Err(Error::Misaligned),
+        ),
+        (
+            "a packed format at whole texels",
+            Format::Rgb10A2Unorm,
+            20,
+            Ok(()),
+        ),
+    ] {
+        assert_eq!(at(format, offset), made_or, "{what}");
+    }
+    let strided = made(&context, &shape, (stages, &ATTRIBUTES), |desc| {
+        desc.vertex_buffers = &STRIDED;
+    });
+    assert_eq!(
+        strided.map(drop),
+        Err(Error::Misaligned),
+        "a stride off its attributes' alignment"
+    );
+}
+
+/// Alpha-to-coverage reads the first target's alpha, so a pipeline whose
+/// fragment stage writes none, or that has no fragment stage, is refused.
+#[test]
+fn coverage_of_an_unwritten_alpha_is_refused() {
+    use crate::Error;
+    let device = rendering();
+    let context = context(&device);
+    let vertex = passing(VEC4, "");
+    let targets = [plain(Format::Rgba8Unorm)];
+    let shape = Shape {
+        multisample: Multisample {
+            samples: 4,
+            mask: u32::MAX,
+            alpha_to_coverage: true,
+        },
+        ..triangles(&targets)
+    };
+    let coverage = |fragment: &str, unstaged: bool| {
+        let stages = ((vertex.as_str(), fragment), &ATTRIBUTES[..]);
+        made(&context, &shape, stages, |desc| {
+            if unstaged {
+                desc.fragment = None;
+            }
+        })
+        .map(drop)
+    };
+    let uncovered = Shape {
+        multisample: Multisample {
+            alpha_to_coverage: false,
+            ..shape.multisample
+        },
+        ..triangles(&targets)
+    };
+    let stageless = made(
+        &context,
+        &uncovered,
+        ((vertex.as_str(), painting("").as_str()), &ATTRIBUTES[..]),
+        |desc| desc.fragment = None,
+    );
+    assert_eq!(stageless.map(drop), Ok(()), "no fragment stage, uncovered");
+    let (three, four) = (painting_three(false), painting(""));
+    assert_eq!(
+        coverage(&three, false),
+        Err(Error::Interface),
+        "of an unwritten alpha"
+    );
+    assert_eq!(
+        coverage(&four, true),
+        Err(Error::Interface),
+        "with no fragment stage"
+    );
+    assert_eq!(coverage(&four, false), Ok(()), "of a written one");
+}
+
 /// What a stage adds to count its invocations into the storage buffer at
 /// set 0, binding 0: its decorations, its types and variable, and the add.
 const COUNTER: (&str, &str, &str) = (

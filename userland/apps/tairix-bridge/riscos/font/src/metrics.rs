@@ -8,26 +8,30 @@
 use alloc::vec::Vec;
 use core::mem::size_of;
 
+use tairix_util::endian::le_u16;
+
+use crate::le_i16;
+
 /// The bytes before the character map: the name, two words, then the count
 /// and version bytes.
 const HEADER: usize = 52;
-const NAME: usize = 40;
+pub(crate) const NAME: usize = 40;
 const COUNT_LOW: usize = 48;
 const VERSION: usize = 49;
 const FLAGS: usize = 50;
 const COUNT_HIGH: usize = 51;
 /// The characters a map covers when its size is not given.
-const MAP_DEFAULT: usize = 256;
+pub(crate) const MAP_DEFAULT: usize = 256;
 /// The file format versions: 0 has no flags, 2 has them; 1 is refused.
 const PLAIN: u8 = 0;
-const FLAGGED: u8 = 2;
+pub(crate) const FLAGGED: u8 = 2;
 
 /// The flags byte's bits.
 pub(crate) mod flag {
     pub(crate) const NO_BOXES: u8 = 1;
     pub(crate) const NO_X_OFFSETS: u8 = 1 << 1;
     pub(crate) const NO_Y_OFFSETS: u8 = 1 << 2;
-    pub(super) const MORE: u8 = 1 << 3;
+    pub(crate) const MORE: u8 = 1 << 3;
     pub(super) const RESERVED: u8 = 1 << 4 | 1 << 7;
     pub(super) const MAP_SIZED: u8 = 1 << 5;
     pub(super) const WIDE_KERNS: u8 = 1 << 6;
@@ -147,7 +151,7 @@ impl Metrics {
             .unwrap_or(NAME);
         let mut at = HEADER;
         let map = if flags & flag::MAP_SIZED != 0 {
-            let size = usize::from(u16_at(bytes, at)?);
+            let size = usize::from(le_u16(bytes, at).ok_or(Malformed)?);
             at += 2;
             match size {
                 0 => None,
@@ -164,8 +168,9 @@ impl Metrics {
                 return Ok(None);
             }
             let values = (0..slots)
-                .map(|slot| i16_at(bytes, at + 2 * slot).map(i32::from))
-                .collect::<Result<Vec<i32>, Malformed>>()?;
+                .map(|slot| le_i16(bytes, at + 2 * slot).map(i32::from))
+                .collect::<Option<Vec<i32>>>()
+                .ok_or(Malformed)?;
             at += 2 * slots;
             Ok(Some(values))
         };
@@ -307,7 +312,10 @@ impl Drop for Metrics {
 
 /// A character map of `size` byte entries at `*at`.
 fn map(bytes: &[u8], at: &mut usize, size: usize) -> Result<Vec<u16>, Malformed> {
-    let entries = bytes.get(*at..*at + size).ok_or(Malformed)?;
+    let entries = bytes
+        .get(*at..)
+        .and_then(|rest| rest.get(..size))
+        .ok_or(Malformed)?;
     *at += size;
     Ok(entries.iter().map(|&slot| u16::from(slot)).collect())
 }
@@ -316,14 +324,18 @@ fn map(bytes: &[u8], at: &mut usize, size: usize) -> Result<Vec<u16>, Malformed>
 /// pairs, each where its offset from the offsets' start says, the two
 /// reserved areas past them.
 fn more(bytes: &[u8], at: usize, flags: u8) -> Result<(Option<Misc>, Vec<Kern>), Malformed> {
-    let misc_at = at + usize::from(u16_at(bytes, at)?);
-    let kerns_at = at + usize::from(u16_at(bytes, at + 2)?);
-    let reserved_at = at + usize::from(u16_at(bytes, at + 4)?);
+    let misc_at = at + usize::from(le_u16(bytes, at).ok_or(Malformed)?);
+    let kerns_at = at + usize::from(le_u16(bytes, at + 2).ok_or(Malformed)?);
+    let reserved_at = at + usize::from(le_u16(bytes, at + 4).ok_or(Malformed)?);
     if misc_at > kerns_at || kerns_at > reserved_at || reserved_at > bytes.len() {
         return Err(Malformed);
     }
     let misc = if kerns_at > misc_at {
-        let field = |offset: usize| i16_at(bytes, misc_at + offset).map(i32::from);
+        let field = |offset: usize| {
+            le_i16(bytes, misc_at + offset)
+                .map(i32::from)
+                .ok_or(Malformed)
+        };
         Some(Misc {
             bbox: Box {
                 x0: field(0)?,
@@ -354,7 +366,7 @@ fn kerns(bytes: &[u8], mut at: usize, flags: u8) -> Result<Vec<Kern>, Malformed>
     let wide = flags & flag::WIDE_KERNS != 0;
     let code = |at: &mut usize| -> Result<u16, Malformed> {
         let value = if wide {
-            u16_at(bytes, *at)?
+            le_u16(bytes, *at).ok_or(Malformed)?
         } else {
             u16::from(byte_at(bytes, *at)?)
         };
@@ -379,7 +391,7 @@ fn kerns(bytes: &[u8], mut at: usize, flags: u8) -> Result<Vec<Kern>, Malformed>
                 if !present {
                     return Ok(0);
                 }
-                let value = i16_at(bytes, at)?;
+                let value = le_i16(bytes, at).ok_or(Malformed)?;
                 at += 2;
                 Ok(i32::from(value))
             };
@@ -396,15 +408,6 @@ fn kerns(bytes: &[u8], mut at: usize, flags: u8) -> Result<Vec<Kern>, Malformed>
 
 fn byte_at(bytes: &[u8], at: usize) -> Result<u8, Malformed> {
     bytes.get(at).copied().ok_or(Malformed)
-}
-
-fn u16_at(bytes: &[u8], at: usize) -> Result<u16, Malformed> {
-    let pair = bytes.get(at..at + 2).ok_or(Malformed)?;
-    Ok(u16::from_le_bytes([pair[0], pair[1]]))
-}
-
-fn i16_at(bytes: &[u8], at: usize) -> Result<i16, Malformed> {
-    u16_at(bytes, at).map(u16::cast_signed)
 }
 
 #[cfg(test)]

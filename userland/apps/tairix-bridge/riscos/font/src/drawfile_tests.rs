@@ -5,12 +5,14 @@
 
 use alloc::vec::Vec;
 
-use tairix_riscos_draw::fixture;
+use tairix_drawing::riscos::format;
+use tairix_riscos_draw::fixture::{self, COLUMN};
 use tairix_riscos_filing::session::Session;
 use tairix_riscos_kernel::os::Regs;
+use tairix_riscos_kernel::swi::font::flag;
 use tairix_riscos_kernel::swi::{chunk, colour_trans, X};
 
-use crate::fixture::{call, find, fonts, mode, read_words, write, write_words};
+use crate::fixture::{call, find, fonts, mode, read_words, write, write_words, RED, WHITE};
 use crate::module::call::{PAINT, SWITCH_OUTPUT_TO_BUFFER};
 
 /// Where the file, the hand-painted strings and their blocks go, and the
@@ -22,15 +24,9 @@ const IDENTITY: u32 = 0x21100;
 const BUFFER: u32 = 0x30000;
 const ROOM: i32 = 0x2_0000;
 
-/// The column the probes painted in, 100 points to 200 both ways, and the
-/// area's colours.
-const COLUMN: [i32; 4] = [64_000, 64_000, 128_000, 128_000];
-const RED: u32 = 0x0000_FF00;
-const WHITE: u32 = 0xFFFF_FF00;
-
 /// `Font_Paint`'s flags for a text area's line: a coordinate block, a
 /// matrix and a length, in millipoints.
-const LINE: u32 = 0xE0;
+const LINE: u32 = flag::BLOCK | flag::MATRIX | flag::LENGTH;
 
 /// Mode 28, as the probes ran in, and Lay's handle at `sixteenths`.
 fn session() -> (Session, u32) {
@@ -90,7 +86,7 @@ fn painted(s: &mut Session, lines: &[Line]) -> Vec<i32> {
             .os()
             .perform(X | colour_trans::SET_FONT_COLOURS, &mut regs)
             .expect("the colours");
-        write_words(s, IDENTITY, &[0x1_0000, 0, 0, 0x1_0000, 0, 0]);
+        write_words(s, IDENTITY, &format::IDENTITY.map(u32::cast_signed));
         for line in lines {
             write(s, STRINGS, &line.text);
             write_words(s, COORDINATES, &[line.spacing, 0, 0, 0, 0, 0, 0, 0]);
@@ -314,7 +310,7 @@ fn a_line_longer_than_the_buffer_goes_out_in_pieces_along_it() {
 const RENDER_MATRIX: u32 = 0x21200;
 /// RISC OS 5.30's DrawFile paints a text in OS units, by a matrix, in a
 /// handle.
-const TEXT: u32 = 0x150;
+const TEXT: u32 = flag::OS_UNITS | flag::MATRIX | flag::HANDLE;
 /// The probes' text: "AB" in Lay at 16 points from (160, 200) OS units.
 const AB: fixture::Text<'static> = fixture::Text {
     bounds: [40960, 51200, 51200, 61440],
@@ -390,7 +386,7 @@ fn a_text_is_painted_at_its_base_through_the_render_s_matrix_in_os_units() {
         b"AB",
         TEXT,
         (160, 200),
-        [0x1_0000, 0, 0, 0x1_0000, 0, 0],
+        format::IDENTITY.map(u32::cast_signed),
     );
     assert!(!genuine.is_empty());
     assert_eq!(ours, genuine);

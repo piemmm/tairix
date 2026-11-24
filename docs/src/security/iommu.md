@@ -103,6 +103,14 @@ from its common configuration, mapped for the read; one that is not decoding
 answers all ones and is refused alike. Devices on a platform with no unit are
 unaffected.
 
+A GPU runs programs its clients submit, so on a platform that has a unit it
+is served only from behind one: the kernel binds a GPU's device channel for a
+node a unit translates, or on a platform whose firmware declares no unit, and
+refuses it otherwise, audited (`4270`), whatever became of the unit and
+whatever the administrator chose for a malformed table's functions
+(`plans/GPU.md` GP11.3). The driver drives its device without serving it and
+never learns why.
+
 Firmware may name a reserved window twice, or two that overlap; a domain maps
 their union once.
 
@@ -482,6 +490,7 @@ second, a load-dependent test.
 | `DmaTranslationUnconfirmed` | 4095 | a unit could not confirm a translation ended — a driver's domain, a removed node's, or one carve's; `node`, `generation` |
 | `DmaBusMaster` | 4147 | the kernel turned a function's bus mastering on as its owner began or off as it ended, recorded in the order the changes landed; `node`, `generation`, `master` (`on`/`off`), `outcome` (`applied`, or `refused` where the function reads back otherwise) |
 | `DmaGroupRefused` | 4148 | a driver's first carve was refused: another node's live owner holds its isolation group; `node`, `generation`, `group`, `holder` |
+| `DeviceChannelUnconfined` | 4270 | a driver was refused its node's GPU channel: the platform declares a unit and none translates the node; `endpoint`, `node`, `dma` (`untranslated`, or `stranded` behind a unit translating nothing) |
 | `DmaFreesUnbatched` | 4250 | no task confirms freed carves in batches, so each free waits for an invalidation of its own; `cause` (`no_room`, `not_admitted`, `cannot_park`) |
 | `PortIoRefused` | 4158 | a driver's port access reached the ports the kernel keeps (PCI configuration mechanism #1); `port`, `width`, `task` |
 | `InterruptRemapping` | 4159 | the port routed the interrupt sources it set up at boot: `outcome` `remapped` (every source raises only the entry, LPI mapping or interrupt file the kernel wrote), `unremapped` (no unit, or one that cannot remap: a device can forge any interrupt), `refused`, `stranded` (a unit could not turn remapping back off and refuses its devices' interrupts), or `unrouted` with the `unrouted` count |

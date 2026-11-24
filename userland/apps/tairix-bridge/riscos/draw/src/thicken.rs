@@ -32,20 +32,72 @@ use crate::geometry::{length_of, Point};
 use crate::path::Element;
 use crate::stage::{Guest, Refusal, Sink, Stop};
 
-/// The cap and join block's fields.
+/// The Draw module's cap and join block: its join, each end's cap, its
+/// mitre limit and each end's triangle cap, read from its four words and
+/// written to them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Style {
-    join: u32,
+pub(crate) struct Style {
+    pub(crate) join: u32,
     /// The leading cap: at a run's end.
-    end_cap: u32,
+    pub(crate) end_cap: u32,
     /// The trailing cap: at a run's start.
-    start_cap: u32,
+    pub(crate) start_cap: u32,
     /// The longest a mitre may be, in line widths, sixteen bits of fraction.
-    mitre: i32,
-    /// A triangular cap's size: its length in the top half, its width in the
-    /// bottom, each in 256ths of the line's width.
-    end_triangle: u32,
-    start_triangle: u32,
+    pub(crate) mitre: i32,
+    pub(crate) end_triangle: Triangle,
+    pub(crate) start_triangle: Triangle,
+}
+
+impl Style {
+    /// The block its words hold.
+    fn of([kinds, mitre, end_triangle, start_triangle]: [u32; 4]) -> Self {
+        let [join, end_cap, start_cap, _] = kinds.to_le_bytes();
+        Self {
+            join: u32::from(join),
+            end_cap: u32::from(end_cap),
+            start_cap: u32::from(start_cap),
+            mitre: mitre.cast_signed(),
+            end_triangle: Triangle::of(end_triangle),
+            start_triangle: Triangle::of(start_triangle),
+        }
+    }
+
+    /// Its block's words.
+    pub(crate) const fn words(self) -> [u32; 4] {
+        [
+            self.join | (self.end_cap << 8) | (self.start_cap << 16),
+            self.mitre.cast_unsigned(),
+            self.end_triangle.word(),
+            self.start_triangle.word(),
+        ]
+    }
+}
+
+/// A triangular cap's size, across and along its line, each in
+/// [`Triangle::UNIT`] parts of the line's width.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Triangle {
+    pub(crate) width: u32,
+    pub(crate) length: u32,
+}
+
+impl Triangle {
+    /// The parts of its line's width the block holds a size in.
+    pub(crate) const UNIT: u32 = 256;
+
+    /// The size a block's word holds: its length in the top half, its width
+    /// in the bottom.
+    const fn of(word: u32) -> Self {
+        Self {
+            width: word & 0xFFFF,
+            length: word >> 16,
+        }
+    }
+
+    /// Its block's word.
+    const fn word(self) -> u32 {
+        (self.length << 16) | self.width
+    }
 }
 
 /// A drawn segment's direction: its end less its start.
@@ -104,19 +156,8 @@ impl<'a> Thickener<'a> {
             return Ok(style);
         }
         let mut words = [0; 4];
-        for (i, word) in (0u32..).zip(&mut words) {
-            *word = guest.read_word(self.block.wrapping_add(4 * i))?;
-        }
-        let [kinds, mitre, end_triangle, start_triangle] = words;
-        let [join, end_cap, start_cap, _] = kinds.to_le_bytes();
-        let style = Style {
-            join: u32::from(join),
-            end_cap: u32::from(end_cap),
-            start_cap: u32::from(start_cap),
-            mitre: mitre.cast_signed(),
-            end_triangle,
-            start_triangle,
-        };
+        guest.read_words(self.block, &mut words)?;
+        let style = Style::of(words);
         self.style = Some(style);
         Ok(style)
     }
@@ -232,9 +273,11 @@ impl<'a> Thickener<'a> {
             CAP_ROUND => self.circle(guest, at),
             CAP_SQUARE => self.polygon(guest, &[at, at + n, at + n - back, at - n - back, at - n]),
             CAP_TRIANGLE => {
-                let [width, length] = [triangle & 0xFFFF, triangle >> 16].map(u32::cast_signed);
+                let [width, length] = [triangle.width, triangle.length].map(u32::cast_signed);
+                // The sizes are in parts of the whole width, of which `n` is half.
+                let shift = Triangle::UNIT.trailing_zeros() - 1;
                 let scaled = |p: Point, by: i32| {
-                    Point::new(p.x.wrapping_mul(by) >> 7, p.y.wrapping_mul(by) >> 7)
+                    Point::new(p.x.wrapping_mul(by) >> shift, p.y.wrapping_mul(by) >> shift)
                 };
                 let v = scaled(n, width);
                 let tip = at - scaled(back, length);

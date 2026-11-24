@@ -491,6 +491,84 @@ fn images_are_copied_in_and_out_alike() {
     });
 }
 
+/// A copy out of an image the context does not hold is refused as it is
+/// uploaded: the bytes its regions write are decided by the image, so it is
+/// never decided against an image the context makes under that key later.
+#[test]
+fn an_upload_copying_out_of_an_image_its_context_lacks_is_refused_as_it_arrives() {
+    let loopback = Loopback::new(MEMORY, Arc::new(tairix_parallel::Serial)).expect("served");
+    // Keys as a fresh context gives its first image and buffer.
+    let typed = loopback.connect(2, REGION).expect("connected");
+    let theirs = context(&typed);
+    let desc = ImageDesc {
+        dimension: ImageDimension::D2,
+        format: Format::Rgba8Unorm,
+        extent: Extent3d {
+            width: 4,
+            height: 4,
+            depth: 1,
+        },
+        mip_levels: 1,
+        array_layers: 1,
+        samples: 1,
+        usage: ImageUsage::TRANSFER_SRC,
+    };
+    let placement = memory(
+        &theirs,
+        theirs.image_requirements(&desc).expect("an image").size,
+    );
+    let image = theirs.create_image(&placement, 0, &desc).expect("placed");
+    let (_memory, target) = buffer(&theirs, 64);
+    let grant = loopback.grant(1, GPU_REGION_MIN);
+    let open = loopback.serve(1, &frame(GpuOp::Open, &ops::Open { grant }));
+    assert!(answer::<Empty>(&open.replies, open.ticket, GpuOp::Open).is_ok());
+    let made = loopback.serve(
+        1,
+        &frame(
+            GpuOp::CreateContext,
+            &ops::CreateContext { memory_limit: None },
+        ),
+    );
+    let ops::OfContext { context } =
+        answer(&made.replies, made.ticket, GpuOp::CreateContext).expect("a context");
+    let whole = BufferImageCopy {
+        buffer_offset: 0,
+        bytes_per_row: 16,
+        rows_per_image: 4,
+        image: ImageSubresource {
+            aspect: crate::Aspects::COLOR,
+            level: 0,
+            base_layer: 0,
+            layers: 1,
+        },
+        origin: Origin3d::default(),
+        extent: desc.extent,
+    };
+    let mut bytes = 1u32.to_le_bytes().to_vec();
+    let copy = crate::command::Command::ImageToBuffer {
+        src: image.key,
+        dst: target.key,
+        regions: alloc::vec![whole, whole],
+        overlapping: false,
+    };
+    crate::wire::put_command(&mut Writer::new(&mut bytes), &copy).expect("encoded");
+    loopback.write_region(grant, 0, &bytes);
+    let span = tairix_abi::gpu::RegionSpan {
+        offset: 0,
+        len: u32::try_from(bytes.len()).expect("small"),
+    };
+    let upload = ops::Upload {
+        context,
+        last: true,
+        span,
+    };
+    let uploaded = loopback.serve(1, &frame(GpuOp::Upload, &upload));
+    assert_eq!(
+        answer::<Empty>(&uploaded.replies, uploaded.ticket, GpuOp::Upload).err(),
+        Some(GpuError::Stale)
+    );
+}
+
 #[test]
 fn a_compute_pipeline_dispatches_alike() {
     agrees(|device| {

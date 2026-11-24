@@ -12,6 +12,7 @@ use std::string::String;
 use std::vec::Vec;
 
 use tairix_abi::Errno;
+use tairix_fontface::FAMILY_MANIFEST;
 
 use crate::discovery::{FaceLoad, FontStore, HandleFace, StoreFile};
 
@@ -43,7 +44,7 @@ impl FontStore<'static> for DirectoryStore {
     }
 
     fn read_manifest(&mut self, dir: &str) -> Option<String> {
-        fs::read_to_string(self.root.join(dir).join("FontFamily")).ok()
+        fs::read_to_string(self.root.join(dir).join(FAMILY_MANIFEST)).ok()
     }
 
     fn face_loader(&mut self, dir: &str, face: &str) -> Box<dyn FaceLoad<'static> + 'static> {

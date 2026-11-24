@@ -180,16 +180,22 @@ every supplier needs is defined here once:
 - **`serve::DeviceChannel`** is a device channel — an endpoint the driver
   loaded for a node serves to the services that use the device: the id its
   node is given in a block, bound restricted-sender requiring their
-  capability. Where other principals hold that capability too, the
+  capability. Its bind answers a **`serve::BoundChannel`**, which takes the
+  endpoint down (`call_destroy`) when it is dropped, so a driver that cannot
+  serve the channel after all, and lives on — the display driver whose GPU
+  goes unserved — leaves nothing bound for a caller to wait on. Where other
+  principals hold that capability too, the
   protocol's own loop admits its callers: the network channel answers the
   network stack alone. **`serve::publish_channel`** then publishes the
   channel node naming it, with whatever facts it states, so the service finds
   the channel in the tree only once it serves, and settles the driver's node:
   the channel is the one child a channel-serving driver publishes, and the
   device manager holds the boot's settling until each publishing driver has
-  settled. The audio and network channels,
-  the GPIO header and every temperature sensor bind and publish through these
-  two. A consumer finds the channel with `HwNode::channel_endpoint`.
+  settled. Each answers why it was refused, the kernel's refusal as the
+  kernel gave it, so a driver that ends or goes unserved over one states why.
+  The audio, network and GPU channels, the GPIO header and every temperature
+  sensor bind and publish through these two. A consumer finds the channel
+  with `HwNode::channel_endpoint`.
 - **`serve::thermal_sensor`** serves a `ThermalSensor` on its node's sensor
   channel for the life of the driver, as `serve::rtc` serves a clock chip.
 - **`testkit`**, behind the `test-support` feature, is the kernel a

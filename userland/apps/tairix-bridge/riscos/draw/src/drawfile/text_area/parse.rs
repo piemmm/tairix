@@ -6,6 +6,8 @@
 //! solidus. Numbers may carry a sign. Control characters are dropped but for
 //! a tab, which reads as a space, and the newline.
 
+use tairix_drawing::riscos::units::SIXTEENTHS_PER_POINT;
+
 use super::Refusal;
 
 /// The version a text must declare.
@@ -14,7 +16,7 @@ const VERSION: u32 = 1;
 pub(super) const FONTS: usize = 100;
 /// A font size is given in points, taken in sixteenths, and is never less
 /// than a point.
-const SIXTEENTHS: i32 = 16;
+const SIXTEENTHS: i32 = SIXTEENTHS_PER_POINT.cast_signed();
 
 /// How a line is set within its column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -629,6 +629,13 @@ pub enum AuditEvent {
     /// Carries the `cause`: `no_room` for the batch, `not_admitted`, or
     /// `cannot_park`.
     DmaFreesUnbatched,
+    /// A driver was refused its node's GPU channel: the platform declares a
+    /// DMA translation unit and none translates the node, so the device the
+    /// channel would serve could reach memory no context was given.
+    ///
+    /// Carries the `endpoint`, the driver's `node`, and its `dma` path:
+    /// `untranslated`, or `stranded` behind a unit that translates nothing.
+    DeviceChannelUnconfined,
     /// The firmware table describing the DMA translation units is
     /// malformed, so no unit translates: the PCI functions it would have
     /// described were withheld, or, by the administrator's choice, published
@@ -914,6 +921,7 @@ impl AuditEvent {
             Self::DmaBusMaster => 4147,
             Self::DmaGroupRefused => 4148,
             Self::DmaFreesUnbatched => 4250,
+            Self::DeviceChannelUnconfined => 4270,
             Self::DmaUnitsMalformed => 4104,
             Self::PortIoRefused => 4158,
             Self::InterruptRemapping => 4159,
@@ -1020,6 +1028,7 @@ impl AuditEvent {
             Self::DmaBusMaster => "bus mastering changed",
             Self::DmaGroupRefused => "dma carve refused: isolation group held",
             Self::DmaFreesUnbatched => "dma frees confirmed one at a time",
+            Self::DeviceChannelUnconfined => "gpu channel refused: node's dma not confined",
             Self::DmaUnitsMalformed => "dma translation units' firmware table malformed",
             Self::PortIoRefused => "port access refused: kernel-owned port",
             Self::InterruptRemapping => "interrupt sources routed",
@@ -1162,6 +1171,7 @@ mod tests {
         AuditEvent::DmaBusMaster,
         AuditEvent::DmaGroupRefused,
         AuditEvent::DmaFreesUnbatched,
+        AuditEvent::DeviceChannelUnconfined,
         AuditEvent::DmaUnitsMalformed,
         AuditEvent::PortIoRefused,
         AuditEvent::InterruptRemapping,
@@ -1195,7 +1205,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 97, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 98, "a new event belongs in `ALL`");
     }
 
     #[test]

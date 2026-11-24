@@ -14,14 +14,15 @@ use tairix_abi::ipc::{MemoryPause, IPC_SENDER_DEPTH_MAX};
 use tairix_abi::rtc_ipc::{self, RTC_ENDPOINT};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
-    CapabilityId, Delay, Errno, HwDeviceClass, HwNode, MmioMapper, ProcId, RegisterWindow,
-    PROC_ID_HEX_LEN,
+    CapabilityId, Delay, DriverError, Errno, HwDeviceClass, HwNode, MmioMapper, ProcId,
+    RegisterWindow, PROC_ID_HEX_LEN,
 };
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;
 
-use crate::exit::{end, step, DriverExit};
+pub use crate::channel::BoundChannel;
+use crate::exit::{end, error, step, DriverExit};
 use crate::supplier::{timer, Timer};
 use crate::{RtDriverHost, RtGrantSyscalls, Supplier};
 
@@ -378,11 +379,15 @@ pub struct DeviceChannel {
 }
 
 impl DeviceChannel {
-    /// Bind the channel of the node this driver was loaded for, answering
-    /// its id; [`None`] on any refusal.
-    #[must_use]
-    pub fn bind(&self) -> Option<u64> {
-        let id = self.block.endpoint(tairix_rt::hw_self_node().ok()?.node());
+    /// Bind the channel of the node this driver was loaded for.
+    ///
+    /// # Errors
+    ///
+    /// Why the driver's node could not be read, or why the kernel refused
+    /// the bind — [`Errno::PermissionDenied`] among them where it will not
+    /// serve the node's device from this driver.
+    pub fn bind(&self) -> Result<BoundChannel, Errno> {
+        let id = self.block.endpoint(tairix_rt::hw_self_node()?.node());
         let mut send_caps = CapabilitySet::empty();
         send_caps.insert(self.gate);
         let bound = tairix_rt::call_create(
@@ -393,26 +398,29 @@ impl DeviceChannel {
             self.max_reply,
             self.per_sender.clamp(1, IPC_SENDER_DEPTH_MAX),
         );
-        (bound == 0).then_some(id)
+        Errno::syscall_result(bound).map(|_| BoundChannel(id))
     }
 }
 
 /// Publish the node `compatible` of `class` naming a bound channel's
 /// `endpoint` and stating `facts`, so the service that uses the device finds
 /// it in the hardware tree only once it serves. The kernel parents it under
-/// the node the driver was loaded for. Answers the node's id; [`None`] on any
-/// refusal.
+/// the node the driver was loaded for. Answers the node's id.
 ///
 /// The channel is the one child a channel-serving driver publishes, so the
 /// driver's own node is then settled: the device manager waits on a node a
 /// publishing driver holds until it settles, and the boot with it.
-#[must_use]
+///
+/// # Errors
+///
+/// Why the node could not be built or the kernel refused it, settling
+/// nothing.
 pub fn publish_channel(
     class: HwDeviceClass,
     compatible: &[u8],
     endpoint: u64,
     facts: &[HwResource],
-) -> Option<u32> {
+) -> Result<u32, Errno> {
     crate::tree::publish_channel(&mut RtTree, class, compatible, endpoint, facts)
 }
 
@@ -448,23 +456,31 @@ pub fn thermal_sensor<S: ThermalSensor + ?Sized>(sensor: &mut S) -> i32 {
         max_reply: thermal::SENSOR_REPLY_LEN,
         per_sender: SENSOR_CHANNEL_DEPTH,
     };
-    let Some(endpoint) = channel.bind() else {
-        return end(
-            DriverExit::NoService,
-            &[step("sensor: the channel could not be bound")],
-        );
+    let channel = match channel.bind() {
+        Ok(channel) => channel,
+        Err(errno) => {
+            return end(
+                DriverExit::NoService,
+                &[
+                    step("sensor: the channel could not be bound"),
+                    error(DriverError::from_errno(errno)),
+                ],
+            )
+        }
     };
-    if publish_channel(
+    let endpoint = channel.endpoint();
+    if let Err(errno) = publish_channel(
         HwDeviceClass::Other,
         THERMAL_SENSOR_NODE_COMPATIBLE,
         endpoint,
         &[],
-    )
-    .is_none()
-    {
+    ) {
         return end(
             DriverExit::NoService,
-            &[step("sensor: the channel's node could not be published")],
+            &[
+                step("sensor: the channel's node could not be published"),
+                error(DriverError::from_errno(errno)),
+            ],
         );
     }
     let mut request = [0u8; thermal::SENSOR_REQUEST_LEN];

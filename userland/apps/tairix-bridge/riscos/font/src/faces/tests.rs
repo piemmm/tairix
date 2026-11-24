@@ -1,3 +1,5 @@
+use tairix_abi::font_ipc::FONT_MAX_GLYPH_RUN;
+
 use super::*;
 use crate::build::SquareFaces;
 

@@ -16,15 +16,17 @@ use crate::rom_encodings::BASE0;
 const LOW: usize = 256;
 /// What a table entry holds for a code no glyph is.
 const NONE: u32 = u32::MAX;
-const NOTDEF: &[u8] = b".notdef";
+/// What the PRM names a code no glyph is.
+pub(crate) const NOTDEF: &str = ".notdef";
 /// The fewest digits an Adobe Glyph List line's code has; a shorter first
 /// field comes before it.
 const CODE_DIGITS: usize = 4;
 /// The largest code a line may give.
 const CODE_MOST: u32 = 0x7FFF_FFFF;
-/// Where UTF-8 numbers the glyphs whose names the glyph lists do not know,
-/// one after another in the base encoding's order.
-const PRIVATE_FIRST: u32 = 0xE000;
+/// Unicode's private use area, where UTF-8 numbers RISC OS's own glyphs:
+/// those whose names the glyph lists do not know, one after another from its
+/// start in the base encoding's order.
+pub(crate) const PRIVATE_USE: core::ops::RangeInclusive<u32> = 0xE000..=0xF8FF;
 
 /// A code and where its name is in the file.
 #[derive(Clone, Copy, Debug)]
@@ -66,7 +68,8 @@ impl EncodingFile {
             }
             at = end + 1;
         }
-        entries.retain(|entry| &bytes[entry.start as usize..entry.end as usize] != NOTDEF);
+        let notdef = NOTDEF.as_bytes();
+        entries.retain(|entry| &bytes[entry.start as usize..entry.end as usize] != notdef);
         Self { bytes, entries }
     }
 
@@ -211,7 +214,7 @@ impl CodeMap {
     /// glyph it reaches from more than one, where no glyph's name has them.
     /// A name opening with a full stop names no character.
     pub(crate) fn utf8(base: &EncodingFile, names: &GlyphNames) -> Self {
-        let mut unnamed = PRIVATE_FIRST;
+        let mut unnamed = *PRIVATE_USE.start();
         let mut direct: Vec<(u32, u32)> = Vec::new();
         for (glyph, name) in base.names().filter(|(_, name)| name.first() != Some(&b'.')) {
             let characters = names.characters(name);

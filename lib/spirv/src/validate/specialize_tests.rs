@@ -156,3 +156,35 @@ fn a_constant_nan_converts_to_its_widths_one_quiet_nan() {
         assert_eq!(got, [*expected], "{operation}");
     }
 }
+
+/// A constant decorated `WorkgroupSize` evaluating to a zero component is
+/// refused whether or not an entry point reads it, as a plain one would be
+/// admitted only without one, so a specialization always folds.
+#[test]
+fn a_workgroup_size_no_entry_point_reads_is_held_to_no_zero_component() {
+    let admitted = admit(
+        r#"OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main"
+OpExecutionMode %main OriginUpperLeft
+OpDecorate %x SpecId 0
+OpDecorate %size BuiltIn WorkgroupSize
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%v3uint = OpTypeVector %uint 3
+%x = OpSpecConstant %uint 4
+%one = OpConstant %uint 1
+%size = OpSpecConstantComposite %v3uint %x %one %one
+%main = OpFunction %void None %fn
+%entry = OpLabel
+OpReturn
+OpFunctionEnd
+"#,
+    )
+    .expect("admitted");
+    let zero = [crate::SpecValue { id: 0, bits: 0 }];
+    assert_eq!(admitted.specialize(&zero).err(), Some(SpecError::Workgroup));
+    let specialized = admitted.specialize(&[]).expect("specialized");
+    assert!(admitted.fold(&specialized).is_ok());
+}

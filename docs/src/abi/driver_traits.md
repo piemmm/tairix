@@ -360,8 +360,9 @@ driver handle. Methods:
 `DisplayMode` carries `width_px`, `height_px`, `stride_bytes`, and a
 `DisplayFormat` (`Rgba8888` or `Bgra8888`). `output` is `None` while no sink
 is connected, and moves only across `service_events`, which the service loop
-calls when one of the display's event sources fired, and after every request
-where `requests_take_wakes` says serving one can take such a wake.
+calls when one of the display's event sources fired, and after every call that
+drove the display — a request, a lease's release, an expired present — where
+`requests_take_wakes` says such a call can take such a wake.
 
 `alloc_buffer` returns a zeroed buffer in memory the device reads — its
 `BufferId`, the shared region holding it, and its stride — within a budget

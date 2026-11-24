@@ -79,7 +79,7 @@ use tairix_vt::char_width;
 use crate::atlas;
 use crate::glyph_cache::CachedGlyph;
 use crate::measure::{self, MeasureCache, MeasureEpoch, MeasuredText};
-use crate::outline::{FaceMetrics, OutlineReply, OwnedOutline};
+use crate::outline::{ask_outlines, page_outlines, OutlineReply, OwnedOutline};
 use crate::outline_cache::{CachedOutline, OutlineCache, OutlineKey};
 
 /// One synchronous font-service call: send one request frame, receive one
@@ -424,13 +424,13 @@ impl Channel {
     ) -> Option<OutlineReply> {
         self.ready();
         let transport = self.transport.as_mut()?;
-        fetch_outlines(
-            transport.as_mut(),
-            &mut self.reply,
-            scalars,
-            family,
-            instance,
-        )
+        let call = |request: &[u8], reply: &mut Vec<u8>| {
+            if reply.len() < FONT_MAX_OUTLINE_REPLY {
+                reply.resize(FONT_MAX_OUTLINE_REPLY, 0);
+            }
+            transport.call(request, reply).ok()
+        };
+        ask_outlines(scalars, family, instance, &mut self.reply, call)
     }
 
     /// Fetch the coverage of a prefix of `scalars`, or an empty batch when no
@@ -551,13 +551,13 @@ pub(crate) trait FontClient {
         weight: FontWeight,
     ) -> Option<FontMetrics>;
 
-    /// Serve every scalar of `run`'s outline, from the cache where it is
-    /// held and over the channel where it is not.
+    /// Serve the outline of every scalar of `scalars`, from the cache where it
+    /// is held and over the channel where it is not.
     ///
-    /// Fetches the misses in *runs* of at most [`FONT_MAX_GLYPH_RUN`], so a
-    /// cold alphabet costs one round trip per batch rather than one per
-    /// character, and retains what it fetched so a second drawing of the same
-    /// lettering costs none. The reply header — the face's own geometry —
+    /// Only the misses are fetched, paged through [`page_outlines`], so a cold
+    /// alphabet costs one round trip per protocol run rather than one per
+    /// character, and what was fetched is retained so a second drawing of the
+    /// same lettering costs none. The reply header — the face's own geometry —
     /// comes from the fetch, or from the face metrics a cached outline keeps,
     /// so a run the cache answers whole costs no round trip at all.
     fn serve_outlines(
@@ -566,54 +566,58 @@ pub(crate) trait FontClient {
         family: FamilyKey,
         instance: (FontWeight, FontStyle, FontStretch),
     ) -> Option<OutlineReply> {
+        if scalars.is_empty() {
+            return None;
+        }
         let (weight, style, stretch) = instance;
+        let key = |scalar| OutlineKey::new(family, scalar, weight, style, stretch);
         let mut reply = OutlineReply::default();
-        let mut served: Vec<OwnedOutline> = Vec::with_capacity(scalars.len());
-        let mut at = 0;
-        while at < scalars.len() {
-            let key = OutlineKey::new(family, scalars[at], weight, style, stretch);
-            if let Some(hit) = self
+        let mut served: Vec<Option<OwnedOutline>> = Vec::with_capacity(scalars.len());
+        let mut missing = Vec::new();
+        let mut asked = Vec::new();
+        for (at, &scalar) in scalars.iter().enumerate() {
+            let hit = self
                 .caches()
                 .outlines
                 .as_mut()
-                .and_then(|cache| cache.get_or_build(&(), key, || None))
-            {
-                if reply.units_per_em == 0 {
-                    state(&mut reply, hit.face);
-                }
-                served.push(hit.outline.clone());
-                at += 1;
+                .and_then(|cache| cache.get_or_build(&(), key(scalar), || None));
+            let Some(hit) = hit else {
+                served.push(None);
+                missing.push(at);
+                asked.push(scalar);
                 continue;
+            };
+            if reply.face.units_per_em == 0 {
+                reply.face = hit.face;
             }
-            // The protocol takes a bounded run and answers a prefix of it, so
-            // the loop asks again for whatever is left.
-            let missing = &scalars[at..scalars.len().min(at + FONT_MAX_GLYPH_RUN)];
-            let fetched = self.fetch_outlines(missing, family, instance)?;
-            if fetched.glyphs.is_empty() {
-                return None;
-            }
-            let face = fetched.face();
-            state(&mut reply, face);
-            for (offset, glyph) in fetched.glyphs.into_iter().enumerate() {
-                let key = OutlineKey::new(family, missing[offset], weight, style, stretch);
-                served.push(glyph.clone());
-                if let Some(cache) = self.caches().outlines.as_mut() {
-                    cache.retain(
-                        &(),
-                        key,
-                        CachedOutline {
-                            outline: glyph,
-                            face,
-                        },
-                    );
+            served.push(Some(hit.outline.clone()));
+        }
+        page_outlines(
+            self,
+            &asked,
+            |client, run| client.fetch_outlines(run, family, instance),
+            |client, first, fetched| {
+                let face = fetched.face;
+                reply.face = face;
+                let landed = missing.iter().zip(&asked).skip(first);
+                for ((&at, &scalar), outline) in landed.zip(fetched.glyphs) {
+                    if let Some(cache) = client.caches().outlines.as_mut() {
+                        cache.retain(
+                            &(),
+                            key(scalar),
+                            CachedOutline {
+                                outline: outline.clone(),
+                                face,
+                            },
+                        );
+                    }
+                    if let Some(slot) = served.get_mut(at) {
+                        *slot = Some(outline);
+                    }
                 }
-            }
-            at = served.len();
-        }
-        if served.is_empty() {
-            return None;
-        }
-        reply.glyphs = served;
+            },
+        )?;
+        reply.glyphs = served.into_iter().collect::<Option<_>>()?;
         Some(reply)
     }
 
@@ -1105,45 +1109,6 @@ fn fetch_glyphs(
             )
         })
         .collect())
-}
-
-/// Fetch the outlines of a prefix of `scalars` from `family`, instanced at
-/// `instance`, over `transport`.
-///
-/// `None` on any failure — a run the protocol will not carry, a refused
-/// call, a frame that does not decode, or a batch answering more than was
-/// asked for — so a caller draws nothing rather than geometry the service
-/// did not send.
-pub(crate) fn fetch_outlines(
-    transport: &mut dyn FontTransport,
-    reply: &mut Vec<u8>,
-    scalars: &[char],
-    family: FamilyKey,
-    instance: (FontWeight, FontStyle, FontStretch),
-) -> Option<OutlineReply> {
-    let run = GlyphRun::new(scalars).ok()?;
-    if reply.len() < FONT_MAX_OUTLINE_REPLY {
-        reply.resize(FONT_MAX_OUTLINE_REPLY, 0);
-    }
-    let (weight, style, stretch) = instance;
-    let request = FontRequest::Outlines {
-        family,
-        scalars: run,
-        weight,
-        style,
-        stretch,
-    }
-    .to_le_bytes();
-    let len = transport.call(&request, reply).ok()?;
-    OutlineReply::decode(reply.get(..len)?, scalars.len())
-}
-
-/// State `face` as the metrics of the face `reply`'s batch is drawn from.
-const fn state(reply: &mut OutlineReply, face: FaceMetrics) {
-    reply.units_per_em = face.units_per_em;
-    reply.ascent = face.ascent;
-    reply.descent = face.descent;
-    reply.line_gap = face.line_gap;
 }
 
 /// Fetch `family`'s line metrics at `pixel_height` in `weight` over
@@ -1995,6 +1960,7 @@ pub(crate) mod tests {
     use tairix_reclaim::{CacheBudget, PressureBand, ReclaimOwner, ReportedPressure};
 
     use crate::glyph_cache::{glyph_cache_budget, glyph_cache_candidate};
+    use crate::outline::FaceMetrics;
 
     /// A client over caches and a channel this test owns outright.
     ///
@@ -2267,7 +2233,10 @@ pub(crate) mod tests {
             (1..=FONT_MAX_GLYPH_RUN)
                 .contains(&scalars.len())
                 .then(|| super::OutlineReply {
-                    units_per_em: 1000,
+                    face: FaceMetrics {
+                        units_per_em: 1000,
+                        ..FaceMetrics::default()
+                    },
                     glyphs: scalars
                         .iter()
                         .map(|_| OwnedOutline {
@@ -2275,7 +2244,6 @@ pub(crate) mod tests {
                             ..OwnedOutline::default()
                         })
                         .collect(),
-                    ..super::OutlineReply::default()
                 })
         }
 
@@ -2355,7 +2323,7 @@ pub(crate) mod tests {
             .serve_outlines(&['a', 'b'], FamilyKey::MONO, instance)
             .expect("served from the cache");
         assert_eq!(reply.glyphs.len(), 2);
-        assert_eq!(reply.face(), face, "the face's metrics came with them");
+        assert_eq!(reply.face, face, "the face's metrics came with them");
         assert!(client
             .serve_outlines(&[], FamilyKey::MONO, instance)
             .is_none());

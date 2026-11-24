@@ -12,7 +12,7 @@ use tairix_rt::sync::Mutex;
 use tairix_virtio::{MockRegion, MockWait, SharedMemory};
 
 use super::*;
-use crate::venus::desk::{Answer, Desk, Order, Rouse};
+use crate::venus::desk::{Answer, Desk, Order, Payload, Rouse};
 use crate::venus::display::Counter;
 use crate::wire::BlobSpec;
 
@@ -712,4 +712,41 @@ fn a_part_goes_back_only_where_the_device_maps_nothing_into_it() {
         "{}",
         next.offset()
     );
+}
+
+#[test]
+fn a_3d_answer_a_display_wait_takes_is_handed_to_the_desk_before_the_loop_parks() {
+    let mapper = MockRegion::new(1 << 20);
+    let rig = Rig::venus();
+    let (mut gpu, transport) = rig.open();
+    let desk = Arc::new(Desk::new(Box::new(Quiet)));
+    let region = HwResource::memory_region(0x1_0000_0000, REGION, 1);
+    let shared = Arc::new(Mutex::new(SharedMemory::new(region).expect("a region")));
+    let counter: Arc<dyn Counter> = Arc::clone(&desk) as Arc<dyn Counter>;
+    gpu.attach_desk(counter, shared, &mapper, None)
+        .expect("attached");
+    let context = context(&mut gpu);
+    // The device answers on its interrupt from here on, as QEMU's 3D one does.
+    transport.borrow_mut().set_synchronous_notify(false);
+    rig.host.attach(&transport);
+    let submit = Order::Submit {
+        context,
+        ring: 0,
+        payload: Payload::new(),
+    };
+    assert!(desk.order(submit, 0).is_ok());
+    gpu.serve_desk();
+    assert!(!desk.has_answers());
+
+    // The console's rows are moved and waited for, the submission's answer
+    // coming on the same interrupt.
+    let flushed = rig.model.borrow().flushes.len();
+    rig.console.0.borrow_mut().damage = Some(rect(0, 16, 1280, 32));
+    gpu.service_events().expect("serviced");
+    assert_eq!(rig.model.borrow().flushes.len(), flushed + 1);
+    assert!(
+        desk.has_answers(),
+        "nothing else rouses the loop for an answer its wait took"
+    );
+    assert!(matches!(desk.next_answer(), Some((0, Answer::Done))));
 }

@@ -7,17 +7,13 @@
 use tairix_colour::Rgb;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
 use tairix_riscos_kernel::swi::font::{
-    SET_COLOUR_TABLE, SET_FONT_COLOURS, SET_PALETTE, TRUE_COLOURS,
+    MOST_OFFSET, SET_COLOUR_TABLE, SET_FONT_COLOURS, SET_PALETTE, TRUE_COLOURS,
 };
 use tairix_riscos_kernel::swi::X;
 
 use super::matching::{Loadings, Look};
 use super::palettes::Against;
 use super::{current, own, BAD_FONT_OFFSET};
-
-/// The longest offset a run reaches, and the furthest either way a deeper
-/// mode takes.
-const LONGEST: i32 = 14;
 
 /// What a font is painted in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,7 +94,7 @@ fn give(os: &mut Os<'_>, regs: &mut Regs, chosen: Chosen) -> Result<bool, Fail> 
             regs.r[1..4].copy_from_slice(&[background, foreground, offset.cast_unsigned()]);
             Ok(false)
         }
-        Chosen::Deep if (-LONGEST..=LONGEST).contains(&regs.r[3].cast_signed()) => {
+        Chosen::Deep if (-MOST_OFFSET..=MOST_OFFSET).contains(&regs.r[3].cast_signed()) => {
             regs.r[2] = 0;
             Ok(true)
         }
@@ -127,7 +123,7 @@ fn choose(
         first,
         loadings,
     };
-    let most = longest.clamp(0, LONGEST);
+    let most = longest.clamp(0, MOST_OFFSET);
     let [down, up] = [1, -1].map(|step| shades.longest_run(step, most));
     let (step, run) = if down > up { (1, down) } else { (-1, up) };
     Chosen::Run {

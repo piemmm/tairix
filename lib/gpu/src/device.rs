@@ -338,6 +338,8 @@ impl Allocation {
     ///
     /// # Errors
     ///
+    /// [`Error::Unsupported`] on a device whose contexts reach none of one
+    /// another's memory ([`Features::SHARED_MEMORY`](crate::Features)),
     /// [`Error::Lost`] once the context is lost, and those of every request
     /// that makes memory ([`Context#memory`]).
     pub fn export(&self) -> Result<Export, Error> {

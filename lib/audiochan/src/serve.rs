@@ -47,13 +47,13 @@ use tairix_abi::driver::audio_channel::{
 use tairix_abi::driver::DeviceWake;
 use tairix_abi::ipc::MemoryPause;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
-use tairix_abi::{CapabilityId, Errno, HwDeviceClass, ProcId};
+use tairix_abi::{CapabilityId, DriverError, Errno, HwDeviceClass, ProcId};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::{LogSink, ServedCall};
 
 use crate::{ChannelIo, Dispatcher, MappedRegion};
-use tairix_drvrt::exit::{end, step, DriverExit};
-use tairix_drvrt::serve::{publish_channel, DeviceChannel};
+use tairix_drvrt::exit::{end, error, step, DriverExit};
+use tairix_drvrt::serve::{publish_channel, BoundChannel, DeviceChannel};
 
 /// Diagnostic event id: the one-shot "device channel published, serving"
 /// beacon an audio driver emits once its device is live and its endpoint is
@@ -98,7 +98,7 @@ const CHANNEL: DeviceChannel = DeviceChannel {
 /// a driver whose loop serves another protocol of the device beside it.
 pub struct Channel<A: Audio> {
     dispatcher: Dispatcher<A, RtChannelIo>,
-    endpoint: u64,
+    channel: BoundChannel,
 }
 
 impl<A: Audio> Channel<A> {
@@ -109,23 +109,29 @@ impl<A: Audio> Channel<A> {
     ///
     /// The exit status to end with, its reason recorded.
     pub fn publish(audio: A) -> Result<Self, i32> {
-        let Some(endpoint) = CHANNEL.bind() else {
-            return Err(end(
+        let channel = CHANNEL.bind().map_err(|errno| {
+            end(
                 DriverExit::NoService,
-                &[step(
-                    "audiochan: the node's device-channel endpoint could not be bound",
-                )],
-            ));
-        };
-        if publish_channel(
+                &[
+                    step("audiochan: the node's device-channel endpoint could not be bound"),
+                    error(DriverError::from_errno(errno)),
+                ],
+            )
+        })?;
+        let endpoint = channel.endpoint();
+        if let Err(errno) = publish_channel(
             HwDeviceClass::Audio,
             AUDIOCHAN_NODE_COMPATIBLE,
             endpoint,
             &[],
-        )
-        .is_none()
-        {
-            return Err(end(DriverExit::NoService, &[step("audiochan: the device-channel node could not be published to the hardware tree")]));
+        ) {
+            return Err(end(
+                DriverExit::NoService,
+                &[
+                    step("audiochan: the device-channel node could not be published to the hardware tree"),
+                    error(DriverError::from_errno(errno)),
+                ],
+            ));
         }
         log(
             &LogSink,
@@ -138,14 +144,14 @@ impl<A: Audio> Channel<A> {
         );
         Ok(Self {
             dispatcher: Dispatcher::new(audio, RtChannelIo { endpoint }),
-            endpoint,
+            channel,
         })
     }
 
     /// The endpoint the mixer calls.
     #[must_use]
     pub const fn endpoint(&self) -> u64 {
-        self.endpoint
+        self.channel.endpoint()
     }
 
     /// The endpoint woke: answer the call waiting.

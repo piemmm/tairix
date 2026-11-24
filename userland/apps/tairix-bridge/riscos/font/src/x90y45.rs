@@ -9,8 +9,10 @@
 use alloc::vec::Vec;
 use core::mem::size_of;
 
+use tairix_util::endian::le_u16;
+
 use crate::glyphs::{Bitmap, Refused};
-use crate::outlines::{Malformed, Undecoded, REDIRECT_BELOW};
+use crate::outlines::{file_offset, redirection, Malformed, Undecoded, REDIRECT_BELOW};
 
 /// An index entry's bytes, and its fields.
 const ENTRY: usize = 16;
@@ -52,10 +54,7 @@ impl File {
     /// The file `bytes`.
     pub(crate) fn read(bytes: Vec<u8>) -> Result<Self, Malformed> {
         if bytes.len() < REDIRECT_BELOW {
-            let end = bytes.iter().position(|&b| b < b' ').unwrap_or(bytes.len());
-            let mut name = bytes;
-            name.truncate(end);
-            return Ok(Self::Master(name));
+            return Ok(Self::Master(redirection(bytes)));
         }
         Sizes::read(bytes).map(Self::Sizes)
     }
@@ -81,16 +80,8 @@ impl Sizes {
             if entry[BPP] != FOUR_BITS {
                 return Err(Malformed);
             }
-            let word = |field: usize| {
-                usize::try_from(u32::from_le_bytes([
-                    entry[field],
-                    entry[field + 1],
-                    entry[field + 2],
-                    entry[field + 3],
-                ]))
-                .map_err(|_| Malformed)
-            };
-            let (start, length) = (word(DATA_AT)?, word(DATA_SIZE)?);
+            let start = file_offset(entry, DATA_AT)?;
+            let length = file_offset(entry, DATA_SIZE)?;
             let end = start.checked_add(length).ok_or(Malformed)?;
             if !(BLOCK_TABLE + 2 * CHARACTERS..=BLOCK_MOST).contains(&length)
                 || end > bytes.len()
@@ -134,7 +125,7 @@ impl Sizes {
         }
         let block = &self.bytes[size.block.0..size.block.1];
         let offset_at = BLOCK_TABLE + 2 * code;
-        let offset = usize::from(u16::from_le_bytes([block[offset_at], block[offset_at + 1]]));
+        let offset = usize::from(le_u16(block, offset_at).ok_or(Malformed)?);
         if offset == 0 {
             return Ok(None);
         }

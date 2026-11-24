@@ -299,6 +299,9 @@ so destroying it by any path returns it
 ([resource limits](./resource-limits.md)). `port_unbind` lets the owner tear a
 port down before it exits, which is what a program opening a transport per
 operation needs: `tairix_rt::PrivatePort` unbinds its port when dropped.
+`call_destroy` does the same for a call endpoint, as its owner's exit would:
+a driver whose device channel goes unserved while the driver lives on takes
+it down, and `tairix_drvrt::serve::BoundChannel` does so when dropped.
 
 ### Well-known names
 

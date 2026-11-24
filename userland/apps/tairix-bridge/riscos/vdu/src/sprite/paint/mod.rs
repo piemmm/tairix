@@ -24,6 +24,7 @@ mod transformed;
 use core::ops::Range;
 
 use tairix_riscos_kernel::os::{Fail, Os};
+use tairix_riscos_kernel::swi::sprite_op::THROUGH_MASK;
 
 use crate::canvas::Canvas;
 use crate::changed::Rect;
@@ -43,15 +44,15 @@ pub(crate) use transformed::{plot_mask_transformed, put_transformed, scaling_of}
 pub(crate) struct PlotFlags(pub(crate) u32);
 
 impl PlotFlags {
-    /// The bit plotting through the sprite's mask.
-    pub(crate) const MASKED: u32 = 8;
+    /// Where the translucency is held, a byte.
+    pub(crate) const TRANSLUCENCY_SHIFT: u32 = 8;
 
     pub(crate) const fn action(self) -> u32 {
         self.0 & 7
     }
 
     pub(crate) const fn masked(self) -> bool {
-        self.0 & Self::MASKED != 0
+        self.0 & THROUGH_MASK != 0
     }
 
     pub(crate) const fn table_ignorable(self) -> bool {
@@ -69,7 +70,7 @@ impl PlotFlags {
     /// The share of each pixel kept away, 0 for none to 255 for all but a
     /// 256th.
     pub(crate) const fn translucency(self) -> u32 {
-        (self.0 >> 8) & 0xFF
+        (self.0 >> Self::TRANSLUCENCY_SHIFT) & 0xFF
     }
 }
 
@@ -105,9 +106,7 @@ impl Scale {
             return Ok(Some(Self::UNIT));
         }
         let mut words = [0u32; 4];
-        for (i, word) in (0u32..).zip(words.iter_mut()) {
-            *word = os.read_word(address.wrapping_add(4 * i))?;
-        }
+        os.read_words(address, &mut words)?;
         let [mx, my, dx, dy] = words;
         if words.contains(&0) || words.iter().any(|&w| w.cast_signed() < 0) {
             return Ok(None);

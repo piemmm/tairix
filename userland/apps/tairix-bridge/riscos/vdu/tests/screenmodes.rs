@@ -25,9 +25,7 @@ fn a_loaded_file_answers_for_its_modes_and_a_wild_selector_is_passed_on() {
     let mut session = with_files(&[("Monitor", MONITOR)]);
     let os = &mut session.kernel.os();
     command(os, "LoadModeFile HostFS:$.Monitor").expect("the file loaded");
-    for (i, word) in (0u32..).zip(SELECTOR) {
-        os.write_word(SELECTOR_AT + 4 * i, word).expect("written");
-    }
+    os.write_words(SELECTOR_AT, &SELECTOR).expect("written");
 
     let mut regs = Regs::new([0, MODE_EXTENSION, SELECTOR_AT, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     os.perform(X | SERVICE_CALL, &mut regs).expect("issued");
@@ -198,9 +196,7 @@ sync_pol:3\nendmode\n";
         24,
         u32::MAX,
     ];
-    for (i, word) in (0u32..).zip(selector) {
-        os.write_word(SELECTOR_AT + 4 * i, word).expect("written");
-    }
+    os.write_words(SELECTOR_AT, &selector).expect("written");
     let mut regs = Regs::new([0, SELECTOR_AT, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     let selected = os.perform(X | tairix_riscos_kernel::swi::os::SCREEN_MODE, &mut regs);
     assert!(
@@ -214,9 +210,8 @@ fn a_screen_loaded_from_a_newer_sprite_takes_a_mode_of_its_pixels() {
     use tairix_riscos_kernel::swi::os::{READ_MODE_VARIABLE, SCREEN_MODE, SPRITE_OP};
     let mut session = with_files(&[]);
     let os = &mut session.kernel.os();
-    for (i, word) in (0u32..).zip([1, 640, 480, 5, u32::MAX, u32::MAX]) {
-        os.write_word(SELECTOR_AT + 4 * i, word).expect("written");
-    }
+    os.write_words(SELECTOR_AT, &[1, 640, 480, 5, u32::MAX, u32::MAX])
+        .expect("written");
     call(os, SCREEN_MODE, [0, SELECTOR_AT, 0]).expect("32 bits a pixel");
     let name = SELECTOR_AT + 0x100;
     os.write_bytes(name, b"HostFS:$.Shot\0").expect("written");

@@ -686,9 +686,7 @@ impl Os<'_> {
         let mut user = state.user;
         user[..13].copy_from_slice(&regs.r);
         let (words, len) = dump_words(&user, self.world.swi_at, state.cpsr, slot.bits);
-        for (i, &word) in (0..).zip(&words[..len]) {
-            self.write_word(slot.buffer.wrapping_add(4 * i), word)?;
-        }
+        self.write_words(slot.buffer, &words[..len])?;
         let mut state = self.emptied_stacks(state);
         let mode = match slot.bits {
             Bits::Bit26 => Mode::Supervisor26,

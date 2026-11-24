@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 
 use super::allow::{class, Class};
 pub(crate) use super::binding::Access;
+use super::binding::SampleForms;
 use super::cfg::{Cfg, Scratch};
 use super::types::{Holds, Ty};
 use super::{push, Refusal, Rule, Validator, What, MAX_INDEXES, NONE};
@@ -283,6 +284,9 @@ pub(crate) struct Facts {
     pub(crate) parameters: Vec<Access>,
     /// Each pointer argument of each call it makes.
     pub(crate) arguments: Vec<Argument>,
+    /// Each image it samples, the sampler it samples it through and how,
+    /// by the slot of each one's root.
+    pub(crate) samplings: Vec<(u32, u32, SampleForms)>,
     pub(crate) needs: Needs,
 }
 
@@ -623,6 +627,23 @@ impl Validator<'_> {
         (root.slot != NONE).then_some(root)
     }
 
+    /// Record `sampler`, a root's slot, as the sampler sampled image `id`
+    /// samples through.
+    pub(crate) fn set_sampler(&mut self, id: Id, sampler: u32) {
+        if let Some(slot) = self.slot(id) {
+            if let Some(entry) = self.samplers.get_mut(slot) {
+                *entry = sampler;
+            }
+        }
+    }
+
+    /// The slot of the root of the sampler sampled image `id` samples
+    /// through.
+    pub(crate) fn sampler(&self, id: Id) -> Option<u32> {
+        let sampler = *self.samplers.get(self.slot(id)?)?;
+        (sampler != NONE).then_some(sampler)
+    }
+
     /// Record an access through a pointer rooted at `root`.
     pub(crate) fn access(
         &self,
@@ -658,7 +679,7 @@ impl Validator<'_> {
     }
 
     /// Which parameter of function `function` the id in `slot` is.
-    fn parameter_index(&self, function: u32, slot: u32) -> Option<usize> {
+    pub(crate) fn parameter_index(&self, function: u32, slot: u32) -> Option<usize> {
         let f = self.functions.get(function as usize)?;
         let &(_, index) = self.m.definitions.get(slot as usize)?;
         let n = index.checked_sub(f.at + 1)?;

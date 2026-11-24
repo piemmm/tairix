@@ -14,6 +14,8 @@
 //! A pattern whose lengths sum to nought never moves on: RISC OS 5.30 never
 //! returns from it, and here it leaves the path undashed.
 
+use tairix_drawing::riscos::format::{DASH_COUNT, DASH_LENGTHS};
+
 use crate::geometry::{length_of, Point};
 use crate::path::Element;
 use crate::stage::{Guest, Pen, Refusal, Sink, Stop};
@@ -40,7 +42,12 @@ struct Header {
     count: u32,
 }
 
-const ELEMENTS: u32 = 8;
+/// Where the block holds its count and its lengths, as a guest address is
+/// offset.
+#[expect(clippy::cast_possible_truncation, reason = "a word")]
+const COUNT: u32 = DASH_COUNT as u32;
+#[expect(clippy::cast_possible_truncation, reason = "two words")]
+const LENGTHS: u32 = DASH_LENGTHS as u32;
 
 impl Pattern {
     /// The pattern in the block at `block`.
@@ -51,7 +58,7 @@ impl Pattern {
     fn header(self, guest: &mut dyn Guest) -> Result<Header, Stop> {
         Ok(Header {
             start: guest.read_word(self.block)?,
-            count: guest.read_word(self.block.wrapping_add(4))?,
+            count: guest.read_word(self.block.wrapping_add(COUNT))?,
         })
     }
 
@@ -59,7 +66,7 @@ impl Pattern {
         guest.yield_point()?;
         let at = self
             .block
-            .wrapping_add(ELEMENTS)
+            .wrapping_add(LENGTHS)
             .wrapping_add(index.wrapping_mul(4));
         Ok(u64::from(guest.read_word(at)?))
     }

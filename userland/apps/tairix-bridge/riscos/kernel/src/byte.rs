@@ -407,21 +407,6 @@ impl Os<'_> {
             .map_or(0, u32::from)
     }
 
-    /// `Service_International` `reason` with R3 to R5: R4 its answer, if a
-    /// module claimed it.
-    fn international(
-        &mut self,
-        reason: u32,
-        r3: u32,
-        r4: u32,
-        r5: u32,
-    ) -> Result<Option<u32>, Unwind> {
-        let mut service = Regs::default();
-        service.r[1..6].copy_from_slice(&[crate::service::INTERNATIONAL, reason, r3, r4, r5]);
-        self.service(&mut service)?;
-        Ok((service.r[1] == 0).then_some(service.r[4]))
-    }
-
     /// Characters `first` to `last` of `alphabet` defined by
     /// `Service_International` 5: whether a module knows the alphabet.
     pub fn define_characters(
@@ -431,7 +416,9 @@ impl Os<'_> {
         last: u32,
     ) -> Result<bool, Unwind> {
         let define = crate::service::international::DEFINE;
-        Ok(self.international(define, alphabet, first, last)?.is_some())
+        Ok(self
+            .ask_international(define, alphabet, first, last)?
+            .is_some())
     }
 
     /// Every character of `alphabet` defined: whether a module knows it.
@@ -443,7 +430,7 @@ impl Os<'_> {
     fn select_keyboard(&mut self, keyboard: u32, alphabet: u32) -> Result<(), Unwind> {
         self.world.country.keyboard = keyboard;
         self.world.country.key_alphabet = alphabet;
-        self.international(
+        self.ask_international(
             crate::service::international::KEYBOARD,
             keyboard,
             alphabet,
@@ -463,7 +450,7 @@ impl Os<'_> {
         let country = self.default_country(regs.r[1]);
         let reason = crate::service::international::COUNTRY_ALPHABET;
         regs.r[2] = reason;
-        let Some(alphabet) = self.international(reason, country, 0, 0)? else {
+        let Some((alphabet, _)) = self.ask_international(reason, country, 0, 0)? else {
             regs.r[1] = 0;
             return Ok(());
         };
@@ -488,8 +475,8 @@ impl Os<'_> {
             asked @ 0..=126 => {
                 let number = self.default_country(asked);
                 let alphabet = self
-                    .international(country_alphabet, number, 0, 0)?
-                    .unwrap_or(number);
+                    .ask_international(country_alphabet, number, 0, 0)?
+                    .map_or(number, |(alphabet, _)| alphabet);
                 regs.r[2] = crate::service::international::DEFINE;
                 if !self.define_alphabet_fully(alphabet)? {
                     regs.r[1] = 0;
@@ -501,7 +488,8 @@ impl Os<'_> {
             asked => {
                 let keyboard = self.default_country(asked - 128);
                 regs.r[2] = country_alphabet;
-                let Some(alphabet) = self.international(country_alphabet, keyboard, 0, 0)? else {
+                let answer = self.ask_international(country_alphabet, keyboard, 0, 0)?;
+                let Some((alphabet, _)) = answer else {
                     regs.r[1] = 0;
                     return Ok(());
                 };

@@ -538,9 +538,7 @@ impl Os<'_> {
             return Ok(unused);
         };
         let scale = name + crate::os::len32(CONFIRM_POINTER.len()).next_multiple_of(4);
-        for (i, factor) in (0..).zip([1u32; 4]) {
-            self.write_word(scale + 4 * i, factor)?;
-        }
+        self.write_words(scale, &[1; 4])?;
         let mut shape = Regs::new([0x124, area, name, 0x23, 0, 0, scale, 0, 0, 0, 0, 0, 0]);
         self.perform_quietly(crate::swi::X | crate::swi::os::SPRITE_OP, &mut shape)?;
         let mut flush = Regs::new([21, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);

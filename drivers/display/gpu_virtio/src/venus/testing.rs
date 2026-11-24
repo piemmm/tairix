@@ -7,22 +7,28 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt::Debug;
 
+use core::convert::Infallible;
+
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::DriverError;
-use tairix_gpu::{Commands, Device, Error, Hardware, Job};
+use tairix_gpu::{
+    BufferViewDesc, Commands, Device, Error, Format, Hardware, ImageDesc, ImageViewDesc, Job,
+    LayoutBinding, MemoryRequirements, PipelineStage, RenderStages, SamplerDesc, SetResource,
+};
 
-use super::info::narrow;
+use super::info::{feature_chain, narrow, HostDevice};
 use super::reply::{
-    HostMemory, HostMemoryHeap, HostMemoryType, HostQueueFamily, HostRequirements, Reader,
-    MAX_PHYSICAL_DEVICES, MAX_QUEUE_FAMILIES,
+    chained_members, HostExtensions, HostFeatures, HostFormatFeatures, HostImageLimits, HostMemory,
+    HostMemoryHeap, HostMemoryType, HostQueueFamily, HostRequirements, Reader, RobustAlignments,
+    ASKED, MAX_PHYSICAL_DEVICES, MAX_QUEUE_FAMILIES,
 };
 use super::{
-    Command, Structure, VkResult, API_VERSION, MAX_MEMORY_HEAPS, MAX_MEMORY_TYPES,
-    PHYSICAL_DEVICE_NAME_LEN, UUID_LEN,
+    Command, Structure, VkResult, API_VERSION, CORE_FEATURES, EXTENSION_NAME_LEN, MAX_MEMORY_HEAPS,
+    MAX_MEMORY_TYPES, PHYSICAL_DEVICE_NAME_LEN, UUID_LEN,
 };
 
 /// A stream written item by item.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Grammar(pub(crate) Vec<u8>);
 
 impl Grammar {
@@ -56,6 +62,24 @@ impl Grammar {
         self.i32(command as i32).u32(u32::from(reply))
     }
 
+    /// A string: its length with its terminator, then its bytes and the
+    /// terminator, padded to whole words.
+    #[cfg(test)]
+    pub(crate) fn string(self, text: &str) -> Self {
+        let len = text.len() + 1;
+        self.u64(len as u64)
+            .bytes(text.as_bytes())
+            .bytes(&[0; 4][..len.next_multiple_of(4) - text.len()])
+    }
+
+    /// Booleans, a word each.
+    #[cfg(test)]
+    pub(crate) fn booleans(self, members: &[bool]) -> Self {
+        members
+            .iter()
+            .fold(self, |grammar, &member| grammar.u32(u32::from(member)))
+    }
+
     /// A structure's type and its empty chain.
     pub(crate) fn structure(self, structure: Structure) -> Self {
         self.i32(structure as i32).u64(0)
@@ -66,27 +90,41 @@ impl Grammar {
     }
 }
 
-/// A reply of [`Command::GetPhysicalDeviceProperties2`]: the limits all
-/// zero but those set by `limits`, given each member's offset in words from
-/// the limits' start.
-pub(crate) fn properties_reply(limits: impl FnOnce(Grammar) -> Grammar) -> Grammar {
+/// A reply of [`Command::GetPhysicalDeviceProperties2`], asked with the
+/// robust accesses' properties where `robust` gives the granularity they are
+/// bounded at, storage then uniform: the limits all zero but those set by
+/// `limits`, given each member's offset in words from the limits' start.
+pub(crate) fn properties_reply(
+    robust: Option<RobustAlignments>,
+    api_version: u32,
+    limits: impl FnOnce(Grammar) -> Grammar,
+) -> Grammar {
     let mut name = [0u8; PHYSICAL_DEVICE_NAME_LEN];
     name[..8].copy_from_slice(b"llvmpipe");
-    let header = Grammar::default()
+    let chained = Grammar::default()
         .i32(Command::GetPhysicalDeviceProperties2 as i32)
         .u64(1)
         .i32(Structure::PhysicalDeviceProperties2 as i32)
         .u64(1)
         .i32(Structure::PhysicalDeviceSubgroupProperties as i32)
-        .u64(1)
-        .structure(Structure::PhysicalDeviceMaintenance3Properties)
+        .u64(1);
+    let chained = match robust {
+        Some(alignments) => chained
+            .i32(Structure::PhysicalDeviceMaintenance3Properties as i32)
+            .u64(1)
+            .structure(Structure::PhysicalDeviceRobustness2Properties)
+            .u64(alignments.storage)
+            .u64(alignments.uniform),
+        None => chained.structure(Structure::PhysicalDeviceMaintenance3Properties),
+    };
+    let header = chained
         .u32(1024)
         .u64(1 << 31)
         .u32(32)
-        .u32(0x3f)
         .u32(0xff)
+        .u32(0xf)
         .u32(1)
-        .u32(API_VERSION)
+        .u32(api_version)
         .u32(1)
         .u32(0x10005)
         .u32(0)
@@ -99,8 +137,13 @@ pub(crate) fn properties_reply(limits: impl FnOnce(Grammar) -> Grammar) -> Gramm
 }
 
 /// The limits, member by member in the renderer's order, with the values a
-/// test reads back.
+/// test reads back, the lines strict.
 pub(crate) fn limits(grammar: Grammar) -> Grammar {
+    lined_limits(grammar, true)
+}
+
+/// [`limits`], the lines strict where `strict`.
+pub(crate) fn lined_limits(grammar: Grammar, strict: bool) -> Grammar {
     grammar
         .u32(16384)
         .u32(16384)
@@ -158,7 +201,10 @@ pub(crate) fn limits(grammar: Grammar) -> Grammar {
         .u64(16)
         .u64(64)
         .u64(16)
-        .words(14)
+        .words(7)
+        .u32(16384)
+        .u32(16384)
+        .words(5)
         .u32(8)
         .words(12)
         .u64(2)
@@ -167,10 +213,92 @@ pub(crate) fn limits(grammar: Grammar) -> Grammar {
         .u64(2)
         .f32(1.0)
         .f32(8.0)
-        .words(4)
+        .words(2)
+        .u32(u32::from(strict))
+        .u32(1)
         .u64(1)
         .u64(1)
         .u64(64)
+}
+
+/// A reply of [`Command::EnumerateDeviceExtensionProperties`] naming
+/// `names`, each at version one.
+pub(crate) fn extensions_reply(names: &[&str]) -> Grammar {
+    names.iter().fold(
+        Grammar::default()
+            .i32(Command::EnumerateDeviceExtensionProperties as i32)
+            .i32(0)
+            .u64(1)
+            .u32(u32::try_from(names.len()).unwrap_or(u32::MAX))
+            .u64(count(names.len())),
+        |grammar, name| {
+            let mut bytes = [0u8; EXTENSION_NAME_LEN];
+            bytes[..name.len()].copy_from_slice(name.as_bytes());
+            grammar.u64(count(EXTENSION_NAME_LEN)).bytes(&bytes).u32(1)
+        },
+    )
+}
+
+/// A reply of [`Command::GetPhysicalDeviceFeatures2`] asked with `chain`,
+/// stating `features`: each chained structure's members in the chain's order,
+/// then the core features.
+pub(crate) fn features_reply(chain: &[Structure], features: &HostFeatures) -> Grammar {
+    let mut grammar = Grammar::default()
+        .i32(Command::GetPhysicalDeviceFeatures2 as i32)
+        .u64(1)
+        .i32(Structure::PhysicalDeviceFeatures2 as i32);
+    for &structure in chain {
+        grammar = grammar.u64(1).i32(structure as i32);
+    }
+    grammar = grammar.u64(0);
+    for members in features.chained.iter().rev() {
+        grammar = members
+            .iter()
+            .fold(grammar, |grammar, &member| grammar.u32(u32::from(member)));
+    }
+    features
+        .core
+        .iter()
+        .fold(grammar, |grammar, &member| grammar.u32(u32::from(member)))
+}
+
+/// Every draw feature the seam names.
+#[cfg(test)]
+pub(crate) const DRAW_FEATURES: tairix_gpu::Features = tairix_gpu::Features::DUAL_SOURCE_BLEND
+    .with(tairix_gpu::Features::LOGIC_OP)
+    .with(tairix_gpu::Features::DEPTH_CLAMP)
+    .with(tairix_gpu::Features::WIDE_LINES)
+    .with(tairix_gpu::Features::LARGE_POINTS)
+    .with(tairix_gpu::Features::VERTEX_STORES)
+    .with(tairix_gpu::Features::FRAGMENT_STORES)
+    .with(tairix_gpu::Features::DRAW_INDIRECT_FIRST_INSTANCE);
+
+/// The uses a pass makes of a format, which only a device that draws states.
+#[cfg(test)]
+pub(crate) const DRAWN: tairix_gpu::FormatFeatures = tairix_gpu::FormatFeatures::COLOR_ATTACHMENT
+    .with(tairix_gpu::FormatFeatures::DEPTH_STENCIL)
+    .with(tairix_gpu::FormatFeatures::MULTISAMPLED)
+    .with(tairix_gpu::FormatFeatures::BLENDED)
+    .with(tairix_gpu::FormatFeatures::RESOLVED)
+    .with(tairix_gpu::FormatFeatures::VERTEX_INPUT);
+
+/// The uses a pass makes of `format` that a device that draws states: all
+/// of [`DRAWN`] but an sRGB format's resolve, which a host may average
+/// encoded.
+#[cfg(test)]
+pub(crate) fn drawn(format: tairix_gpu::Format) -> tairix_gpu::FormatFeatures {
+    if format.is_srgb() {
+        DRAWN.without(tairix_gpu::FormatFeatures::RESOLVED)
+    } else {
+        DRAWN
+    }
+}
+
+/// What a device that draws states of `format` where its host serves every
+/// use: every use of its encoding but those [`drawn`] leaves out.
+#[cfg(test)]
+pub(crate) fn every_use(format: tairix_gpu::Format) -> tairix_gpu::FormatFeatures {
+    format.features().without(DRAWN.without(drawn(format)))
 }
 
 /// A backend that runs nothing, so a statement alone is judged.
@@ -179,6 +307,13 @@ pub(crate) struct Idle;
 impl Hardware for Idle {
     type Context = ();
     type Memory = ();
+    type Image = Infallible;
+    type View = Infallible;
+    type BufferView = Infallible;
+    type Sampler = Infallible;
+    type Set = Infallible;
+    type Compute = Infallible;
+    type Render = Infallible;
 
     fn create_context(&self) -> Result<(), Error> {
         Ok(())
@@ -196,6 +331,48 @@ impl Hardware for Idle {
         Ok(())
     }
 
+    fn image(&self, _: &Arc<()>, _: &ImageDesc) -> Result<(Infallible, MemoryRequirements), Error> {
+        Err(Error::Unsupported)
+    }
+
+    fn place(&self, image: &Infallible, (): &(), _: u64) -> Result<(), Error> {
+        match *image {}
+    }
+
+    fn view(
+        &self,
+        image: &Infallible,
+        _: &ImageDesc,
+        _: &ImageViewDesc,
+    ) -> Result<Infallible, Error> {
+        match *image {}
+    }
+
+    fn buffer_view(&self, (): &(), _: u64, _: &BufferViewDesc) -> Result<Infallible, Error> {
+        Err(Error::Unsupported)
+    }
+
+    fn sampler(&self, _: &Arc<()>, _: &SamplerDesc) -> Result<Infallible, Error> {
+        Err(Error::Unsupported)
+    }
+
+    fn set(
+        &self,
+        _: &Arc<()>,
+        _: &[LayoutBinding],
+        _: &[SetResource<'_, Self>],
+    ) -> Result<Infallible, Error> {
+        Err(Error::Unsupported)
+    }
+
+    fn compute(&self, _: &Arc<()>, _: PipelineStage<'_>) -> Result<Infallible, Error> {
+        Err(Error::Unsupported)
+    }
+
+    fn render(&self, _: &Arc<()>, _: RenderStages<'_>) -> Result<Infallible, Error> {
+        Err(Error::Unsupported)
+    }
+
     fn run(&self, job: Job<Self>) {
         job.finish(Ok(()));
     }
@@ -205,6 +382,51 @@ impl Hardware for Idle {
     }
 
     fn lost(&self, _: &Arc<()>) {}
+}
+
+/// A reply of [`Command::GetPhysicalDeviceFormatProperties2`], asked with
+/// Vulkan 1.3's format features chained where `stated`, offering `offered`:
+/// in the older features, only what their 31 bits name.
+pub(crate) fn format_reply(offered: HostFormatFeatures, stated: bool) -> Grammar {
+    let older = |bits: u64| u32::try_from(bits & OLDER_FORMAT_FEATURES).unwrap_or(0);
+    let reply = Grammar::default()
+        .i32(Command::GetPhysicalDeviceFormatProperties2 as i32)
+        .u64(1);
+    let reply = if stated {
+        reply
+            .i32(Structure::FormatProperties2 as i32)
+            .u64(1)
+            .structure(Structure::FormatProperties3)
+            .u64(0)
+            .u64(offered.optimal)
+            .u64(offered.buffer)
+    } else {
+        reply.structure(Structure::FormatProperties2)
+    };
+    reply
+        .u32(0)
+        .u32(older(offered.optimal))
+        .u32(older(offered.buffer))
+}
+
+/// The format features older Vulkan names.
+pub(crate) const OLDER_FORMAT_FEATURES: u64 = (1 << 31) - 1;
+
+/// A reply of [`Command::GetPhysicalDeviceImageFormatProperties2`], asked
+/// with no extension structure, answering `result` and `most`.
+pub(crate) fn image_format_reply(result: i32, most: HostImageLimits) -> Grammar {
+    Grammar::default()
+        .i32(Command::GetPhysicalDeviceImageFormatProperties2 as i32)
+        .i32(result)
+        .u64(1)
+        .structure(Structure::ImageFormatProperties2)
+        .u32(most.extent[0])
+        .u32(most.extent[1])
+        .u32(most.extent[2])
+        .u32(most.levels)
+        .u32(most.layers)
+        .u32(most.samples)
+        .u64(u64::MAX)
 }
 
 /// A clock that never moves.
@@ -269,11 +491,19 @@ pub fn read_every_reply(bytes: &[u8]) {
     let _ = Reader::new(bytes).result_of(Command::BindBufferMemory2);
     let _ = Reader::new(bytes).made(Command::CreateInstance, id);
     let _ = Reader::new(bytes).physical_devices(MAX_PHYSICAL_DEVICES);
-    let _ = Reader::new(bytes).properties();
+    let _ = Reader::new(bytes).properties(false);
+    let _ = Reader::new(bytes).properties(true);
     let _ = Reader::new(bytes).queue_families(MAX_QUEUE_FAMILIES);
     let _ = Reader::new(bytes).memory_properties();
-    let _ = Reader::new(bytes).memory_requirements();
-    let _ = Reader::new(bytes).command_buffers(&ids);
+    let _ = Reader::new(bytes).memory_requirements(Command::GetBufferMemoryRequirements2);
+    let _ = Reader::new(bytes).memory_requirements(Command::GetImageMemoryRequirements2);
+    let _ = Reader::new(bytes).format_properties(false);
+    let _ = Reader::new(bytes).format_properties(true);
+    let _ = Reader::new(bytes).image_format_properties();
+    let _ = Reader::new(bytes).allocated(Command::AllocateCommandBuffers, &ids);
+    let _ = Reader::new(bytes).extensions(ids.len());
+    let chain = feature_chain(API_VERSION, every_extension());
+    let _ = Reader::new(bytes).features(&chain);
     let mut reader = Reader::new(bytes);
     let _ = reader
         .made(Command::CreateInstance, id)
@@ -414,7 +644,7 @@ fn results(draw: &mut dyn FnMut() -> u64, made: &mut Vec<Vec<u8>>) {
         )
         .0;
     held(draw, &bytes, &answered, |bytes| {
-        Reader::new(bytes).command_buffers(&buffers)
+        Reader::new(bytes).allocated(Command::AllocateCommandBuffers, &buffers)
     });
     made.push(bytes);
 }
@@ -506,46 +736,187 @@ fn memory(draw: &mut dyn FnMut() -> u64, made: &mut Vec<Vec<u8>>) -> HostMemory 
         .u32(requirements.type_bits)
         .0;
     held(draw, &bytes, &requirements, |bytes| {
-        Reader::new(bytes).memory_requirements()
+        Reader::new(bytes).memory_requirements(Command::GetBufferMemoryRequirements2)
     });
     made.push(bytes);
     memory
 }
 
-/// A physical device's properties, a few of its limits' words changed: read
-/// or refused, and narrowed with `memory` and `families` into a statement the
-/// seam takes, or refused.
+/// Every extension the driver asks for.
+pub(crate) fn every_extension() -> HostExtensions {
+    ASKED
+        .iter()
+        .fold(HostExtensions::NONE, |every, &(_, flag)| every.with(flag))
+}
+
+/// Extensions a device might offer: every one the driver asks for, three
+/// times in four, so a statement is often narrowed.
+fn drawn_extensions(draw: &mut dyn FnMut() -> u64) -> HostExtensions {
+    if !draw().is_multiple_of(4) {
+        return every_extension();
+    }
+    HostExtensions::from_bits(u16::try_from(draw() % (1 << ASKED.len())).unwrap_or(0))
+}
+
+/// The names of the extensions `offered` says a device offers, among one the
+/// driver never asks for.
+fn extension_names(offered: HostExtensions) -> Vec<&'static str> {
+    core::iter::once("VK_KHR_swapchain")
+        .chain(
+            ASKED
+                .iter()
+                .filter(|&&(_, flag)| offered.contains(flag))
+                .map(|&(name, _)| name),
+        )
+        .collect()
+}
+
+/// The granularity a device bounds robust accesses at: a power of two Vulkan
+/// allows half the time, anything at all otherwise.
+fn drawn_alignments(draw: &mut dyn FnMut() -> u64) -> RobustAlignments {
+    if draw() & 1 == 0 {
+        RobustAlignments {
+            storage: 1 << below(draw, 9),
+            uniform: 1 << below(draw, 9),
+        }
+    } else {
+        RobustAlignments {
+            storage: draw(),
+            uniform: draw(),
+        }
+    }
+}
+
+/// A physical device's extensions, features and properties, a few of its
+/// limits' words changed: each read back as written and refused cut short,
+/// and narrowed with `memory` and `families` into a statement the seam
+/// takes, or refused.
 fn properties(
     draw: &mut dyn FnMut() -> u64,
     made: &mut Vec<Vec<u8>>,
     memory: &HostMemory,
     families: &[HostQueueFamily],
 ) {
-    let mut properties = properties_reply(limits).0;
-    let header = properties_reply(|grammar| grammar).0.len() - 20;
+    let extensions = drawn_extensions(draw);
+    let names = extension_names(extensions);
+    let bytes = extensions_reply(&names).0;
+    let counted = u32::try_from(names.len()).unwrap_or(u32::MAX);
+    held(
+        draw,
+        &bytes,
+        &(VkResult::Success, counted, extensions),
+        |bytes| Reader::new(bytes).extensions(names.len()),
+    );
+    made.push(bytes);
+
+    let chain = feature_chain(API_VERSION, extensions);
+    let plausible = draw() & 1 == 0;
+    let mut bit = || plausible || draw() & 1 == 0;
+    let mut chained = tairix_inline::ArrayVec::new();
+    for &structure in &chain {
+        let mut members = tairix_inline::ArrayVec::new();
+        for _ in 0..chained_members(structure).unwrap_or(0) {
+            assert!(members.try_push(bit()).is_ok());
+        }
+        assert!(chained.try_push(members).is_ok());
+    }
+    let mut core = [false; CORE_FEATURES];
+    for member in &mut core {
+        *member = bit();
+    }
+    let features = HostFeatures { core, chained };
+    let bytes = features_reply(&chain, &features).0;
+    held(draw, &bytes, &features, |bytes| {
+        Reader::new(bytes).features(&chain)
+    });
+    made.push(bytes);
+
+    let mut formats = [HostFormatFeatures::default(); Format::ALL.len()];
+    for offered in &mut formats {
+        let stated = draw() & 1 == 0;
+        let mut features = || {
+            let bits = draw();
+            if stated {
+                bits
+            } else {
+                bits & OLDER_FORMAT_FEATURES
+            }
+        };
+        *offered = HostFormatFeatures {
+            optimal: features(),
+            buffer: features(),
+        };
+        let bytes = format_reply(*offered, stated).0;
+        held(draw, &bytes, offered, |bytes| {
+            Reader::new(bytes).format_properties(stated)
+        });
+        made.push(bytes);
+    }
+
+    // What the host makes of each format's widest image of four samples,
+    // where it was asked.
+    let multisampled: [Option<HostImageLimits>; Format::ALL.len()] = core::array::from_fn(|_| {
+        draw().is_multiple_of(2).then(|| HostImageLimits {
+            extent: [word(draw), word(draw), 1],
+            levels: 1,
+            layers: word(draw),
+            samples: u32::try_from(draw() & 0x7f).unwrap_or(0),
+        })
+    });
+
+    let robustness = extensions.intersects(HostExtensions::ROBUSTNESS2);
+    let alignments = drawn_alignments(draw);
+    let robust = robustness.then_some(alignments);
+    let mut properties = properties_reply(robust, API_VERSION, limits).0;
+    // The limits lie between the header and the five words that end it.
+    let header = properties_reply(robust, API_VERSION, |grammar| grammar)
+        .0
+        .len()
+        - 20;
     let limits_words = (properties.len() - 20 - header) / 4;
     for _ in 0..below(draw, 4) {
         let at = header + 4 * below(draw, limits_words);
         properties[at..at + 4].copy_from_slice(&word(draw).to_le_bytes());
     }
-    if let Ok(read) = Reader::new(&properties).properties() {
-        if let Ok(statement) = narrow(&read, memory, families) {
-            assert_eq!(
-                statement.memory_types.len(),
-                statement.info.memory_types.len()
-            );
-            assert!(statement
-                .memory_types
-                .iter()
-                .all(|&host| usize::try_from(host).is_ok_and(|host| host < memory.types.len())));
-            assert!(usize::try_from(statement.family).is_ok_and(|family| family < families.len()));
-            assert!(
-                Device::hardware(Idle, statement.info.clone(), &[1], Arc::new(Still)).is_ok(),
-                "a statement the seam refuses: {statement:?}"
-            );
+    if let Ok(read) = Reader::new(&properties).properties(robustness) {
+        assert_eq!(read.robust_alignments, robust);
+        let host = HostDevice {
+            properties: &read,
+            extensions,
+            features: &features,
+            chain: &chain,
+            memory,
+            families,
+            formats: &formats,
+            multisampled: &multisampled,
+        };
+        if let Ok(statement) = narrow(&host) {
+            check_statement(&statement, memory, families);
         }
     }
     made.push(properties);
+}
+
+/// A narrowed statement names the host's own memory types and family, and
+/// the seam takes it.
+fn check_statement(
+    statement: &super::info::Statement,
+    memory: &HostMemory,
+    families: &[HostQueueFamily],
+) {
+    assert_eq!(
+        statement.memory_types.len(),
+        statement.info.memory_types.len()
+    );
+    assert!(statement
+        .memory_types
+        .iter()
+        .all(|&host| usize::try_from(host).is_ok_and(|host| host < memory.types.len())));
+    assert!(usize::try_from(statement.family).is_ok_and(|family| family < families.len()));
+    assert!(
+        Device::hardware(Idle, statement.info.clone(), &[1], Arc::new(Still)).is_ok(),
+        "a statement the seam refuses: {statement:?}"
+    );
 }
 
 /// Replies of every kind the driver reads, their values drawn from `draw`:
@@ -564,5 +935,39 @@ pub fn replies(draw: &mut dyn FnMut() -> u64) -> Vec<Vec<u8>> {
     let families = queue_families(draw, &mut made);
     let memory = memory(draw, &mut made);
     properties(draw, &mut made, &memory, &families);
+    image_formats(draw, &mut made);
     made
+}
+
+/// The most an image may be, made or refused: read back as written, and
+/// refused cut short or as done in part.
+fn image_formats(draw: &mut dyn FnMut() -> u64, made: &mut Vec<Vec<u8>>) {
+    let most = HostImageLimits {
+        extent: [word(draw), word(draw), word(draw)],
+        levels: word(draw),
+        layers: word(draw),
+        samples: word(draw),
+    };
+    let result = match below(draw, 4) {
+        0 => 0,
+        // Host or device memory exhausted.
+        1 => -1 - i32::try_from(below(draw, 2)).unwrap_or(0),
+        2 => -3 - i32::try_from(below(draw, 1 << 10)).unwrap_or(0),
+        _ => 1 + i32::try_from(below(draw, 1 << 10)).unwrap_or(0),
+    };
+    let bytes = image_format_reply(result, most).0;
+    let read = Reader::new(&bytes).image_format_properties();
+    match result {
+        0 => held(draw, &bytes, &Some(most), |bytes| {
+            Reader::new(bytes).image_format_properties()
+        }),
+        -2 | -1 => assert_eq!(
+            read,
+            Err(DriverError::OutOfMemory),
+            "out of memory, the image perhaps made later"
+        ),
+        failed if failed < 0 => assert_eq!(read, Ok(None), "refused, its properties unread"),
+        _ => assert!(read.is_err(), "done in part, which no query answers"),
+    }
+    made.push(bytes);
 }

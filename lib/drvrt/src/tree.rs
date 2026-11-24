@@ -2,7 +2,7 @@
 //! host-testable seam over the two calls it makes.
 
 use tairix_abi::hwtree::{HwResource, HW_NODE_ROOT};
-use tairix_abi::{HwDeviceClass, HwMatchKey, HwNode};
+use tairix_abi::{Errno, HwDeviceClass, HwMatchKey, HwNode};
 
 /// The hardware-tree calls a channel's publication makes.
 pub(crate) trait TreeCalls {
@@ -15,23 +15,27 @@ pub(crate) trait TreeCalls {
 /// Publish through `tree` the node `compatible` of `class` naming a bound
 /// channel's `endpoint` and stating `facts`, then settle the driver's own
 /// node: the channel is the one child a channel-serving driver publishes.
-/// Answers the node's id; [`None`] on any refusal, settling nothing.
+/// Answers the node's id.
+///
+/// # Errors
+///
+/// Why the node could not be built or was refused, settling nothing.
 pub(crate) fn publish_channel(
     tree: &mut impl TreeCalls,
     class: HwDeviceClass,
     compatible: &[u8],
     endpoint: u64,
     facts: &[HwResource],
-) -> Option<u32> {
+) -> Result<u32, Errno> {
     let mut node = HwNode::new(0, HW_NODE_ROOT, class);
-    node.push_match_key(HwMatchKey::compatible(compatible).ok()?)
-        .ok()?;
-    node.push_resource(HwResource::endpoint(endpoint)).ok()?;
+    node.push_match_key(HwMatchKey::compatible(compatible)?)?;
+    node.push_resource(HwResource::endpoint(endpoint))?;
     for fact in facts {
-        node.push_resource(*fact).ok()?;
+        node.push_resource(*fact)?;
     }
-    let id = u32::try_from(tree.emit(&node)).ok()?;
+    let id = Errno::syscall_result(tree.emit(&node))?;
+    let id = u32::try_from(id).map_err(|_| Errno::OutOfRange)?;
     // A refused settle only leaves the device manager to wait out its bound.
     let _ = tree.settle();
-    Some(id)
+    Ok(id)
 }

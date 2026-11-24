@@ -193,12 +193,11 @@ fn take_command(
         4 => {
             let (src, dst) = (take_key(reader)?, take_key(reader)?);
             let regions = reader.list(MAX_COPY_REGIONS, Wire::take)?;
-            // An image the context does not have is refused, stale, as the
-            // submission resolves it.
-            let overlapping = match arrival.image_desc(src) {
-                Some(desc) => to_buffer_overlaps(&regions, &desc)?,
-                None => false,
-            };
+            // Decided against the image as it stands, so one the context
+            // does not hold is refused now, never decided against one made
+            // under its key before the submission resolves it.
+            let desc = arrival.image_desc(src).ok_or(Error::Stale)?;
+            let overlapping = to_buffer_overlaps(&regions, &desc)?;
             Command::ImageToBuffer {
                 src,
                 dst,

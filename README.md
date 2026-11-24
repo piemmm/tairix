@@ -88,7 +88,7 @@ for filesystems, the feature section below.
 | Display switched off when idle (desktop screensaver, login screen) | ✓ virtio-gpu | ✓ virtio-gpu · ◐ Pi 4 engine | ✓ virtio-gpu | — |
 | Desktop paced at the output's own refresh rate | ✓ virtio-gpu | ✓ virtio-gpu · ✓ Pi 4 engine | ✓ virtio-gpu | — |
 | Native display engine (mode setting, several outputs, hotplug, HDMI 2.0 scrambling) | ◐ virtio-gpu | ◐ Pi 4 HVS + HDMI | ◐ virtio-gpu | — |
-| GPU served to programs (`gpu-v1` device channel) | ◐ virtio-gpu Venus | ▢ | ▢ | — |
+| GPU served to programs (`gpu-v1` device channel) | ✓ virtio-gpu Venus | ▢ | ▢ | — |
 | Sandboxed font service (`fontd`, glyph rendering) | ✓ floor | ✓ store | ✓ floor | ▢ |
 | Graphical login screen (`greeter.app`) | ◐ | ◐ | ◐ | ▢ |
 | Fast user switching (concurrent desktop sessions) | ▢ | ◐ | ▢ | ▢ |
@@ -234,6 +234,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Root encrypted at its owner's choice, swap always encrypted (§4, §11) | Secret/data recovery at rest; on a plaintext root the files, password hashes, sealed app secrets and the signing and log-attestation keys under `/System/Security/Keys` are protected only by the disk staying in its owner's hands, so whoever reads it offline can forge sealed audit segments | ✓ | ✓ | ✓ | — |
 | Capability-gated, bounded DMA carves and MMIO grants (§4, §18.1) | A driver reaching device registers or memory it was not granted | ✓ | ✓ | ✓ | — |
 | DMA translation: a device reaches only its node's domain, revoked at its driver's end (§4, `plans/IOMMU.md`) | Malicious-device or compromised-driver DMA into any memory, before or after the unit takes over; a dead driver's device writing freed memory | ◐ VT-d, AMD-Vi, virtio-iommu | ✓ SMMUv3, virtio-iommu | ✓ RISC-V IOMMU, virtio-iommu | — |
+| A GPU served to programs only from a node the platform's DMA translation unit translates, or on a platform declaring none; the kernel refuses its channel otherwise, audited (`plans/GPU.md` GP11.3) | A program's GPU work driving a device no unit confines, on a machine whose unit could confine it | ✓ | ✓ | ✓ | — |
 | A malformed description of the DMA translation units fails closed: nothing it would have described masters DMA; on x86_64 `iommu.malformed=unconfined` publishes it untranslated instead, audited and listed by `sysinfo dma` (`plans/IOMMU.md` IOM1, IOM14) | A firmware table bug leaving every device's DMA unconfined on a machine that has a unit | ✓ DMAR, IVRS, VIOT | ✓ device tree | ✓ device tree | — |
 | Isolation groups: one owner at a time for devices the fabric cannot keep apart — requester-id aliases, ACS (`plans/IOMMU.md` IOM8) | Two drivers whose devices share a bridge's alias or reach each other peer-to-peer below the unit, each reaching the other's memory or device | ✓ VT-d, AMD-Vi, virtio-iommu | ✓ SMMUv3, virtio-iommu | ✓ RISC-V IOMMU, virtio-iommu | — |
 | Address translation services refused: ATS, PRI and PASID off at the device and translated requests refused at the unit; untrusted external-facing ports (`plans/IOMMU.md` IOM10) | A device presenting a pre-translated address past the unit; a hot-plugged device passing as another or reaching firmware's windows | ✓ VT-d, AMD-Vi | ✓ SMMUv3 | ✓ RISC-V IOMMU | — |

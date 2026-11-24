@@ -72,13 +72,7 @@ fn made(gpu: &Gpu, spirv: &[u8], push: u32) -> Made {
     let bindings: Vec<LayoutBinding> = entry
         .bindings()
         .iter()
-        .map(|binding| LayoutBinding {
-            binding: binding.binding,
-            kind: binding.kind,
-            count: 1,
-            access: binding.access,
-            stages: Stages::COMPUTE,
-        })
+        .map(|binding| LayoutBinding::unsampled(binding, Stages::COMPUTE).expect("unsampled"))
         .collect();
     let module = context.create_shader_module(admitted).expect("a module");
     let set_layout = context

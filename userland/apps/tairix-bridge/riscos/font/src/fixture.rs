@@ -11,28 +11,31 @@ use alloc::format;
 use alloc::vec::Vec;
 use std::sync::LazyLock;
 
+use tairix_colour::Rgb;
 use tairix_fscopy::fixture::Tree;
 use tairix_riscos_filing::session::{
     command, modules_with, session, Session, Setup, DISC, SLOT_BYTES,
 };
 use tairix_riscos_kernel::module::Builtin;
-use tairix_riscos_kernel::os::{Fail, Regs};
-use tairix_riscos_kernel::swi::{chunk, X};
+use tairix_riscos_kernel::os::Regs;
+use tairix_riscos_kernel::swi::font::flag::HANDLE;
+use tairix_riscos_kernel::swi::X;
 
-use crate::build::{filled as character, rectangle as rect, Element, Font, Point};
+use crate::build::{
+    filled as character, rectangle as rect, Element, Font, Point, SESSION_MODULES, SET_PATH,
+};
+pub(crate) use crate::build::{BLOCK, TEXT};
+use crate::module::call::PAINT;
 
-static MODULES: LazyLock<Vec<&'static Builtin>> = LazyLock::new(|| {
-    modules_with(&[
-        &tairix_riscos_vdu::MODULES,
-        &tairix_riscos_draw::MODULES,
-        &crate::MODULES,
-    ])
-});
+static MODULES: LazyLock<Vec<&'static Builtin>> = LazyLock::new(|| modules_with(&SESSION_MODULES));
 
-/// Where a test writes a string, and a block a call answers into.
-pub(crate) const TEXT: u32 = 0x9000;
-pub(crate) const BLOCK: u32 = 0xA000;
+/// Where a test writes a matrix.
 pub(crate) const MATRIX: u32 = 0xA100;
+/// Where the probes painted: 125 pixels across and 200 up in mode 28.
+pub(crate) const AT: [u32; 2] = [100_000, 160_000];
+/// White and red, as RISC OS colour words.
+pub(crate) const WHITE: u32 = Rgb::WHITE.riscos_word();
+pub(crate) const RED: u32 = Rgb::new(u8::MAX, 0, 0).riscos_word();
 
 /// The font the layout probes measured: awkward advances and kerns at the
 /// base encoding 0 places of space, A to E and i.
@@ -110,12 +113,9 @@ pub(crate) const OLD_A: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
 /// Every pixel of the screen made `value`, a byte at a time.
 pub(crate) fn fill(s: &mut Session, value: u8) {
-    let mut os = s.kernel.os();
     let block = BLOCK + 0x300;
-    for (i, variable) in (0u32..).zip([148, 7, -1i32]) {
-        os.write_word(block + 4 * i, variable.cast_unsigned())
-            .expect("written");
-    }
+    write_words(s, block, &[148, 7, -1]);
+    let mut os = s.kernel.os();
     let mut regs = tairix_riscos_kernel::os::Regs::default();
     regs.r[..2].copy_from_slice(&[block, block + 0x20]);
     os.perform(
@@ -284,25 +284,28 @@ pub(crate) fn fonts() -> Session {
         keys: &[],
         disc: Some(&tree),
     });
-    command(
-        &mut s.kernel.os(),
-        "Set Font$Path HostFS:$.Lib.,Resources:$.Fonts.",
-    )
-    .expect("Font$Path");
+    command(&mut s.kernel.os(), SET_PATH).expect("Font$Path");
     s
 }
 
 /// Font Manager call `offset` with `low` its first registers: its
 /// registers, or its error's number.
 pub(crate) fn call(s: &mut Session, offset: u32, low: &[u32]) -> Result<Regs, u32> {
-    let mut regs = Regs::default();
-    regs.r[..low.len()].copy_from_slice(low);
-    let mut os = s.kernel.os();
-    match os.perform(X | (chunk::FONT + offset), &mut regs) {
-        Ok(()) => Ok(regs),
-        Err(Fail::Error(block)) => Err(os.read_word(block).expect("the error's number")),
-        Err(other) => panic!("{other:?}"),
-    }
+    crate::build::call(&mut s.kernel.os(), offset, low)
+}
+
+/// `Font_Paint` of `text` in `handle` with `flags` at `x` and `y`, R5 and R6
+/// as given; its error's number where it fails.
+pub(crate) fn font_paint(
+    s: &mut Session,
+    handle: u32,
+    text: &[u8],
+    flags: u32,
+    [x, y]: [u32; 2],
+    [r5, r6]: [u32; 2],
+) -> Result<(), u32> {
+    let text = write(s, TEXT, text);
+    call(s, PAINT, &[handle, text, HANDLE | flags, x, y, r5, r6]).map(drop)
 }
 
 /// Screen mode `number` selected.
@@ -379,28 +382,20 @@ pub(crate) fn pixels(
 
 /// `bytes` written at `at`, a nought after them.
 pub(crate) fn write(s: &mut Session, at: u32, bytes: &[u8]) -> u32 {
-    let mut os = s.kernel.os();
-    os.write_bytes(at, bytes).expect("written");
-    os.write_byte(at + u32::try_from(bytes.len()).expect("short"), 0)
-        .expect("terminated");
-    at
+    crate::build::write(&mut s.kernel.os(), at, bytes)
 }
 
 /// `words` written at `at`.
 pub(crate) fn write_words(s: &mut Session, at: u32, words: &[i32]) {
-    let mut os = s.kernel.os();
-    for (i, &word) in (0u32..).zip(words) {
-        os.write_word(at + 4 * i, word.cast_unsigned())
-            .expect("written");
-    }
+    let words: Vec<u32> = words.iter().map(|&word| word.cast_unsigned()).collect();
+    s.kernel.os().write_words(at, &words).expect("written");
 }
 
 /// The `n` words at `at`.
 pub(crate) fn read_words(s: &mut Session, at: u32, n: u32) -> Vec<i32> {
-    let mut os = s.kernel.os();
-    (0..n)
-        .map(|i| os.read_word(at + 4 * i).expect("read").cast_signed())
-        .collect()
+    let mut words = alloc::vec![0; n as usize];
+    s.kernel.os().read_words(at, &mut words).expect("read");
+    words.into_iter().map(u32::cast_signed).collect()
 }
 
 /// The handle `identifier` is found on at `points` sixteenths both ways at

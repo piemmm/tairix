@@ -52,9 +52,8 @@ fn a_selector_naming_no_screen_is_refused() {
         (6, 0x100_0000),
     ] {
         let os = &mut session.kernel.os();
-        for (i, word) in (0u32..).zip([1, 640, 480, 3, u32::MAX, index, value, u32::MAX]) {
-            os.write_word(SELECTOR_AT + 4 * i, word).expect("written");
-        }
+        let selector = [1, 640, 480, 3, u32::MAX, index, value, u32::MAX];
+        os.write_words(SELECTOR_AT, &selector).expect("written");
         let mut regs = Regs::new([0, SELECTOR_AT, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         let refused = os.perform(X | SCREEN_MODE, &mut regs);
         assert!(
@@ -208,15 +207,11 @@ const NO_ROOM_TO_GROW: u32 = 0x706;
 fn hostile_sprite(session: &mut Session, size: u32, block: [u32; 8]) {
     let mut os = session.kernel.os();
     let free = 16u32.saturating_add(block[0]);
-    for (i, word) in (0u32..).zip([size, 1, 16, free]) {
-        os.write_word(AREA + 4 * i, word).expect("written");
-    }
+    os.write_words(AREA, &[size, 1, 16, free]).expect("written");
     os.write_word(AREA + 16, block[0]).expect("written");
     os.write_bytes(AREA + 20, b"hostile\0\0\0\0\0")
         .expect("written");
-    for (i, &word) in (0u32..).zip(&block[1..]) {
-        os.write_word(AREA + 32 + 4 * i, word).expect("written");
-    }
+    os.write_words(AREA + 32, &block[1..]).expect("written");
 }
 
 /// `OS_SpriteOp` `reason` on the hostile sprite, R3 and R4 as given: its

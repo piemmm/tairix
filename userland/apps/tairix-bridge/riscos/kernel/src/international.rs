@@ -12,7 +12,7 @@ mod alphabets;
 use alloc::vec::Vec;
 
 use crate::error::Error;
-use crate::module::{Builtin, Command, CommandKind, Help, Resource, Services};
+use crate::module::{Builtin, Command, Resource, Services};
 use crate::msgtrans::Own;
 use crate::os::{len32, Fail, Os, Regs, Unwind, World};
 use crate::service::{self, international as reason};
@@ -27,10 +27,10 @@ pub(crate) const READ_ALPHABET: u32 = 127;
 pub(crate) const READ_KEYBOARD: u32 = 0xFF;
 /// The keyboard is set as 128 more than its number.
 pub(crate) const SET_KEYBOARD: u32 = 0x80;
-/// Latin1, the alphabet RISC OS starts in, and UTF-8, whose codes from &80
-/// are shown by their number.
+/// Latin1, the alphabet RISC OS starts in.
 pub(crate) const LATIN1: u32 = 101;
-pub(crate) const UTF8: u32 = 111;
+/// UTF-8, whose codes from &80 are shown by their number.
+pub const UTF8: u32 = 111;
 /// The configured country.
 const COUNTRY_CMOS: u8 = crate::cmos::COUNTRY;
 
@@ -115,7 +115,7 @@ const NAMELESS_KEYBOARDS: [(u32, u32); 7] = [
 const NAMELESS_ISO: [(u32, &[u8; 2]); 2] = [(23, b"hk"), (25, b"ru")];
 
 /// The alphabets by number, so an abbreviation names the first it matches.
-const ALPHABETS: [(u32, &str); 15] = [
+pub const ALPHABETS: [(u32, &str); 15] = [
     (LATIN1, "Latin1"),
     (102, "Latin2"),
     (103, "Latin3"),
@@ -125,7 +125,7 @@ const ALPHABETS: [(u32, &str); 15] = [
     (108, "Hebrew"),
     (109, "Latin5"),
     (110, "Welsh"),
-    (111, "UTF8"),
+    (UTF8, "UTF8"),
     (112, "Latin9"),
     (113, "Latin6"),
     (114, "Latin7"),
@@ -156,38 +156,36 @@ pub(crate) static INTERNATIONAL: Builtin = Builtin {
         handler: service,
     }),
     commands: &[
-        command(
+        Command::new(
             "Alphabet",
-            1,
+            (0, 1),
             "*Alphabet selects an alphabet by its name or a country's. With neither, it gives the current one.",
-            "Syntax: *Alphabet [<country name> | <alphabet name>]",
+            Some("Syntax: *Alphabet [<country name> | <alphabet name>]"),
             alphabet_command,
         ),
-        command("Alphabets", 0, "*Alphabets lists the alphabets known.", "Syntax: *Alphabets", alphabets_command),
-        command(
+        Command::new("Alphabets", (0, 0), "*Alphabets lists the alphabets known.", Some("Syntax: *Alphabets"), alphabets_command),
+        Command::new(
             "Country",
-            1,
+            (0, 1),
             "*Country selects a country, its alphabet and its keyboard. With no name, it gives the current one.",
-            "Syntax: *Country [<country name>]",
+            Some("Syntax: *Country [<country name>]"),
             country_command,
         ),
-        command("Countries", 0, "*Countries lists the countries known.", "Syntax: *Countries", countries_command),
-        command(
+        Command::new("Countries", (0, 0), "*Countries lists the countries known.", Some("Syntax: *Countries"), countries_command),
+        Command::new(
             "Keyboard",
-            1,
+            (0, 1),
             "*Keyboard selects a country's keyboard. With no name, it gives the current one.",
-            "Syntax: *Keyboard [<country name>]",
+            Some("Syntax: *Keyboard [<country name>]"),
             keyboard_command,
         ),
         Command {
-            name: "Country",
-            kind: CommandKind::Configure,
-            min: 0,
-            max: 1,
-            translate: 0,
-            help: Help::Text("*Configure Country sets the country the machine starts in."),
             syntax: Some("Syntax: *Configure Country <country name>"),
-            run: Some(configure_country),
+            ..Command::configure(
+                "Country",
+                "*Configure Country sets the country the machine starts in.",
+                configure_country,
+            )
         },
     ],
     init: Some(init),
@@ -202,25 +200,6 @@ pub(crate) static INTERNATIONAL: Builtin = Builtin {
     }],
     code: None,
 };
-
-const fn command(
-    name: &'static str,
-    max: u8,
-    help: &'static str,
-    syntax: &'static str,
-    run: crate::module::Code,
-) -> Command {
-    Command {
-        name,
-        kind: CommandKind::Command,
-        min: 0,
-        max,
-        translate: 0,
-        help: Help::Text(help),
-        syntax: Some(syntax),
-        run: Some(run),
-    }
-}
 
 /// International's state.
 pub(crate) struct State {
@@ -347,17 +326,21 @@ impl Os<'_> {
         self.write_text(&bytes)
     }
 
-    /// A name or number asked of the other modules too: `Service_International`
-    /// `reason` with R3 the name or number; R4 its answer, if claimed.
-    fn ask_international(
+    /// `Service_International` `reason` offered with R3 to R5: R4 and R5 as
+    /// the module that claimed it left them, none where no module did.
+    ///
+    /// # Errors
+    ///
+    /// What unwinds.
+    pub fn ask_international(
         &mut self,
         reason: u32,
         r3: u32,
-        buffer: u32,
-        size: u32,
-    ) -> Result<Option<(u32, u32)>, Fail> {
+        r4: u32,
+        r5: u32,
+    ) -> Result<Option<(u32, u32)>, Unwind> {
         let mut regs = Regs::default();
-        regs.r[1..6].copy_from_slice(&[service::INTERNATIONAL, reason, r3, buffer, size]);
+        regs.r[1..6].copy_from_slice(&[service::INTERNATIONAL, reason, r3, r4, r5]);
         self.service(&mut regs)?;
         Ok((regs.r[1] == 0).then_some((regs.r[4], regs.r[5])))
     }

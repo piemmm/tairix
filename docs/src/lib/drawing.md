@@ -372,11 +372,16 @@ document as a Draw file when it begins with the format's signature and as SVG ot
 so a file is read by what it holds, never by its name.
 
 `riscos::format` is the format's one definition: its signature, header,
-object and path element layouts, codes and style bits, and `Objects`, the
-walk of a run of objects that refuses one whose size does not frame it
-(`Misframed`). The reader and writer use it, and so do TAIRiX Bridge's Draw
-and DrawFile modules and SpriteExtend, so the layout is never written down
-twice.
+each object's fields, the path elements and the bytes each takes, codes and
+style bits, the matrix's fixed point (`matrix_words` reads one) and the
+stroke the format fixes — a mitre limit of ten, triangle caps in sixteenths
+of the line's width — and `Objects`, the walk of a run of objects that
+refuses one whose size does not frame it (`Misframed`). `riscos::units`
+holds RISC OS's units beside it: the draw unit, 640 to the point and 256 to
+the OS unit, and the point the Font Manager counts in millipoints and
+sixteenths, each unit that follows from others derived from them. The reader
+and writer use both, and so do TAIRiX Bridge's Draw and DrawFile modules,
+SpriteExtend and the Font Manager, so neither is written down twice.
 
 `riscos::read` reads a file into one layer, finding its font table and
 options first, as later RISC OS lets them follow the objects that need

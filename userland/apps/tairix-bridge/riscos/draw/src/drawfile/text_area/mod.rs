@@ -5,15 +5,18 @@
 mod paint;
 mod parse;
 
-use tairix_drawing::riscos::format::{self, Object, OBJECT_HEADER, TEXT_COLUMN};
+use tairix_drawing::riscos::format::{
+    Object, BARE_HEADER, OBJECT_BOUNDS, OBJECT_HEADER, OBJECT_SIZE, TEXT_COLUMN,
+};
+use tairix_util::endian::le_u32;
+
+use super::render::{box_at, terminated};
 
 pub(super) use paint::{paint, Places, BLOCK_BYTES, BUFFER_BYTES};
 
 /// The words between a text area's columns and its colours: the columns'
 /// end and two reserved.
 const AFTER_COLUMNS: usize = 12;
-/// Where a column object holds its box.
-const COLUMN_BOX: usize = 8;
 
 /// Why a text area is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,21 +45,18 @@ impl<'a> Area<'a> {
     /// The text area `object`.
     pub(super) fn of(object: Object<'a>) -> Self {
         let bytes = object.bytes;
-        let word = |at| format::int(bytes, at).unwrap_or(0);
         let mut at = OBJECT_HEADER;
-        while format::word(bytes, at) == Some(TEXT_COLUMN) {
+        while le_u32(bytes, at) == Some(TEXT_COLUMN) {
             at = at.saturating_add(object_size(bytes, at));
         }
         let columns = bytes.get(OBJECT_HEADER..at.min(bytes.len())).unwrap_or(&[]);
         at = at.saturating_add(AFTER_COLUMNS);
-        let text = bytes.get(at.saturating_add(8)..).unwrap_or(&[]);
-        let end = text.iter().position(|&b| b == 0).unwrap_or(text.len());
         Self {
-            foreground: format::word(bytes, at).unwrap_or(0),
-            background: format::word(bytes, at + 4).unwrap_or(0),
-            bounds: [word(8), word(12), word(16), word(20)],
+            foreground: le_u32(bytes, at).unwrap_or(0),
+            background: le_u32(bytes, at.saturating_add(4)).unwrap_or(0),
+            bounds: box_at(bytes, OBJECT_BOUNDS),
             columns,
-            text: &text[..end],
+            text: terminated(bytes, at.saturating_add(8)),
         }
     }
 
@@ -101,9 +101,8 @@ impl Iterator for Columns<'_> {
         if let Some(lone) = self.lone.take() {
             return Some(lone);
         }
-        format::word(self.bytes, self.at)?;
-        let word = |i: usize| format::int(self.bytes, self.at + COLUMN_BOX + 4 * i).unwrap_or(0);
-        let column = [word(0), word(1), word(2), word(3)];
+        le_u32(self.bytes, self.at)?;
+        let column = box_at(self.bytes, self.at.saturating_add(OBJECT_BOUNDS));
         self.at = self.at.saturating_add(object_size(self.bytes, self.at));
         Some(column)
     }
@@ -111,8 +110,8 @@ impl Iterator for Columns<'_> {
 
 /// The size of the object at `at`, never less than its two header words.
 fn object_size(bytes: &[u8], at: usize) -> usize {
-    let size = format::word(bytes, at.saturating_add(4)).unwrap_or(0);
-    usize::try_from(size).unwrap_or(usize::MAX).max(8)
+    let size = le_u32(bytes, at.saturating_add(OBJECT_SIZE)).unwrap_or(0);
+    usize::try_from(size).unwrap_or(usize::MAX).max(BARE_HEADER)
 }
 
 #[cfg(test)]

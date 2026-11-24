@@ -9,6 +9,7 @@ mod declare;
 mod decorate;
 mod dominance;
 mod entry;
+mod fold;
 pub(crate) mod glsl;
 mod group;
 mod image;
@@ -30,6 +31,8 @@ mod cfg_tests;
 #[cfg(test)]
 mod refusal_tests;
 #[cfg(test)]
+mod sampling_tests;
+#[cfg(test)]
 mod scale_tests;
 #[cfg(test)]
 mod tests;
@@ -40,9 +43,11 @@ use alloc::vec::Vec;
 
 pub use allow::CAPABILITIES;
 pub use binding::{
-    Access, Binding, BindingKind, Component, Disagreement, ImageShape, Layout, Stages,
+    Access, Binding, BindingKind, Component, Disagreement, ImageShape, Layout, SampleForms,
+    Sampling, Stages,
 };
 pub use entry::{EntryPoint, Interpolation, Stage, Varying, WorkgroupSize};
+pub use fold::FoldError;
 pub use specialize::{Constant, ConstantId, SpecError, SpecValue, Specialized, MAX_SPECIALIZED};
 pub use types::{MAX_MATRIX_COLUMNS, MAX_VECTOR_COMPONENTS};
 pub use view::{ImageType, Member, Scalar, Type, TypeId};
@@ -61,6 +66,16 @@ pub const MAX_CALL_DEPTH: usize = 255;
 
 /// The most resource bindings one entry point may use.
 pub const MAX_BINDINGS: usize = 1024;
+
+/// The most pairs of an image and a sampler it is sampled through that one
+/// function makes, its callees' included: one for each binding an entry point
+/// may use.
+pub const MAX_SAMPLINGS: usize = MAX_BINDINGS;
+
+/// The most samplings the validator looks at in one module following them
+/// through calls and into entry points: what bounds that work, which grows
+/// with calls and entry points rather than with the module's size.
+pub const MAX_SAMPLING_WORK: usize = 1 << 20;
 
 /// The most interface locations a stage's inputs or outputs may span.
 pub const MAX_LOCATIONS: u32 = 64;
@@ -185,6 +200,10 @@ pub enum Limit {
     CallDepth,
     /// [`MAX_BINDINGS`].
     Bindings,
+    /// [`MAX_SAMPLINGS`].
+    Samplings,
+    /// [`MAX_SAMPLING_WORK`].
+    SamplingWork,
     /// [`MAX_LOCATIONS`].
     Locations,
     /// [`MAX_TYPE_DEPTH`].

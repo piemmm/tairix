@@ -240,12 +240,6 @@ const fn type_reading(sprite_type: u8) -> TypeReading {
     }
 }
 
-/// The standard screen's eigen factor: a pixel two OS units across.
-pub(crate) const STANDARD_EIG: u8 = 1;
-/// The standard screen's resolution, which a JPEG stating none and a
-/// decoded picture take.
-pub(crate) const STANDARD_DPI: u32 = sprite_dpi_of_eig(STANDARD_EIG);
-
 /// The highest RISC OS 5 type `OS_ReadModeVariable` answers for.
 const LAST_READ_TYPE: u8 = sprite_type::YCBCR_422;
 

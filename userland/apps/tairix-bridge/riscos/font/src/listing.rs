@@ -4,11 +4,13 @@
 use alloc::vec::Vec;
 
 use tairix_riscos_kernel::error::{BAD_PARAMETERS, BUFFER_OVERFLOW};
+use tairix_riscos_kernel::msgtrans::menus::{header, item};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 
 use crate::catalogue::{families, Catalogue, Family};
 use crate::find::read_identifier;
-use crate::menu::{self, field, flag, Labels, Options, Tick, HEADER, INDIRECTED, ITEM, NONE};
+use crate::identifier::{letter, FIELD};
+use crate::menu::{self, Labels, Options, Tick, NONE};
 use crate::module::{error, message, raise, with};
 use crate::scan;
 
@@ -233,8 +235,6 @@ const ENCODING_MENU: u32 = 1;
 const ITEMS_MOST: usize = 1024;
 /// The longest item text read back.
 const TEXT_MOST: usize = 256;
-/// An inline item text's room.
-const INLINE_TEXT: usize = 12;
 
 /// `Font_DecodeMenu`: R2's selections from R1's menu, as an identifier into
 /// R3's buffer of R4 bytes, or its size alone where R3 is nought. A choice
@@ -265,7 +265,7 @@ pub(crate) fn decode_menu(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> 
         if !answer.is_empty() {
             os.write_byte(regs.r[3].wrapping_add(needed - 1), ZERO)?;
         }
-        regs.r[2] = if answer.windows(2).any(|w| w == b"\\f") {
+        regs.r[2] = if answer.windows(2).any(|w| w == [FIELD, letter::FONT_NAME]) {
             0
         } else {
             regs.r[2].wrapping_add(4 * consumed)
@@ -286,8 +286,8 @@ struct Chosen {
 /// The texts the selection at `selection`, whose first word is `first`,
 /// chose from the menu at `menu`.
 fn chosen(os: &mut Os<'_>, menu: u32, selection: u32, first: u32) -> Result<Chosen, Fail> {
-    let item = item_at(os, menu, first)?;
-    let family = item_text(os, item)?;
+    let entry = item_at(os, menu, first)?;
+    let family = item_text(os, entry)?;
     let second = os.read_word(selection.wrapping_add(4))?;
     if second.cast_signed() < 0 {
         return Ok(Chosen {
@@ -296,7 +296,7 @@ fn chosen(os: &mut Os<'_>, menu: u32, selection: u32, first: u32) -> Result<Chos
             consumed: 1,
         });
     }
-    let submenu = os.read_word(item.wrapping_add(len32(field::SUBMENU)))?;
+    let submenu = os.read_word(entry.wrapping_add(item::SUBMENU))?;
     if submenu == NONE || submenu == 0 {
         return Err(not_found(os, &family));
     }
@@ -312,13 +312,13 @@ fn chosen(os: &mut Os<'_>, menu: u32, selection: u32, first: u32) -> Result<Chos
 /// The address of item `index` of the menu at `menu`; "font not found" past
 /// its last.
 fn item_at(os: &mut Os<'_>, menu: u32, index: u32) -> Result<u32, Fail> {
-    let first = menu.wrapping_add(len32(HEADER));
+    let first = menu.wrapping_add(header::LEN);
     for i in 0..ITEMS_MOST {
-        let item = first.wrapping_add(len32(ITEM * i));
+        let entry = first.wrapping_add(item::LEN * len32(i));
         if len32(i) == index {
-            return Ok(item);
+            return Ok(entry);
         }
-        if os.read_word(item)? & flag::LAST != 0 {
+        if os.read_word(entry)? & item::LAST != 0 {
             break;
         }
     }
@@ -326,14 +326,16 @@ fn item_at(os: &mut Os<'_>, menu: u32, index: u32) -> Result<u32, Fail> {
 }
 
 /// An item's text: indirected, or in the item.
-fn item_text(os: &mut Os<'_>, item: u32) -> Result<Vec<u8>, Fail> {
-    let icon_flags = os.read_word(item.wrapping_add(len32(field::ICON_FLAGS)))?;
-    let text = item.wrapping_add(len32(field::TEXT));
-    if icon_flags & INDIRECTED != 0 {
+fn item_text(os: &mut Os<'_>, entry: u32) -> Result<Vec<u8>, Fail> {
+    let icon_flags = os.read_word(entry.wrapping_add(item::ICON_FLAGS))?;
+    let text = entry.wrapping_add(item::TEXT);
+    if icon_flags & item::INDIRECTED != 0 {
         let at = os.read_word(text)?;
         Ok(os.read_until(at, TEXT_MOST, |b| b < b' ')?.0)
     } else {
-        Ok(os.read_until(text, INLINE_TEXT, |b| b < b' ')?.0)
+        Ok(os
+            .read_until(text, item::TEXT_ROOM as usize, |b| b < b' ')?
+            .0)
     }
 }
 
@@ -367,7 +369,11 @@ fn answer(
             let key = crate::identifier::encoding_key(&wanted);
             return Err(raise(os, error::NO_ENCODING, &[&key]));
         };
-        (b'E', &encoding.identifier, encoding.name.as_ref())
+        (
+            letter::ENCODING,
+            &encoding.identifier,
+            encoding.name.as_ref(),
+        )
     } else {
         let font = if chosen.member.is_some() {
             catalogue
@@ -380,12 +386,12 @@ fn answer(
         let Some(font) = font else {
             return Err(not_found(os, &wanted));
         };
-        (b'F', &font.identifier, font.name.as_ref())
+        (letter::FONT, &font.identifier, font.name.as_ref())
     };
-    let mut out = alloc::vec![b'\\', marker];
+    let mut out = alloc::vec![FIELD, marker];
     out.extend_from_slice(identifier);
     if let Some(name) = name {
-        out.extend_from_slice(&[b'\\', marker.to_ascii_lowercase()]);
+        out.extend_from_slice(&[FIELD, marker.to_ascii_lowercase()]);
         out.extend_from_slice(
             tairix_riscos_kernel::Decimal::of(territory.cast_signed()).as_bytes(),
         );

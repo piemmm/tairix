@@ -26,15 +26,20 @@ use common::{
     answers, command, drivers_with, rma_used, select_depth, COLOUR_MODULES, HOSTILE_CALL_WORDS,
 };
 use tairix_drawing::riscos::format::{
-    CLOSE, CLOSE_WITH_GAP, FONT_TABLE, GROUP, JPEG, LINE, MOVE, OPTIONS, PATH, SPRITE, TAGGED,
-    TEXT, TEXT_AREA, TEXT_COLUMN, TRANSFORMED_SPRITE, TRANSFORMED_TEXT,
+    CLOSE, CLOSE_WITH_GAP, END, FIXED_ONE, GROUP, IDENTITY, JPEG, LINE, MOVE, NO_COLOUR,
+    OBJECT_HEADER, OPTIONS, PATH, SPRITE, TAGGED, TEXT, TEXT_AREA, TEXT_COLUMN, TRANSFORMED_SPRITE,
+    TRANSFORMED_TEXT,
 };
+use tairix_drawing::riscos::units::DRAW_UNIT_SHIFT;
 use tairix_fuzzseed::Prng;
+use tairix_image::SPRITE_HEADER_LEN;
+use tairix_riscos_draw::fixture::{self, words};
 use tairix_riscos_filing::session::{modules_with, Session};
 use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::module::Builtin;
 use tairix_riscos_kernel::os::{Fail, Regs};
 use tairix_riscos_kernel::swi::chunk::DRAW_FILE;
+use tairix_riscos_kernel::swi::os::READ_VDU_VARIABLES;
 use tairix_riscos_kernel::swi::X;
 
 const SMOKE_RUNS: u64 = 4;
@@ -46,13 +51,9 @@ const BLOCKS_AT: u32 = APPLICATION + 0x1_0000;
 static MODULES: LazyLock<Vec<&'static Builtin>> =
     LazyLock::new(|| modules_with(&[&tairix_riscos_vdu::MODULES, &tairix_riscos_draw::MODULES]));
 
-fn words(words: &[u32]) -> Vec<u8> {
-    words.iter().flat_map(|w| w.to_le_bytes()).collect()
-}
-
 /// An object of `kind` around `body`, its size most often right.
 fn object(rng: &mut Prng, kind: u32, body: &[u8]) -> Vec<u8> {
-    let right = u32::try_from(24 + body.len()).unwrap_or(u32::MAX);
+    let right = u32::try_from(OBJECT_HEADER + body.len()).unwrap_or(u32::MAX);
     let size = match rng.below(12) {
         0 => rng.next_u32(),
         1 => right.wrapping_sub(4),
@@ -100,15 +101,10 @@ fn path_object(rng: &mut Prng) -> Vec<u8> {
 /// A font table naming up to three fonts, a number now and then repeated
 /// or past the range.
 fn font_table(rng: &mut Prng) -> Vec<u8> {
-    let mut table = words(&[FONT_TABLE, 0]);
-    for n in 1..=u8::try_from(rng.below(4)).unwrap_or(0) {
-        table.push(*rng.pick(&[n, 0xFF, 7]));
-        table.extend(b"Homerton.Medium\0");
-    }
-    let mut table = padded(table);
-    let size = u32::try_from(table.len()).unwrap_or(0);
-    table[4..8].copy_from_slice(&size.to_le_bytes());
-    table
+    let fonts: Vec<(u8, &[u8])> = (1..=u8::try_from(rng.below(4)).unwrap_or(0))
+        .map(|n| (*rng.pick(&[n, 0xFF, 7]), &b"Homerton.Medium"[..]))
+        .collect();
+    fixture::font_table(&fonts)
 }
 
 /// Text in a font a table may not name, transformed or not.
@@ -130,7 +126,8 @@ fn text_object(rng: &mut Prng) -> Vec<u8> {
         TRANSFORMED_TEXT
     };
     if kind == TRANSFORMED_TEXT {
-        let mut transformed = words(&[0x1_0000, 0, 0, 0x1_0000, point(rng), point(rng), 0]);
+        let mut transformed = words(&IDENTITY[..4]);
+        transformed.extend(words(&[point(rng), point(rng), 0]));
         transformed.extend(body);
         body = transformed;
     }
@@ -141,10 +138,19 @@ fn text_object(rng: &mut Prng) -> Vec<u8> {
 fn sprite_object(rng: &mut Prng) -> Vec<u8> {
     let anything = rng.next_u32();
     let mode = *rng.pick(&[28, 27, 15, 99, anything]);
-    let mut sprite = words(&[60, 0x7370, 0, 0, 0, 3, 0, 31, 44, 44, mode]);
-    sprite.extend(words(&[0x0403_0201; 4]));
     let kind = *rng.pick(&[SPRITE, TRANSFORMED_SPRITE]);
-    object(rng, kind, &sprite)
+    object(rng, kind, &sprite_of(mode, 0x0403_0201))
+}
+
+/// A sprite of `mode`, a word across, four rows up and unmasked, each word
+/// `pixels`.
+fn sprite_of(mode: u32, pixels: u32) -> Vec<u8> {
+    let image = SPRITE_HEADER_LEN;
+    let rows = words(&[pixels; 4]);
+    let size = image + u32::try_from(rows.len()).unwrap_or(0);
+    let mut sprite = words(&[size, 0x7370, 0, 0, 0, 3, 0, 31, image, image, mode]);
+    sprite.extend(rows);
+    sprite
 }
 
 /// A text area of one column whose text holds any of its commands.
@@ -207,7 +213,7 @@ fn deep_chain(rng: &mut Prng) -> Vec<u8> {
             (TAGGED, words(&[rng.next_u32()]))
         };
         body.extend(&inner);
-        let size = u32::try_from(24 + body.len()).unwrap_or(u32::MAX);
+        let size = u32::try_from(OBJECT_HEADER + body.len()).unwrap_or(u32::MAX);
         inner = words(&[kind, size, 0, 0, 90_000, 70_000]);
         inner.extend(body);
     }
@@ -284,26 +290,26 @@ fn call(session: &mut Session, rng: &mut Prng) {
     }
 }
 
+/// An object of `kind` around `body`, boxed from 0,0 to 9000,9000.
+fn boxed(kind: u32, body: &[u8]) -> Vec<u8> {
+    let size = u32::try_from(OBJECT_HEADER + body.len()).unwrap_or(u32::MAX);
+    let mut bytes = words(&[kind, size, 0, 0, 9000, 9000]);
+    bytes.extend(body);
+    bytes
+}
+
+/// A red triangle, filled and not outlined, over half that box.
+fn filled_path() -> Vec<u8> {
+    let triangle = [MOVE, 0, 0, LINE, 9000, 0, LINE, 9000, 9000, CLOSE, END];
+    let mut body = words(&[0xFF00, NO_COLOUR, 0, 0]);
+    body.extend(words(&triangle));
+    boxed(PATH, &body)
+}
+
 /// A sound file of a filled path rendered and measured: the calls reach
 /// the module.
 fn reaches_drawfile(session: &mut Session) {
-    let mut bytes = b"Draw".to_vec();
-    bytes.extend(words(&[201, 0]));
-    bytes.extend(b"Fuzz        ");
-    bytes.extend(words(&[0, 0, 9000, 9000]));
-    bytes.extend(words(&[
-        2,
-        24 + 16 + 44,
-        0,
-        0,
-        9000,
-        9000,
-        0xFF00,
-        u32::MAX,
-        0,
-        0,
-    ]));
-    bytes.extend(words(&[2, 0, 0, 8, 9000, 0, 8, 9000, 9000, 5, 0]));
+    let bytes = fixture::file([0, 0, 9000, 9000], &[&filled_path()]);
     session
         .kernel
         .os()
@@ -367,12 +373,8 @@ fn a_sprite_rendered_leaves_its_32k_table_with_colourtrans() {
     let mut session = drivers_with(MODULES.as_slice(), b"");
     select_depth(&mut session, 3).expect("256 colours");
     let held = rma_used(&mut session);
-    let mut bytes = b"Draw".to_vec();
-    bytes.extend(words(&[201, 0]));
-    bytes.extend(b"Sprite      ");
-    bytes.extend(words(&[0, 0, 9000, 9000, 5, 24 + 60, 0, 0, 9000, 9000]));
-    bytes.extend(words(&[60, 0x7370, 0, 0, 0, 3, 0, 31, 44, 44, TRUE_COLOUR]));
-    bytes.extend(words(&[0x00FF_8040; 4]));
+    let sprite = boxed(SPRITE, &sprite_of(TRUE_COLOUR, 0x00FF_8040));
+    let bytes = fixture::file([0, 0, 9000, 9000], &[&sprite]);
     session
         .kernel
         .os()
@@ -396,19 +398,15 @@ fn a_sprite_rendered_leaves_its_32k_table_with_colourtrans() {
 /// A file of a filled path inside `depth` levels of `kind`, a group or a
 /// tagged object, each level's header written outermost first.
 fn nested(depth: u32, kind: u32) -> Vec<u8> {
-    let mut leaf = words(&[2, 24 + 16 + 44, 0, 0, 9000, 9000, 0xFF00, u32::MAX, 0, 0]);
-    leaf.extend(words(&[2, 0, 0, 8, 9000, 0, 8, 9000, 9000, 5, 0]));
+    let leaf = filled_path();
     let level: &[u8] = if kind == GROUP {
         b"Nested      "
     } else {
         &[0x34, 0x12, 0, 0]
     };
-    let overhead = 24 + u32::try_from(level.len()).unwrap_or(0);
+    let overhead = u32::try_from(OBJECT_HEADER + level.len()).unwrap_or(0);
     let leaf_bytes = u32::try_from(leaf.len()).unwrap_or(0);
-    let mut bytes = b"Draw".to_vec();
-    bytes.extend(words(&[201, 0]));
-    bytes.extend(b"Nesting     ");
-    bytes.extend(words(&[0, 0, 9000, 9000]));
+    let mut bytes = fixture::file([0, 0, 9000, 9000], &[]);
     for outside in 0..depth {
         bytes.extend(words(&[
             kind,
@@ -462,4 +460,75 @@ fn nesting_past_risc_os_s_stack_aborts_as_its_overflow_does() {
             }
         }
     }
+}
+
+/// A JPEG is plotted through its own matrix, which `JPEG_PlotTransformed` is
+/// handed as a matrix: its pixels land where the matrix puts them.
+#[test]
+fn a_jpeg_lands_where_its_matrix_puts_it() {
+    let mut session = drivers_with(MODULES.as_slice(), b"");
+    select_depth(&mut session, 5).expect("32 bits a pixel");
+    let picture = tairix_image::Picture::rgba(16, 16, vec![0xFF; 16 * 16 * 4]).expect("a picture");
+    let options = tairix_image::JpegOptions::new(90, [0, 0, 0]).expect("options");
+    let data = tairix_image::encode_jpeg(&picture, options).expect("encoded");
+    // From 100 OS units both ways, 32 across and up: pixels 50 to 65 of the
+    // 640 by 480 screen, two OS units a pixel as a JPEG's are.
+    let (at, side): (i32, i32) = (100 << DRAW_UNIT_SHIFT, 32 << DRAW_UNIT_SHIFT);
+    let bounds = [at, at, at + side, at + side];
+    let jpeg = fixture::jpeg(
+        bounds,
+        [side.cast_unsigned(); 2],
+        [90; 2],
+        [FIXED_ONE, 0, 0, FIXED_ONE, at, at],
+        &data,
+    );
+    let bytes = fixture::file(bounds, &[&jpeg]);
+    session
+        .kernel
+        .os()
+        .write_bytes(FILE_AT, &bytes)
+        .expect("written");
+    let length = u32::try_from(bytes.len()).unwrap_or(0);
+    let mut render = Regs::new([0, FILE_AT, length, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    session
+        .kernel
+        .os()
+        .perform(X | DRAW_FILE, &mut render)
+        .expect("rendered");
+    session
+        .kernel
+        .os()
+        .write_words(BLOCKS_AT, &[148, u32::MAX])
+        .expect("the screen's start asked for");
+    common::call(
+        &mut session,
+        READ_VDU_VARIABLES,
+        &[BLOCKS_AT, BLOCKS_AT + 8],
+    )
+    .expect("read");
+    let screen = session
+        .kernel
+        .os()
+        .read_word(BLOCKS_AT + 8)
+        .expect("the screen");
+    let pixels = session
+        .kernel
+        .os()
+        .read_vec(screen, 640 * 480 * 4)
+        .expect("read");
+    let drawn: Vec<(usize, usize)> = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .enumerate()
+        .filter(|(_, pixel)| **pixel != [0; 4])
+        .map(|(i, _)| (i % 640, i / 640))
+        .collect();
+    assert_eq!(drawn.len(), 16 * 16);
+    assert!(
+        drawn
+            .iter()
+            .all(|&(x, row)| (50..66).contains(&x) && (414..430).contains(&row)),
+        "the rows counted from the screen's top: {drawn:?}"
+    );
 }

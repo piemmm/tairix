@@ -302,7 +302,8 @@ fn a_clear_reads_the_clock_each_check_s_work_of_it() {
 
 #[test]
 fn the_memories_a_dispatch_views_are_counted_as_it_views_them() {
-    use tairix_spirv::{Access, BindingKind, Stages};
+    use crate::DescriptorType;
+    use tairix_spirv::{Access, Stages};
     let (device, clock) = roomy();
     let context = context(&device);
     let (_memory, buffer) = crate::device_tests::buffer(&context, WORK_PER_CHECK);
@@ -315,7 +316,7 @@ fn the_memories_a_dispatch_views_are_counted_as_it_views_them() {
     let set_layout = context
         .create_bind_set_layout(&[crate::LayoutBinding {
             binding: 0,
-            kind: BindingKind::StorageBuffer,
+            kind: DescriptorType::StorageBuffer,
             count: 3,
             access: Access::READ.with(Access::WRITE),
             stages: Stages::COMPUTE,
@@ -2125,7 +2126,8 @@ fn wide(context: &Context) -> Result<Wide, Error> {
 
 /// [`wide`], of `descriptors` storage buffers.
 fn wide_of(context: &Context, descriptors: u32) -> Result<Wide, Error> {
-    use tairix_spirv::{Access, BindingKind, Stages};
+    use crate::DescriptorType;
+    use tairix_spirv::{Access, Stages};
     let text = alloc::format!(
         r#"OpCapability Shader
 OpMemoryModel Logical GLSL450
@@ -2158,7 +2160,7 @@ OpFunctionEnd
         context.create_shader_module(tairix_spirv::assemble::admit(&text).expect("admitted"))?;
     let set_layout = context.create_bind_set_layout(&[crate::LayoutBinding {
         binding: 0,
-        kind: BindingKind::StorageBuffer,
+        kind: DescriptorType::StorageBuffer,
         count: descriptors,
         access: Access::READ.with(Access::WRITE),
         stages: Stages::COMPUTE,
@@ -2610,7 +2612,8 @@ OpFunctionEnd
 
 #[test]
 fn bindings_of_two_sets_over_shared_and_interleaved_memories_reach_their_own() {
-    use tairix_spirv::{Access, BindingKind, Stages};
+    use crate::DescriptorType;
+    use tairix_spirv::{Access, Stages};
     let (device, _) = device();
     let context = context(&device);
     let module = context
@@ -2618,7 +2621,7 @@ fn bindings_of_two_sets_over_shared_and_interleaved_memories_reach_their_own() {
         .expect("a module");
     let binding = |binding, count| crate::LayoutBinding {
         binding,
-        kind: BindingKind::StorageBuffer,
+        kind: DescriptorType::StorageBuffer,
         count,
         access: Access::READ.with(Access::WRITE),
         stages: Stages::COMPUTE,
@@ -3053,7 +3056,8 @@ fn cleared_picture(context: &Context) -> (crate::Allocation, crate::Image, crate
 
 #[test]
 fn a_sampler_in_a_set_of_its_own_beside_another_s_memory_is_resolved() {
-    use tairix_spirv::{Access, BindingKind, Component, ImageShape, Stages};
+    use crate::{DescriptorType, SampleType, SamplerType};
+    use tairix_spirv::{Access, Component, ImageShape, Stages};
     let (device, _) = device();
     let context = context(&device);
     let (_placed, _image, texels) = cleared_picture(&context);
@@ -3077,13 +3081,13 @@ fn a_sampler_in_a_set_of_its_own_beside_another_s_memory_is_resolved() {
     let out_layout = context
         .create_bind_set_layout(&[crate::LayoutBinding {
             access: Access::READ.with(Access::WRITE),
-            ..binding(0, BindingKind::StorageBuffer)
+            ..binding(0, DescriptorType::StorageBuffer)
         }])
         .expect("a layout");
     let image_layout = context
         .create_bind_set_layout(&[
-            binding(0, BindingKind::SampledImage(float_2d)),
-            binding(1, BindingKind::Sampler),
+            binding(0, DescriptorType::SampledImage(float_2d, SampleType::Float)),
+            binding(1, DescriptorType::Sampler(SamplerType::Filtering)),
         ])
         .expect("a layout");
     let layout = context
@@ -3137,4 +3141,67 @@ fn a_sampler_in_a_set_of_its_own_beside_another_s_memory_is_resolved() {
     crate::device_tests::submit(&crate::device_tests::queue(&context), &commands).expect("ran");
     assert_eq!(context.status(), Ok(()));
     assert_eq!(words(&held, 1), [0.75_f32.to_bits()]);
+}
+
+/// A workgroup of two tiles, its shared words initialized to their null:
+/// what each tile writes before the barrier the other reads after it, so the
+/// initializer is the zero the memory starts at and never laid again as a
+/// tile starts.
+const SHARED_NULL: &str = r#"
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %lid %buf %shared
+OpExecutionMode %main LocalSize 128 1 1
+OpDecorate %lid BuiltIn LocalInvocationIndex
+OpDecorate %buf DescriptorSet 0
+OpDecorate %buf Binding 0
+OpDecorate %block Block
+OpMemberDecorate %block 0 Offset 0
+OpDecorate %words ArrayStride 4
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%zero = OpConstant %uint 0
+%one = OpConstant %uint 1
+%half = OpConstant %uint 64
+%all = OpConstant %uint 128
+%workgroup = OpConstant %uint 2
+%shared_sem = OpConstant %uint 264
+%words = OpTypeRuntimeArray %uint
+%block = OpTypeStruct %words
+%block_ptr = OpTypePointer StorageBuffer %block
+%word_ptr = OpTypePointer StorageBuffer %uint
+%uint_in = OpTypePointer Input %uint
+%lid = OpVariable %uint_in Input
+%buf = OpVariable %block_ptr StorageBuffer
+%shared_t = OpTypeArray %uint %all
+%shared_ptr = OpTypePointer Workgroup %shared_t
+%shared_word = OpTypePointer Workgroup %uint
+%nothing = OpConstantNull %shared_t
+%shared = OpVariable %shared_ptr Workgroup %nothing
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%l = OpLoad %uint %lid
+%mark = OpIAdd %uint %l %one
+%mine = OpAccessChain %shared_word %shared %l
+OpStore %mine %mark
+OpControlBarrier %workgroup %workgroup %shared_sem
+%across = OpIAdd %uint %l %half
+%other = OpUMod %uint %across %all
+%theirs = OpAccessChain %shared_word %shared %other
+%read = OpLoad %uint %theirs
+%out = OpAccessChain %word_ptr %buf %zero %l
+OpStore %out %read
+OpReturn
+OpFunctionEnd
+"#;
+
+#[test]
+fn a_null_initialized_workgroup_variable_is_not_laid_again_as_each_tile_starts() {
+    let (device, _clock) = device();
+    let context = context(&device);
+    let rig = rig(&context, SHARED_NULL, 128 * 4, &[]).expect("a pipeline");
+    run(&context, &rig, [1, 1, 1]).expect("dispatched");
+    let expected: alloc::vec::Vec<u32> = (0..128).map(|l| (l + 64) % 128 + 1).collect();
+    assert_eq!(words(&rig.memory, 128), expected);
 }

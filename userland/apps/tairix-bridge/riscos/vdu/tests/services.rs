@@ -110,9 +110,7 @@ fn a_calibration_set_or_refused_is_announced_and_the_default_restored_quietly() 
     let mut session = watched();
     let table = [2, 2, 2, 0, 0xFF, 0, 0xFF, 0, 0xFF];
     let os = &mut session.kernel.os();
-    for (i, word) in (0u32..).zip(table) {
-        os.write_word(0x9000 + 4 * i, word).expect("written");
-    }
+    os.write_words(0x9000, &table).expect("written");
     let changed = |session: &mut Session| {
         let seen = seen(session);
         seen.iter()

@@ -26,16 +26,20 @@ const CALL_A_SWI_HOPS: u32 = 16;
 /// A number no SWI has, for a chain followed too far.
 const UNKNOWN: u32 = 0x80;
 
-/// SpriteExtend's JPEG SWIs other modules call.
+/// SpriteExtend's JPEG SWIs other modules call, and the flag their
+/// transformed plot shares with `OS_SpriteOp` 56.
 pub mod jpeg {
     use super::chunk::SPRITE_EXTEND;
 
     /// `JPEG_PlotTransformed`.
     pub const PLOT_TRANSFORMED: u32 = SPRITE_EXTEND + 0x04;
+    /// `JPEG_PlotTransformed`'s R1 bit making R2 a destination parallelogram,
+    /// as `OS_SpriteOp` 56's makes R6 one.
+    pub use super::sprite_op::PARALLELOGRAM;
 }
 
-/// `OS_SpriteOp`'s reasons other modules call, and the bits R0 adds to a
-/// reason to name a sprite in R1's area.
+/// `OS_SpriteOp`'s reasons other modules call, the bits R0 adds to a reason
+/// to name a sprite in R1's area, and a plot's flag for the sprite's mask.
 pub mod sprite_op {
     /// R0's bits that hold the reason.
     pub const REASON: u32 = 0xFF;
@@ -47,8 +51,15 @@ pub mod sprite_op {
     pub const READ_INFO: u32 = 40;
     /// A sprite plotted through a matrix or onto a parallelogram.
     pub const PUT_TRANSFORMED: u32 = 56;
+    /// [`PUT_TRANSFORMED`]'s R3 bit making R6 a destination parallelogram
+    /// rather than a matrix.
+    pub const PARALLELOGRAM: u32 = 1;
+    /// R1 naming no area, for a sprite R2 points at.
+    pub const NO_AREA: u32 = 0x100;
     /// Output switched to a sprite's mask.
     pub const SWITCH_TO_MASK: u32 = 61;
+    /// R5's bit plotting a scaled or transformed sprite through its mask.
+    pub const THROUGH_MASK: u32 = 8;
 }
 
 /// Draw's SWIs other modules call.
@@ -97,7 +108,8 @@ pub mod chunk {
     pub const SPRITE_EXTEND: u32 = 0x4_9980;
 }
 
-/// The Font Manager's SWIs other modules call.
+/// The Font Manager's SWIs other modules call, the flags and control codes
+/// of the strings they paint and measure, and how far its colours reach.
 pub mod font {
     use super::chunk::FONT;
 
@@ -125,9 +137,70 @@ pub mod font {
     pub const SCAN_STRING: u32 = FONT + 0x21;
     /// `Font_SetColourTable`, ColourTrans's own call.
     pub const SET_COLOUR_TABLE: u32 = FONT + 0x22;
+    /// The furthest the anti-aliasing colours reach from the foreground,
+    /// either way: the largest offset a font's colours are set with.
+    pub const MOST_OFFSET: i32 = 14;
+
+    /// R2's flags for the string `Font_Paint` and `Font_ScanString` walk.
+    pub mod flag {
+        /// `Font_Paint`'s R3 and R4, and the box `Font_CharBBox` gives, in OS
+        /// units rather than millipoints.
+        pub const OS_UNITS: u32 = 1 << 4;
+        /// R5 points at a block, the justification offsets first.
+        pub const BLOCK: u32 = 1 << 5;
+        /// R6 points at a matrix.
+        pub const MATRIX: u32 = 1 << 6;
+        /// R7 holds the string's length in bytes.
+        pub const LENGTH: u32 = 1 << 7;
+        /// R0 holds the font, nought for the current one.
+        pub const HANDLE: u32 = 1 << 8;
+        /// The font's kerning applied.
+        pub const KERN: u32 = 1 << 9;
+        /// The string set from right to left.
+        pub const RIGHT_TO_LEFT: u32 = 1 << 10;
+        /// The string's units are halfwords.
+        pub const HALFWORDS: u32 = 1 << 12;
+        /// The string's units are words.
+        pub const WORDS: u32 = 1 << 13;
+    }
+
+    /// The control codes such a string holds: each a unit below the space,
+    /// its parameters after it.
+    pub mod code {
+        /// The string's end, as [`LINE_FEED`] and [`RETURN`] are.
+        pub const END: u8 = 0;
+        /// A move across by the distance after it.
+        pub const MOVE_ACROSS: u8 = 9;
+        /// A line feed.
+        pub const LINE_FEED: u8 = 10;
+        /// A move up by the distance after it.
+        pub const MOVE_UP: u8 = 11;
+        /// A return.
+        pub const RETURN: u8 = 13;
+        /// The foreground colour, or with [`BACKGROUND`] the background.
+        pub const COLOUR: u8 = 17;
+        /// The background and foreground colours and the anti-aliasing offset.
+        pub const COLOURS: u8 = 18;
+        /// The background and foreground as RGB, and the largest offset.
+        pub const RGB: u8 = 19;
+        /// A comment, to the next control code.
+        pub const COMMENT: u8 = 21;
+        /// An underline's position and thickness.
+        pub const UNDERLINE: u8 = 25;
+        /// A font, by its handle.
+        pub const FONT: u8 = 26;
+        /// A matrix of four words, from the next word boundary.
+        pub const MATRIX: u8 = 27;
+        /// A matrix of six words, its translation among them.
+        pub const MATRIX_MOVED: u8 = 28;
+        /// The space: the least unit that is a character.
+        pub const SPACE: u8 = 32;
+        /// [`COLOUR`]'s bit for the background.
+        pub const BACKGROUND: u8 = 0x80;
+    }
 }
 
-/// ColourTrans's SWIs, and their flag for the background.
+/// ColourTrans's SWIs, and the flags and arguments other modules give them.
 pub mod colour_trans {
     use super::chunk::COLOUR_TRANS;
 
@@ -205,6 +278,17 @@ pub mod colour_trans {
     pub const GENERATE_TABLE: u32 = COLOUR_TRANS + 0x23;
     /// R3's bit asking for the background colour.
     pub const BACKGROUND: u32 = 1 << 7;
+    /// `ColourTrans_SetGCOL`'s R3 bit asking for an ECF where one comes
+    /// closer.
+    pub const USE_ECF: u32 = 1 << 8;
+    /// The flag bit a call naming a sprite sets where R1 points at the sprite
+    /// rather than naming it.
+    pub const SPRITE_POINTER: u32 = 1;
+    /// A source that is the sprite R1 points at outside any area, in place
+    /// of a mode or an area: no area, as `OS_SpriteOp` names it.
+    pub const BARE_SPRITE: u32 = super::sprite_op::NO_AREA;
+    /// A mode or palette argument naming the current one.
+    pub const CURRENT: u32 = u32::MAX;
 }
 
 /// The sound modules' SWIs.
@@ -350,6 +434,8 @@ pub mod os {
     pub const CALL_A_VECTOR: u32 = 0x34;
     /// `OS_ReadModeVariable`.
     pub const READ_MODE_VARIABLE: u32 = 0x35;
+    /// [`READ_MODE_VARIABLE`]'s R0 for the current mode.
+    pub const CURRENT_MODE: u32 = u32::MAX;
     /// `OS_RemoveCursors`.
     pub const REMOVE_CURSORS: u32 = 0x36;
     /// `OS_RestoreCursors`.
@@ -491,6 +577,11 @@ pub mod os {
     /// `OS_Exit`'s word beside a return code.
     pub mod exit {
         pub use crate::env::ABEX;
+    }
+
+    /// `OS_ReadVarVal`'s and `OS_SetVarVal`'s types, in R4.
+    pub mod var_type {
+        pub use crate::vars::{MACRO, STRING};
     }
 
     /// `OS_ScreenMode`'s reasons more than the VDU drivers name: the mode

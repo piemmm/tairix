@@ -12,8 +12,9 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::error::Error;
-use crate::filing::fs::{self as interface, block};
-use crate::module::{Builtin, Command, CommandKind, Help, Resource, Services, Swis};
+use crate::filing::fs::{self as interface, attribute, block, Declaration};
+use crate::memory::MemoryError;
+use crate::module::{Builtin, Command, Resource, Services, Swis};
 use crate::msgtrans::Own;
 use crate::os::{len32, Fail, Os, Regs, Unwind, World};
 use crate::service;
@@ -29,11 +30,75 @@ const FS_INFO: u32 = FS_NUMBER | interface::info::READ_ONLY;
 /// The longest name an entry may have: a containment bound on the walk of a
 /// block the guest wrote, not a capacity.
 const NAME_MOST: u32 = 1024;
-/// An entry's words before its name.
-const HEADER: u32 = 20;
+/// An entry's words before its name: its offset to the next entry, its load
+/// and execution addresses, its length and its attributes.
+const HEADER_WORDS: usize = 5;
+const HEADER: u32 = 4 * len32(HEADER_WORDS);
 /// The least an entry may be: its words, a name of one character and its
 /// terminator padded, and the data's length word.
 const LEAST_ENTRY: u32 = HEADER + 4 + 4;
+
+/// The attributes a file of a block is given: its owner's to read and write.
+pub const ATTRIBUTES: u32 = attribute::OWNER_READ | attribute::OWNER_WRITE;
+
+/// The word after a block's last entry.
+pub const BLOCK_END: u32 = 0;
+
+/// The words the entry for a file named `name` holding `data` takes in a
+/// block.
+#[must_use]
+pub const fn entry_words(name: &[u8], data: &[u8]) -> usize {
+    HEADER_WORDS + (name.len() + 1).div_ceil(4) + 1 + data.len().div_ceil(4)
+}
+
+/// The entry for the file `name` holding `data`, with load and execution
+/// addresses `load` and `exec`, appended to `out` as
+/// `ResourceFS_RegisterFiles` reads a block: its header, its name and
+/// terminator, its data's length with four, then its data, each padded to a
+/// word.
+///
+/// # Errors
+///
+/// No memory where `out` cannot grow to hold it, or where the entry is
+/// longer than its offset word can say, which no 32-bit guest could hold.
+pub fn push_entry(
+    out: &mut Vec<u32>,
+    name: &[u8],
+    data: &[u8],
+    (load, exec): (u32, u32),
+) -> Result<(), MemoryError> {
+    let words = entry_words(name, data);
+    let offset = entry_offset(words).ok_or(MemoryError::NoMemory)?;
+    out.try_reserve(words)?;
+    // The offset spans the data, so its length with four fits a word too.
+    let length = len32(data.len());
+    out.extend_from_slice(&[offset, load, exec, length, ATTRIBUTES]);
+    push_padded(out, name, (name.len() + 1).div_ceil(4));
+    out.push(length + 4);
+    push_padded(out, data, data.len().div_ceil(4));
+    Ok(())
+}
+
+/// The offset from an entry of `words` words to the next; none past what a
+/// word holds.
+fn entry_offset(words: usize) -> Option<u32> {
+    u32::try_from(words.checked_mul(4)?).ok()
+}
+
+/// `bytes` as little-endian words, the last padded with noughts, then
+/// nought words to `count`.
+fn push_padded(words: &mut Vec<u32>, bytes: &[u8], count: usize) {
+    let (whole, tail) = bytes.as_chunks::<4>();
+    words.extend(whole.iter().map(|word| u32::from_le_bytes(*word)));
+    let mut pushed = whole.len();
+    if !tail.is_empty() {
+        let mut last = [0; 4];
+        last[..tail.len()].copy_from_slice(tail);
+        words.push(u32::from_le_bytes(last));
+        pushed += 1;
+    }
+    words.extend(core::iter::repeat_n(0, count.saturating_sub(pushed)));
+}
 
 /// "%0 has these files registered already" and "%0 has no such files registered".
 const ALREADY_REGISTERED: Error = Error {
@@ -63,19 +128,11 @@ const WORKSPACE: u32 = (FS_NAME_AT + len32(FS_NAME.len())).next_multiple_of(4);
 
 /// The routines it hands out: the registration a module calls during
 /// `Service_ResourceFSStarting`, the callback that issues
-/// `Service_ResourceFSStarted`, and the filing system's entries, by their
-/// words in its information block.
+/// `Service_ResourceFSStarted`, and from the third on, the filing system's
+/// entries.
 const REGISTER_STARTING: usize = 0;
 const STARTED_CALLBACK: usize = 1;
-const FS_ENTRIES: [(usize, usize); 7] = [
-    (block::OPEN, 2),
-    (block::GET_BYTES, 3),
-    (block::PUT_BYTES, 4),
-    (block::ARGS, 5),
-    (block::CLOSE, 6),
-    (block::FILE, 7),
-    (block::FUNC, 8),
-];
+const FS_ENTRIES: usize = 2;
 
 /// ResourceFS.
 pub(crate) static RESOURCE_FS: Builtin = Builtin {
@@ -92,16 +149,13 @@ pub(crate) static RESOURCE_FS: Builtin = Builtin {
         numbers: &[service::FS_REDECLARE, service::TERRITORY_STARTED],
         handler: service,
     }),
-    commands: &[Command {
-        name: "ResourceFS",
-        kind: CommandKind::Command,
-        min: 0,
-        max: 0,
-        translate: 0,
-        help: Help::Text("*ResourceFS makes ResourceFS the current filing system."),
-        syntax: Some("Syntax: *ResourceFS"),
-        run: Some(select),
-    }],
+    commands: &[Command::new(
+        "ResourceFS",
+        (0, 0),
+        "*ResourceFS makes ResourceFS the current filing system.",
+        Some("Syntax: *ResourceFS"),
+        select,
+    )],
     init: Some(init),
     finalise: Some(finalise),
     start: None,
@@ -270,9 +324,7 @@ impl Os<'_> {
             return Ok(None);
         }
         let mut words = [0; 4];
-        for (n, word) in (1..).zip(words.iter_mut()) {
-            *word = self.read_word(at.wrapping_add(4 * n))?;
-        }
+        self.read_words(at.wrapping_add(4), &mut words)?;
         let [load, exec, length, attributes] = words;
         let name = at.wrapping_add(HEADER);
         let room = (offset - HEADER).min(NAME_MOST);
@@ -484,34 +536,22 @@ impl Os<'_> {
     /// The filing system registered with FileSwitch, if FileSwitch is there
     /// to take it.
     fn declare(&mut self) -> Result<(), Fail> {
-        let (Some(base), Some(workspace)) = (
-            self.module_of(&RESOURCE_FS),
-            self.world.resource_fs.workspace,
-        ) else {
+        let Some(workspace) = self.world.resource_fs.workspace else {
             return Ok(());
         };
-        let mut words = [0; block::WORDS];
-        words[block::NAME] = (workspace + FS_NAME_AT).wrapping_sub(base);
-        words[block::STARTUP] = (workspace + EMPTY_AT).wrapping_sub(base);
-        words[block::INFO] = FS_INFO;
-        for (word, routine) in FS_ENTRIES {
-            let Some(at) = self.routine_of(&RESOURCE_FS, routine) else {
-                return Ok(());
-            };
-            words[word] = at.wrapping_sub(base);
-        }
-        for (n, word) in (0..).zip(words) {
-            self.write_word(workspace + FS_BLOCK_AT + 4 * n, word)?;
-        }
-        let mut regs = Regs::default();
-        regs.r[..4].copy_from_slice(&[
-            os::fs_control::ADD,
-            base,
-            (workspace + FS_BLOCK_AT).wrapping_sub(base),
+        let declared = self.declare_filing_system(Declaration {
+            module: &RESOURCE_FS,
+            first_entry: FS_ENTRIES,
+            block: workspace + FS_BLOCK_AT,
+            name: workspace + FS_NAME_AT,
+            startup: workspace + EMPTY_AT,
+            info: FS_INFO,
             workspace,
-        ]);
-        self.perform_quietly(X | os::FS_CONTROL, &mut regs)?;
-        Ok(())
+        });
+        match declared {
+            Ok(()) | Err(Fail::Error(_)) => Ok(()),
+            Err(unwind) => Err(unwind),
+        }
     }
 
     /// Registers the block at `block`, newest: refused if it is registered.
@@ -582,7 +622,7 @@ impl Os<'_> {
     /// from now; none while no territory answers.
     fn read_upper_case(&mut self) -> Result<(), Unwind> {
         let mut regs = Regs::default();
-        regs.r[0] = u32::MAX;
+        regs.r[0] = crate::territory::CURRENT;
         let table = if self.perform_quietly(X | crate::territory::UPPER_CASE_TABLE, &mut regs)? {
             let mut table = Box::new([0; 256]);
             match self.read_bytes(regs.r[0], &mut table[..]) {

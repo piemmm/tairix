@@ -113,3 +113,24 @@ pub(crate) fn feed(
     }
     sink.finish(guest)
 }
+
+/// Whether two paths have the same elements, each coordinate of each point
+/// `near` the genuine one's.
+pub(crate) fn alike(
+    ours: &[Element],
+    genuine: &[Element],
+    near: impl Fn(i32, i32) -> bool,
+) -> bool {
+    ours.len() == genuine.len()
+        && ours.iter().zip(genuine).all(|(a, b)| {
+            a.code() == b.code()
+                && a.points()
+                    .iter()
+                    .zip(b.points())
+                    .all(|(p, q)| match (p, q) {
+                        (Some(p), Some(q)) => near(p.x, q.x) && near(p.y, q.y),
+                        (None, None) => true,
+                        _ => false,
+                    })
+        })
+}

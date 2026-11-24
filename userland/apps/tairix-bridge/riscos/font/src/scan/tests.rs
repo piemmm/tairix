@@ -1,6 +1,7 @@
 use alloc::vec::Vec;
 
 use tairix_riscos_filing::session::Session;
+use tairix_riscos_kernel::filing::fs::Info;
 use tairix_riscos_kernel::vectors;
 
 use super::*;
@@ -42,16 +43,21 @@ fn listed(s: &mut Session, budget: &mut usize) -> Result<Vec<Entry>, Fail> {
 fn a_read_s_records_are_those_wholly_within_its_room() {
     let mut s = fonts();
     let mut os = s.kernel.os();
-    let mut room = alloc::vec![0u8; ENTRIES_ROOM as usize];
-    let mut at = 0;
+    let room = alloc::vec![0u8; ENTRIES_ROOM as usize];
+    os.write_bytes(BLOCK, &room).expect("cleared");
+    let mut at = BLOCK;
     for (kind, name) in [(FILE, &b"IntMetric0"[..]), (DIRECTORY, b"Encodings")] {
-        let (kind_at, name_at) = (at + KIND_AT as usize, at + NAME_AT as usize);
-        room[kind_at..kind_at + 4].copy_from_slice(&kind.to_le_bytes());
-        room[name_at..name_at + name.len()].copy_from_slice(name);
-        at = (name_at + name.len() + 1).next_multiple_of(4);
+        let info = Info {
+            kind,
+            ..Info::default()
+        };
+        os.write_listed(at, Layout::Info, &info, 0, name)
+            .expect("written");
+        at += Layout::Info.size(name);
     }
-    room[at + NAME_AT as usize..].fill(b'x');
-    os.write_bytes(BLOCK, &room).expect("written");
+    let unended = at + Layout::Info.name_at();
+    let tail = alloc::vec![b'x'; (BLOCK + ENTRIES_ROOM - unended) as usize];
+    os.write_bytes(unended, &tail).expect("written");
     let read = records(&mut os, BLOCK, 42).expect("read");
     let found: Vec<(u32, &[u8])> = read.iter().map(|e| (e.kind, e.name.as_slice())).collect();
     assert_eq!(

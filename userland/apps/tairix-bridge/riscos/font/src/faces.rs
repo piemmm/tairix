@@ -8,12 +8,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::mem::size_of;
 
-use tairix_abi::font_ipc::{
-    FamilyKey, FontRequest, FontStretch, FontStyle, FontWeight, GlyphRun, FONT_MAX_GLYPH_RUN,
-};
+use tairix_abi::font_ipc::{FamilyKey, FontStretch, FontStyle, FontWeight};
 use tairix_bezier::{Path, PathEl};
 use tairix_drawing::riscos::{self, Slant};
-use tairix_font::{FaceMetrics, OutlineReply};
+use tairix_font::{ask_outlines, page_outlines, FaceMetrics};
 use tairix_util::mathf::{ceil, floor, round_i32};
 
 use crate::desktop;
@@ -127,34 +125,33 @@ impl Face {
             metrics: FaceMetrics::default(),
             slant: 0.0,
         };
-        let mut reply = Vec::new();
-        let mut pending = asking_for.as_slice();
-        while !pending.is_empty() {
-            let run = pending.len().min(FONT_MAX_GLYPH_RUN);
-            let characters: Vec<char> = pending[..run].iter().map(|&(_, c)| c).collect();
-            let request = FontRequest::Outlines {
-                family: asking.family,
-                scalars: GlyphRun::new(&characters).map_err(|_| Unanswered)?,
-                weight: asking.weight,
-                style: asking.style,
-                stretch: FontStretch::NORMAL,
-            }
-            .to_le_bytes();
-            reply.clear();
-            if !relay(&request, &mut reply) {
-                return Err(Unanswered);
-            }
-            let answered = OutlineReply::decode(&reply, run).ok_or(Unanswered)?;
-            if answered.glyphs.is_empty() {
-                return Err(Unanswered);
-            }
-            face.metrics = answered.face();
-            face.slant = answered.glyphs[0].synthetic_shear;
-            for (&(glyph, _), outline) in pending.iter().zip(&answered.glyphs) {
-                face.shapes[glyph] = shape(outline).map(Box::new);
-            }
-            pending = &pending[answered.glyphs.len()..];
-        }
+        let characters: Vec<char> = asking_for.iter().map(|&(_, character)| character).collect();
+        let instance = (asking.weight, asking.style, FontStretch::NORMAL);
+        let mut frame = Vec::new();
+        page_outlines(
+            &mut face,
+            &characters,
+            |_, run| {
+                ask_outlines(
+                    run,
+                    asking.family,
+                    instance,
+                    &mut frame,
+                    |request, reply| {
+                        reply.clear();
+                        relay(request, reply).then_some(reply.len())
+                    },
+                )
+            },
+            |face, first, answered| {
+                face.metrics = answered.face;
+                face.slant = answered.glyphs[0].synthetic_shear;
+                for (&(glyph, _), outline) in asking_for.iter().skip(first).zip(&answered.glyphs) {
+                    face.shapes[glyph] = shape(outline).map(Box::new);
+                }
+            },
+        )
+        .ok_or(Unanswered)?;
         Ok(face)
     }
 

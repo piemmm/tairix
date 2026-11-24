@@ -556,6 +556,18 @@ pub enum DmaPath {
     },
 }
 
+impl DmaPath {
+    /// The path's name in audit records.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Translated { .. } => "translated",
+            Self::Untranslated => "untranslated",
+            Self::Stranded { .. } => "stranded",
+        }
+    }
+}
+
 /// Stream ranges one node names: its resources bound how many.
 type Streams = ArrayVec<IommuStreams, HW_NODE_MAX_RESOURCES>;
 

@@ -412,10 +412,8 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     if os.variable_text(PATH)?.is_none() {
         os.set_string_variable(PATH, PATH_DEFAULT)?;
     }
-    for (i, _) in ROUTINES.iter().enumerate() {
-        let address = os.routine_of(&UK, i).unwrap_or(0);
-        os.write_word(workspace + at::TABLE + 4 * len32(i), address)?;
-    }
+    let addresses: [u32; ENTRIES] = core::array::from_fn(|i| os.routine_of(&UK, i).unwrap_or(0));
+    os.write_words(workspace + at::TABLE, &addresses)?;
     register(os)
 }
 
@@ -552,10 +550,7 @@ fn convert_standard_time(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 fn convert_time_to_ordinals(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let time = os.read_five(regs.r[1])?;
     let ordinals = os.uk_local(time)?;
-    for (i, word) in (0..).zip(ordinals.words()) {
-        os.write_word(regs.r[2].wrapping_add(4 * i), word)?;
-    }
-    Ok(())
+    os.write_words(regs.r[2], &ordinals.words())
 }
 
 /// `Territory_ConvertTimeStringToOrdinals`: R2's text read as R1 says, as
@@ -580,9 +575,7 @@ fn convert_time_string_to_ordinals(os: &mut Os<'_>, regs: &mut Regs) -> Result<(
 /// time, at the current zone.
 fn convert_ordinals_to_time(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let mut words = [0; 7];
-    for (i, word) in (0..).zip(words.iter_mut()) {
-        *word = os.read_word(regs.r[2].wrapping_add(4 * i))?;
-    }
+    os.read_words(regs.r[2], &mut words)?;
     let Some(local) = calendar::time_of(words) else {
         return Err(os.own_error(own, BAD_TIME, &[]));
     };
@@ -722,10 +715,7 @@ fn read_calendar_information(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fai
     ]);
     words[4..11].copy_from_slice(&LONGEST);
     words[11] = zone_longest;
-    for (i, word) in (0..).zip(words) {
-        os.write_word(regs.r[2].wrapping_add(4 * i), word)?;
-    }
-    Ok(())
+    os.write_words(regs.r[2], &words)
 }
 
 /// `Territory_NameToNumber`: R1's name, to its first control character, as

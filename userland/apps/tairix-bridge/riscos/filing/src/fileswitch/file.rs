@@ -117,15 +117,6 @@ fn target(os: &mut Os<'_>, regs: &Regs, need: Need) -> Result<(Resolved, Info), 
     Ok((resolved, found))
 }
 
-/// `info` into R0 and R2 to R5.
-fn answer(regs: &mut Regs, info: &Info) {
-    regs.r[0] = info.kind;
-    regs.r[2] = info.load;
-    regs.r[3] = info.exec;
-    regs.r[4] = info.length;
-    regs.r[5] = info.attributes;
-}
-
 /// `OS_File` 0 and 10: R4 to R5 saved as the file R1 names, stamped `load`
 /// and `exec`.
 fn save(os: &mut Os<'_>, regs: &mut Regs, load: u32, exec: u32) -> Result<(), Fail> {
@@ -233,7 +224,7 @@ fn read_info(
     typed: bool,
 ) -> Result<(), Fail> {
     let (resolved, found) = name::find(os, regs.r[1], search, Need::Length)?;
-    answer(regs, &found);
+    found.answer(regs);
     if typed {
         regs.r[6] = object_type(found.kind, found.load, name::leaf(&resolved.path));
         // With its type in R6, a typed object's R2 keeps only its stamp's
@@ -258,7 +249,7 @@ fn delete(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     gone.r[2] = found.load;
     gone.r[3] = found.exec;
     call::file_modifying(os, &resolved, fs::file::DELETE, &mut gone)?;
-    answer(regs, &found);
+    found.answer(regs);
     Ok(())
 }
 

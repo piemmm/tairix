@@ -24,6 +24,10 @@ tairix-rt = { path = "../rt", version = "=0.0.0" }
 # The records a driver's ending and a supplier's serve loop are written as.
 tairix-log = { path = "../log", version = "=0.0.0" }
 
+[dev-dependencies]
+# The trap seam a host test reads the syscalls a guard's drop makes through.
+tairix-abi-trap = { path = "../abi-trap", version = "=0.0.0", features = ["host-seam"] }
+
 [features]
 # Exposes `testkit`'s fake kernel to a link supplier's own tests, so every
 # supplier is tested against the one double of the kernel's rules rather than

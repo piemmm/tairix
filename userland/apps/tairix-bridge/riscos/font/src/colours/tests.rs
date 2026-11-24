@@ -148,11 +148,10 @@ mod session {
 
     use tairix_riscos_filing::session::Session;
 
-    use crate::fixture::{call, deep_mode, fonts, mode, BLOCK};
+    use crate::fixture::{call, deep_mode, fonts, mode, BLOCK, WHITE};
 
     use crate::module::call::{READ_COLOUR_TABLE, SET_FONT_COLOURS, SET_PALETTE};
     const TRUE: u32 = tairix_riscos_kernel::swi::font::TRUE_COLOURS;
-    const WHITE: u32 = 0xFFFF_FF00;
 
     /// The colour table read, or its error's number.
     fn table(s: &mut Session) -> Result<Vec<u8>, u32> {

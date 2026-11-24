@@ -9,7 +9,7 @@ use tairix_filecore::record::NAME_LEN;
 use tairix_filecore::volume::{Backing, Volume};
 use tairix_filecore::{Error, Fault};
 use tairix_fsmeta::preset::acorn;
-use tairix_riscos_kernel::module::{Command, CommandKind, Help};
+use tairix_riscos_kernel::module::{Command, CommandKind};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::read_unsigned::HEXADECIMAL;
 
@@ -133,14 +133,8 @@ const fn command(
     run: tairix_riscos_kernel::module::Code,
 ) -> Command {
     Command {
-        name,
         kind: CommandKind::Filing,
-        min,
-        max,
-        translate: 0,
-        help: Help::Text(help),
-        syntax: Some(syntax),
-        run: Some(run),
+        ..Command::new(name, (min, max), help, Some(syntax), run)
     }
 }
 

@@ -20,14 +20,17 @@ mod program {
     use tairix_abi::driver::DeviceWake;
     use tairix_abi::hwlink::LinkRole;
     use tairix_abi::hwtree::HwResourceKind;
-    use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwProperty, ProcId, PROC_ID_HEX_LEN};
+    use tairix_abi::{
+        CapabilityId, DriverError, Errno, HwDeviceClass, HwProperty, ProcId, PROC_ID_HEX_LEN,
+    };
     use tairix_drv_gpio_bcm2835::block::{Block, LINES, WINDOW_LEN};
     use tairix_drv_gpio_bcm2835::controller::{Controller, HeaderPort, Record, BANK_INTERRUPTS};
     use tairix_drv_gpio_bcm2835::REQUIRED_CAPABILITIES;
-    use tairix_drvrt::exit::{end, step, DriverExit};
+    use tairix_drvrt::exit::{end, error, step, DriverExit};
     use tairix_drvrt::irqline::LineRecord;
     use tairix_drvrt::serve::{
-        instance_field, log_event, publish_channel, DeviceChannel, DutyNode, Endpoint, Service,
+        instance_field, log_event, publish_channel, BoundChannel, DeviceChannel, DutyNode,
+        Endpoint, Service,
     };
     use tairix_drvrt::{Recorder, RtSupplier, SupplierHost};
     use tairix_log::{EventId, Field, FieldValue, Level};
@@ -104,17 +107,18 @@ mod program {
                 // that finds the header can call it.
                 match header_id {
                     Some(id) => {
-                        if publish_channel(
+                        if let Err(errno) = publish_channel(
                             HwDeviceClass::Other,
                             GPIO_HEADER_NODE_COMPATIBLE,
                             id,
                             &[],
-                        )
-                        .is_none()
-                        {
+                        ) {
                             return end(
                                 DriverExit::NoService,
-                                &[step("gpio: the header could not be published")],
+                                &[
+                                    step("gpio: the header could not be published"),
+                                    error(DriverError::from_errno(errno)),
+                                ],
                             );
                         }
                     }
@@ -166,10 +170,13 @@ mod program {
             return Ok(None);
         };
         match HEADER.bind() {
-            Some(id) => Ok(Some((RtHeader::new(id), lent))),
-            None => Err(end(
+            Ok(channel) => Ok(Some((RtHeader::new(channel), lent))),
+            Err(errno) => Err(end(
                 DriverExit::NoService,
-                &[step("gpio: the header endpoint could not be bound")],
+                &[
+                    step("gpio: the header endpoint could not be bound"),
+                    error(DriverError::from_errno(errno)),
+                ],
             )),
         }
     }
@@ -184,15 +191,18 @@ mod program {
         per_sender: 1,
     };
 
-    /// The header endpoint over the runtime's call syscalls.
+    /// The header endpoint over the runtime's call syscalls, taken down
+    /// with it.
     struct RtHeader {
         supplier: RtSupplier,
+        _channel: BoundChannel,
     }
 
     impl RtHeader {
-        const fn new(endpoint: u64) -> Self {
+        const fn new(channel: BoundChannel) -> Self {
             Self {
-                supplier: RtSupplier::new(endpoint),
+                supplier: RtSupplier::new(channel.endpoint()),
+                _channel: channel,
             }
         }
 

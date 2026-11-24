@@ -238,6 +238,7 @@ const NUM_PORT_BIND: u64 = SyscallNumber::PORT_BIND.as_u16() as u64;
 /// `port_admit` syscall number (as above).
 const NUM_PORT_ADMIT: u64 = SyscallNumber::PORT_ADMIT.as_u16() as u64;
 const NUM_PORT_UNBIND: u64 = SyscallNumber::PORT_UNBIND.as_u16() as u64;
+const NUM_CALL_DESTROY: u64 = SyscallNumber::CALL_DESTROY.as_u16() as u64;
 const NUM_WAITSET_CLOSE: u64 = SyscallNumber::WAITSET_CLOSE.as_u16() as u64;
 const NUM_CALL_PEER_ORIGIN: u64 = SyscallNumber::CALL_PEER_ORIGIN.as_u16() as u64;
 const NUM_WALL_TIME_GET: u64 = SyscallNumber::WALL_TIME_GET.as_u16() as u64;
@@ -535,6 +536,17 @@ pub extern "C" fn sys_port_unbind(endpoint: u64) -> i32 {
     // SAFETY: see `sys_yield`. No user pointer is dereferenced; the argument
     // is a plain scalar the kernel validates.
     unsafe { ret_i32(raw_syscall(NUM_PORT_UNBIND, [endpoint, 0, 0, 0, 0, 0])) }
+}
+
+/// `call_destroy`: take down a call endpoint the caller bound
+/// (`SyscallNumber::CALL_DESTROY`), failing each call it holds. An endpoint
+/// another process owns is refused. Returns a `TAIRIX_E_*` code.
+#[must_use]
+#[export_name = "tairix_sys_call_destroy"]
+pub extern "C" fn sys_call_destroy(endpoint: u64) -> i32 {
+    // SAFETY: see `sys_yield`. No user pointer is dereferenced; the argument
+    // is a plain scalar the kernel validates.
+    unsafe { ret_i32(raw_syscall(NUM_CALL_DESTROY, [endpoint, 0, 0, 0, 0, 0])) }
 }
 
 /// `cap_query`: report whether the caller holds capability `cap`
@@ -4588,6 +4600,7 @@ mod tests {
         (NUM_PORT_BIND, "port_bind", 3),
         (NUM_PORT_ADMIT, "port_admit", 2),
         (NUM_PORT_UNBIND, "port_unbind", 1),
+        (NUM_CALL_DESTROY, "call_destroy", 1),
         (NUM_CALL_PEER_PORT, "call_peer_port", 3),
         (NUM_WAITSET_CLOSE, "waitset_close", 1),
         (NUM_PORT_RESOLVE, "port_resolve", 2),
@@ -4803,6 +4816,11 @@ mod tests {
         });
         assert_eq!(number, NUM_PORT_UNBIND);
         assert_eq!(args, [0x5EAD_0004, 0, 0, 0, 0, 0]);
+        let (number, args) = capture(0, || {
+            let _ = sys_call_destroy(0x5EAD_0005);
+        });
+        assert_eq!(number, NUM_CALL_DESTROY);
+        assert_eq!(args, [0x5EAD_0005, 0, 0, 0, 0, 0]);
         let (number, args) = capture(0, || {
             let _ = sys_waitset_close(7);
         });

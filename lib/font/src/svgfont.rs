@@ -28,7 +28,7 @@ use crate::outline::{OutlineReply, OwnedContour, OwnedOutline, OwnedSegment};
 
 /// The scalar a face is probed with, chosen because every face maps it and
 /// a run of text almost always needs it.
-const PROBE: char = ' ';
+pub const FACE_PROBE: char = ' ';
 
 /// The most faces one provider will resolve.
 ///
@@ -72,10 +72,7 @@ impl ServiceFonts {
 
 impl FontProvider for ServiceFonts {
     fn select(&mut self, req: &FaceRequest<'_>) -> Result<FaceMetrics, FontUnavailable> {
-        let family = FamilyKey::new(req.family).map_err(|_| FontUnavailable)?;
-        let weight = FontWeight::new(req.weight).map_err(|_| FontUnavailable)?;
-        let style = wire_style(req.style);
-        let stretch = FontStretch::new(req.stretch).map_err(|_| FontUnavailable)?;
+        let (family, (weight, style, stretch)) = wire_face(req)?;
         if let Some(held) = self.faces.iter().find(|held| {
             held.family == family
                 && held.weight == weight
@@ -89,19 +86,10 @@ impl FontProvider for ServiceFonts {
         }
         // A face is not selectable without the geometry a run is laid out
         // in, and the outline reply's header is where the service states it.
-        let reply =
-            crate::outline_run(&[PROBE], family, weight, style, stretch).ok_or(FontUnavailable)?;
+        let reply = crate::outline_run(&[FACE_PROBE], family, weight, style, stretch)
+            .ok_or(FontUnavailable)?;
         let id = FaceId::new(u32::try_from(self.faces.len()).map_err(|_| FontUnavailable)?);
-        let metrics = FaceMetrics {
-            id,
-            units_per_em: f64::from(reply.units_per_em),
-            ascent: f64::from(reply.ascent),
-            descent: f64::from(reply.descent),
-            line_gap: f64::from(reply.line_gap),
-        };
-        if !metrics.is_usable() {
-            return Err(FontUnavailable);
-        }
+        let metrics = seam_metrics(id, reply.face)?;
         self.faces.push(Resolved {
             family,
             weight,
@@ -138,6 +126,17 @@ impl FontProvider for ServiceFonts {
     }
 }
 
+/// The wire face an SVG face request names: its family, and the weight,
+/// posture and width to instance it at.
+pub fn wire_face(
+    req: &FaceRequest<'_>,
+) -> Result<(FamilyKey, (FontWeight, FontStyle, FontStretch)), FontUnavailable> {
+    let family = FamilyKey::new(req.family).map_err(|_| FontUnavailable)?;
+    let weight = FontWeight::new(req.weight).map_err(|_| FontUnavailable)?;
+    let stretch = FontStretch::new(req.stretch).map_err(|_| FontUnavailable)?;
+    Ok((family, (weight, wire_style(req.style), stretch)))
+}
+
 /// The wire posture an SVG one names.
 const fn wire_style(style: SvgStyle) -> FontStyle {
     match style {
@@ -145,6 +144,25 @@ const fn wire_style(style: SvgStyle) -> FontStyle {
         SvgStyle::Italic => FontStyle::Italic,
         SvgStyle::Oblique => FontStyle::Oblique,
     }
+}
+
+/// The seam's metrics for face `id`, from the font-unit metrics `face` an
+/// outline reply states; refused where no text could be laid out with them.
+pub fn seam_metrics(
+    id: FaceId,
+    face: crate::outline::FaceMetrics,
+) -> Result<FaceMetrics, FontUnavailable> {
+    let metrics = FaceMetrics {
+        id,
+        units_per_em: f64::from(face.units_per_em),
+        ascent: f64::from(face.ascent),
+        descent: f64::from(face.descent),
+        line_gap: f64::from(face.line_gap),
+    };
+    metrics
+        .is_usable()
+        .then_some(metrics)
+        .ok_or(FontUnavailable)
 }
 
 /// Convert one fetched outline into the decoder seam's own form.
@@ -175,8 +193,8 @@ fn seam_contour(contour: OwnedContour) -> OutlineContour {
     }
 }
 
-/// The reply a provider turns into seam outlines, exposed for the host-side
-/// two-phase exchange that fetches on a sandboxed decoder's behalf.
+/// A reply's glyphs in the decoder seam's own form, for a provider that
+/// reaches the service over a transport of its own.
 #[must_use]
 pub fn seam_outlines(reply: OutlineReply) -> Vec<GlyphOutline> {
     reply.glyphs.into_iter().map(seam_outline).collect()
@@ -184,17 +202,57 @@ pub fn seam_outlines(reply: OutlineReply) -> Vec<GlyphOutline> {
 
 #[cfg(test)]
 mod tests {
-    use super::{seam_outline, wire_style, ServiceFonts, MAX_FACES};
-    use crate::outline::{OwnedContour, OwnedOutline, OwnedSegment};
+    use super::{seam_metrics, seam_outline, wire_face, wire_style, ServiceFonts, MAX_FACES};
+    use crate::outline::{FaceMetrics, OwnedContour, OwnedOutline, OwnedSegment};
     use alloc::vec;
     use tairix_abi::font_ipc::FontStyle;
-    use tairix_svg::font::{FaceId, FontProvider, FontStyle as SvgStyle, OutlineSegment};
+    use tairix_svg::font::{
+        FaceId, FaceRequest, FontProvider, FontStyle as SvgStyle, FontUnavailable, OutlineSegment,
+    };
 
     #[test]
     fn a_posture_crosses_the_seam_unchanged() {
         assert_eq!(wire_style(SvgStyle::Normal), FontStyle::Normal);
         assert_eq!(wire_style(SvgStyle::Italic), FontStyle::Italic);
         assert_eq!(wire_style(SvgStyle::Oblique), FontStyle::Oblique);
+    }
+
+    #[test]
+    fn a_face_request_is_its_wire_face_or_is_refused() {
+        let request = |family, weight, stretch| FaceRequest {
+            family,
+            weight,
+            style: SvgStyle::Oblique,
+            stretch,
+        };
+        let (family, (weight, style, stretch)) =
+            wire_face(&request("sans-serif", 700, 10_000)).expect("a wire face");
+        assert_eq!(family.as_str(), "sans-serif");
+        assert_eq!(weight.axis_value(), 700);
+        assert_eq!(style, FontStyle::Oblique);
+        assert_eq!(stretch.hundredths(), 10_000);
+        assert!(wire_face(&request("Sans Serif", 700, 10_000)).is_err());
+        assert!(wire_face(&request("sans-serif", 0, 10_000)).is_err());
+        assert!(wire_face(&request("sans-serif", 700, 0)).is_err());
+    }
+
+    #[test]
+    fn metrics_no_text_can_be_laid_out_with_are_refused() {
+        let face = FaceMetrics {
+            units_per_em: 2048,
+            ascent: 1900,
+            descent: 500,
+            line_gap: 60,
+        };
+        let metrics = seam_metrics(FaceId::new(3), face).expect("usable");
+        assert_eq!(metrics.id, FaceId::new(3));
+        assert!((metrics.units_per_em - 2048.0).abs() < f64::EPSILON);
+        assert!((metrics.line_gap - 60.0).abs() < f64::EPSILON);
+        let no_em = FaceMetrics {
+            units_per_em: 0,
+            ..face
+        };
+        assert_eq!(seam_metrics(FaceId::new(3), no_em), Err(FontUnavailable));
     }
 
     #[test]

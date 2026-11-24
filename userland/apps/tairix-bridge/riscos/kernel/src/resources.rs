@@ -6,15 +6,11 @@
 use alloc::vec::Vec;
 
 use crate::filing::filetype;
-use crate::filing::fs::attribute;
 use crate::memory::{Memory, MemoryError};
 use crate::module::{Builtin, Resource, Services};
-use crate::os::{len32, Fail, Os, Regs, Unwind};
-use crate::resourcefs::{DEREGISTER_FILES, REGISTER_FILES};
+use crate::os::{Fail, Os, Regs, Unwind};
+use crate::resourcefs::{self, DEREGISTER_FILES, REGISTER_FILES};
 use crate::swi::X;
-
-/// A resource's attributes: readable and writable by its owner.
-const ATTRIBUTES: u32 = attribute::OWNER_READ | attribute::OWNER_WRITE;
 
 /// The resources no one built-in module owns: the messages every module
 /// shares, and the Wimp's file-type sprites, drawn from the desktop's icon
@@ -62,41 +58,24 @@ fn block<'a>(
 ) -> Result<Vec<u32>, MemoryError> {
     let load_high = u32::try_from(stamp >> 32).unwrap_or(0);
     let exec = u32::try_from(stamp & 0xFFFF_FFFF).unwrap_or(0);
-    let words_of = |bytes: usize| bytes.div_ceil(4);
     let total = resources
         .clone()
-        .map(|resource| 6 + words_of(resource.name.len() + 1) + words_of(resource.data.len()))
+        .map(|resource| resourcefs::entry_words(resource.name.as_bytes(), resource.data))
         .sum::<usize>()
         + 1;
     let mut words = Vec::new();
     words.try_reserve_exact(total)?;
     for resource in resources {
-        let name_words = words_of(resource.name.len() + 1);
-        let entry = 4 * (6 + name_words + words_of(resource.data.len()));
-        let length = len32(resource.data.len());
         let load = crate::filing::fs::stamp::typed(resource.file_type, load_high);
-        words.extend_from_slice(&[len32(entry), load, exec, length, ATTRIBUTES]);
-        push_padded(&mut words, resource.name.as_bytes(), name_words);
-        words.push(length + 4);
-        push_padded(&mut words, resource.data, words_of(resource.data.len()));
+        resourcefs::push_entry(
+            &mut words,
+            resource.name.as_bytes(),
+            resource.data,
+            (load, exec),
+        )?;
     }
-    words.push(0);
+    words.push(resourcefs::BLOCK_END);
     Ok(words)
-}
-
-/// `bytes` as little-endian words, the last padded with noughts, then
-/// nought words to `count`.
-fn push_padded(words: &mut Vec<u32>, bytes: &[u8], count: usize) {
-    let (whole, tail) = bytes.as_chunks::<4>();
-    words.extend(whole.iter().map(|word| u32::from_le_bytes(*word)));
-    let mut pushed = whole.len();
-    if !tail.is_empty() {
-        let mut last = [0; 4];
-        last[..tail.len()].copy_from_slice(tail);
-        words.push(u32::from_le_bytes(last));
-        pushed += 1;
-    }
-    words.extend(core::iter::repeat_n(0, count.saturating_sub(pushed)));
 }
 
 /// Lays the resources of `builtins`, in their order, into the host pages as

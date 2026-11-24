@@ -43,6 +43,8 @@ pub mod scanout;
 pub mod server;
 #[cfg(feature = "service")]
 pub mod service;
+#[cfg(any(test, feature = "service"))]
+mod serving;
 pub mod sleep;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testkit;

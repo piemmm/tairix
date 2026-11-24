@@ -8,7 +8,7 @@ use core::fmt::Write as _;
 use super::assemble::{admit, refused};
 use crate::{
     Limit, Rule, MAX_BINDINGS, MAX_CALL_DEPTH, MAX_GLOBALS, MAX_INDEXES, MAX_LOCALS, MAX_MEMBERS,
-    MAX_NESTING,
+    MAX_NESTING, MAX_SAMPLINGS, MAX_SAMPLING_WORK,
 };
 
 /// The parts of a compute shader a test supplies.
@@ -187,6 +187,118 @@ fn bindings_to_the_bound_are_admitted_and_past_it_refused() {
     assert_eq!(
         refused(&samplers(MAX_BINDINGS + 1)),
         Rule::Limit(Limit::Bindings)
+    );
+}
+
+/// A compute shader sampling each of `images` images through each of
+/// `samplers` samplers.
+fn pairs(images: usize, samplers: usize) -> String {
+    let mut interface = String::new();
+    for n in 0..images {
+        let _ = write!(interface, " %i{n}");
+    }
+    for n in 0..samplers {
+        let _ = write!(interface, " %s{n}");
+    }
+    let decorations = format!(
+        "{}{}",
+        lines(images, |n| format!(
+            "OpDecorate %i{n} DescriptorSet 0\nOpDecorate %i{n} Binding {n}"
+        )),
+        lines(samplers, |n| format!(
+            "OpDecorate %s{n} DescriptorSet 1\nOpDecorate %s{n} Binding {n}"
+        ))
+    );
+    let declarations = format!(
+        "%float = OpTypeFloat 32\n%v2 = OpTypeVector %float 2\n%v4 = OpTypeVector %float 4\n%f0 = OpConstant %float 0\n%at = OpConstantComposite %v2 %f0 %f0\n%image = OpTypeImage %float 2D 0 0 0 1 Unknown\n%uc_image = OpTypePointer UniformConstant %image\n%sampler = OpTypeSampler\n%uc_sampler = OpTypePointer UniformConstant %sampler\n%sampled = OpTypeSampledImage %image\n{}{}",
+        lines(images, |n| format!("%i{n} = OpVariable %uc_image UniformConstant")),
+        lines(samplers, |n| format!("%s{n} = OpVariable %uc_sampler UniformConstant"))
+    );
+    let mut body = format!(
+        "{}{}",
+        lines(images, |n| format!("%li{n} = OpLoad %image %i{n}")),
+        lines(samplers, |n| format!("%ls{n} = OpLoad %sampler %s{n}"))
+    );
+    for i in 0..images {
+        for s in 0..samplers {
+            let _ = writeln!(
+                body,
+                "%p{i}_{s} = OpSampledImage %sampled %li{i} %ls{s}\n%v{i}_{s} = OpImageSampleExplicitLod %v4 %p{i}_{s} %at Lod %f0"
+            );
+        }
+    }
+    body.push_str("OpReturn");
+    module(&Parts {
+        interface: &interface,
+        decorations: &decorations,
+        declarations: &declarations,
+        body: &body,
+        functions: "",
+    })
+}
+
+#[test]
+fn samplings_to_the_bound_are_admitted_and_past_it_refused() {
+    let side = MAX_SAMPLINGS.isqrt();
+    assert_eq!(side * side, MAX_SAMPLINGS);
+    let admitted = admit(&pairs(side, side)).expect("admitted");
+    let sampled = admitted.entry_points().first().map(|e| e.samplings().len());
+    assert_eq!(sampled, Some(MAX_SAMPLINGS));
+    assert_eq!(
+        refused(&pairs(side + 1, side)),
+        Rule::Limit(Limit::Samplings)
+    );
+}
+
+/// A compute shader calling, `calls` times, a function that samples the
+/// image its parameter points to through each of `samplers` samplers.
+fn sampled_through_calls(calls: usize, samplers: usize) -> String {
+    let mut interface = String::from(" %image_v");
+    for n in 0..samplers {
+        let _ = write!(interface, " %s{n}");
+    }
+    let decorations = format!(
+        "OpDecorate %image_v DescriptorSet 0\nOpDecorate %image_v Binding 0\n{}",
+        lines(samplers, |n| format!(
+            "OpDecorate %s{n} DescriptorSet 1\nOpDecorate %s{n} Binding {n}"
+        ))
+    );
+    let declarations = format!(
+        "%float = OpTypeFloat 32\n%v2 = OpTypeVector %float 2\n%v4 = OpTypeVector %float 4\n%f0 = OpConstant %float 0\n%at = OpConstantComposite %v2 %f0 %f0\n%image = OpTypeImage %float 2D 0 0 0 1 Unknown\n%uc_image = OpTypePointer UniformConstant %image\n%sampler = OpTypeSampler\n%uc_sampler = OpTypePointer UniformConstant %sampler\n%sampled = OpTypeSampledImage %image\n%of_image = OpTypeFunction %void %uc_image\n%image_v = OpVariable %uc_image UniformConstant\n{}",
+        lines(samplers, |n| format!("%s{n} = OpVariable %uc_sampler UniformConstant"))
+    );
+    let body = format!(
+        "{}OpReturn",
+        lines(calls, |n| format!(
+            "%call{n} = OpFunctionCall %void %helper %image_v"
+        ))
+    );
+    let functions = format!(
+        "%helper = OpFunction %void None %of_image\n%parameter = OpFunctionParameter %uc_image\n%helper_entry = OpLabel\n%li = OpLoad %image %parameter\n{}OpReturn\nOpFunctionEnd",
+        lines(samplers, |n| format!(
+            "%ls{n} = OpLoad %sampler %s{n}\n%p{n} = OpSampledImage %sampled %li %ls{n}\n%r{n} = OpImageSampleExplicitLod %v4 %p{n} %at Lod %f0"
+        ))
+    );
+    module(&Parts {
+        interface: &interface,
+        decorations: &decorations,
+        declarations: &declarations,
+        body: &body,
+        functions: &functions,
+    })
+}
+
+#[test]
+fn samplings_followed_through_calls_are_admitted_within_the_work_bound_and_past_it_refused() {
+    let samplers = 64;
+    let admitted = admit(&sampled_through_calls(1024, samplers)).expect("admitted");
+    let sampled = admitted.entry_points().first().map(|e| e.samplings().len());
+    assert_eq!(sampled, Some(samplers), "one pair for each sampler");
+    let calls = MAX_SAMPLING_WORK / samplers + 1;
+    assert_eq!(
+        refused(&sampled_through_calls(calls, samplers)),
+        Rule::Limit(Limit::SamplingWork),
+        "every call looks at each of the callee's samplings"
     );
 }
 

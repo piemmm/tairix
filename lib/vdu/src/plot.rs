@@ -20,6 +20,8 @@ pub const BACKGROUND: u8 = 3;
 pub const LINE: u8 = 0x00;
 /// A solid line without its last point.
 pub const LINE_WITHOUT_LAST: u8 = 0x08;
+/// A dotted line with both its ends, its pattern begun afresh.
+pub const DOTTED: u8 = 0x10;
 /// A solid line without its first point.
 pub const LINE_WITHOUT_FIRST: u8 = 0x20;
 /// A dotted line without either end: the last of the line shapes.

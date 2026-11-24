@@ -15,8 +15,8 @@ use crate::host::owned;
 use crate::info::Limits;
 use crate::memory::Charge;
 use crate::model::{
-    shared_bytes, ComputePipelineKey, ContextKey, ContextState, Model, PickPipelines,
-    PipelineLayoutKey, Pipelines, ShaderModuleKey,
+    shared_bytes, ComputePipelineKey, ContextKey, ContextState, Model, PickPlanned,
+    PipelineLayoutKey, Planned, ShaderModuleKey,
 };
 use crate::Error;
 
@@ -50,8 +50,18 @@ pub(crate) type ComputePipelineState<B> = PipelineState<B, <B as Backend>::Compu
 /// A module a pipeline's stage is made from.
 pub(crate) type Module = Arc<crate::binding::ShaderModuleState>;
 
+/// What a pipeline is made from, looked up under the device's lock: the
+/// context as the device holds it, its first module, its second where it has
+/// one, and its layout.
+pub(crate) type PipelineParts<B> = (
+    Arc<<B as Backend>::Context>,
+    Module,
+    Option<Module>,
+    Arc<PipelineLayoutState>,
+);
+
 /// Which kind of pipeline of stages `P` a request makes.
-pub(crate) type PickPipeline<B, K, P> = PickPipelines<B, K, Arc<PipelineState<B, P>>>;
+pub(crate) type PickPipeline<B, K, P> = PickPlanned<B, K, Arc<PipelineState<B, P>>>;
 
 impl<B: Backend, P> core::fmt::Debug for PipelineState<B, P> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -123,6 +133,7 @@ pub(crate) fn plan_stage<'m>(
     entry
         .agree(&layout.agreement())
         .map_err(Error::Disagreement)?;
+    layout.sampling(entry)?;
     let specialized = module
         .specialize(specialization)
         .map_err(|refusal| match refusal {
@@ -165,8 +176,10 @@ impl Context {
     /// [`Error::Foreign`] for a module or layout of another context,
     /// [`Error::EntryPoint`] for a name no compute entry point has,
     /// [`Error::Disagreement`] for a layout that does not provide what the
-    /// entry point uses, [`Error::Specialization`] for values the module
-    /// refuses, [`Error::TooLarge`] for a workgroup, a working set or a
+    /// entry point uses, [`Error::Sampling`] for a sampling the layout's
+    /// sample and sampler types do not take, [`Error::Specialization`] for
+    /// values the module refuses, [`Error::TooLarge`] for a workgroup, a
+    /// working set or a
     /// program past the device's, and [`Error::OutOfMemory`] or
     /// [`Error::HeapFull`] for working memory, host memory or table room the
     /// device cannot reserve, asked before any working memory is made.
@@ -192,15 +205,15 @@ impl Context {
 }
 
 impl<B: Backend> Shared<B> {
-    /// The context's module `first` names, the one `second` names where it
-    /// names one, and the pipeline layout `layout` names, looked up under one
-    /// hold of the device's lock.
+    /// The context as the device holds it, its module `first` names, the
+    /// one `second` names where it names one, and the pipeline layout
+    /// `layout` names, looked up under one hold of the device's lock.
     pub(crate) fn modules_and_layout(
         &self,
         context: ContextKey,
         (first, second): (ShaderModuleKey, Option<ShaderModuleKey>),
         layout: PipelineLayoutKey,
-    ) -> Result<(Module, Option<Module>, Arc<PipelineLayoutState>), Error> {
+    ) -> Result<PipelineParts<B>, Error> {
         let model = self.model.lock();
         let live = model.live(context)?;
         let module = |key| live.shader_modules.get(key).cloned().ok_or(Error::Stale);
@@ -211,7 +224,7 @@ impl<B: Backend> Shared<B> {
             .get(layout)
             .cloned()
             .ok_or(Error::Stale)?;
-        Ok((first, second, layout))
+        Ok((Arc::clone(&live.device), first, second, layout))
     }
 
     /// A compute pipeline of the context: the compute entry point `entry` of
@@ -223,7 +236,8 @@ impl<B: Backend> Shared<B> {
         (module, entry, specialization): (ShaderModuleKey, &str, &[SpecValue]),
         layout: PipelineLayoutKey,
     ) -> Result<ComputePipelineKey, Error> {
-        let (module, _, layout) = self.modules_and_layout(context, (module, None), layout)?;
+        let (device, module, _, layout) =
+            self.modules_and_layout(context, (module, None), layout)?;
         let plan = plan_stage(
             &self.info.limits,
             &module.admitted,
@@ -232,7 +246,7 @@ impl<B: Backend> Shared<B> {
         )?;
         #[cfg(test)]
         crate::fair::held::note_making();
-        let prepared = self.backend.compute(&self.info, &plan)?;
+        let prepared = self.backend.compute(&device, &self.info, &plan)?;
         drop(plan);
         let held = shared_bytes::<ComputePipelineState<B>>().saturating_add(prepared.held);
         self.file_pipeline(
@@ -263,7 +277,7 @@ impl<B: Backend> Shared<B> {
         let made = match <B::Pool as Pool>::make(plan) {
             Ok(made) => made,
             Err(error) => {
-                self.model.lock().unreserve_pipeline((context, pick));
+                self.model.lock().unreserve((context, pick));
                 return Err(error);
             }
         };
@@ -280,7 +294,7 @@ impl<B: Backend> Shared<B> {
 /// The context's compute pipelines.
 pub(crate) fn computes<B: Backend>(
     context: &mut ContextState<B>,
-) -> &mut Pipelines<ComputePipelineKey, Arc<ComputePipelineState<B>>> {
+) -> &mut Planned<ComputePipelineKey, Arc<ComputePipelineState<B>>> {
     &mut context.compute_pipelines
 }
 
@@ -295,7 +309,7 @@ impl<B: Backend> Model<B> {
         (stages, layout, need): (P, Arc<PipelineLayoutState>, Need<B>),
         ((hold, grown), charge): ((Hold<B>, Grown<B>), Charge),
     ) -> (Result<K, Error>, Released<B, P>) {
-        self.unreserve_pipeline((key, pick));
+        self.unreserve((key, pick));
         let installed = self.install_pool(grown);
         let state = match crate::shared(PipelineState {
             stages,

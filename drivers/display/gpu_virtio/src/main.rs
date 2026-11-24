@@ -34,7 +34,7 @@ mod program {
         ) -> i32 {
             let mut all = ArrayVec::<DeviceWake, 4>::new();
             let _ = all.try_extend_from_slice(wakes);
-            if let Some(port) = serve_gpu(&mut gpu, host) {
+            if let Ok(port) = serve_gpu(&mut gpu, host) {
                 let _ = all.try_push(DeviceWake::Port(port));
             }
             serve(&mut gpu, &all)

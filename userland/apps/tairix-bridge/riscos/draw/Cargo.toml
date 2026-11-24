@@ -23,12 +23,24 @@ tairix-riscos-arm = { path = "../arm", version = "=0.0.0" }
 # The VDU drivers: where output goes, and the foreground a fill plots in.
 tairix-riscos-vdu = { path = "../vdu", version = "=0.0.0" }
 # The Draw file format's one definition: the path elements the module reads,
-# the cap and join codes, and the object walk DrawFile renders through.
+# the cap and join codes, the objects' fields, RISC OS's units, and the
+# object walk DrawFile renders through.
 tairix-drawing = { path = "../../../../../lib/drawing", version = "=0.0.0" }
-# Fallible buffers a path's segments are held in.
+# Fallible buffers a path's segments are held in, and the little-endian
+# reads a file's fields are taken with.
 tairix-util = { path = "../../../../../lib/util", version = "=0.0.0" }
+# The VDU vocabulary DrawFile writes: control codes, plot codes and mode
+# variables.
+tairix-vdu = { path = "../../../../../lib/vdu", version = "=0.0.0" }
+# A sprite area's and a sprite's control blocks, which DrawFile reads and
+# lays out.
+tairix-image = { path = "../../../../../lib/image", version = "=0.0.0" }
+# A wide coordinate held to a word, as a text area's measures are.
+tairix-geometry = { path = "../../../../../lib/geometry", version = "=0.0.0" }
 
 [dev-dependencies]
+# Draw files made to order, which the integration tests render.
+tairix-riscos-draw = { path = ".", features = ["test-support"] }
 # The seeded generator the fuzz harnesses draw from.
 tairix-fuzzseed = { path = "../../../../../tests/fuzzseed", version = "=0.0.0" }
 # The filing system and BASIC the recorded programs run under, and the

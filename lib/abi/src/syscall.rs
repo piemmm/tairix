@@ -696,7 +696,8 @@ impl SyscallNumber {
     /// [`crate::LimitKind::IpcQueueBytes`] limit, and a bind past it fails
     /// closed with [`crate::Errno::LimitExceeded`]. The endpoint is owned by
     /// the creating task and torn down (in-flight callers released
-    /// fail-closed) when that task exits. A build with no
+    /// fail-closed) when that task exits or takes it down with
+    /// [`SyscallNumber::CALL_DESTROY`]. A build with no
     /// call-endpoint registry wired fails closed with
     /// [`crate::Errno::NotImplemented`].
     pub const CALL_CREATE: Self = Self(32);
@@ -3419,6 +3420,20 @@ impl SyscallNumber {
     /// [`crate::Errno::NotFound`]; a build with no map facility wired with
     /// [`crate::Errno::NotImplemented`].
     pub const MMIO_UNMAP: Self = Self(175);
+    /// Take down a call endpoint the calling process bound with
+    /// [`SyscallNumber::CALL_CREATE`], so a service that cannot serve it after
+    /// all leaves nothing bound for a caller to wait on.
+    ///
+    /// Arguments: `endpoint: u64`. Returns `0`, or `-errno`. As the owner's
+    /// exit does, the kernel revokes every grant naming the endpoint before it
+    /// unbinds it, so no holder's grant reaches whatever binds the id next;
+    /// fails each call it holds, waking its caller; and answers the server's
+    /// next receive [`crate::Errno::NotFound`]. Needs **no capability**: only
+    /// the endpoint's owner may take it down, the gate its receive has. An
+    /// endpoint another process owns fails closed with
+    /// [`crate::Errno::PermissionDenied`], and an id nothing is bound to with
+    /// [`crate::Errno::NotFound`].
+    pub const CALL_DESTROY: Self = Self(176);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
@@ -3746,6 +3761,7 @@ mod tests {
         assert_eq!(SyscallNumber::FS_SET_TIMES.as_u16(), 173);
         assert_eq!(SyscallNumber::FS_VOLUME_STATS.as_u16(), 174);
         assert_eq!(SyscallNumber::MMIO_UNMAP.as_u16(), 175);
+        assert_eq!(SyscallNumber::CALL_DESTROY.as_u16(), 176);
     }
 
     #[test]

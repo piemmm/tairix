@@ -53,13 +53,13 @@ use tairix_abi::driver::net_channel::{
 };
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
-use tairix_abi::{CapabilityId, Errno, HwDeviceClass, ProcId, PROC_ID_HEX_LEN};
+use tairix_abi::{CapabilityId, DriverError, Errno, HwDeviceClass, ProcId, PROC_ID_HEX_LEN};
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::room::RoomMember;
 use tairix_rt::{LogSink, ServedCall};
 
 use crate::{Drain, DrainAction, Drained, NetChannelServer, Notifier};
-use tairix_drvrt::exit::{end, step, DriverExit};
+use tairix_drvrt::exit::{end, error, step, DriverExit};
 use tairix_drvrt::serve::{instance_field, log_event, publish_channel, DeviceChannel};
 
 /// Diagnostic event id: the one-shot "device channel published, serving"
@@ -135,27 +135,31 @@ struct Region {
 /// the driver fail-closed with its reason recorded rather than degrading
 /// into a busy re-poll.
 pub fn serve<N: Net>(net: N, irq_handle: u64) -> i32 {
-    let Some(endpoint) = CHANNEL.bind() else {
-        return end(
-            DriverExit::NoService,
-            &[step(
-                "netchan: the node's device-channel endpoint could not be bound",
-            )],
-        );
+    let channel = match CHANNEL.bind() {
+        Ok(channel) => channel,
+        Err(errno) => {
+            return end(
+                DriverExit::NoService,
+                &[
+                    step("netchan: the node's device-channel endpoint could not be bound"),
+                    error(DriverError::from_errno(errno)),
+                ],
+            )
+        }
     };
-    if publish_channel(
+    let endpoint = channel.endpoint();
+    if let Err(errno) = publish_channel(
         HwDeviceClass::Network,
         NETCHAN_NODE_COMPATIBLE,
         endpoint,
         &[],
-    )
-    .is_none()
-    {
+    ) {
         return end(
             DriverExit::NoService,
-            &[step(
-                "netchan: the device-channel node could not be published",
-            )],
+            &[
+                step("netchan: the device-channel node could not be published"),
+                error(DriverError::from_errno(errno)),
+            ],
         );
     }
 

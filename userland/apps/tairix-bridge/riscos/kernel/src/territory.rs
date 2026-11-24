@@ -17,9 +17,7 @@ use alloc::vec::Vec;
 use tairix_riscos_arm::psr;
 
 use crate::error::Error;
-use crate::module::{
-    Asked, Builtin, Command, CommandKind, Help, Refused, Resource, Services, Swis,
-};
+use crate::module::{Asked, Builtin, Command, Refused, Resource, Services, Swis};
 use crate::msgtrans::Own;
 use crate::os::{len32, Fail, Os, Regs, Unwind, World};
 use crate::service;
@@ -98,6 +96,8 @@ const ALPHABET_NAME: &[u8] = b"AlphabetName";
 
 /// The UK, which the Manager falls back on.
 pub(crate) const UK: u32 = 1;
+/// The territory number `-1` names: the current one.
+pub(crate) const CURRENT: u32 = u32::MAX;
 /// A quarter of an hour and an hour, in centiseconds.
 const QUARTER_HOUR: i64 = 90_000;
 const HOUR: i64 = 360_000;
@@ -207,20 +207,6 @@ const NAMES: [&str; 57] = [
     "ConvertTimeFormats",
 ];
 
-/// A configuration keyword's command.
-const fn configure(name: &'static str, help: &'static str, run: crate::module::Code) -> Command {
-    Command {
-        name,
-        kind: CommandKind::Configure,
-        min: 0,
-        max: 1,
-        translate: 0,
-        help: Help::Text(help),
-        syntax: None,
-        run: Some(run),
-    }
-}
-
 /// The Territory Manager.
 pub(crate) static TERRITORY_MANAGER: Builtin = Builtin {
     title: "TerritoryManager",
@@ -237,43 +223,37 @@ pub(crate) static TERRITORY_MANAGER: Builtin = Builtin {
         handler: service,
     }),
     commands: &[
-        Command {
-            name: "Territories",
-            kind: CommandKind::Command,
-            min: 0,
-            max: 0,
-            translate: 0,
-            help: Help::Text("*Territories lists the territories loaded, by number and name."),
-            syntax: Some("Syntax: *Territories"),
-            run: Some(territories_command),
-        },
-        Command {
-            name: "Territory",
-            kind: CommandKind::Command,
-            min: 0,
-            max: 1,
-            translate: 0,
-            help: Help::Text("*Territory selects the current territory by its name or number, or names it."),
-            syntax: Some("Syntax: *Territory [<territory>]"),
-            run: Some(territory_command),
-        },
-        configure(
+        Command::new(
+            "Territories",
+            (0, 0),
+            "*Territories lists the territories loaded, by number and name.",
+            Some("Syntax: *Territories"),
+            territories_command,
+        ),
+        Command::new(
+            "Territory",
+            (0, 1),
+            "*Territory selects the current territory by its name or number, or names it.",
+            Some("Syntax: *Territory [<territory>]"),
+            territory_command,
+        ),
+        Command::configure(
             "Territory",
             "*Configure Territory sets the territory the machine starts in.",
             configure_territory,
         ),
-        configure(
+        Command::configure(
             "DST",
             "*Configure DST puts the clock on daylight saving time, and *Configure NoDST takes it off.",
             configure_dst,
         ),
-        configure("NoDST", "*Configure NoDST takes the clock off daylight saving time.", configure_no_dst),
-        configure(
+        Command::configure("NoDST", "*Configure NoDST takes the clock off daylight saving time.", configure_no_dst),
+        Command::configure(
             "AutoDST",
             "*Configure AutoDST puts the clock on and off daylight saving time as the territory's rules say.",
             configure_auto_dst,
         ),
-        configure(
+        Command::configure(
             "TimeZone",
             "*Configure TimeZone sets the standard time's offset from UTC, in hours and minutes.",
             configure_time_zone,
@@ -333,7 +313,7 @@ fn own(world: &mut World) -> Option<&mut Own> {
 impl Os<'_> {
     /// The territory R0 names: the current one for -1.
     fn named_territory(&self, number: u32) -> u32 {
-        if number == u32::MAX {
+        if number == CURRENT {
             self.world.territory.current
         } else {
             number
@@ -370,7 +350,7 @@ impl Os<'_> {
     /// answers, none where there is no current territory.
     fn current_zones(&mut self) -> Result<Option<Regs>, Fail> {
         let mut zones = Regs::default();
-        match self.call_territory(u32::MAX, entry::READ_TIME_ZONES, &mut zones) {
+        match self.call_territory(CURRENT, entry::READ_TIME_ZONES, &mut zones) {
             Ok(()) => Ok(Some(zones)),
             Err(Fail::Error(_)) => Ok(None),
             Err(unwind) => Err(unwind),
@@ -399,19 +379,14 @@ impl Os<'_> {
     /// The seven words of ordinals at `at`, centiseconds to year.
     fn ordinal_words(&mut self, at: u32) -> Result<[u32; 7], Fail> {
         let mut words = [0; 7];
-        for (i, word) in (0..).zip(words.iter_mut()) {
-            *word = self.read_word(at.wrapping_add(4 * i))?;
-        }
+        self.read_words(at, &mut words)?;
         Ok(words)
     }
 
     /// The nine words of `time`'s ordinals, weekday and day of the year
     /// last, written at `at`.
     fn write_ordinals(&mut self, at: u32, time: u64) -> Result<(), Fail> {
-        for (i, word) in (0..).zip(Ordinals::of(time).words()) {
-            self.write_word(at.wrapping_add(4 * i), word)?;
-        }
-        Ok(())
+        self.write_words(at, &Ordinals::of(time).words())
     }
 
     /// Territory `number`'s name, or the Manager's word for one without.
@@ -447,8 +422,8 @@ impl Os<'_> {
     /// brought up to date where its rules keep it.
     fn territory_selected(&mut self) -> Result<(), Fail> {
         let mut regs = Regs::default();
-        self.call_territory(u32::MAX, entry::SELECT_KEYBOARD_HANDLER, &mut regs)?;
-        let alphabet = self.territory_alphabet(u32::MAX)?;
+        self.call_territory(CURRENT, entry::SELECT_KEYBOARD_HANDLER, &mut regs)?;
+        let alphabet = self.territory_alphabet(CURRENT)?;
         self.define_alphabet_fully(alphabet)?;
         self.territory_started()?;
         self.dst_changeover()
@@ -503,9 +478,7 @@ impl Os<'_> {
             return Ok(());
         }
         let mut entries = [0; ENTRIES];
-        for (i, slot) in (0..).zip(entries.iter_mut()) {
-            *slot = self.read_word(regs.r[1].wrapping_add(4 * i))?;
-        }
+        self.read_words(regs.r[1], &mut entries)?;
         if self.world.territory.territories.try_reserve(1).is_err() {
             return Err(self.no_memory());
         }
@@ -534,7 +507,7 @@ impl Os<'_> {
     /// none where more follows a number.
     fn name_or_number(&mut self, text: u32) -> Result<Option<u32>, Fail> {
         let mut regs = Regs::default();
-        regs.r[..2].copy_from_slice(&[u32::MAX, text]);
+        regs.r[..2].copy_from_slice(&[CURRENT, text]);
         self.perform(X | NAME_TO_NUMBER, &mut regs)?;
         if regs.r[0] != 0 {
             return Ok(Some(regs.r[0]));
@@ -693,8 +666,6 @@ fn loaded(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     Ok(())
 }
 
-/// `*Territories`: each loaded territory's number and name, the newest
-/// first.
 /// `*Territory`: the territory named or numbered selected, or the current
 /// one's name written.
 fn territory_command(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
@@ -709,6 +680,8 @@ fn territory_command(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     os.select_territory(number)
 }
 
+/// `*Territories`: each loaded territory's number and name, the newest
+/// first.
 fn territories_command(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     let numbers: Vec<u32> = os
         .world

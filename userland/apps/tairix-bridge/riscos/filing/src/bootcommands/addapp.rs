@@ -12,10 +12,10 @@
 use alloc::vec::Vec;
 
 use tairix_riscos_kernel::filing::filetype::OBEY;
-use tairix_riscos_kernel::filing::fs::attribute::{OWNER_READ, OWNER_WRITE};
 use tairix_riscos_kernel::filing::fs::kind;
 use tairix_riscos_kernel::filing::fs::stamp;
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
+use tairix_riscos_kernel::resourcefs::{push_entry, BLOCK_END};
 use tairix_riscos_kernel::swi::os::{self as swi, file, fs_control};
 use tairix_riscos_kernel::swi::resource_fs;
 use tairix_riscos_kernel::swi::X;
@@ -27,8 +27,6 @@ use crate::fileswitch::name::matches;
 
 /// The directory added objects go in, below `Resources:$`.
 const APPS: &[u8] = b"Apps.";
-/// An added file's attributes: its owner able to read and write it.
-const ATTRIBUTES: u32 = OWNER_READ | OWNER_WRITE;
 /// The room a canonical name is read into.
 const NAME_ROOM: u32 = 1024;
 
@@ -151,31 +149,20 @@ fn build(
     load: u32,
     exec: u32,
 ) -> Result<u32, Fail> {
-    let mut bytes = Vec::new();
+    let mut words = Vec::new();
     for (name, data) in files {
         let whole = tairix_util::fallible::joined(&[APPS, leaf, b".", name])
             .ok_or_else(|| os.no_memory())?;
-        let name_room = (whole.len() + 1).next_multiple_of(4);
-        let data_room = data.len().next_multiple_of(4);
-        let size = 20 + name_room + 4 + data_room;
-        if bytes.try_reserve(size).is_err() {
+        if push_entry(&mut words, &whole, data, (load, exec)).is_err() {
             return Err(os.no_memory());
         }
-        for word in [len32(size), load, exec, len32(data.len()), ATTRIBUTES] {
-            bytes.extend_from_slice(&word.to_le_bytes());
-        }
-        bytes.extend_from_slice(&whole);
-        bytes.resize(bytes.len() + name_room - whole.len(), 0);
-        bytes.extend_from_slice(&(len32(data.len()) + 4).to_le_bytes());
-        bytes.extend_from_slice(data);
-        bytes.resize(bytes.len() + data_room - data.len(), 0);
     }
-    if bytes.try_reserve(4).is_err() {
+    if words.try_reserve(1).is_err() {
         return Err(os.no_memory());
     }
-    bytes.extend_from_slice(&0u32.to_le_bytes());
-    let block = os.rma_claim(len32(bytes.len()))?;
-    match os.write_bytes(block, &bytes) {
+    words.push(BLOCK_END);
+    let block = os.rma_claim(4 * len32(words.len()))?;
+    match os.write_words(block, &words) {
         Ok(()) => Ok(block),
         Err(fail) => {
             os.rma_free(block)?;

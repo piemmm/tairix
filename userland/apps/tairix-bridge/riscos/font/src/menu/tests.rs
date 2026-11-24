@@ -152,7 +152,7 @@ fn a_title_of_twelve_is_unterminated_and_a_longer_one_indirected() {
     let second = first + (HEADER + ITEM) / 4;
     assert_eq!(words[second..second + 3], [0x8000 + 13 + 14 + 7, 0, 0]);
     assert_eq!(words[second + 4], 0xBC, "width counts the title less two");
-    assert_eq!(words[second + 7], flag::INDIRECTED_TITLE);
+    assert_eq!(words[second + 7], item::INDIRECTED_TITLE);
     assert!(data.ends_with(b"Fourteenchars\0Medium\0X\0"));
 }
 
@@ -178,7 +178,7 @@ fn a_tick_marks_the_family_and_its_member_and_the_system_font_heads_the_menu() {
     let mut menu = alloc::vec![0; sizes.menu];
     let data = build(&families, LABELS, options, &mut menu, 0, 0);
     let words = words(&menu);
-    assert_eq!(words[HEADER / 4 + 3 * ITEM / 4], flag::TICKED);
+    assert_eq!(words[HEADER / 4 + 3 * ITEM / 4], item::TICKED);
     assert!(data.starts_with(b"System font\rCorpus\r"));
     assert_eq!(menu[9], 13, "the title ends as the texts do");
 }

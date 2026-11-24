@@ -1,6 +1,7 @@
 use alloc::vec::Vec;
 
 use tairix_riscos_filing::session::Session;
+use tairix_util::endian::{le_u16, le_u32};
 
 use crate::fixture::{call, find, find_at, fonts, mode, write, TEXT};
 use crate::module::call::{MAKE_BITMAP, READ_DEFN};
@@ -30,7 +31,7 @@ fn make(s: &mut Session, font: u32, size: (i32, i32), flags: u32) -> Result<(), 
 }
 
 fn word(bytes: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes(bytes[at..at + 4].try_into().expect("a word"))
+    le_u32(bytes, at).expect("a word")
 }
 
 #[test]
@@ -86,7 +87,7 @@ fn a_file_of_sub_placements_holds_each_glyph_four_times_across() {
     make(&mut s, pix, (256, 256), 0b11).expect("made");
     let bytes = pix_file(&mut s, "f320x320").expect("the file");
     assert_eq!(
-        u16::from_le_bytes([bytes[6], bytes[7]]),
+        le_u16(&bytes, 6).expect("the flags"),
         0x41,
         "flagged, placed across"
     );

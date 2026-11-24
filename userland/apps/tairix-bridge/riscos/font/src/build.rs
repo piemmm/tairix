@@ -2,13 +2,25 @@
 //! 8 outlines file for each font, in the layouts the PRM gives, and bitmap
 //! files of glyphs given pixel by pixel, new style and old. The fonts the
 //! tests read and the corpus has genuine RISC OS draw are made here, so no
-//! font of RISC OS's is ever needed to test against.
+//! font of RISC OS's is ever needed to test against. So is what the crate's
+//! tests and its integration tests share of a session: its modules, its
+//! `Font$Path`, where they write and the calls they make.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-use crate::outlines::CHUNK;
+use tairix_riscos_kernel::module::Builtin;
+use tairix_riscos_kernel::os::{Fail, Os, Regs};
+use tairix_riscos_kernel::swi::{chunk, X};
+
+use crate::metrics::{self, flag};
+use crate::outlines::character::{OUTLINE, WIDE};
+use crate::outlines::{
+    wide_point, CHUNK, CHUNK_MUST, CURVE, INCLUSIONS_FOLLOW, LAST_VERSION, LINE, MAGIC, MOVE,
+    STROKES_FOLLOW, TABLE, TERMINATOR,
+};
 pub use crate::outlines::{Element, Point};
+use crate::units;
 
 /// The scaffold table's size: its size word, the skeleton threshold and a
 /// byte of padding, with no scaffold lines.
@@ -212,15 +224,15 @@ impl Font {
     #[must_use]
     pub fn metrics(&self) -> Vec<u8> {
         let slots = self.characters.len() + 1;
-        let scale = |v: i32| v * 1000 / i32::from(self.design_size);
+        let scale = |v: i32| v * units::MILLEMS / i32::from(self.design_size);
         let mut out = self.name.clone();
-        out.resize(40, b'\r');
+        out.resize(metrics::NAME, b'\r');
         out.extend_from_slice(&16u32.to_le_bytes());
         out.extend_from_slice(&16u32.to_le_bytes());
         let low = u8::try_from(slots & 0xFF).unwrap_or(0);
-        let more = if self.kerns.is_empty() { 0 } else { 1 << 3 };
-        out.extend_from_slice(&[low, 2, more | 1 << 2, 0]);
-        let mut map = [0u8; 256];
+        let more = if self.kerns.is_empty() { 0 } else { flag::MORE };
+        out.extend_from_slice(&[low, metrics::FLAGGED, more | flag::NO_Y_OFFSETS, 0]);
+        let mut map = [0u8; metrics::MAP_DEFAULT];
         for (slot, &code) in self.characters.keys().enumerate() {
             map[usize::from(code)] = u8::try_from(slot + 1).unwrap_or(0);
         }
@@ -265,8 +277,8 @@ impl Font {
     pub fn outlines(&self) -> Vec<u8> {
         let last = self.characters.keys().next_back().copied().unwrap_or(0);
         let chunks = usize::from(last) / CHUNK + 1;
-        let mut out = b"FONT".to_vec();
-        out.extend_from_slice(&[0, 8]);
+        let mut out = MAGIC.to_vec();
+        out.extend_from_slice(&[0, LAST_VERSION]);
         out.extend_from_slice(&self.design_size.to_le_bytes());
         let union = self
             .characters
@@ -283,7 +295,7 @@ impl Font {
         for value in [union[0], union[1], union[2] - union[0], union[3] - union[1]] {
             out.extend_from_slice(&i16::try_from(value).unwrap_or(0).to_le_bytes());
         }
-        let offsets_at = 52 + 4;
+        let offsets_at = TABLE + usize::from(TABLE_BYTES);
         out.extend_from_slice(&u32::try_from(offsets_at).unwrap_or(0).to_le_bytes());
         out.extend_from_slice(&u32::try_from(chunks).unwrap_or(0).to_le_bytes());
         out.extend_from_slice(&1u32.to_le_bytes());
@@ -309,7 +321,7 @@ impl Font {
                     _ => index.extend_from_slice(&0u32.to_le_bytes()),
                 }
             }
-            chunk_data.extend_from_slice(&(1u32 << 31).to_le_bytes());
+            chunk_data.extend_from_slice(&CHUNK_MUST.to_le_bytes());
             chunk_data.extend_from_slice(&index);
             chunk_data.extend_from_slice(&body);
             while chunk_data.len() % 4 != 0 {
@@ -328,11 +340,10 @@ impl Font {
 /// A character's data: its flags, box, outline, strokes and inclusions.
 fn encode(character: &Character) -> Vec<u8> {
     let wide = character.wide();
-    let mut out = alloc::vec![(1 << 3) | u8::from(wide)];
+    let mut out = alloc::vec![OUTLINE | (u8::from(wide) * WIDE)];
     let point = |out: &mut Vec<u8>, p: Point| {
         if wide {
-            let packed = (p.x.cast_unsigned() & 0xFFF) | ((p.y.cast_unsigned() & 0xFFF) << 12);
-            out.extend_from_slice(&packed.to_le_bytes()[..3]);
+            out.extend_from_slice(&wide_point(p.x, p.y));
         } else {
             out.extend_from_slice(&[p.x.to_le_bytes()[0], p.y.to_le_bytes()[0]]);
         }
@@ -350,15 +361,15 @@ fn encode(character: &Character) -> Vec<u8> {
         for element in elements {
             match *element {
                 Element::Move(p) => {
-                    out.push(1);
+                    out.push(MOVE);
                     point(out, p);
                 }
                 Element::Line(p) => {
-                    out.push(2);
+                    out.push(LINE);
                     point(out, p);
                 }
                 Element::Curve(a, b, c) => {
-                    out.push(3);
+                    out.push(CURVE);
                     for p in [a, b, c] {
                         point(out, p);
                     }
@@ -367,20 +378,20 @@ fn encode(character: &Character) -> Vec<u8> {
         }
     };
     path(&mut out, &character.fill);
-    let mut terminator = 0;
+    let mut terminator = TERMINATOR;
     if !character.strokes.is_empty() {
-        terminator |= 1 << 2;
+        terminator |= STROKES_FOLLOW;
     }
     if character.strokes.is_empty() && !character.inclusions.is_empty() {
-        terminator |= 1 << 3;
+        terminator |= INCLUSIONS_FOLLOW;
     }
     out.push(terminator);
     if !character.strokes.is_empty() {
         path(&mut out, &character.strokes);
         out.push(if character.inclusions.is_empty() {
-            0
+            TERMINATOR
         } else {
-            1 << 3
+            TERMINATOR | INCLUSIONS_FOLLOW
         });
     }
     if !character.inclusions.is_empty() {
@@ -575,4 +586,53 @@ impl SquareFaces {
 #[must_use]
 pub fn square_faces(request: &[u8], reply: &mut Vec<u8>) -> bool {
     SquareFaces::capped(usize::MAX).answer(request, reply)
+}
+
+/// Where a test writes a string.
+pub const TEXT: u32 = 0x9000;
+
+/// Where a test gives a call a block to answer into.
+pub const BLOCK: u32 = 0xA000;
+
+/// The modules a test's session holds beside the filing system's: the VDU
+/// drivers, Draw and DrawFile, and these.
+pub static SESSION_MODULES: [&[&Builtin]; 3] = [
+    &tairix_riscos_vdu::MODULES,
+    &tairix_riscos_draw::MODULES,
+    &crate::MODULES,
+];
+
+/// The command that puts a test's font library, `Lib` on its disc, on
+/// `Font$Path` ahead of ResourceFS's fonts.
+pub const SET_PATH: &str = "Set Font$Path HostFS:$.Lib.,Resources:$.Fonts.";
+
+/// How many SWIs the Font Manager has.
+pub const SWIS: usize = crate::module::NAMES.len();
+
+/// Font Manager call `offset` with `low` its first registers: its
+/// registers, or its error's number.
+///
+/// # Panics
+///
+/// Where the call unwinds, or its error cannot be read.
+pub fn call(os: &mut Os<'_>, offset: u32, low: &[u32]) -> Result<Regs, u32> {
+    let mut regs = Regs::default();
+    regs.r[..low.len()].copy_from_slice(low);
+    match os.perform(X | (chunk::FONT + offset), &mut regs) {
+        Ok(()) => Ok(regs),
+        Err(Fail::Error(block)) => Err(os.read_word(block).expect("the error's number")),
+        Err(other) => panic!("{other:?}"),
+    }
+}
+
+/// `bytes` written at `at`, a nought after them: `at`.
+///
+/// # Panics
+///
+/// Where guest memory refuses them.
+pub fn write(os: &mut Os<'_>, at: u32, bytes: &[u8]) -> u32 {
+    os.write_bytes(at, bytes).expect("written");
+    os.write_byte(at + u32::try_from(bytes.len()).expect("short"), 0)
+        .expect("terminated");
+    at
 }

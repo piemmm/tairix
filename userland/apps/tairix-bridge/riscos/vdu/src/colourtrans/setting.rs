@@ -5,16 +5,15 @@
 
 use tairix_colour::Rgb;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
-use tairix_riscos_kernel::swi::colour_trans::BACKGROUND;
+use tairix_riscos_kernel::swi::colour_trans::{BACKGROUND, USE_ECF};
 use tairix_riscos_kernel::swi::os::{set_colour, SET_COLOUR};
 use tairix_riscos_kernel::swi::X;
 use tairix_vdu::mode::var;
 
 use super::matching::Look;
-use super::{current, ecf, CURRENT};
+use super::{current, ecf};
+use tairix_riscos_kernel::swi::os::CURRENT_MODE;
 
-/// `SetGCOL`'s R3 bit asking for an ECF where one comes closer.
-const USE_ECF: u32 = 1 << 8;
 /// `SetColour`'s R3 bit asking for the text colour.
 const TEXT: u32 = 1 << 9;
 
@@ -24,7 +23,7 @@ const TEXT: u32 = 1 << 9;
 /// only R3's background bit.
 pub(super) fn set_gcol(os: &mut Os<'_>, regs: &mut Regs, look: Look) -> Result<(), Fail> {
     let wanted = Rgb::from_riscos_word(regs.r[0]);
-    let [log2_bpp] = crate::vars::mode_variables(os, CURRENT, [var::LOG2_BPP])?;
+    let [log2_bpp] = crate::vars::mode_variables(os, CURRENT_MODE, [var::LOG2_BPP])?;
     let Some((against, loadings)) = current(os)? else {
         return Ok(());
     };

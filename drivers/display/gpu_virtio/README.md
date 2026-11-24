@@ -48,17 +48,68 @@ process sees it.
   recorded with the reason.
 - **The GPU it serves.** Where the device takes Venus work, the driver serves
   it to client processes on its node's channel (`gpu-v1`, `plans/GPU.md`
-  GP11.2), published as a `tairix,gpu` child of the node. A thread of its own
+  GP11.2), published as a `tairix,gpu` child of the node, once the kernel
+  binds the channel: for a node a DMA translation unit translates, or on a
+  platform with none (GP11.3). A thread of its own
   probes the host's physical device and states it, narrowed to what the
   backend runs, through `tairix_gpu`'s model, which the runtime hosts for
-  every client. Each context is a virtio-gpu context of its own holding a
+  every client. Each context is a virtio-gpu context of its own, reaching
+  no other's memory, so the GPU exports none, holding a
   Vulkan instance, device and queues, one shared blob its replies and
   commands cross, and a feedback page each job's last command writes its
-  number into: a retired fence alone proves nothing. Memory is zeroed before
+  number into, in a slot the job holds until the number is read: a retired
+  fence alone proves nothing. Memory is zeroed before
   it is answered, and host-visible memory is a blob mapped into the
   host-visible region. The display loop alone touches the device: the GPU
-  side's orders reach it through a desk it drains, roused through a port only
-  this process may send to, so no GPU request holds the display back.
+  side's orders reach it through a desk it serves after every display command
+  it waited for, roused through a port only this process may send to, so no
+  GPU request holds the display back and no 3D answer waits on a later wake.
+- **Compute.** Bind sets of buffers, compute pipelines and dispatches. A
+  module is folded before it is sent — specialized as the seam specialized
+  it, and every value it could read unwritten defined — so the host compiles
+  the one meaning the seam admitted. An indirect dispatch's counts are checked
+  on the device by the pinned `indirect_counts` pass before the dispatch reads
+  them; counts past the device's run nothing and lose the context, as on the
+  software device. The seam's semantics for what a program reads past its
+  bindings or before it wrote it need the host's second robustness level and
+  zero-initialized workgroup memory: a host without either serves no GPU.
+  Commands or replies longer than a context's shared areas cross a blob made
+  for them.
+- **Images.** Images, views, texel buffers and samplers; buffer-image,
+  image-image copies and clears; and bind sets of every descriptor kind. A
+  format's shader uses through an image are stated only where the host's
+  robust image access reads past an image's edges as zeros, any image use only
+  where the host copies the format both ways, and a float depth format only
+  where the host keeps a depth copied in outside `0.0..=1.0`; a depth or
+  stencil format only of a queue family running graphics work too; a 24-bit
+  depth the host renders none of is its float depth and stencil. From Vulkan
+  1.3, or with its extension, a depth is stated sampled only where it is also
+  compared, and storage reached through a binding naming no format only where
+  the format says it is; an older host's device features grant that reach.
+  An image is asked of the host before it is made — cube-compatible where a
+  square of one sample with six layers or more, unless the host makes no such
+  image of its format, which then has no cube view — kept in the general
+  layout, and cleared once bound, so it reads zero whatever its memory held.
+- **Drawing.** Render pipelines, passes and draws — direct, indexed and
+  indirect — on a host drawing with the software device's meaning: Vulkan
+  1.3, where rendering without render pass objects and binding vertex buffers
+  at their sizes are core; `maintenance5`, for a point no stage sizes a pixel
+  wide and an index buffer bound at its size; full 32-bit indices,
+  independent blending and a clamped depth bias; and strict lines, or
+  rectangular ones through the line rasterization extension. A host short of
+  any states no drawing. A format is stated with four samples only at the
+  standard sample positions, and where the host makes an image of four
+  samples of it at the widest side stated; an sRGB format is never stated
+  resolved, as a host may average its samples encoded. Vertex and index
+  buffers bind at their sizes in whole indices, an empty range binding
+  nothing, so a read past one reads nought; each draw's scissor is held to the
+  pixels its viewport covers, so a point or line stays within its viewport as
+  a triangle does. Where the host draws no first instance from a record, an
+  indirect draw's records are checked on the device by the pinned
+  `indirect_records` pass, each check ordered after the last by a barrier,
+  and a pass whose records outrun their slot renders as several rendering
+  instances, each copying its records only once the one before has drawn, the
+  last alone resolving.
 - **The pointer is the device's cursor.** A pointer image is copied into the
   driver's own 64 × 64 image, transferred, and shown on the cursor queue;
   moving it presents nothing.
@@ -82,15 +133,21 @@ process sees it.
 ## Limitations
 
 - No layer compositor, one scanout.
-- The GPU it serves runs transfers alone — copies, fills and updates; compute,
-  images and drawing are `plans/GPU.md` GP5.4–GP5.6. A virtio-MMIO device has
-  no host-visible region, so Venus is served over PCI only.
+- A binding of the GPU it serves holds one descriptor: the device states no
+  arrays of them. It states no subgroup operation: a Vulkan
+  host forms a module's subgroups as it chooses, so the seam's cannot be had
+  on it. A virtio-MMIO device has no host-visible region, so Venus is served
+  over PCI only.
 - The renderer cannot stop a job once started, so a job still running ten
   seconds after it began loses its context.
-- The GPU's channel binds whether or not an IOMMU translates the node until
-  `plans/GPU.md` GP11.3. A context reaches host memory alone — its blobs and
-  the host's own Vulkan objects — and never names guest memory, so no client
-  can have the device read or write the guest's.
+- On a platform with no DMA translation unit, such as a QEMU board without
+  one, the GPU is served with nothing but this driver confining the device's
+  DMA: the platform's own limitation (`plans/GPU.md` decision 8). A context
+  still reaches host memory alone — its blobs and the host's own Vulkan
+  objects — and never names guest memory, so no client can have the device
+  read or write the guest's. On a platform declaring a unit the kernel binds
+  the GPU's channel only for a node one translates, and otherwise this
+  driver drives the display without serving the GPU (`24928`).
 - A panic report reaches the console's memory; the screen shows it only while
   this driver still runs.
 

@@ -42,17 +42,17 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GP4 | The pinned first-party chrome past the desktop's passes (GD6): the compositor's per-frame chrome and the furniture painter's draws as build-time SPIR-V, each with its conformance case | done |
 | GP4.1 | The compositor's per-frame chrome as pinned passes: a window's body cut to its shape and laid with the dithered over, its drop shadow at either level and easing between them, and the scaled desktop's resample — the body's rule and the shadow defined once in `lib/raster` for the compositor and the passes | done |
 | GP4.2 | The furniture painter's draws as pinned passes: plates and rounded rectangles, gradients, rings, polygons and strokes, glyph runs and icons, each `lib/raster`'s own primitive | done |
-| GP11 | The device channel: `gpu-v1`, a driver hosting GP2's model for every client process, the context-creation capability, per-context bounds on queued work, the watchdog's one-shot timer, and the IOMMU requirement — landing with the first hardware backend | in progress |
+| GP11 | The device channel: `gpu-v1`, a driver hosting GP2's model for every client process, the context-creation capability, per-context bounds on queued work, the watchdog's one-shot timer, and the IOMMU requirement — landing with the first hardware backend | done |
 | GP11.1 | The backend seam: `lib/gpu`'s model over a backend, the software device the first; overlap decided by the model, independent of any backend's texel layout | done |
-| GP5 | The Venus backend: a guest Vulkan ICD over virtio-gpu's Venus capset — arbitrary shaders on real host hardware | in progress |
+| GP5 | The Venus backend: a guest Vulkan ICD over virtio-gpu's Venus capset — arbitrary shaders on real host hardware | done |
 | GP5.1 | virtio shared memory: the capability decoded, its region granted to the node's driver, and mapped and unmapped there a part at a time | done |
 | GP5.2 | virtio-gpu 3D in `gpu_virtio`: a control queue of many requests in flight, capsets, Venus contexts and their fence rings, blob resources, `SUBMIT_3D`; QEMU built with virglrenderer, its Venus over lavapipe | done |
 | GP11.2 | The served device, with GP5.3: `gpu-v1`, the runtime hosting the model for every client, `Device::connect`, `GPU_DEVICES`, `CAP_GPU` and `gpucheck`, per-client bounds, and the watchdog | done |
 | GP5.3 | The Venus backend's core, with GP11.2: the protocol and its replies, bring-up, the device it states, memory, buffers, transfers and job submission | done |
-| GP11.3 | The IOMMU requirement: the kernel binds a GPU's device channel only for a node a unit translates, or on a platform with none | planned |
-| GP5.4 | Compute through Venus: modules, layouts, bind sets, compute pipelines, dispatches; the pinned set held to the software device, in `gpucheck` | planned |
-| GP5.5 | Images, views, samplers, image copies, clears and bindings through Venus | planned |
-| GP5.6 | Render pipelines, passes and draws through Venus | planned |
+| GP11.3 | The IOMMU requirement: the kernel binds a GPU's device channel only for a node a unit translates, or on a platform with none | done |
+| GP5.4 | Compute through Venus: modules, layouts, bind sets, compute pipelines, dispatches; the pinned set held to the software device, in `gpucheck` | done |
+| GP5.5 | Images, views, samplers, image copies, clears and bindings through Venus; typed sampling in the seam (`plans/SHADER.md` SH9); the image work held to the software device, in `gpucheck` | done |
+| GP5.6 | Render pipelines, passes and draws through Venus; the render work held to the software device, in `gpucheck` | done |
 | GP6 | Presentation: the swapchain, the accelerated layer path, fullscreen promotion, and the vsync flip | planned |
 | GP7 | `plans/WINTERSUN.md` WS19: the game's 3D view (WS32) — its terrain, entity, particle and light passes — as pinned SPIR-V, offloaded | planned |
 | GP8 | Untrusted-shader admission: `plans/SHADER.md`'s runtime path wired into pipeline creation | planned |
@@ -67,8 +67,8 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GD5 | The screen fade as a lone layer's opacity | done |
 | GD10 | Black as no layer: a solid black window over the screen is the engine's own background, nothing written, baked or held | done |
 | GD6 | The desktop's frost, dithered blend, copy, fill and encode as pinned compute passes (`lib/shaders`), `lib/raster`'s arithmetic to the bit | done |
-| GD7 | Copy engines as `lib/gpu`'s transfer queue | blocked: GP11 |
-| GD11 | The desktop's compositing engine on a device: GD6's passes drawing its frost and flattened layers where the session is given hardware, `lib/raster` everywhere else | blocked: GP11, GP5 |
+| GD7 | Copy engines as `lib/gpu`'s transfer queue | planned |
+| GD11 | The desktop's compositing engine on a device: GD6's passes drawing its frost and flattened layers where the session is given hardware, `lib/raster` everywhere else | planned |
 
 Items are built in ledger order. An item is complete — tests, docs, and a green
 whole-project gate — before the next begins. Several items additionally wait on
@@ -286,12 +286,14 @@ device has not stated.
 - **`Image`, `ImageView`** — an image is typed, sized and usage-declared: 1D,
   2D or 3D, mip levels, array layers, 1 or 4 samples, and its `ImageUsage`.
   Like a buffer it is placed in an allocation at an offset the device aligns
-  and a size the device states (`Context::image_requirements`); its texel
-  layout is the device's own, and texels enter and leave only by copies with a
-  stated buffer layout. A view selects mip levels, layers and an aspect, gives
-  the image a view dimension (1D, 1D array, 2D, 2D array, cube, cube array, 3D),
-  and may read an sRGB image as its unorm twin or the reverse, and nothing
-  else.
+  and a size the device states (`Context::image_requirements`, asked of the
+  context's device); its texel layout is the device's own, texels enter and
+  leave only by copies with a stated buffer layout, and it reads zero once
+  placed, whatever its memory held. A view selects mip levels, layers and an
+  aspect, gives the image a view dimension (1D, 1D array, 2D, 2D array, cube,
+  cube array, 3D), and may read an sRGB image as its unorm twin or the
+  reverse, and nothing else; its format offers one of the uses its image was
+  made for that a view serves.
 - **`BufferView`** — a texel buffer: a buffer, an aligned offset, a range of
   whole texels of a format with the texel-buffer feature, at most
   `max_texel_buffer_elements`.
@@ -301,14 +303,20 @@ device has not stated.
   feature) to the device's limit; an optional comparison; three border colours;
   and unnormalised coordinates under Vulkan's restrictions.
 - **`BindSetLayout`, `BindSet`, `PipelineLayout`** — a layout entry is a
-  binding, the `tairix_spirv::BindingKind` it holds (so an image binding states
-  the dimension, sample type and storage format a module declares), a count,
-  the `Access` it allows and the stages that see it; a layout holds at most the
+  binding, the `DescriptorType` it holds, a count, the `Access` it allows and
+  the stages that see it. A descriptor type is the `tairix_spirv::BindingKind`
+  a module declares (an image binding's dimension, component and storage
+  format) and how a sampler reads it, which no module states: an image sampled
+  through a sampler states its texels as float or depth, filterable or not, or
+  signed or unsigned integer, and a sampler its type — filtering, nearest,
+  integer, comparing, nearest comparing, or unnormalised — each consistent with
+  the other in a combined binding. A layout holds at most the
   device's `max_bind_set_descriptors`, its bindings' together, since a set of
   it looks each one up under the device's lock, and is checked and built
   before that lock is taken. A bind set is made whole: every binding written,
   every range within its buffer, aligned and made for the use, every view of
-  the shape and usage its entry states, so a draw or dispatch naming it checks
+  the shape and usage its entry states and of a format its sample type reads,
+  every sampler of its entry's type, so a draw or dispatch naming it checks
   nothing per binding; one whose descriptors alone pass its context's limit is
   refused before any is looked up, and it keeps each descriptor's memory by
   its place among the set's own. A pipeline layout is up to
@@ -324,7 +332,11 @@ device has not stated.
   count, sample mask and alpha-to-coverage, per-target blending — dual-source
   factors (a feature) included — write masks, and (a feature) a logic
   operation. Creation refuses an entry point of another stage, a layout it
-  disagrees with, a vertex input no attribute provides or provides as another
+  disagrees with, a sampling its layout's types do not take — a sampler whose
+  type does not sample the image's texels, a comparing sampler read through or
+  a reading one compared with, an unnormalised one at a derived level, offset,
+  biased, projected or gathered (`Error::Sampling`, `plans/SHADER.md` SH9) —
+  a vertex input no attribute provides or provides as another
   component type, a fragment input no vertex output provides, a fragment
   output with no target or of another component type, a second colour a
   blend reads that its fragment stage does not write or for a target past the
@@ -514,10 +526,9 @@ device has not stated.
   integer saturates and a `NaN` is zero; `OpUndef`, an undefined shuffle
   component, an uninitialised variable, workgroup memory and an unwritten
   output read as zero; subgroup operations fold in active lanes only, and an
-  index naming an inactive or absent lane reads zero; a depth-reference sample
-  through a sampler with no comparison compares as `LessOrEqual`, and a plain
-  sample through one with a comparison ignores it; `OpUnreachable` ends its
-  lane. A participant clears the registers it runs in before each piece of a
+  index naming an inactive or absent lane reads zero; a sampling reaches the
+  interpreter only through a sampler of a type its layout states takes it
+  (§1.1); `OpUnreachable` ends its lane. A participant clears the registers it runs in before each piece of a
   job, so nothing of another context is ever read. Stores, atomics and image writes are
   made for active lanes only, never for a helper. Lowering, interpretation and
   the fixed-function stages are total over every bit pattern: no input panics
@@ -700,9 +711,10 @@ a hardware backend is its driver's own (§2.22).
   and destroyed, makes memory in a context, runs each ready job as a `Job` it
   answers, and is told of each context lost. What a backend makes it may wait
   on the device for; the model never holds its lock across one. The forms of
-  images, bind sets and pipelines join the seam with GP5.4 and GP5.5; until
-  then `Device::hardware` refuses a description stating a format, a shader
-  capability, a feature or a queue past transfers.
+  bind sets of buffers and compute pipelines joined the seam with GP5.4,
+  those of images, views, texel buffers and samplers with GP5.5, and those of
+  render pipelines and passes with GP5.6; `Device::hardware` takes a
+  description stating any queue, feature or use of a format.
 - **`gpu-v1`** (`lib/abi/src/gpu.rs`): one request for each method of the
   seam, framed as every channel is — a magic, `GPU_VERSION_V1` and an op, a
   status word answering — its bulk bytes (a module's words, an update's bytes,
@@ -776,12 +788,26 @@ a hardware backend is its driver's own (§2.22).
 **GP11.3 — the IOMMU requirement** (decision 8): a device that no IOMMU
 confines, on a platform with one, serves no context; where a platform has
 none, the driver's `README.md` states the limitation. The kernel enforces it,
-not the driver, whose bugs are the threat: a GPU's device channel is a
-per-node device-channel block, which only the node's own driver binds, and
-`call_create` refuses that bind — audited — for a node no unit translates on
-a platform whose firmware declares a unit, whether or not the kernel drives
-it. The driver goes on driving the display path and never learns how its
-node is translated (`plans/IOMMU.md` decision 5).
+not the driver, whose bugs are the threat.
+
+- **The rule is the GPU channel's bind.** `call_create` binds an id of
+  `GPU_CHANNEL_ENDPOINTS` only for the driver loaded for that node, and only
+  where the DMA path the kernel recorded for the node when it admitted the
+  driver (`LoadedDriver::dma`) is translated, or is untranslated on a
+  platform whose firmware declares no unit. Every other device channel keeps
+  the node rule alone: their clients send data their driver places, where a
+  GPU's clients run programs of their own on the device.
+- **A platform declares a unit** where the hardware tree names an `Iommu`
+  node, whatever became of it, or a firmware table describing units was
+  malformed. A stranded node — behind a unit that translates nothing — is
+  refused with an untranslated one, and `iommu.malformed=unconfined`, which
+  publishes a malformed table's functions untranslated so the machine can
+  boot from PCI storage, serves no GPU.
+- **A refusal is audited** (`DEVICE_CHANNEL_UNCONFINED`, `4270`: the
+  endpoint, the node and its path), leaves no endpoint and no grant, and
+  answers the driver `PermissionDenied`. The driver records the refusal as
+  the kernel gave it and goes on driving the display; it never learns how
+  its node is translated (`plans/IOMMU.md` decision 5).
 
 ## 3. GP1 / GP5 / GP9 — the backends
 
@@ -874,14 +900,17 @@ GP5's pieces, in the order they land:
     into and the stream a job's commands travel through, executed in place
     and in parts, so a job is not bounded by what one request carries; and
     the feedback memory, host-visible and coherent, into which each job's
-    last command writes its number. A fence the render server retired
-    proves nothing — it retires the fences of a worker that died — so a job is
-    done only once its number is read back. Every object a context makes is
-    made in an exchange of its own and named only once answered: a failed
-    creation followed by a command naming its object is fatal to the context
-    on the host. A lost context sends nothing more and answers the work it
-    holds at once, since the model counts a job against its engine until it
-    is answered. Control orders and waited exchanges wait for the device's
+    last command writes its number, in a slot the job holds until that number
+    is read — jobs on different queues end in any order — and a device-local
+    zero-fill in a slot of its own, one fill at a time. A fence the render
+    server retired proves nothing — it retires the fences of a worker that
+    died — so a job is done only once its number is read back. Every object a
+    context makes is made in an exchange of its own and named only once
+    answered: a failed creation followed by a command naming its object is
+    fatal to the context on the host. A lost context sends nothing more and
+    answers the work and the exchange it holds at once, refused, since the
+    model counts a job against its engine until it is answered and an
+    exchange's caller waits untimed. Control orders and waited exchanges wait for the device's
     answer untimed, as Linux's virtio-gpu driver does: a device that stops
     answering its control queue has failed whole, and only jobs, whose length
     a client chooses, carry the watchdog.
@@ -898,27 +927,247 @@ GP5's pieces, in the order they land:
     driver's mapping, device-local memory by a fill — so no context reads what
     another left.
   - **What it states** is the host's statement narrowed: one queue family
-    running transfers alone until GP5.4 and GP5.6, no formats until GP5.5 and
-    no shader capabilities until GP5.4, so the model refuses what the backend
-    cannot yet run before it reaches the backend.
+    running transfers and dispatches — one running graphics work too where
+    the host has one, since only such a family copies and clears depth and
+    stencil, and without it no depth or stencil format is stated; drawing where
+    the host draws with the software device's meaning (GP5.6); and of each
+    format the uses its images, texel buffers, samplers, vertex buffers,
+    attachments and resolves make where the host serves them (GP5.5, GP5.6),
+    so the model refuses what the backend cannot run before it reaches the
+    backend.
   - **The driver's threads.** The display path keeps the device: its loop
     alone publishes to the control queue and takes its answers. The GPU
     service and its workers reach the device through a desk the display loop
-    drains, rousing it on a port only the driver's own process may send to
+    serves last in each service of the device — after every display command
+    it waited for, since such a wait takes the interrupt a 3D answer raised —
+    rousing it on a port only the driver's own process may send to
     (`desk_endpoint_for`), and an answer thread hands each answer to the work
     waiting on it, so no GPU request holds the display path back and no fence
-    holds a display request.
-- **GP5.4 — compute**: modules, set and pipeline layouts, bind sets, compute
-  pipelines specialised as the seam says, and dispatches; an indirect
-  dispatch's counts checked on the device by a pinned first-party pass before
-  the dispatch reads them, one past the device's losing the context as on the
-  software device (§1.2). The host's second robustness level is required: a
-  host without it serves no context. The pinned set runs through Venus and is
-  held to the software device to the bit, in `gpucheck`.
-- **GP5.5 — images, views and samplers**, their copies, clears and bindings.
+    holds a display request. That thread also sends a context's waiting work,
+    so nothing waiting on the desk holds a lock it takes: an exchange holds
+    the shared memory only while copying.
+- **GP5.4 — compute**: bind sets of buffers, compute pipelines and dispatches,
+  direct and indirect. The seam carries their forms (`Hardware::set`,
+  `Hardware::compute`, `JobCommand::Dispatch`, `Counts`); a description
+  stating a format or a render queue is still refused.
+  - **One meaning on the host.** A module is folded before it is sent
+    (`Admitted::fold`, `plans/SHADER.md` SH8): every specialization constant
+    the value the seam evaluated, and every value it could read before writing
+    it defined — an `OpUndef` its null, every private, workgroup and function
+    variable without an initializer given its null — so the host compiler
+    receives no specialization to re-evaluate and no undefined value to
+    resolve its own way.
+  - **What a program reads past its bindings or before it wrote it** has the
+    software device's one meaning on the host, so the host must offer both:
+    `robustBufferAccess` with `robustBufferAccess2`, a binding's size a whole
+    number of the granularity the host bounds robust accesses at (the
+    device's stated size alignments); and zero-initialized workgroup memory,
+    without which one program's leftover workgroup memory shows through to
+    the next. A host without either serves no GPU. The validator admits a
+    workgroup variable's initializer only as its null.
+  - **What it states.** A shader capability where the host runs it, the
+    feature it needs enabled when the device is made: the core and chained
+    features of 16-bit storage, 16-bit floats, 64-bit and 16-bit integers and
+    the image ones. No subgroup capability: a Vulkan host decides which
+    invocations form a subgroup and, for a SPIR-V 1.6 module, how many, so the
+    seam's subgroup — the device's subgroup size of a workgroup's invocations,
+    in order — cannot be had on it, and what a module computes would depend on
+    the machine. The SPIR-V its Vulkan takes: 1.3 at 1.1, 1.5 at 1.2, 1.6 from
+    1.3; the instance asks for 1.3 and the driver requires 1.1. No arrays of
+    descriptors: an array indexed per invocation needs decorations the
+    validator does not admit, so a binding holds one.
+  - **Forms.** A bind set is a descriptor set layout and a pool holding the
+    one set, the layout let go once the set is written; a compute pipeline is
+    its module, its sets' layouts and its pipeline layout, the module and the
+    sets' layouts let go once it is made.
+  - **An indirect dispatch's counts** are copied into the job's slot of the
+    feedback buffer and held to the device's by the pinned `indirect_counts`
+    pass, then dispatched from there: counts past them are zeroed and the
+    slot's fault word set, so nothing runs and the job is answered
+    `Loss::Fault`, losing the context, as the software device judges it.
+  - **Exchanges.** One whose commands or replies outrun the shared blob's
+    areas — a host's extension list, a long module — crosses a blob made for
+    it. Every refusal but the device's comes before anything is sent, so what
+    was made before it is let go; a release that cannot be queued loses its
+    context, whose end frees everything on the host.
+  - **`gpucheck`** runs, besides the transfers, every pass of the pinned set
+    on its sample (`Pinned::sample`) and an indirect dispatch past the
+    device's counts on each served GPU and on the software device, and holds
+    the two to the bit; the Venus vertical runs it through the host's
+    lavapipe.
+- **GP5.5 — images, views, texel buffers and samplers**, their copies,
+  clears and bindings, through the seam's forms (`Hardware::image`, `place`,
+  `view`, `buffer_view` and `sampler`; `JobCommand::BufferImage`, `CopyImage`
+  and `ClearImage`; `SetResource`'s image kinds).
+  - **Typed sampling.** A layout states how each image is read and how each
+    sampler reads (§1.1), and pipeline creation agrees a module's samplings
+    with it (`plans/SHADER.md` SH9). Vulkan's samplers carry no sample type,
+    and a host filtering an integer texel, or comparing through a sampler made
+    to read, has no meaning the software device shares: the seam refuses both
+    before any backend is asked.
+  - **What it states** of each format: a shader's use of an image only where
+    the host's robust image access reads past an image's edges as zeros, and
+    any use of an image only where the host copies the format both ways, as
+    every image is cleared once placed. A float depth format only where the
+    host's unrestricted depth range keeps a depth copied in outside
+    `0.0..=1.0`, as the software device keeps it. `Depth24PlusStencil8` is
+    the host's 24-bit depth where it renders one, else its float depth and
+    stencil, whose depth no copy reads. From Vulkan 1.3, or with its
+    extension (enabled before 1.3), each format's own word: a depth sampled
+    only where it is also compared, and storage reached through a binding
+    naming no format only where the format offers it, a module then reaching
+    it so with no device feature; an older host compares every depth it
+    samples, and its device features grant that reach to every format the
+    seam stores, all of which they cover. A texel buffer's two uses are stated
+    together or not at all, as the one buffer it views is made for both. Anisotropic
+    filtering and mirror-clamp-to-edge where the host offers them, each
+    enabled. A 2D image's side is held within the host's cube's, a
+    sampler's level-of-detail
+    bias is the host's in whole steps up to `MAX_LOD_BIAS`, a storage binding's
+    alignment is a texel buffer's offset alignment too, and a storage image is
+    bounded by the largest allocation.
+  - **Images.** The host's image format properties are asked first, so an
+    image past what the host makes of its format, kind, use and flags is
+    refused as unsupported before one is made, asked as it is to be made, its
+    format list included. An image is made cube-compatible where it is a
+    square of one sample with six layers or more; a host making no such image
+    of its format has it made without, and refuses only its cube views. It is
+    made with a mutable format — from Vulkan 1.2 with the list of it and its
+    sRGB twin — where it has a twin. Its requirements are asked of its
+    context's device, their memory types named as stated and their bytes
+    whole runs of the host's buffer-image granularity — from Vulkan 1.3 of its
+    description, in the exchange that makes it, and before then of the image
+    once made, since a query naming an image whose making failed ends the
+    context. **An image reads zero once placed**:
+    bound, then in the context's utility turn taken from the undefined layout
+    to the general one it is kept in for every use and cleared, answered only
+    once the device has. Every command follows a full memory barrier, so the
+    general layout needs no transition.
+  - **Views** are made for the uses of their image that their format offers,
+    so a storage image seen as its sRGB twin is a sampled view.
+  - **Samplers.** One reads its border as floats and, where it clamps to its
+    border, a second reads it as integers, both made in one exchange; a
+    binding names the one its texels read as.
+  - **Texel buffers** are views of their memory's one buffer, at the seam
+    buffer's offset plus the view's.
+  - **Copies and clears** name the host's regions in texels, a colour as the
+    floats, signed or unsigned words its format reads, and a depth and
+    stencil as they are.
+  - **`gpucheck`** adds the image work — copies between buffers and images
+    and between images; clears of colour, depth and stencil; and a dispatch
+    that fetches a uniform texel buffer, writes a storage texel buffer and a
+    storage image, samples an integer image and compares a depth image, every
+    value exact on any conforming device — on each served GPU stating the
+    uses it makes, held to the software device to the bit; the Venus vertical
+    runs it through the host's lavapipe.
 - **GP5.6 — render pipelines, passes and draws**, direct and indirect, through
-  dynamic rendering, an indirect draw's records checked on the device as a
-  dispatch's counts are.
+  dynamic rendering. The seam carries their forms (`Hardware::render`,
+  `JobCommand::Pass`), and `Device::hardware` takes a description stating
+  any queue, feature or use of a format. The seam refuses what no host could
+  run with one meaning: a vertex attribute off its alignment — its channel's
+  bytes, or a packed format's texel's — in its offset, its buffer's stride or
+  the binding's offset (`Error::Misaligned`), as Vulkan reads one there or
+  nowhere; and a blend reading a second colour beside another target, the
+  one target every host blends so (`Error::Interface`). A draw's scissor is
+  its own within the pass's area, an empty one at the area's corner.
+  - **What it states.** A family that draws only on a host of Vulkan 1.3 —
+    where rendering without render pass objects and binding vertex buffers
+    at their sizes are core, an older host's extensions for both bringing
+    dependencies of their own — that gives a draw the software device's
+    meaning:
+    - lines as rectangles: the host's strict lines, else its line
+      rasterization's rectangular lines, enabled and asked for by every
+      pipeline;
+    - a point whose size no stage writes one pixel wide, and an index buffer
+      bound at its size (`maintenance5`);
+    - every index a full word holds drawn (`fullDrawIndexUint32`);
+    - each target blended as its own (`independentBlend`);
+    - a depth bias clamped (`depthBiasClamp`);
+    - four samples only at the standard positions (`standardSampleLocations`).
+
+    Each feature is stated where the host offers it, and enabled there:
+    dual-source blending, logic operations, depth clamping, wide lines, large
+    points, stores from vertex and fragment stages, and indirect draws' first
+    instances. Of each format, the uses a pass makes are stated where the
+    host's optimal tiling offers them: a colour target, blended, a
+    depth-stencil target, and a resolve into it. Four samples are stated
+    where the host makes an image of four samples of the format at the widest
+    side stated, for every use the seam's image of it may have: its
+    attachment use, both transfers, sampling where offered, and its sRGB
+    twin's views. The widest side is held to the host's framebuffer, an
+    attachment being an image a rendering instance may cover whole. A vertex
+    attribute is stated where the buffer features offer it. No sRGB format is
+    stated resolved: before `maintenance10`, which the Venus protocol carries
+    none of, a host may average its samples encoded or decoded as it chooses,
+    and the seam averages them decoded. Without `multiDrawIndirect` an
+    indirect draw reads one record. The viewport bounds are the host's
+    rounded inward, the largest point and the widest line the host's in whole
+    pixels.
+  - **Render pipelines.** A render pipeline is its two modules, folded as a
+    compute one's are, the layout's set layouts and pipeline layout, and one
+    graphics pipeline naming its targets' formats. The viewport, scissor,
+    stencil reference and blend constants are dynamic. The modules and set
+    layouts are let go once the pipeline is made. A target is written in the
+    channels its write mask names that the fragment stage writes, so a
+    channel no output writes keeps what it held, as on the software device.
+    Vulkan defines no value for such a channel, so the seam refuses a
+    pipeline whose blend factors or alpha-to-coverage would read one
+    (`Error::Interface`) rather than give it a meaning a host could differ
+    on.
+  - **Passes.** A pass is one rendering instance in the general layout every
+    image is kept in. Each colour target is loaded or cleared as the pass
+    says and stored, and averaged into its resolve view as the pass ends; the
+    depth and stencil of its one view are each loaded or cleared. Each draw's
+    scissor, within the pass's area, is narrowed to the pixels its viewport
+    covers: the software device holds every sample to the viewport, and a
+    host clips a triangle there but draws a point's square or a line's
+    rectangle whole. A draw binds its vertex buffers and indices at their
+    sizes (`vkCmdBindVertexBuffers2`, `vkCmdBindIndexBuffer2`), indices in
+    whole ones and an empty range at its buffer's start, so a robust read
+    past one reads nought, as on the software device. Between consecutive
+    draws only what changes is bound again.
+  - **Indirect draws.** Where the device states first instances, a draw
+    reads its records where they lie. Where it does not, each draw's records
+    are copied into the job's feedback slot before the pass and checked there
+    by the pinned `indirect_records` pass, one check a draw, each after a
+    barrier since each reads and writes the slot's fault word. A record
+    naming a first instance is zeroed and the fault word set, so the job
+    answers `Loss::Fault`, as the software device judges it. The 256 records a
+    slot holds bound the device's indirect count. A pass whose records outrun
+    the slot runs as successive rendering instances, each copying its records
+    only after a barrier past the draws before that read the slot, loading
+    what the last stored, only the last resolving. An instance whose draws
+    read no record copies and checks nothing.
+  - **What a host may compute differently**, each within Vulkan's bounds:
+    coverage at sub-pixel precision; interpolation; a value converted to a
+    normalised target, blended into one or resolved, which only nought and
+    one convert to alike everywhere; the samples alpha-to-coverage keeps; a
+    depth bias's least step; a line's width and a point's size, to the host's
+    granularity; whether a point centred outside the clip volume is drawn
+    where its square reaches the viewport (the host's
+    `pointClippingBehavior`), and the samples near where a line leaves the
+    clip volume, which Vulkan lets a host clip there or not; and which
+    samples of a pixel a viewport's edge falls within a point or line covers.
+    Everything else in a draw has the one meaning above.
+  - **`gpucheck`** adds the render work, and every value it reads is exact
+    on any conforming device: triangles halving rectangles on the pixel grid
+    or on half pixels between the standard sample positions, points and a
+    line centred on pixel rows, varyings flat, tags from the fragment's
+    coordinate, unsigned normalised targets given nought and one alone, and
+    four samples averaged into a float target. Instanced strips, depth-tested and stencilled — a
+    culled mirrored one among them — then an indexed strip with a restart
+    under a scissor, and an indirect strip added into the colour through an
+    offset viewport, render an unsigned normalised target and an integer one
+    within an area a row short of them; a pass keeping that colour draws two
+    of its channels alone, a list and an indexed fan with a restart; points
+    and a line draw into a float target; four samples, some masked, resolve;
+    and last, in the same context, a record naming its first instance draws,
+    a device stating no first instances having to lose that context. Each
+    step runs on the first queue family stating its work. It runs on each
+    served GPU stating a family that draws and the uses it makes, held to
+    the software device to the bit; the Venus vertical runs it through the
+    host's lavapipe, and its software device is held to a model of Vulkan's
+    rules in `gpucheck`'s tests.
 
 The alternatives are named and refused for this role. **virgl** carries a
 Gallium/TGSI-flavoured stream and would make the guest speak a GL-shaped
@@ -1460,6 +1709,14 @@ Each needs sign-off before the item that depends on it; none is assumed.
     passes; a client's exit releases everything it held; every decoder is
     fuzzed and total; `Device::connect` runs the seam's tests against a
     served device and agrees with the software device on every one.
+  - **GP11.3**: the kernel binds a GPU's channel for a translated node, and
+    for an untranslated one where the firmware declares no unit; where it
+    declares one — through a malformed table too — an untranslated or
+    stranded node is refused, audited, with no endpoint and no grant left,
+    while another device's channel on it binds as before. Live, the Venus
+    vertical is served on `q35` with no unit and behind VT-d translating the
+    GPU, and refused beside a virtio-iommu its PCI host bypasses, the
+    device's 3D work still running.
 - **GP3**: every seam method has a software implementation and a host test; a
   program compiled against the seam runs unchanged with no device present.
   - **GP3.1**: every format round-trips its texels; images, views and copies
@@ -1526,6 +1783,47 @@ Each needs sign-off before the item that depends on it; none is assumed.
     every command it writes; a served device's copies, fills and updates
     through Venus equal the software device's; a lost context's virtio-gpu
     context is destroyed and every other context goes on.
+  - **GP5.4**: every compute command and reply held to the renderer's
+    grammar; a host's statement narrowed to the capabilities it runs and
+    refused short of either robustness level or zero-initialized workgroup
+    memory; a dispatch run by a renderer of the test's own on the software
+    device leaving what the pass leaves; an indirect dispatch past the
+    device's counts losing its context alone with nothing run past them; a
+    module longer than the exchange area crossing whole; a pipeline or set
+    the host refuses, or whose making is refused part way, leaving nothing
+    behind; an exchange waiting on the host holding back no part of a job;
+    and every pass of the pinned set agreeing with the software device to the
+    bit, in `gpucheck`, through QEMU's Venus.
+  - **GP5.5**: every image command and reply held to the renderer's grammar;
+    a host's statement narrowed to the formats it copies both ways and reads
+    robustly, a float depth only with its unrestricted range, a 24-bit depth
+    stood in for, a depth compared and storage reached unformatted as the
+    host's version says, and the sampler features enabled where offered; on a
+    renderer of the test's own that keeps texels in a layout of its own and
+    refuses what Vulkan's valid usage refuses, an image made as described,
+    reading zero whatever its memory held, copied, cleared and bound to
+    dispatches leaving what the software device leaves; an image past what
+    the host makes refused with nothing left behind; a pairing the layout's
+    sampling types refuse refused at pipeline creation; and the image work
+    agreeing with the software device to the bit, in `gpucheck`, through
+    QEMU's Venus.
+  - **GP5.6**: every render command and reply held to the renderer's
+    grammar; a host's statement narrowed to one of Vulkan 1.3 drawing with
+    the software device's meaning, four samples only at the standard
+    positions and where the host makes the widest image of them, no sRGB
+    format resolved, and the drawing features enabled where offered; on a
+    renderer of the test's own that refuses what Vulkan's valid usage
+    refuses — two commands reaching one buffer's bytes, either writing, with
+    no barrier between them among it — every kind of draw leaving what the
+    software device leaves, ranges and scissors at their edges bound as the
+    host's valid usage has them, a scissor held to its viewport, each target written only in the channels its fragment stage
+    writes and only within its pass, four samples resolving alike, a host's
+    own lines drawn as the rectangles asked for, and records the host draws no
+    first instance of checked on the device — a record naming one losing its
+    context, and a pass whose checked records outrun the slot running as
+    several rendering instances that leave the same; and the render work
+    agreeing with the software device to the bit, in `gpucheck`, through
+    QEMU's Venus.
 - **GP8**: a hostile module is refused or contained; a compromised compiler
   sandbox can reach nothing; the fuzz corpus is clean (`plans/SHADER.md`).
 - **Differential**: a frame through the seam matches the direct software path

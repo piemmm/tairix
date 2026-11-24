@@ -7,12 +7,13 @@ tairix_util::flags! {
     /// What a format may be used for, as a device states it
     /// ([`DeviceInfo::formats`](crate::DeviceInfo::formats)).
     pub struct FormatFeatures(u32) {
-        /// Sampled, through a sampled image or a uniform texel buffer.
+        /// Sampled through a sampled image: of its depth, compared or read,
+        /// for a format with depth.
         const SAMPLED = 1;
-        /// Sampled with linear filtering.
+        /// Sampled with linear filtering: of its depth, compared or read,
+        /// for a format with depth.
         const FILTERED = 1 << 1;
-        /// Read and written by texel, through a storage image or a storage
-        /// texel buffer.
+        /// Read and written by texel through a storage image.
         const STORAGE = 1 << 2;
         /// Rendered to as a colour attachment.
         const COLOR_ATTACHMENT = 1 << 3;
@@ -30,6 +31,15 @@ tairix_util::flags! {
         const RESOLVED = 1 << 9;
         /// Read as a vertex attribute.
         const VERTEX_INPUT = 1 << 10;
+        /// Read through a storage image whose binding names no format.
+        const STORAGE_READ_WITHOUT_FORMAT = 1 << 11;
+        /// Written through a storage image whose binding names no format.
+        const STORAGE_WRITE_WITHOUT_FORMAT = 1 << 12;
+        /// Read through a storage texel buffer whose binding names no format.
+        const TEXEL_BUFFER_READ_WITHOUT_FORMAT = 1 << 13;
+        /// Written through a storage texel buffer whose binding names no
+        /// format.
+        const TEXEL_BUFFER_WRITE_WITHOUT_FORMAT = 1 << 14;
     }
 }
 
@@ -201,36 +211,40 @@ const FLOAT_COLOR: FormatFeatures = FormatFeatures::SAMPLED
     .with(FormatFeatures::RESOLVED)
     .with(FormatFeatures::UNIFORM_TEXEL_BUFFER);
 
-/// [`FLOAT_COLOR`], read and written by texel, and read as a vertex
+/// Read and written by texel through a storage image and a storage texel
+/// buffer, whether or not the binding names the format, and read as a vertex
 /// attribute.
-const STORED_FLOAT: FormatFeatures = FLOAT_COLOR
-    .with(FormatFeatures::STORAGE)
+const STORED: FormatFeatures = FormatFeatures::STORAGE
+    .with(FormatFeatures::STORAGE_READ_WITHOUT_FORMAT)
+    .with(FormatFeatures::STORAGE_WRITE_WITHOUT_FORMAT)
     .with(FormatFeatures::STORAGE_TEXEL_BUFFER)
+    .with(FormatFeatures::TEXEL_BUFFER_READ_WITHOUT_FORMAT)
+    .with(FormatFeatures::TEXEL_BUFFER_WRITE_WITHOUT_FORMAT)
     .with(FormatFeatures::VERTEX_INPUT);
 
-/// A signed normalised format: filtered, stored and read as a vertex
-/// attribute, but no attachment.
+/// [`FLOAT_COLOR`], [`STORED`].
+const STORED_FLOAT: FormatFeatures = FLOAT_COLOR.with(STORED);
+
+/// A signed normalised format: filtered and [`STORED`], but no attachment.
 const SNORM: FormatFeatures = FormatFeatures::SAMPLED
     .with(FormatFeatures::FILTERED)
-    .with(FormatFeatures::STORAGE)
     .with(FormatFeatures::UNIFORM_TEXEL_BUFFER)
-    .with(FormatFeatures::STORAGE_TEXEL_BUFFER)
-    .with(FormatFeatures::VERTEX_INPUT);
+    .with(STORED);
 
-/// An integer colour format: sampled unfiltered, stored, read as a vertex
-/// attribute, and rendered and multisampled without blending or resolve.
+/// An integer colour format: sampled unfiltered, [`STORED`], and rendered and
+/// multisampled without blending or resolve.
 const INTEGER: FormatFeatures = FormatFeatures::SAMPLED
-    .with(FormatFeatures::STORAGE)
     .with(FormatFeatures::COLOR_ATTACHMENT)
     .with(FormatFeatures::MULTISAMPLED)
     .with(FormatFeatures::UNIFORM_TEXEL_BUFFER)
-    .with(FormatFeatures::STORAGE_TEXEL_BUFFER)
-    .with(FormatFeatures::VERTEX_INPUT);
+    .with(STORED);
 
-/// A depth or stencil format.
-const DEPTH: FormatFeatures = FormatFeatures::SAMPLED
+/// A stencil format.
+const STENCIL: FormatFeatures = FormatFeatures::SAMPLED
     .with(FormatFeatures::DEPTH_STENCIL)
     .with(FormatFeatures::MULTISAMPLED);
+/// A format with depth, which filters, compared or read.
+const DEPTH: FormatFeatures = STENCIL.with(FormatFeatures::FILTERED);
 
 /// One format's description.
 struct Info {
@@ -389,7 +403,7 @@ impl Format {
             },
             Self::Stencil8 => Info {
                 aspects: Aspects::STENCIL,
-                ..colour(E::Stencil8, 1, Uint, DEPTH, I::UNKNOWN)
+                ..colour(E::Stencil8, 1, Uint, STENCIL, I::UNKNOWN)
             },
             Self::Depth32FloatStencil8 | Self::Depth24PlusStencil8 => Info {
                 aspects: Aspects::DEPTH_STENCIL,
@@ -404,9 +418,10 @@ impl Format {
         self as usize
     }
 
-    /// What the software device states it can be used for: everything its
-    /// encoding can mean.
-    pub(crate) const fn software_features(self) -> FormatFeatures {
+    /// Every use its encoding can mean: the most any device states of it,
+    /// and what the software device does.
+    #[must_use]
+    pub const fn features(self) -> FormatFeatures {
         self.info().features
     }
 
@@ -502,6 +517,29 @@ impl Format {
         self.info().reversed
     }
 
+    /// The bits each of its channels holds, red first.
+    pub(crate) const fn channel_widths(self) -> [u32; 4] {
+        match self.encoding() {
+            Encoding::Rgb10A2Unorm | Encoding::Rgb10A2Uint => [10, 10, 10, 2],
+            Encoding::Rg11B10Float => [11, 11, 10, 0],
+            Encoding::Rgb9E5Float => [9, 9, 9, 0],
+            Encoding::Depth32Stencil8 => [32, 8, 0, 0],
+            encoding => [encoding.channel_bits(); 4],
+        }
+    }
+
+    /// The bytes a vertex attribute of it is read at a whole number of: its
+    /// channel's, or a packed format's whole texel's.
+    pub(crate) const fn attribute_alignment(self) -> u32 {
+        match self.info().encoding {
+            Encoding::Rgb10A2Unorm
+            | Encoding::Rgb10A2Uint
+            | Encoding::Rg11B10Float
+            | Encoding::Rgb9E5Float => 4,
+            encoding => encoding.channel_bits() / 8,
+        }
+    }
+
     /// The bytes one texel takes in an image, every aspect included.
     pub(crate) const fn texel_bytes(self) -> u32 {
         let info = self.info();
@@ -512,29 +550,37 @@ impl Format {
     }
 }
 
+impl Encoding {
+    /// The bits of each channel of an encoding packed channel by channel.
+    pub(crate) const fn channel_bits(self) -> u32 {
+        match self {
+            Self::Unorm8
+            | Self::Snorm8
+            | Self::Uint8
+            | Self::Sint8
+            | Self::Srgb8
+            | Self::Stencil8 => 8,
+            Self::Unorm16
+            | Self::Snorm16
+            | Self::Uint16
+            | Self::Sint16
+            | Self::Float16
+            | Self::Depth16 => 16,
+            _ => 32,
+        }
+    }
+}
+
 /// The bytes `channels` channels of `encoding` take.
 const fn stored_bytes(encoding: Encoding, channels: u32) -> u32 {
-    let per_channel = match encoding {
-        Encoding::Unorm8
-        | Encoding::Snorm8
-        | Encoding::Uint8
-        | Encoding::Sint8
-        | Encoding::Srgb8
-        | Encoding::Stencil8 => 1,
-        Encoding::Unorm16
-        | Encoding::Snorm16
-        | Encoding::Uint16
-        | Encoding::Sint16
-        | Encoding::Float16
-        | Encoding::Depth16 => 2,
-        Encoding::Uint32 | Encoding::Sint32 | Encoding::Float32 | Encoding::Depth32 => 4,
+    match encoding {
         Encoding::Rgb10A2Unorm
         | Encoding::Rgb10A2Uint
         | Encoding::Rg11B10Float
-        | Encoding::Rgb9E5Float => return 4,
-        Encoding::Depth32Stencil8 => return 8,
-    };
-    per_channel * channels
+        | Encoding::Rgb9E5Float => 4,
+        Encoding::Depth32Stencil8 => 8,
+        encoding => encoding.channel_bits() / 8 * channels,
+    }
 }
 
 #[cfg(test)]

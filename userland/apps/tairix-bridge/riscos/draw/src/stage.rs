@@ -17,6 +17,14 @@ pub(crate) type Span = (i32, i32, i32);
 /// What processing reaches beyond itself: guest memory, and the screen.
 pub(crate) trait Guest {
     fn read_word(&mut self, at: u32) -> Result<u32, Fail>;
+    /// Fills `out` with the words from `at` on, the address wrapping past
+    /// the top of memory.
+    fn read_words(&mut self, at: u32, out: &mut [u32]) -> Result<(), Fail> {
+        for (i, word) in (0u32..).zip(out) {
+            *word = self.read_word(at.wrapping_add(4 * i))?;
+        }
+        Ok(())
+    }
     fn write_word(&mut self, at: u32, value: u32) -> Result<(), Fail>;
     /// Plots `spans` in the graphics foreground, within the graphics window.
     fn plot(&mut self, spans: &[Span]) -> Result<(), Fail>;

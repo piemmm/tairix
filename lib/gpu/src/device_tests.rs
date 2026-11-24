@@ -11,8 +11,8 @@ use tairix_parallel::Serial;
 
 use crate::{
     Allocation, AllocationDesc, Buffer, BufferDesc, BufferUsage, CommandBuffer, Context,
-    ContextDesc, CopyRegion, Device, Error, Fence, Loss, NoThreads, Queue, SoftwareDesc, Spawn,
-    Submission, SubmitError, DEFAULT_SUBGROUP_SIZE, MAX_UPDATE_BYTES,
+    ContextDesc, CopyRegion, Device, Error, Features, Fence, Loss, NoThreads, Queue, SoftwareDesc,
+    Spawn, Submission, SubmitError, DEFAULT_SUBGROUP_SIZE, MAX_UPDATE_BYTES,
 };
 
 /// A clock a test sets, advancing by `step` at every reading, which it
@@ -275,6 +275,18 @@ fn a_handle_of_another_device_is_refused_even_where_its_keys_match() {
         one.import(memory.export().expect("exported")).err(),
         Some(Error::Foreign)
     );
+}
+
+#[test]
+fn memory_is_exported_only_by_a_device_whose_contexts_share_it() {
+    let unshared = crate::binding::tests::device_stating(|info| {
+        info.features = info.features.without(Features::SHARED_MEMORY);
+    });
+    let owner = context(&unshared);
+    assert_eq!(memory(&owner, 64).export().err(), Some(Error::Unsupported));
+    let (sharing, _) = device();
+    let owner = context(&sharing);
+    assert!(memory(&owner, 64).export().is_ok());
 }
 
 #[test]

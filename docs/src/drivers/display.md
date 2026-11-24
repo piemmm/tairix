@@ -161,7 +161,7 @@ desktop uses the layers and the plane is [the window manager's](../desktop/wm.md
 |--------------|--------------------------------------|-------------------------------------------|------------------------|
 | framebuffer  | `tairix-drv-display-framebuffer` (Run process over `tairix_display::Framebuffer`) | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 & aarch64 `ramfb` QEMU verticals + wasm32 browser-canvas vertical |
 | vesa         | `tairix-drv-display-vesa`            | x86_64 VBE linear framebuffer (`ModeInfoBlock`) | host-side tests + x86_64 `ramfb` QEMU vertical |
-| gpu_virtio   | `tairix-drv-display-gpu-virtio`      | a virtio GPU on virtio-mmio or virtio-PCI: frames are resource backings, the pointer its cursor, the console hosted on it; where the device offers Venus, its contexts, host blobs in the host-visible region and command streams, and the GPU served on its node's channel | host-side tests against a model device and a model renderer, fuzz harnesses over its reading of the device's answers and the renderer's Venus replies, aarch64, riscv64 and x86_64 QEMU verticals, and the x86_64 Venus vertical |
+| gpu_virtio   | `tairix-drv-display-gpu-virtio`      | a virtio GPU on virtio-mmio or virtio-PCI: frames are resource backings, the pointer its cursor, the console hosted on it; where the device offers Venus, its contexts, host blobs in the host-visible region and command streams, and the GPU served on its node's channel | host-side tests against a model device and a model renderer, fuzz harnesses over its reading of the device's answers and the renderer's Venus replies, aarch64, riscv64 and x86_64 QEMU verticals, and the x86_64 Venus verticals — with no unit, behind VT-d, and beside a unit its PCI host bypasses |
 | bcm2711_hvs  | `tairix-drv-display-bcm2711-hvs`     | the Pi 4's HVS and HDMI pixel valves, driven natively, its encoders over `encoder-v1` | host-side tests against a register-level model |
 | bcm2711_hdmi | `tairix-drv-display-bcm2711-hdmi`    | not a surface: each Pi 4 HDMI block, an `encoder-v1` encoder of the display engine and an `audiochan-v1` audio device | host-side tests against a register-level model |
 
@@ -481,38 +481,153 @@ the first marked `ConsoleHost`.
 - **The GPU it serves.** Where the device takes Venus work the driver serves
   it on its node's channel ([`gpu-v1`](../abi/gpu.md)), binding the node's
   channel block restricted to `CAP_GPU` and publishing a `tairix,gpu` child
-  once the GPU is made (events `24927`–`24929`). A thread of its own probes
-  the host — an instance, its first physical device, a queue family taking
-  transfers, its memory types — and states it through
-  `tairix_gpu::Device::hardware`, narrowed to transfers and stating a
-  host-visible memory type only where it is coherent, since the renderer
-  flushes nothing; `tairix_gpu::serve` hosts it for every client. Each
+  once the GPU is made (events `24927`–`24929`). The kernel binds that
+  channel only for a node a DMA translation unit translates, or on a
+  platform with none; refused, the driver records why (`24928`) and goes on
+  driving the display. A thread of its own probes
+  the host — an instance, its first physical device, its extensions, its
+  properties and the granularity it bounds robust accesses at, a queue
+  family taking dispatches, drawing too where one does, its memory types and
+  its features — and states it through `tairix_gpu::Device::hardware`:
+  transfers, compute and, on a host drawing with the software device's
+  meaning, rendering over buffers and images; of each format the uses an
+  image, a texel buffer, a sampler, a vertex buffer, an attachment or a
+  resolve makes that the host serves; anisotropic filtering,
+  mirror-clamp-to-edge and, on a host drawing, dual-source blending, logic
+  operations, depth clamping, wide lines, large points, stores from the
+  vertex and fragment stages and a record's first instance, each where
+  offered; each shader capability the host runs but the subgroup ones — a
+  Vulkan host forms a module's subgroups as it chooses, so the seam's cannot
+  be had on it — the SPIR-V its Vulkan takes, and a host-visible memory type
+  only where it is coherent, since the
+  renderer flushes nothing; `tairix_gpu::serve` hosts it for every client. A
+  host without `robustBufferAccess2` or zero-initialized workgroup memory
+  serves no GPU: the seam's one meaning for what a program reads past its
+  bindings or before it wrote it needs both, and the device is made with
+  them enabled with the features its capabilities need. Each
   context is a virtio-gpu context of its own holding a Vulkan instance, a
   device and a queue for each the device states, each on a ring of its own;
   a 256 KiB shared blob holding its reply stream, an exchange area and its
-  job stream; and a feedback page. Every object is made in an exchange of
+  job stream; and a feedback page. No context reaches another's memory, so
+  the device states no `Features::SHARED_MEMORY` and refuses every export.
+  Every object is made in an exchange of
   its own, answered before anything names it, because a failed creation
   followed by a command naming its object is fatal to the context on the
   host. Memory is one allocation with one buffer over it, zeroed before it
   is answered — host-visible memory, a blob mapped into the region, through
   the driver's mapping, device-local memory by a fill. A job is one command
   buffer, a barrier before each command, its last command writing the job's
-  number into the feedback page; it crosses in parts of at most 96 KiB, the
-  last on its queue's ring and the rest on ring `0`, and is done only once
-  its number reads back, since the render server retires a dead worker's
-  fences as if they had landed. A context lost — a part refused, a number
-  that never landed, its watchdog — sends nothing more, answers the work it
-  still holds at once, and ends once nothing of it is with the device. A part
-  of the region is handed out again only once the device is known to map
-  nothing into it, and memory a blob may still name is never freed: a map or
-  unmap refused or answered unreadably leaves both kept. Control orders and
-  waited exchanges wait for the device's answer untimed, as Linux's
-  virtio-gpu driver waits for its control queue; only jobs, whose length a
-  client chooses, carry the watchdog. The display loop alone publishes to the
-  control queue: the GPU side's orders reach it through a desk it drains as
-  it services the device, roused by a message on a port
-  (`desk_endpoint_for`) only this process may send to, and an answer thread
-  hands each answer to the work waiting on it.
+  number into a slot of the feedback page; it crosses in parts of at most
+  96 KiB, the last on its queue's ring and the rest on ring `0`, and is done
+  only once its number reads back, since the render server retires a dead
+  worker's fences as if they had landed. A job holds its slot until its
+  number is read, since jobs on different queues end in any order, and a
+  device-local zero-fill writes into a slot of its own, one fill at a time.
+  A context lost — a part refused, a number that never landed, its watchdog
+  — sends nothing more, answers the work and the exchange it still holds at
+  once, refused, and ends once nothing of it is with the device. A part of the region is handed out
+  again only once the device is known to map nothing into it, and memory a
+  blob may still name is never freed: a map or unmap refused or answered
+  unreadably leaves both kept. Control orders and waited exchanges wait for
+  the device's answer untimed, as Linux's virtio-gpu driver waits for its
+  control queue; only jobs, whose length a client chooses, carry the
+  watchdog. An exchange whose commands or replies outrun the shared blob's
+  16 KiB areas crosses a blob made for it, its stream ending by pointing the
+  renderer back at the context's reply area. Every refusal of an exchange
+  but the device's comes before anything is sent, so what was made before it
+  is let go; a release that cannot be queued loses its context, whose end
+  frees everything on the host. A refusal reaches the seam as what it means
+  there: one the host does not do as `Error::Unsupported`, a value past what
+  the protocol carries as `Error::TooLarge`, a device fault or a device gone
+  as the context's loss, and any other as `Error::OutOfMemory`.
+- **Compute.** A bind set is a descriptor set layout and a pool holding the
+  one set, the layout let go once the set is written; a compute pipeline is
+  its module, its sets' layouts and its pipeline layout, the module and the
+  sets' layouts let go once it is made. Each module is folded before it is
+  sent (`Admitted::fold`): specialized as the seam specialized it, and every
+  value it could read unwritten defined, so the host compiles the one
+  meaning the seam admitted. A dispatch binds its pipeline, sets and push
+  constants after the barrier before it. An indirect dispatch's three counts
+  are copied into the job's slot of the feedback buffer and held to the
+  device's by the pinned `indirect_counts` pass, then dispatched from there:
+  counts past the device's are zeroed and the slot's fault word set, so the
+  dispatch runs nothing and the job is answered `Loss::Fault`, losing the
+  context, as the software device judges it.
+  The display loop alone publishes to the
+  control queue: the GPU side's orders reach it through a desk it serves last
+  in each service of the device, after every display command it waited for,
+  since such a wait takes the interrupt a 3D answer raised. A message on a
+  port (`desk_endpoint_for`) only this process may send to rouses it for the
+  desk, and an answer thread hands each answer to the work waiting on it. That thread also sends a
+  context's waiting work through its shared memory, so nothing that waits on
+  the desk holds a lock the answer thread takes: an exchange holds the shared
+  memory only while copying into or out of it.
+- **Images.** A format's use by a shader through an image is stated only
+  where the host's robust image access reads past an image's edges as zeros,
+  any image use only where the host copies the format both ways, and a float
+  depth format only where the host's unrestricted depth range keeps a depth
+  copied in as the software device does, and a depth or stencil format only
+  where the queue family runs graphics work too — the only family Vulkan
+  copies and clears them on, chosen where the host has one;
+  `Depth24PlusStencil8` is the host's
+  24-bit depth, or where it renders none its float depth and stencil, whose
+  depth the seam never copies. From Vulkan 1.3, or with its extension, the
+  host states its format features in full: a depth is stated sampled only
+  where it is also compared, and storage reached through a binding naming no
+  format only where the format says it is, a module then reaching it so
+  whatever the device features; an older host compares every depth it
+  samples, and its device features grant every format the seam stores that
+  reach. An image is asked of the host's image format properties before it is
+  made, as it is to be made: cube-compatible where a square of one sample with
+  six layers or more — and where the host makes no such image of its format,
+  made without, any view but a cube's made of it — and of a mutable format
+  where it has an sRGB twin, listing the two from Vulkan 1.2. From Vulkan 1.3
+  the memory it needs is asked of its description in the exchange that makes
+  it; before, once it is made. That memory is whole runs of the host's
+  buffer-image granularity, so no buffer beside the image shares a run with
+  it. Once bound it is taken from the undefined layout to the general one it
+  is kept in and cleared, in the context's utility turn, so it reads zero
+  whatever its memory held. A view is made for the uses of its image its
+  format offers; a sampler clamping to its border is made twice in one
+  exchange, its border read as floats and as integers, and a binding names
+  the one its texels read as; a texel buffer is a view of its memory's one
+  buffer, made for both texel uses, so a format offering only one is stated
+  for neither. Copies name the host's regions in texels, and a clear its
+  colour as the floats, signed or unsigned words its format reads.
+- **Drawing.** A host draws with the software device's meaning or the device
+  states none: Vulkan 1.3, where rendering without render pass objects (with
+  its feature) and binding vertex buffers at their sizes are core, so an older
+  host, whose extensions for both bring dependencies of their own, draws
+  nothing; `maintenance5`, whose point a pixel wide where no stage sizes it and
+  index buffer bound at its size the seam's meaning needs; full 32-bit indices, independent blending and a clamped depth bias;
+  and strict lines, or rectangular ones asked of every pipeline through the
+  line rasterization extension. A render pipeline is its folded modules, its
+  layouts and one graphics pipeline naming its targets' and depth-stencil
+  formats, its viewport, scissor, blend constant and stencil reference set by
+  each draw, each target's write mask the channels the seam narrowed it to. A
+  pass is one rendering instance in the general layout every image is kept
+  in, storing each attachment and resolving by the average of its samples,
+  which no sRGB format is stated as, since a host may average its samples
+  encoded. A draw binds its vertex buffers and indices at their sizes, its
+  indices in whole ones and an empty range at its buffer's start, so a robust
+  read past one reads nought; and its scissor held to the pixels its viewport
+  covers, so the host holds a point or line to its viewport as clipping holds
+  a triangle there. A format is stated with four samples only where the
+  host places them at the standard positions and makes an image of four
+  samples of it, at the widest side stated, for every use the seam's image of
+  it may have; the widest side is held to the host's framebuffer, and the
+  viewport bounds rounded inward to whole pixels. Without
+  `multiDrawIndirect` an indirect draw reads one record. Where the host draws
+  no first instance from a record, at most 256 records a draw are copied into
+  the job's slot of the feedback buffer and held there by the pinned
+  `indirect_records` pass before the draw reads them, each check after a
+  barrier, as each reads and writes the slot's fault word: a record naming a
+  first instance is zeroed and the fault word set, so the job is answered
+  `Loss::Fault`, losing the context, as the software device judges it. A
+  pass whose checked records outrun the slot renders as several rendering
+  instances in turn, each copying its records over the slot only after a
+  barrier past the draws before, loading what the one before stored, and the
+  last alone resolving.
 - **Ordering across the queues.** The pointer image's transfer is fenced and
   answered before the cursor queue names it, as the specification requires
   of `UPDATE_CURSOR`.

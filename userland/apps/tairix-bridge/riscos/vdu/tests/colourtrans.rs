@@ -228,12 +228,7 @@ fn output_to_a_sprite_with_no_palette_matches_against_the_screen() {
 fn a_reinitialised_colourtrans_gives_back_its_32k_tables() {
     let mut session = common::drivers(b"");
     common::vdu(&mut session, &[22, 15]).expect("mode 15");
-    {
-        let os = &mut session.kernel.os();
-        for (i, word) in (0u32..).zip([1, 640, 480, 4, u32::MAX, u32::MAX]) {
-            os.write_word(BLOCK + 4 * i, word).expect("a deep selector");
-        }
-    }
+    deep_selector(&mut session, 4);
     let cycle = |session: &mut tairix_riscos_filing::session::Session| {
         call(
             session,
@@ -464,12 +459,7 @@ fn a_table_for_a_deep_destination_holds_its_pixels_wide_or_its_gcols_narrow() {
     const WIDE: u32 = 1 << 4;
     let mut session = common::drivers(b"");
     common::vdu(&mut session, &[22, 12]).expect("mode 12");
-    {
-        let os = &mut session.kernel.os();
-        for (i, word) in (0u32..).zip([1, 640, 480, 5, u32::MAX, u32::MAX]) {
-            os.write_word(BLOCK + 4 * i, word).expect("a deep selector");
-        }
-    }
+    deep_selector(&mut session, 5);
     let (wide, narrow) = (BLOCK + 0x100, BLOCK + 0x200);
     for (at, flags) in [(wide, WIDE), (narrow, 0)] {
         call(
@@ -554,12 +544,7 @@ fn a_transfer_function_takes_each_colour_before_it_is_matched() {
 fn no_more_32k_tables_are_kept_than_colourtrans_keeps() {
     let mut session = common::drivers(b"");
     common::vdu(&mut session, &[22, 12]).expect("mode 12");
-    {
-        let os = &mut session.kernel.os();
-        for (i, word) in (0u32..).zip([1, 640, 480, 5, u32::MAX, u32::MAX]) {
-            os.write_word(BLOCK + 4 * i, word).expect("a deep selector");
-        }
-    }
+    deep_selector(&mut session, 5);
     let palette = BLOCK + 0x100;
     let mut free = Vec::new();
     for n in 0..6u32 {
@@ -600,12 +585,7 @@ fn a_table_is_matched_by_the_loadings_its_transfer_function_left() {
         0xE8BD_8007,
         SKEWED,
     ];
-    {
-        let os = &mut session.kernel.os();
-        for (i, &word) in (0u32..).zip(&code) {
-            os.write_word(routine + 4 * i, word).expect("written");
-        }
-    }
+    common::write_words(&mut session, routine, &code);
     let table = BLOCK + 0x100;
     let built = |session: &mut tairix_riscos_filing::session::Session, flags| {
         call(
@@ -636,10 +616,7 @@ fn a_table_is_matched_by_the_loadings_its_transfer_function_left() {
 
 /// A selector for a deep mode at [`BLOCK`].
 fn deep_selector(session: &mut tairix_riscos_filing::session::Session, log2_bpp: u32) {
-    let os = &mut session.kernel.os();
-    for (i, word) in (0u32..).zip([1, 640, 480, log2_bpp, u32::MAX, u32::MAX]) {
-        os.write_word(BLOCK + 4 * i, word).expect("a deep selector");
-    }
+    common::write_words(session, BLOCK, &[1, 640, 480, log2_bpp, u32::MAX, u32::MAX]);
 }
 
 #[test]

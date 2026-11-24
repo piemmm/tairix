@@ -23,7 +23,7 @@ use crate::{
 };
 
 /// Its SWIs, in their chunk's order.
-const NAMES: &[&str] = &[
+pub(crate) const NAMES: &[&str] = &[
     "CacheAddr",
     "FindFont",
     "LoseFont",

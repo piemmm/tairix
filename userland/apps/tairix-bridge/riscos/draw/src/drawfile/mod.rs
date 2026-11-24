@@ -15,16 +15,16 @@ mod text_area;
 mod workspace;
 
 use tairix_drawing::riscos::format;
+use tairix_drawing::riscos::units::{DRAW_UNITS_PER_OS_UNIT, DRAW_UNIT_SHIFT};
 use tairix_riscos_kernel::error::Error;
-use tairix_riscos_kernel::filing::filetype;
-use tairix_riscos_kernel::module::{
-    Builtin, Command, CommandKind, Help, Resource, Swis, SWI_OUT_OF_RANGE,
-};
+use tairix_riscos_kernel::filing::{filetype, fs::kind};
+use tairix_riscos_kernel::module::{Builtin, Command, Resource, Swis, SWI_OUT_OF_RANGE};
 use tairix_riscos_kernel::msgtrans::Own;
 use tairix_riscos_kernel::os::{Fail, Os, Regs, World};
 use tairix_riscos_kernel::swi::{chunk, os as kos, pdriver, X};
 
 use crate::geometry::Matrix;
+use crate::process::matrix_at;
 use check::{Refusal, Stop, Within};
 use render::{Asked, Renderer, FLATNESS};
 
@@ -65,16 +65,13 @@ pub(crate) static DRAW_FILE: Builtin = Builtin {
         handler: perform,
     }),
     services: None,
-    commands: &[Command {
-        name: "Render",
-        kind: CommandKind::Command,
-        min: 1,
-        max: 12,
-        translate: 0,
-        help: Help::Text("Renders a Draw file on the screen."),
-        syntax: Some(RENDER_SYNTAX),
-        run: Some(render_command),
-    }],
+    commands: &[Command::new(
+        "Render",
+        (1, 12),
+        "Renders a Draw file on the screen.",
+        Some(RENDER_SYNTAX),
+        render_command,
+    )],
     init: Some(init),
     finalise: Some(finalise),
     start: None,
@@ -199,14 +196,12 @@ fn checked(os: &mut Os<'_>, regs: &Regs) -> Result<(alloc::vec::Vec<u8>, check::
 /// The matrix R3 gives, and its address; the identity in the workspace for
 /// none.
 fn matrix_of(os: &mut Os<'_>, at: u32, workspace: u32) -> Result<(Matrix, u32), Fail> {
-    if at == 0 {
-        return Ok((Matrix::IDENTITY, workspace + workspace::IDENTITY));
-    }
-    let mut words = [0; 6];
-    for (i, word) in (0u32..).zip(&mut words) {
-        *word = os.read_word(at.wrapping_add(4 * i))?;
-    }
-    Ok((Matrix::from_words(words), at))
+    let address = if at == 0 {
+        workspace + workspace::IDENTITY
+    } else {
+        at
+    };
+    Ok((matrix_at(os, at)?, address))
 }
 
 /// `DrawFile_Render`.
@@ -218,11 +213,9 @@ fn render(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let clip = if regs.r[4] == 0 {
         None
     } else {
-        let mut words = [0i32; 4];
-        for (i, word) in (0u32..).zip(&mut words) {
-            *word = os.read_word(regs.r[4].wrapping_add(4 * i))?.cast_signed();
-        }
-        let [x0, y0, x1, y1] = words.map(|v| v.wrapping_shl(8));
+        let mut words = [0; 4];
+        os.read_words(regs.r[4], &mut words)?;
+        let [x0, y0, x1, y1] = words.map(|v| v.cast_signed().wrapping_shl(DRAW_UNIT_SHIFT));
         Some([x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)])
     };
     let flags = regs.r[0];
@@ -251,9 +244,8 @@ fn bbox(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let (bytes, _) = checked(os, regs)?;
     let at = workspace(os);
     let (matrix, _) = matrix_of(os, regs.r[3], at)?;
-    let corner = |i: usize| format::int(&bytes, format::HEADER_BOUNDS + 4 * i).unwrap_or(0);
-    let bounds = render::transformed_box(&matrix, [corner(0), corner(1), corner(2), corner(3)]);
-    render::write_words(os, regs.r[4], &bounds.map(i32::cast_unsigned))
+    let bounds = render::transformed_box(&matrix, render::box_at(&bytes, format::HEADER_BOUNDS));
+    os.write_words(regs.r[4], &bounds.map(i32::cast_unsigned))
 }
 
 /// `DrawFile_DeclareFonts`: each font the file uses declared to the printer
@@ -262,15 +254,14 @@ fn bbox(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 fn declare_fonts(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let (bytes, fonts) = checked(os, regs)?;
     render::ask_font_cache(os)?;
-    let objects = &bytes[format::HEADER..];
+    let objects = format::Objects::new(&bytes[format::HEADER..], format::HEADER);
     let mut declaring = Declaring {
         file: regs.r[1],
         flags: regs.r[0] & NO_DOWNLOAD,
         fonts: &fonts,
         name: workspace(os) + workspace::NAME,
-        depth: stack::Depth::default(),
     };
-    declaring.run(os, objects, format::HEADER)
+    declaring.run(os, objects, stack::Depth::default())
 }
 
 /// What declaring a file's fonts needs.
@@ -280,18 +271,27 @@ struct Declaring<'f> {
     fonts: &'f check::Fonts,
     /// Where a text area's font's name is written out.
     name: u32,
-    depth: stack::Depth,
 }
 
 impl Declaring<'_> {
-    fn run(&mut self, os: &mut Os<'_>, run: &[u8], at: usize) -> Result<(), Fail> {
-        for object in format::Objects::new(run, at).map_while(Result::ok) {
-            self.object(os, object)?;
+    fn run(
+        &mut self,
+        os: &mut Os<'_>,
+        objects: format::Objects<'_>,
+        depth: stack::Depth,
+    ) -> Result<(), Fail> {
+        for object in objects.map_while(Result::ok) {
+            self.object(os, object, depth)?;
         }
         Ok(())
     }
 
-    fn object(&mut self, os: &mut Os<'_>, object: format::Object<'_>) -> Result<(), Fail> {
+    fn object(
+        &mut self,
+        os: &mut Os<'_>,
+        object: format::Object<'_>,
+        depth: stack::Depth,
+    ) -> Result<(), Fail> {
         match object.kind {
             format::FONT_TABLE => {
                 for &(_, name) in &self.fonts.names {
@@ -306,40 +306,23 @@ impl Declaring<'_> {
                     .fonts()
                     .map_err(|refusal| raise_area(os, refusal))?;
                 for name in names {
-                    let length = name.len().min(workspace::NAME_BYTES as usize - 1);
-                    os.write_bytes(self.name, &name[..length])?;
-                    os.write_bytes(self.name + u32::try_from(length).unwrap_or(0), &[0])?;
+                    workspace::write_name(os, self.name, workspace::NAME_BYTES as usize, name)?;
                     self.declare(os, self.name)?;
                 }
             }
             format::GROUP => {
-                let run = object.bytes.get(check::GROUP_OBJECTS..).unwrap_or(&[]);
-                let taken = self.deeper(os, stack::Level::Group)?;
-                let declared = self.run(os, run, object.at + check::GROUP_OBJECTS);
-                self.depth.leave(taken);
-                declared?;
+                let deeper = depth.deeper(os, stack::DECLARE, stack::Level::Group)?;
+                self.run(os, stack::group_objects(object), deeper)?;
             }
             format::TAGGED => {
-                let wrapped = object.bytes.get(check::TAGGED_OBJECT..).unwrap_or(&[]);
-                if let Some(Ok(inner)) =
-                    format::Objects::new(wrapped, object.at + check::TAGGED_OBJECT).next()
-                {
-                    let taken = self.deeper(os, stack::Level::Tagged)?;
-                    let declared = self.object(os, inner);
-                    self.depth.leave(taken);
-                    declared?;
+                if let Some(Ok(inner)) = stack::tagged_object(object) {
+                    let deeper = depth.deeper(os, stack::DECLARE, stack::Level::Tagged)?;
+                    self.object(os, inner, deeper)?;
                 }
             }
             _ => {}
         }
         Ok(())
-    }
-
-    /// One `level` deeper, or the supervisor stack's overflow.
-    fn deeper(&mut self, os: &mut Os<'_>, level: stack::Level) -> Result<stack::Taken, Fail> {
-        self.depth
-            .enter(stack::DECLARE, level)
-            .ok_or_else(|| Fail::Unwind(os.overflowed()))
     }
 
     fn declare(&self, os: &mut Os<'_>, name: u32) -> Result<(), Fail> {
@@ -377,7 +360,7 @@ fn scaled(text: &[u8], scale: i64) -> Option<i32> {
         numerator = numerator * 10 + digit;
         denominator *= 10;
     }
-    scaled += (numerator * scale + denominator / 2) / denominator;
+    scaled = scaled.checked_add((numerator * scale + denominator / 2) / denominator)?;
     i32::try_from(if negative { -scaled } else { scaled }).ok()
 }
 
@@ -387,24 +370,23 @@ fn render_command(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     const SLOTS: usize = 10;
     const ARGUMENTS_ROOM: u32 = 512;
     let template = os.rma_claim_with(RENDER_ARGUMENTS)?;
-    let buffer = os.rma_claim(ARGUMENTS_ROOM);
-    let result = buffer.and_then(|buffer| {
+    let result = os.with_rma_block(ARGUMENTS_ROOM, |os, buffer| {
         let mut read = Regs::default();
         read.r[..4].copy_from_slice(&[template, regs.r[0], buffer, ARGUMENTS_ROOM]);
         os.perform(X | kos::READ_ARGS, &mut read)?;
-        let mut slots = [0u32; SLOTS];
-        for (i, slot) in (0u32..).zip(&mut slots) {
-            *slot = os.read_word(buffer + 4 * i)?;
-        }
+        let mut slots = [0; SLOTS];
+        os.read_words(buffer, &mut slots)?;
         let text = |os: &mut Os<'_>, at: u32| os.read_text(at, ARGUMENTS_ROOM as usize);
+        let fixed_one = i64::from(format::FIXED_ONE);
+        let draw_units = i64::from(DRAW_UNITS_PER_OS_UNIT);
         let mut matrix = Matrix::IDENTITY;
         let entries = [
-            (&mut matrix.a, 1 << 16),
-            (&mut matrix.b, 1 << 16),
-            (&mut matrix.c, 1 << 16),
-            (&mut matrix.d, 1 << 16),
-            (&mut matrix.e, 1 << 8),
-            (&mut matrix.f, 1 << 8),
+            (&mut matrix.a, fixed_one),
+            (&mut matrix.b, fixed_one),
+            (&mut matrix.c, fixed_one),
+            (&mut matrix.d, fixed_one),
+            (&mut matrix.e, draw_units),
+            (&mut matrix.f, draw_units),
         ];
         for ((entry, scale), &slot) in entries.into_iter().zip(&slots[1..7]) {
             if slot != 0 {
@@ -423,17 +405,14 @@ fn render_command(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         let mut flatness = 0;
         if slots[9] != 0 {
             flags |= flag::FLATNESS;
-            flatness = scaled(&text(os, slots[9])?, 1 << 8)
+            flatness = scaled(&text(os, slots[9])?, draw_units)
                 .unwrap_or(0)
                 .cast_unsigned();
         }
         let at = workspace(os);
-        render::write_words(os, at + workspace::MATRIX, &matrix.words())?;
+        os.write_words(at + workspace::MATRIX, &matrix.words())?;
         load_and_render(os, slots[0], flags, at + workspace::MATRIX, flatness)
     });
-    if let Ok(buffer) = buffer {
-        os.free_rma_quietly(buffer);
-    }
     os.free_rma_quietly(template);
     result
 }
@@ -446,20 +425,35 @@ fn load_and_render(
     matrix: u32,
     flatness: u32,
 ) -> Result<(), Fail> {
-    const READ_INFO: u32 = 5;
-    const LOAD: u32 = 255;
     let mut info = Regs::default();
-    info.r[..2].copy_from_slice(&[READ_INFO, name]);
+    info.r[..2].copy_from_slice(&[kos::file::READ_INFO, name]);
     os.perform(X | kos::FILE, &mut info)?;
-    let length = if info.r[0] == 1 { info.r[4] } else { 0 };
-    let at = os.rma_claim(length.max(4))?;
-    let mut load = Regs::default();
-    load.r[..4].copy_from_slice(&[LOAD, name, at, 0]);
-    let rendered = os.perform(X | kos::FILE, &mut load).and_then(|()| {
+    let length = if info.r[0] == kind::FILE {
+        info.r[4]
+    } else {
+        0
+    };
+    os.with_rma_block(length, |os, at| {
+        let mut load = Regs::default();
+        load.r[..4].copy_from_slice(&[kos::file::LOAD, name, at, 0]);
+        os.perform(X | kos::FILE, &mut load)?;
         let mut render = Regs::default();
         render.r[..6].copy_from_slice(&[flags, at, length, matrix, 0, flatness]);
         os.perform(X | (chunk::DRAW_FILE + call::RENDER), &mut render)
-    });
-    os.free_rma_quietly(at);
-    rendered
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_render_argument_is_scaled_and_one_past_the_arithmetic_is_no_number() {
+        let fixed_one = i64::from(format::FIXED_ONE);
+        assert_eq!(scaled(b"1.5", fixed_one), Some(0x1_8000));
+        assert_eq!(scaled(b"-0.25", fixed_one), Some(-0x4000));
+        assert_eq!(scaled(b"x", fixed_one), None);
+        // The fraction's rounding carries the whole past what the sum holds.
+        assert_eq!(scaled(b"140737488355327.999999999", fixed_one), None);
+    }
 }

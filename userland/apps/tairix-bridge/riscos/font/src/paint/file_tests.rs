@@ -4,25 +4,26 @@
 
 use alloc::vec::Vec;
 
+use tairix_drawing::riscos::format;
 use tairix_riscos_filing::session::Session;
 use tairix_riscos_kernel::os::Regs;
+use tairix_riscos_kernel::swi::font::flag::MATRIX as MATRIX_FLAG;
 use tairix_riscos_kernel::swi::font::TRUE_COLOURS;
 use tairix_riscos_kernel::swi::{colour_trans, os as kos, X};
+use tairix_util::endian::le_u32;
 
 use crate::fixture::{
-    call, deep_mode, fill, find, find_at, fonts, mode, pixels, save, write, write_words, BLOCK,
-    MATRIX, TEXT,
+    call, deep_mode, fill, find, find_at, font_paint, fonts, mode, pixels, save, write,
+    write_words, AT, BLOCK, MATRIX, TEXT,
 };
 use crate::glyphs::Bitmap;
-use crate::layout::flag::{HANDLE, MATRIX as MATRIX_FLAG};
 use crate::makebitmap::{laid_out, GlyphPixels, Size};
 use crate::module::call::{
-    CURRENT_FONT, CURRENT_RGB, LOOKUP_FONT, PAINT, READ_COLOUR_TABLE, SET_COLOUR_TABLE,
-    SET_FONT_COLOURS, SET_PALETTE,
+    CURRENT_FONT, CURRENT_RGB, LOOKUP_FONT, READ_COLOUR_TABLE, SET_COLOUR_TABLE, SET_FONT_COLOURS,
+    SET_PALETTE,
 };
 use crate::outlines::Depth;
 
-const AT: [u32; 2] = [100_000, 160_000];
 /// The screen row the pen's line is in, and the column its pixel is.
 const BASELINE: u32 = 279;
 const PEN: u32 = 125;
@@ -43,8 +44,7 @@ fn paint_at(
     x: u32,
     r6: u32,
 ) -> Result<(), u32> {
-    let at = write(s, TEXT, text);
-    call(s, PAINT, &[handle, at, HANDLE | flags, x, AT[1], 0, r6]).map(drop)
+    font_paint(s, handle, text, flags, [x, AT[1]], [0, r6])
 }
 
 fn paint(s: &mut Session, handle: u32, text: &[u8]) -> Result<(), u32> {
@@ -162,7 +162,7 @@ fn a_file_is_not_painted_at_another_size_nor_for_a_font_found_with_a_matrix() {
     mode(&mut s, 27);
     call(&mut s, SET_FONT_COLOURS, &[0, 0, 1, 14]).expect("the colours");
     let pix = find(&mut s, b"Pix", 256);
-    write_words(&mut s, MATRIX, &[65536, 0, 0, 65536, 0, 0]);
+    write_words(&mut s, MATRIX, &format::IDENTITY.map(u32::cast_signed));
     paint_at(&mut s, pix, b"A", MATRIX_FLAG, AT[0], MATRIX).expect("painted");
     assert_eq!(
         around(&mut s),
@@ -257,14 +257,8 @@ fn a_damaged_glyph_in_a_file_paints_nothing_and_no_outline() {
         bitmap: pattern(),
     }));
     let mut bytes = laid_out(b"Pix", &size, drawn).expect("laid out");
-    let table = usize::try_from(u32::from_le_bytes(
-        bytes[16..20].try_into().expect("a word"),
-    ))
-    .expect("small");
-    let chunk = usize::try_from(u32::from_le_bytes(
-        bytes[table + 8..table + 12].try_into().expect("a word"),
-    ))
-    .expect("small");
+    let table = usize::try_from(le_u32(&bytes, 16).expect("a word")).expect("small");
+    let chunk = usize::try_from(le_u32(&bytes, table + 8).expect("a word")).expect("small");
     bytes[chunk + 3] = 0;
     save(&mut s, "HostFS:$.Lib.Pix.f320x320", &bytes);
     let pix = find(&mut s, b"Pix", 256);

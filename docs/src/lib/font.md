@@ -147,6 +147,13 @@ cache holds whole is answered, face metrics and all, with no round trip. `tairix
 wraps `outline_run` as the `lib/svg` font seam, so there is one adapter
 between the decoder and the endpoint rather than one per consumer.
 
+Every client of the protocol — this one, TAIRiX Bridge's Font Manager and the
+build's host provider, each over its own transport — builds its request with
+`ask_outlines` and pages a run through `page_outlines`. A run longer than one
+request carries is asked for in runs it does carry, and a reply answering
+nothing or more than its run asked for is refused rather than read, so no
+client can pair glyphs with the wrong characters.
+
 ### A family may be asked for by kind
 
 A request names a family key, and a key spelling one of CSS's generic

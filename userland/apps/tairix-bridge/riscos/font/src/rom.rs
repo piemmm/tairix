@@ -9,8 +9,8 @@ use tairix_riscos_kernel::module::{Builtin, Resource};
 /// The ROM fonts' Messages file.
 const MESSAGES: &[u8] = include_bytes!("../resources/ROMFonts/Messages1");
 
-/// The encodings, by leaf.
-const ENCODINGS: [(&str, &[u8]); 17] = [
+/// The encodings, by their names in ResourceFS.
+pub(crate) const ENCODINGS: [(&str, &[u8]); 17] = [
     (
         "Fonts.Encodings./Base0",
         include_bytes!("../resources/ROMFonts/Encodings/Base0"),

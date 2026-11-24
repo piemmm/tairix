@@ -1,12 +1,15 @@
 //! Where a processed path goes, but the screen: a path buffer, a count of
 //! the bytes one would need, or its bounding box.
 
+use tairix_drawing::riscos::format::END;
+
 use crate::geometry::Point;
-use crate::path::Element;
+use crate::path::{bytes_of, Element, POINTS_AT};
 use crate::stage::{Guest, Refusal, Sink, Stop};
 
-/// The bytes a path's end element takes.
-pub(crate) const END_BYTES: u32 = 8;
+/// The bytes a path's end element takes: its code's word, then the room left
+/// after it.
+const END_BYTES: u32 = bytes_of(END) + 4;
 
 /// A path written to a buffer that begins as an end element: its second
 /// word the room after it. Each element is written if it fits, the end
@@ -42,11 +45,9 @@ pub(crate) fn write_element(
     element: Element,
 ) -> Result<(), Stop> {
     guest.write_word(at, word)?;
-    let mut next = at.wrapping_add(4);
-    for point in element.points().into_iter().flatten() {
-        guest.write_word(next, point.x.cast_unsigned())?;
-        guest.write_word(next.wrapping_add(4), point.y.cast_unsigned())?;
-        next = next.wrapping_add(8);
+    let points = at.wrapping_add(POINTS_AT);
+    for (i, value) in (0u32..).zip(element.point_words()) {
+        guest.write_word(points.wrapping_add(4 * i), value)?;
     }
     Ok(())
 }

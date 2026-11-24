@@ -9,10 +9,10 @@ use tairix_colour::Rgb;
 use tairix_riscos_kernel::module::{Builtin, Swis, SWI_OUT_OF_RANGE};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::chunk;
+use tairix_riscos_kernel::swi::colour_trans::CURRENT;
 
 use crate::colourtrans::palettes;
 use crate::colourtrans::readwrite::named_colours;
-use crate::colourtrans::CURRENT;
 use crate::inverse::{self, fifteen, CELLS};
 use crate::palette::EIGHT_BIT_COLOURS;
 use crate::sprite::UNKNOWN_MODE;

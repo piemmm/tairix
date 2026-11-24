@@ -208,6 +208,11 @@ struct MockDisplay {
     abandoned: usize,
     /// The busy time the device's own compositor accounts, where it does.
     engine_busy_ns: Option<u64>,
+    /// Serving a request can take its event sources' wakes.
+    takes_wakes: bool,
+    /// What had been shown, lit and abandoned at each service of its event
+    /// sources.
+    serviced: Vec<(usize, usize, usize)>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -239,6 +244,8 @@ impl MockDisplay {
             memory: DisplayMemory::NONE,
             abandoned: 0,
             engine_busy_ns: None,
+            takes_wakes: false,
+            serviced: Vec::new(),
         }
     }
 
@@ -266,6 +273,16 @@ impl Display for MockDisplay {
 
     fn abandon_queued(&mut self) {
         self.abandoned += 1;
+    }
+
+    fn service_events(&mut self) -> Result<Serviced, DriverError> {
+        self.serviced
+            .push((self.shown.len(), self.powered.len(), self.abandoned));
+        Ok(Serviced::default())
+    }
+
+    fn requests_take_wakes(&self) -> bool {
+        self.takes_wakes
     }
 
     fn memory(&self) -> DisplayMemory {
@@ -1977,3 +1994,6 @@ fn a_revoked_client_sees_the_typed_teardown_signal() {
         Err(DriverError::SeatRevoked)
     );
 }
+
+#[path = "serving_tests.rs"]
+mod serving;

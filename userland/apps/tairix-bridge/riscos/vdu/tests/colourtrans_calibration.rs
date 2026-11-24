@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{call, command, error_number, select_depth};
+use common::{call, command, error_number, read_words, select_depth, write_words};
 use tairix_riscos_filing::session::Session;
 use tairix_riscos_kernel::swi::colour_trans as ct;
 
@@ -26,20 +26,14 @@ const THREE: [u32; 10] = [
 ];
 
 fn set_table(session: &mut Session, table: &[u32]) -> Result<(), tairix_riscos_kernel::os::Fail> {
-    let os = &mut session.kernel.os();
-    for (i, &word) in (0u32..).zip(table) {
-        os.write_word(TABLE + 4 * i, word).expect("written");
-    }
+    write_words(session, TABLE, table);
     call(session, ct::SET_CALIBRATION, &[TABLE]).map(drop)
 }
 
 fn read_back(session: &mut Session) -> Vec<u32> {
     let size = call(session, ct::READ_CALIBRATION, &[0]).expect("sized").r[1];
     call(session, ct::READ_CALIBRATION, &[READ]).expect("read");
-    let os = &mut session.kernel.os();
-    (0..size / 4)
-        .map(|i| os.read_word(READ + 4 * i).expect("read"))
-        .collect()
+    read_words(session, READ, size / 4)
 }
 
 fn device_colour(session: &mut Session, device: u32) -> u32 {
@@ -214,13 +208,7 @@ fn a_device_palette_is_converted_entry_by_entry_as_one_device_colour_is() {
     set_table(&mut session, &THREE).expect("set");
     let devices = [0, 0x8080_8000, 0x1234_5600, 0xFFFF_FF00, 0x00FF_0000];
     let (from, to) = (READ, READ + 0x100);
-    for (i, &device) in (0u32..).zip(&devices) {
-        session
-            .kernel
-            .os()
-            .write_word(from + 4 * i, device)
-            .expect("written");
-    }
+    write_words(&mut session, from, &devices);
     let count = u32::try_from(devices.len()).expect("few");
     call(
         &mut session,

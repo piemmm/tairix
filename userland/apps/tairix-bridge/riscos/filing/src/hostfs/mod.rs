@@ -23,9 +23,9 @@ use alloc::vec::Vec;
 
 use tairix_fscopy::tree::Dir as _;
 use tairix_riscos_kernel::error::Error;
-use tairix_riscos_kernel::filing::fs::{block, info};
+use tairix_riscos_kernel::filing::fs::{block, info, Declaration};
 use tairix_riscos_kernel::filing::UNSUPPORTED;
-use tairix_riscos_kernel::module::{Builtin, Command, CommandKind, Help, Resource, Services};
+use tairix_riscos_kernel::module::{Builtin, Command, Resource, Services};
 use tairix_riscos_kernel::msgtrans::{Own, OwnFile};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, Unwind, World};
 use tairix_riscos_kernel::service::FS_REDECLARE;
@@ -58,16 +58,8 @@ const NAME_AT: u32 = BLOCK_AT + 4 * len32(block::WORDS);
 const EMPTY_AT: u32 = (NAME_AT + len32(NAME.len() + 1)).next_multiple_of(4);
 const WORKSPACE: u32 = EMPTY_AT + 4;
 
-/// Each entry's word in the information block and its routine.
-const ENTRIES: [(usize, usize); 7] = [
-    (block::OPEN, 0),
-    (block::GET_BYTES, 1),
-    (block::PUT_BYTES, 2),
-    (block::ARGS, 3),
-    (block::CLOSE, 4),
-    (block::FILE, 5),
-    (block::FUNC, 6),
-];
+/// The first of its routines that are its entries, which are all it has.
+const ENTRIES: usize = 0;
 
 /// HostFS.
 pub static HOST_FS: Builtin = Builtin {
@@ -79,16 +71,13 @@ pub static HOST_FS: Builtin = Builtin {
         numbers: &[FS_REDECLARE],
         handler: service,
     }),
-    commands: &[Command {
-        name: NAME,
-        kind: CommandKind::Command,
-        min: 0,
-        max: 0,
-        translate: 0,
-        help: Help::Text("*HostFS makes HostFS the current filing system."),
-        syntax: Some("Syntax: *HostFS"),
-        run: Some(select),
-    }],
+    commands: &[Command::new(
+        NAME,
+        (0, 0),
+        "*HostFS makes HostFS the current filing system.",
+        Some("Syntax: *HostFS"),
+        select,
+    )],
     init: Some(init),
     finalise: Some(finalise),
     start: None,
@@ -324,30 +313,15 @@ fn discs(os: &mut Os<'_>) -> Roots {
 /// HostFS registered with FileSwitch from its information block, built in
 /// its workspace.
 fn declare(os: &mut Os<'_>, workspace: u32) -> Result<(), Fail> {
-    let Some(base) = os.module_of(&HOST_FS) else {
-        return Ok(());
-    };
-    let mut words = [0; block::WORDS];
-    words[block::NAME] = (workspace + NAME_AT).wrapping_sub(base);
-    words[block::STARTUP] = (workspace + EMPTY_AT).wrapping_sub(base);
-    words[block::INFO] = INFO;
-    for (word, routine) in ENTRIES {
-        let Some(at) = os.routine_of(&HOST_FS, routine) else {
-            return Ok(());
-        };
-        words[word] = at.wrapping_sub(base);
-    }
-    for (n, word) in (0..).zip(words) {
-        os.write_word(workspace + BLOCK_AT + 4 * n, word)?;
-    }
-    let mut regs = Regs::default();
-    regs.r[..4].copy_from_slice(&[
-        fs_control::ADD,
-        base,
-        (workspace + BLOCK_AT).wrapping_sub(base),
+    os.declare_filing_system(Declaration {
+        module: &HOST_FS,
+        first_entry: ENTRIES,
+        block: workspace + BLOCK_AT,
+        name: workspace + NAME_AT,
+        startup: workspace + EMPTY_AT,
+        info: INFO,
         workspace,
-    ]);
-    os.perform(X | FS_CONTROL, &mut regs)
+    })
 }
 
 /// Its service handler: `Service_FSRedeclare`, HostFS registered again.

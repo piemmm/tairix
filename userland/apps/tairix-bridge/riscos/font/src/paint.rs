@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 use tairix_raster::scan::FillRule;
 use tairix_riscos_draw::pixels::{fill_interior, Point};
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
+use tairix_riscos_kernel::swi::font::{code, flag};
 use tairix_riscos_vdu::render::{self, Levels, Surface, WHOLE};
 
 use crate::bitmaps::{self, Held, Kind, Raster, Scalable};
@@ -23,7 +24,7 @@ use crate::buffer::{Corners, Recorder};
 use crate::colours::{self, Colours, Table};
 use crate::glyphs::{self, rounded, Bitmap, Placing, Reach, Refused, Scratch, Traced};
 use crate::grid::{self, clamped, exactly, Grid, DRAW_UNITS, QUARTERS};
-use crate::layout::{self, flag, Limit, Placed, Request, Visit};
+use crate::layout::{self, Limit, Placed, Request, Visit};
 use crate::module::{error, raise, with};
 use crate::outlines::{Depth, PLACEMENTS};
 use crate::resolve::Font;
@@ -47,8 +48,6 @@ mod paint_flag {
     pub(super) const RESERVED: u32 = !0x7FFF;
 }
 
-/// The space character, which justification widens.
-const SPACE: u32 = 32;
 /// Where in a paint's block its rub-out box's corners are.
 const RUB_OUT_WORDS: u32 = 16;
 
@@ -129,7 +128,7 @@ fn justified(
     surface: &Surface,
 ) -> Result<(i32, i32), Fail> {
     let measuring = Request {
-        split: Some(SPACE),
+        split: Some(u32::from(code::SPACE)),
         limit: Limit::None,
         ..*request
     };

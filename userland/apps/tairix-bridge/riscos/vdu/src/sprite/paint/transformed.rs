@@ -26,13 +26,14 @@
 //! Every product is exact or refused: a parallelogram too extreme to carry
 //! draws nothing.
 
-use tairix_drawing::riscos::format::{END, MOVE};
+use tairix_drawing::riscos::format::{element_bytes, END, FRACTION_BITS, MOVE};
+use tairix_drawing::riscos::units::{DRAW_UNITS_PER_OS_UNIT, DRAW_UNIT_SHIFT};
+use tairix_image::STANDARD_SPRITE_EIG;
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::output::workspace;
-use tairix_riscos_kernel::swi::{draw, X};
+use tairix_riscos_kernel::swi::{draw, sprite_op, X};
 use tairix_util::divisor::gcd;
 
-use super::super::format;
 use super::super::header::Sprite;
 use super::colours::{converted_first, mapped, Conversion, Converted};
 use super::scaled::{paint, plot_block};
@@ -41,8 +42,6 @@ use super::{Destination, Mapping, PlotFlags};
 use crate::changed::Rect;
 use crate::state;
 
-/// R3's bit making R6 a destination parallelogram rather than a matrix.
-const PARALLELOGRAM: u32 = 1;
 /// R3's bit making R4 a source rectangle.
 const SOURCE_RECTANGLE: u32 = 2;
 /// The fraction bits of a column step, as RISC OS 5 carries it.
@@ -51,7 +50,11 @@ const STEP_BITS: u32 = 16;
 /// it down never moves the step grid's whole part.
 const ROW_BITS: u32 = 32;
 /// The words of the path SpriteExtend hands Draw: three moves and the end.
-const CORNER_PATH_WORDS: usize = 10;
+const CORNER_PATH_WORDS: usize = match (element_bytes(MOVE), element_bytes(END)) {
+    (Some(moved), Some(end)) => (3 * moved + end) / size_of::<u32>(),
+    // Both name elements, and `corner_path`'s array refuses any other length.
+    _ => 0,
+};
 
 /// `OS_SpriteOp` 56: the sprite through R6's matrix or parallelogram, the
 /// part of it R4 names where R3 asks, turned into the destination's pixels
@@ -106,7 +109,7 @@ pub(crate) fn plot_mask_transformed(
     let destination = Destination::now(os)?;
     let handed = Handed {
         row: handed_row(&checked, form),
-        action: PlotFlags::MASKED,
+        action: sprite_op::THROUGH_MASK,
         table: 0,
     };
     let Some(mut transform) =
@@ -166,6 +169,11 @@ fn table_in_use(
     }
 }
 
+/// A guest word as the signed value it holds.
+fn signed(word: u32) -> i128 {
+    i128::from(word.cast_signed())
+}
+
 /// `corners` each held to a sprite of `size` pixels, their order kept.
 fn held(corners: [i128; 4], size: (i128, i128)) -> [i128; 4] {
     let [x0, y0, x1, y1] = corners;
@@ -181,7 +189,11 @@ fn held(corners: [i128; 4], size: (i128, i128)) -> [i128; 4] {
 /// corner, the one along its row, and the one along its column, each in
 /// 1/256 OS units of a sprite at `eig`, carried in a word as RISC OS's are.
 fn corner_path(corners: [i128; 4], eig: (u32, u32)) -> [u32; CORNER_PATH_WORDS] {
-    let unit = |pixels: i128, eig: u32| u32::try_from(pixels).unwrap_or(0).wrapping_shl(8 + eig);
+    let unit = |pixels: i128, eig: u32| {
+        u32::try_from(pixels)
+            .unwrap_or(0)
+            .wrapping_shl(DRAW_UNIT_SHIFT + eig)
+    };
     let [x0, y0, x1, y1] = corners;
     let (x0, y0, x1, y1) = (
         unit(x0, eig.0),
@@ -202,17 +214,9 @@ fn drawn_corners(
     matrix: u32,
     handed: Handed,
 ) -> Result<[i128; 8], Fail> {
-    let mut path = [0u8; 4 * CORNER_PATH_WORDS];
-    for (bytes, word) in path
-        .as_chunks_mut::<4>()
-        .0
-        .iter_mut()
-        .zip(corner_path(corners, eig))
-    {
-        *bytes = word.to_le_bytes();
-    }
-    os.below_supervisor_stack(len32(path.len()), |os, at| {
-        os.write_bytes(at, &path)?;
+    let path = corner_path(corners, eig);
+    os.below_supervisor_stack(len32(size_of_val(&path)), |os, at| {
+        os.write_words(at, &path)?;
         let mut regs = Regs::default();
         regs.r[..8].copy_from_slice(&[
             at,
@@ -225,12 +229,9 @@ fn drawn_corners(
             handed.table,
         ]);
         os.perform(X | draw::TRANSFORM_PATH, &mut regs)?;
-        let mut point = |n: u32| -> Result<[i128; 2], Fail> {
-            let x = os.read_word(at.wrapping_add(12 * n + 4))?.cast_signed();
-            let y = os.read_word(at.wrapping_add(12 * n + 8))?.cast_signed();
-            Ok([i128::from(x), i128::from(y)])
-        };
-        let [[x0, y0], [x1, y1], [x3, y3]] = [point(0)?, point(1)?, point(2)?];
+        let mut moved = [0; CORNER_PATH_WORDS];
+        os.read_words(at, &mut moved)?;
+        let [_, x0, y0, _, x1, y1, _, x3, y3, _] = moved.map(signed);
         Ok([x0, y0, x1, y1, 0, 0, x3, y3])
     })
 }
@@ -244,17 +245,19 @@ pub(crate) fn scaling_of(
     parallelogram: bool,
     shape: u32,
 ) -> Result<Option<(crate::raster::Point, super::Scale)>, Fail> {
-    let mut words = [0i32; 8];
+    let mut words = [0; 8];
     let count = if parallelogram { 8 } else { 6 };
-    for (i, word) in (0u32..).zip(words.iter_mut().take(count)) {
-        *word = os.read_word(shape.wrapping_add(4 * i))?.cast_signed();
-    }
+    os.read_words(shape, &mut words[..count])?;
+    let words = words.map(u32::cast_signed);
     let eig = state::with(os, |vdu, _| {
         Ok((vdu.format().x_eig(), vdu.format().y_eig()))
     })?;
-    let pixel = (256u32 << eig.0, 256u32 << eig.1);
+    let pixel = (
+        DRAW_UNITS_PER_OS_UNIT << eig.0,
+        DRAW_UNITS_PER_OS_UNIT << eig.1,
+    );
     // A matrix scales OS units, and a picture's pixel is the standard screen's.
-    let picture = 256u32 << format::STANDARD_EIG;
+    let picture = DRAW_UNITS_PER_OS_UNIT << STANDARD_SPRITE_EIG;
     let positive = |v: i32| u32::try_from(v).ok().filter(|&v| v > 0);
     let found = if parallelogram {
         let [x0, y0, x1, y1, _, _, x3, y3] = words;
@@ -276,7 +279,10 @@ pub(crate) fn scaling_of(
         match (positive(x_across), positive(y_down)) {
             (Some(across), Some(down)) if y_across == 0 && x_down == 0 => super::Scale::of(
                 (across, down),
-                ((pixel.0 << 16) / picture, (pixel.1 << 16) / picture),
+                (
+                    (pixel.0 << FRACTION_BITS) / picture,
+                    (pixel.1 << FRACTION_BITS) / picture,
+                ),
             )
             .map(|scale| ((shift_x, shift_y), scale)),
             _ => None,
@@ -285,7 +291,11 @@ pub(crate) fn scaling_of(
     let Some(((x, y), scale)) = found else {
         return Ok(None);
     };
-    let at = super::at(os, (x >> 8).cast_unsigned(), (y >> 8).cast_unsigned())?;
+    let at = super::at(
+        os,
+        (x >> DRAW_UNIT_SHIFT).cast_unsigned(),
+        (y >> DRAW_UNIT_SHIFT).cast_unsigned(),
+    )?;
     Ok(Some((at, scale)))
 }
 
@@ -532,30 +542,27 @@ impl Transform {
         let given = if form & SOURCE_RECTANGLE == 0 {
             [0, size.1, size.0, 0]
         } else {
-            let mut words = [0i128; 4];
-            for (i, word) in (0u32..).zip(words.iter_mut()) {
-                *word = i128::from(os.read_word(rectangle.wrapping_add(4 * i))?.cast_signed());
-            }
-            words
+            let mut words = [0; 4];
+            os.read_words(rectangle, &mut words)?;
+            words.map(signed)
         };
-        let (corners, mut points) = if form & PARALLELOGRAM == 0 {
+        let (corners, mut points) = if form & sprite_op::PARALLELOGRAM == 0 {
             let corners = held(given, size);
             let points = drawn_corners(os, corners, checked.pixels.shown.eig, shape, handed)?;
             (corners, points)
         } else {
-            let mut points = [0i128; 8];
-            for (i, point) in (0u32..).zip(points.iter_mut()) {
-                *point = i128::from(os.read_word(shape.wrapping_add(4 * i))?.cast_signed());
-            }
-            (given, points)
+            let mut points = [0; 8];
+            os.read_words(shape, &mut points)?;
+            (given, points.map(signed))
         };
         let origin = state::with(os, |vdu, _| Ok(vdu.graphics.origin))?;
         for (i, point) in points.iter_mut().enumerate() {
             let along = if i % 2 == 0 { origin.0 } else { origin.1 };
-            *point += i128::from(along) << 8;
+            *point += i128::from(along) << DRAW_UNIT_SHIFT;
         }
         let format = destination.format;
-        let pixel = (256i128 << format.x_eig(), 256i128 << format.y_eig());
+        let unit = i128::from(DRAW_UNITS_PER_OS_UNIT);
+        let pixel = (unit << format.x_eig(), unit << format.y_eig());
         Ok(Self::of(corners, points, size, pixel, destination.window))
     }
 

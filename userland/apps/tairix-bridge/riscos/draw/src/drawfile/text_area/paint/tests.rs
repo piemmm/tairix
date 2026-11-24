@@ -1,5 +1,6 @@
 use super::*;
 use crate::drawfile::text_area::tests::{area, object};
+use crate::fixture::COLUMN;
 
 const PLACES: Places = Places {
     buffer: 0x9000,
@@ -8,9 +9,6 @@ const PLACES: Places = Places {
     name: 0x9400,
     name_bytes: 256,
 };
-
-/// The column the probes laid out in: 100 points to 200 both ways.
-const COLUMN: [i32; 4] = [64_000, 64_000, 128_000, 128_000];
 
 /// A painter over one column `column`, its buffer holding `text`.
 fn painted<'a>(bytes: &'a [u8], text: &[u8]) -> Painter<'a> {
@@ -248,4 +246,16 @@ fn a_point_goes_through_the_render_matrix_to_millipoints_cut_toward_nought() {
         painter.millipoints(-64001 * PER_DRAW_UNIT + point(1000), 0),
         (-99_001, 0)
     );
+}
+
+#[test]
+fn a_gap_past_the_arithmetic_puts_the_next_line_below_its_column() {
+    let bytes = column(COLUMN);
+    let mut painter = painted(&bytes, b"");
+    painter.started();
+    painter.lines = 1;
+    painter.settings.paragraph = i64::from(i32::MAX) * MILLIPOINTS;
+    painter.gap(u32::MAX);
+    let bottom = i64::from(COLUMN[1]) * PER_DRAW_UNIT;
+    assert!(painter.y.is_some_and(|y| y < bottom), "{:?}", painter.y);
 }

@@ -21,6 +21,8 @@
 //!   latest-wins with at most one job in flight, and `JobQueue`, every request
 //!   answered in turn.
 //! * [`divisor`] — the greatest common divisor of two unsigned integers.
+//! * [`endian`] — little-endian integers read from a byte slice, refused
+//!   where it ends first.
 //! * [`fallible`] — reserving a data-sized buffer before filling it, so
 //!   exhaustion is a refusal rather than an allocation abort.
 //! * [`flags!`] — a set of bit flags over one unsigned integer, as a field
@@ -79,6 +81,7 @@ pub mod conf;
 pub mod count;
 pub mod defer;
 pub mod divisor;
+pub mod endian;
 pub mod fallible;
 mod flags;
 pub mod fmt;

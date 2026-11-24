@@ -13,21 +13,7 @@ use super::name::Resolved;
 use super::system::{enter, info, Calls, Point};
 
 pub use tairix_riscos_kernel::filing::fs::kind::{DIRECTORY, FILE, IMAGE, NOT_FOUND};
-
-/// An object's catalogue information.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub struct Info {
-    /// Its type.
-    pub kind: u32,
-    /// Its load address.
-    pub load: u32,
-    /// Its execution address.
-    pub exec: u32,
-    /// Its length.
-    pub length: u32,
-    /// Its attributes.
-    pub attributes: u32,
-}
+pub use tairix_riscos_kernel::filing::fs::Info;
 
 /// What `FSEntry_Open` answers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -198,13 +184,11 @@ pub fn read_info(
         regs.r[1] = at;
         regs.r[6] = special_at;
         enter(os, target, &mut regs)?;
-        Ok(Info {
-            kind: regs.r[0],
-            load: regs.r[2],
-            exec: regs.r[3],
-            length: if without_length { 0 } else { regs.r[4] },
-            attributes: regs.r[5],
-        })
+        let mut info = Info::answered(&regs);
+        if without_length {
+            info.length = 0;
+        }
+        Ok(info)
     })
 }
 

@@ -1122,16 +1122,40 @@ dismissed, `1` refused or lost, or a usage error.
 
 `tairix-gpucheck` lists the GPUs drivers serve (the `GPU_DEVICES` query),
 reaches each through `Device::connect`, and runs the same work on it and on a
-software device: a pattern updated into host-visible memory, a fill beside
-it, both copied through memory the device keeps for itself and back, then a
-fill past its buffer that every device must refuse. It prints one line per
-GPU: agreement, or the first `tairix_gpucheck::Difference` — a byte, the work
-refused, or a different answer to the fill (`plans/GPU.md` GP11.2).
+software device, each step on the first queue family stating its kind of
+work: a pattern updated into host-visible memory, a fill beside it, both
+copied through memory the device keeps for itself and back, then a fill past
+its buffer that every device must refuse; every pass of the pinned set on its
+sample (`tairix_shaders::SET`); the image work — copies between buffers and
+images and between images, clears of colour, depth and stencil, and a
+dispatch fetching a uniform texel buffer, writing a storage texel buffer and
+a storage image, sampling an integer image and comparing a depth image; the
+render work — instanced, indexed and indirect strips, a list, an indexed fan,
+points and a line, depth-tested and stencilled, culled, blended, masked,
+scissored and offset, into unsigned normalised, integer and float targets,
+four samples resolved, and last a record naming its first instance, which a
+device stating no first instances must answer by losing that context; and
+last a fill dispatched indirectly with counts one past the device's own,
+which must lose its context. Every value the work reads is exact on any
+conforming device. It prints one line per GPU: agreement, or the first
+`tairix_gpucheck::Difference` — a step of the work refused, named; a byte; a
+different answer to the fill; a pass's word, named by pass, binding and
+place; a byte of the image work, of the render work, of the resolved samples
+or of the draw naming its first instance; a different answer to that draw;
+or a different answer to the dispatch past the counts (`plans/GPU.md` GP11.2,
+GP5.4–GP5.6). A device stating less than the image or render work uses of
+its formats, or no family that draws, is not held to that step, one stating
+no four samples of the render work's colour to its resolve, nor one whose
+counts no count is past to the last step.
 
 The work and the comparison are the library, so `cargo test -p
-tairix-gpucheck` holds two software devices to agreement and finds the byte a
-device whose copies corrupt one got wrong, and the Venus vertical holds the
-virtio-gpu driver's Venus backend to the same comparison. Manifest:
+tairix-gpucheck` holds two software devices to agreement, the image work to
+the values it computes and the render work to a model of Vulkan's rules, a
+device running transfers alone refused at the first pass by name, a device
+whose first family runs transfers alone running its dispatches on the next,
+and each kind of difference found where it first is; and the Venus verticals
+hold the virtio-gpu driver's Venus backend to the same comparison, every
+step stated, with no translation unit and behind one translating the GPU. Manifest:
 `CAP_GPU`, `CAP_SHM`, `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS`, all within the
 session baseline. Exit status: `0` every served GPU agreed, `1` one differed
 or could not be reached, none is served, the list or the software device

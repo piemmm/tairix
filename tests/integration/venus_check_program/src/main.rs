@@ -2,7 +2,9 @@
 //! display driver, it brings the device up as that driver does, drives the
 //! engine's 3D work against the device, then makes the driver's Venus backend
 //! a GPU as the driver does and holds it to the software device with
-//! `gpucheck`'s work, records the verdict, and serves the seat's display.
+//! `gpucheck`'s work, every step of it stated — the image work, the render
+//! work and its four-sample pass — records the verdict, or that the GPU was
+//! not served and why, and serves the seat's display.
 //!
 //! On the host it is an inert stub so the workspace build, clippy and fmt
 //! still cover the file.
@@ -24,7 +26,7 @@ mod program {
     use tairix_abi::WindowError;
     use tairix_display::service::serve;
     use tairix_drv_display_gpu_virtio::program::{
-        host_visible_region, run, start_gpu, Drive, Engine, Host,
+        host_visible_region, run, start_gpu, Drive, Engine, Host, Unserved,
     };
     use tairix_drv_display_gpu_virtio::wire::BlobSpec;
     use tairix_drv_display_gpu_virtio::{Done, Stream};
@@ -33,7 +35,7 @@ mod program {
     use tairix_gpucheck::{compare, reference, work};
     use tairix_inline::ArrayVec;
     use tairix_log::{Field, FieldValue, Level};
-    use tairix_test_venus_check::{FAILED, PASSED};
+    use tairix_test_venus_check::{FAILED, PASSED, PASSED_MESSAGE, UNSERVED};
     use tairix_virtio::{SharedMemory, Transport};
 
     /// How long one command may take: past a context's making, which starts
@@ -245,19 +247,31 @@ mod program {
                 })
             }
         };
-        let expected =
-            reference(Arc::new(tairix_rt::ClockDelay)).and_then(|reference| work(&reference));
-        let agreed = match &expected {
-            Ok(expected) => {
-                compare(&device, expected).map_err(|difference| format!("{difference}"))
+        let expected = match reference(Arc::new(tairix_rt::ClockDelay)) {
+            Ok(reference) => {
+                work(&reference).map_err(|refused| format!("the software device refused {refused}"))
             }
-            Err(why) => Err(format!("the software device refused the work: {why}")),
+            Err(why) => Err(format!("the software device could not be made: {why}")),
         };
+        let agreed = expected.and_then(|expected| {
+            let answered = work(&device).map_err(|refused| format!("refused {refused}"))?;
+            if answered.images.is_none() {
+                return Err("the GPU states less than the image work uses".into());
+            }
+            match &answered.render {
+                None => return Err("the GPU states less than the render work uses".into()),
+                Some(rendered) if rendered.resolved.is_none() => {
+                    return Err("the GPU states no four samples of the render work's colour".into())
+                }
+                Some(_) => {}
+            }
+            compare(&answered, &expected).map_err(|difference| format!("{difference}"))
+        });
         match agreed {
             Ok(()) => log_event(
                 Level::Info,
                 PASSED,
-                "venus check: contexts, blobs and their mappings made and let go, and the backend agreed with the software device",
+                PASSED_MESSAGE,
                 &[Field {
                     key: "caching",
                     value: FieldValue::UnsignedInt(u64::from(caching as u32)),
@@ -296,12 +310,28 @@ mod program {
             let _ = all.try_extend_from_slice(wakes);
             match check(&mut gpu, host) {
                 Ok(caching) => {
-                    let then = move |made, _| held_to_reference(made, caching);
+                    // The check serves no client: its channel goes with it.
+                    let then = move |made, _channel| held_to_reference(made, caching);
                     match start_gpu(&mut gpu, host, then) {
-                        Some(port) => {
+                        Ok(port) => {
                             let _ = all.try_push(DeviceWake::Port(port));
                         }
-                        None => record(&Failed {
+                        Err(Unserved::Refused { why, reason }) => log_event(
+                            Level::Info,
+                            UNSERVED,
+                            "venus check: the device's 3D work ran and its GPU was not served",
+                            &[
+                                Field {
+                                    key: "step",
+                                    value: FieldValue::Str(why),
+                                },
+                                Field {
+                                    key: "reason",
+                                    value: FieldValue::Error(reason.as_errno()),
+                                },
+                            ],
+                        ),
+                        Err(Unserved::NoVenus) => record(&Failed {
                             step: "start the backend",
                             why: DriverError::Unsupported,
                         }),

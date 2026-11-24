@@ -84,8 +84,8 @@ pub(crate) const MAX_TEXT_RUNS: usize = 1024;
 /// desktop. A fixed containment bound, not a capacity.
 pub(crate) const MAX_PROVIDER_REQUESTS: usize = 256;
 
-/// How many scalars one provider request asks for, matched to the run a
-/// glyph protocol answers in one round trip.
+/// How many scalars one provider request asks for: the decoder's own batch,
+/// which bounds what a request carries while a line of text costs few.
 const PROVIDER_RUN: usize = 32;
 
 /// The most values one position list may carry: a list longer than the text

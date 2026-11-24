@@ -16,12 +16,8 @@ fn every_recorded_file_is_checked_as_genuine_risc_os_checked_it() {
 
 #[test]
 fn a_font_table_names_its_numbers_where_they_are_in_the_file() {
-    let mut file = alloc::vec::Vec::from(&b"Draw"[..]);
-    file.extend([201u32, 0].iter().flat_map(|w| w.to_le_bytes()));
-    file.extend(b"Probe       ");
-    file.extend([0u32; 4].iter().flat_map(|w| w.to_le_bytes()));
-    file.extend([FONT_TABLE, 24].iter().flat_map(|w| w.to_le_bytes()));
-    file.extend(b"\x01Ab\0\x02Cd\0\x01Ef\0\0\0\0\0");
+    let table = crate::fixture::font_table(&[(1, b"Ab"), (2, b"Cd"), (1, b"Ef")]);
+    let file = crate::fixture::file([0; 4], &[&table]);
     let fonts = check(&file).expect("sound");
     assert_eq!(fonts.table, Some(40));
     assert_eq!(

@@ -152,7 +152,7 @@ const VIDC_ENTRIES: u32 = 16;
 const TRUECOLOUR_PIXEL: ([u32; RGBA_BYTES], u32) = ([8, 8, 8, 8], 4);
 
 /// The finest resolution an eigen factor can state: OS units per inch.
-const OS_UNITS_PER_INCH: u32 = 180;
+pub const OS_UNITS_PER_INCH: u32 = 180;
 
 /// The dots to the inch an eigen factor of `eig` states: a pixel `2^eig` OS
 /// units across.
@@ -160,6 +160,14 @@ const OS_UNITS_PER_INCH: u32 = 180;
 pub const fn dpi_of_eig(eig: u8) -> u32 {
     OS_UNITS_PER_INCH >> eig
 }
+
+/// The standard screen's eigen factor, the desktop's: a pixel two OS units
+/// across.
+pub const STANDARD_EIG: u8 = 1;
+
+/// The standard screen's resolution: what RISC OS takes a picture stating
+/// none to be at.
+pub const STANDARD_DPI: u32 = dpi_of_eig(STANDARD_EIG);
 
 /// The largest eigen factor a RISC OS 5 mode word's two-bit fields hold.
 const RO5_MAX_EIG: u8 = 3;

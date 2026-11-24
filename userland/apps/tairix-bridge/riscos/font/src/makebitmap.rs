@@ -10,16 +10,21 @@ use alloc::vec::Vec;
 use tairix_raster::scan::FillRule;
 use tairix_riscos_kernel::filing::filetype;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
-use tairix_riscos_kernel::swi::chunk::FONT;
+use tairix_riscos_kernel::swi::font::{FIND_FONT, LOSE_FONT};
 use tairix_riscos_kernel::swi::X;
 
 use crate::bitmaps::{self, FILE_MOST};
 use crate::glyphs::{self, Bitmap, Placing, Refused, Scratch};
-use crate::module::{call, error, raise, with};
-use crate::outlines::{Depth, CHUNK, PLACEMENTS};
+use crate::handles;
+use crate::module::{error, raise, with};
+use crate::outlines::character::{ONE_BIT, WIDE};
+use crate::outlines::{
+    bitmap_flag, wide_point, Depth, BITMAP_TABLE, CHUNK, CHUNK_HORIZONTAL, CHUNK_MUST,
+    CHUNK_VERTICAL, LAST_VERSION, MAGIC, PLACEMENTS,
+};
 use crate::resolve::{self, Font};
 use crate::transform::Transform;
-use crate::{find, grid, scan, units};
+use crate::{find, grid, put_word, scan, units};
 
 /// `Font_MakeBitmap`'s flags.
 mod make_flag {
@@ -33,22 +38,8 @@ mod make_flag {
     pub(super) const KNOWN: u32 = FOUR | ACROSS | UP | DELETE;
 }
 
-/// The highest handle: R1 past it names a font.
-const LAST_HANDLE: u32 = 255;
-/// The file format's version written.
-const VERSION: u8 = 8;
-/// The header's flag saying each chunk opens with a flag word, and a
-/// chunk's flag bit that must be set.
-const FLAGGED: u16 = 1 << 6;
-const CHUNK_MUST: u32 = 1 << 31;
-/// The table a bitmap file has: its size, then the sizes and resolutions.
-const TABLE: u16 = 10;
-/// Where the header has the chunks' offsets, and the scaffold entries a
-/// bitmap file has: its table's size alone.
+/// The scaffold entries a bitmap file has: its table's size alone.
 const SCAFFOLD_ENTRIES: u32 = 1;
-/// A character's flags: 12-bit coordinates, and one bit a pixel.
-const WIDE: u8 = 1;
-const ONE_BIT: u8 = 1 << 1;
 /// The ranges of a character's coordinates in 8 and 12 bits.
 const NARROW_RANGE: core::ops::RangeInclusive<i32> = -128..=127;
 const WIDE_RANGE: core::ops::RangeInclusive<i32> = -2048..=2047;
@@ -62,17 +53,17 @@ pub(crate) fn make_bitmap(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> 
     if flags & !make_flag::KNOWN != 0 || (placed && flags & make_flag::FOUR == 0) {
         return Err(raise(os, error::RESERVED, &[]));
     }
-    if regs.r[1] <= LAST_HANDLE {
+    if regs.r[1] <= u32::from(handles::LAST) {
         return make(os, regs.r[1], regs, flags);
     }
     let mut find = Regs::default();
     find.r[1..6].copy_from_slice(&regs.r[1..6]);
-    os.perform(X | (FONT + call::FIND_FONT), &mut find)?;
+    os.perform(X | FIND_FONT, &mut find)?;
     let handle = find.r[0];
     let made = make(os, handle, regs, flags);
     let mut release = Regs::default();
     release.r[0] = handle;
-    let lost = os.perform(X | (FONT + call::LOSE_FONT), &mut release);
+    let lost = os.perform(X | LOSE_FONT, &mut release);
     made.and(lost)
 }
 
@@ -264,7 +255,9 @@ pub(crate) fn laid_out(
         .map_err(|_| Unmade::Refused)?;
     out.resize(offsets + 4 * (chunks + 1), 0);
     records.sort_by_key(|r| (r.glyph / CHUNK, r.variant, r.glyph));
-    let chunk_flags = CHUNK_MUST | u32::from(size.placements.0) | u32::from(size.placements.1) << 1;
+    let chunk_flags = CHUNK_MUST
+        | (u32::from(size.placements.0) * CHUNK_HORIZONTAL)
+        | (u32::from(size.placements.1) * CHUNK_VERTICAL);
     let mut records = records.iter().peekable();
     for chunk in 0..chunks {
         let start = out.len();
@@ -297,14 +290,12 @@ fn header(identifier: &[u8], size: &Size, bounds: Bounds, chunks: usize) -> Opti
     let signed = |v: i32| i16::try_from(v).ok();
     let mut out = Vec::new();
     out.try_reserve(128).ok()?;
-    out.extend_from_slice(b"FONT");
-    out.push(match size.depth {
-        Depth::Four => 4,
-        Depth::One => 1,
-    });
-    out.push(VERSION);
-    let placed = u16::from(size.placements.0) | u16::from(size.placements.1) << 1;
-    out.extend_from_slice(&(FLAGGED | placed).to_le_bytes());
+    out.extend_from_slice(MAGIC);
+    out.push(size.depth.bits());
+    out.push(LAST_VERSION);
+    let placed = (u16::from(size.placements.0) * bitmap_flag::ACROSS)
+        | (u16::from(size.placements.1) * bitmap_flag::UP);
+    out.extend_from_slice(&(bitmap_flag::FLAGGED | placed).to_le_bytes());
     for value in [signed(bounds.x0)?, signed(bounds.y0)?] {
         out.extend_from_slice(&value.to_le_bytes());
     }
@@ -319,7 +310,7 @@ fn header(identifier: &[u8], size: &Size, bounds: Bounds, chunks: usize) -> Opti
     out.extend_from_slice(&u32::try_from(chunks).ok()?.to_le_bytes());
     out.extend_from_slice(&SCAFFOLD_ENTRIES.to_le_bytes());
     out.extend_from_slice(&[0; 24]);
-    out.extend_from_slice(&TABLE.to_le_bytes());
+    out.extend_from_slice(&BITMAP_TABLE.to_le_bytes());
     for value in [
         size.points.0,
         size.resolution.0,
@@ -436,10 +427,8 @@ fn record(depth: Depth, bitmap: &Bitmap) -> Option<(Vec<u8>, Bounds)> {
     out.try_reserve(8 + pixels).ok()?;
     out.push((u8::from(wide) * WIDE) | if depth == Depth::One { ONE_BIT } else { 0 });
     if wide {
-        for pair in [(x0, y0), (width, height)] {
-            let packed =
-                (pair.0.cast_unsigned() & 0xFFF) | ((pair.1.cast_unsigned() & 0xFFF) << 12);
-            out.extend_from_slice(&packed.to_le_bytes()[..3]);
+        for (x, y) in [(x0, y0), (width, height)] {
+            out.extend_from_slice(&wide_point(x, y));
         }
     } else {
         out.extend(coordinates.iter().map(|&v| v.to_le_bytes()[0]));
@@ -479,11 +468,6 @@ fn record(depth: Depth, bitmap: &Bitmap) -> Option<(Vec<u8>, Bounds)> {
         y1: y0 + height,
     };
     Some((out, bounds))
-}
-
-/// `value` written as a little-endian word at `at` in `out`.
-fn put_word(out: &mut [u8], at: usize, value: u32) {
-    out[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }
 
 #[cfg(test)]

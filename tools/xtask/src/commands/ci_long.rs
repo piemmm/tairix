@@ -238,7 +238,7 @@ fn qemu_units(ctx: &Context) -> Vec<FlakeUnit<'_>> {
         .map(|enrol| {
             let target_dir = ctx.target_dir();
             let children = std::sync::Arc::clone(&ctx.children);
-            let label = format!("qemu {}", enrol.package);
+            let label = format!("qemu {}", enrol.name);
             let job_label = label.clone();
             let weight = qemu_tests::qemu_job_weight(enrol.cpus, budget);
             // `replica` is the hunt's own repetition index. The concurrent

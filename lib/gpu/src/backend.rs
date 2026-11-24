@@ -7,17 +7,18 @@
 use alloc::sync::Arc;
 use core::fmt::Debug;
 
-use crate::binding::Bound;
+use crate::binding::{BindSetLayoutState, Bound};
 use crate::command::Op;
 use crate::device::Shared;
 use crate::fair::FairGuard;
-use crate::image::ImageDesc;
+use crate::image::{BufferViewDesc, ImageDesc, ImageViewDesc};
 use crate::info::DeviceInfo;
 use crate::memory::{Budget, Charge};
 use crate::model::Model;
 use crate::pipeline::StagePlan;
 use crate::render::RenderPlan;
 use crate::resource::MemoryRequirements;
+use crate::sampler::SamplerDesc;
 use crate::Error;
 
 /// What a device's work runs on.
@@ -28,8 +29,14 @@ pub(crate) trait Backend: Sized + Send + Sync + 'static {
     /// A memory as the device holds it, standing for the charges paying for
     /// it until its last holder lets it go.
     type Memory: Debug + Send + Sync;
-    /// How an image's texels lie in its memory.
+    /// An image as the device holds it: how its texels lie in its memory.
     type Image: Debug + Send + Sync;
+    /// A view of an image as the device reads it.
+    type View: Debug + Send + Sync;
+    /// A texel buffer as the device reads it.
+    type BufferView: Debug + Send + Sync;
+    /// A sampler as the device samples with it.
+    type Sampler: Debug + Send + Sync;
     /// A bind set's descriptors as the device reads them.
     type Set: Debug + Send + Sync;
     /// A compute pipeline's program.
@@ -71,29 +78,77 @@ pub(crate) trait Backend: Sized + Send + Sync + 'static {
     /// within it.
     fn read(&self, memory: &Self::Memory, offset: u64, out: &mut [u8]) -> Result<(), Error>;
 
-    /// How an image of `desc`, which the device of `info` admits, lies in
-    /// memory, and what it needs of the memory it is placed in.
+    /// An image in `context` of `desc`, which the device of `info` admits,
+    /// and what it needs of the memory it is placed in. Made without the
+    /// device's lock: a device may be waited on for it.
     fn image(
         &self,
+        context: &Arc<Self::Context>,
         info: &DeviceInfo,
         desc: &ImageDesc,
     ) -> Result<(Self::Image, MemoryRequirements), Error>;
 
-    /// The descriptors of `resources`, a bind set's every resource in its
-    /// layout's order, and the host bytes they keep.
-    fn set(&self, resources: &[Bound<Self>]) -> Result<(Self::Set, u64), Error>;
+    /// Place `image` at `offset` into `memory`, where its requirements of
+    /// `size` bytes were proved met, its every texel then reading zero. Made
+    /// without the device's lock.
+    fn place(
+        &self,
+        image: &Self::Image,
+        memory: &Self::Memory,
+        offset: u64,
+        size: u64,
+    ) -> Result<(), Error>;
 
-    /// A compute pipeline's program from its checked entry point.
+    /// A view of `desc` of an image of `of`, which it was proved to see.
+    /// Made without the device's lock.
+    fn view(
+        &self,
+        image: &Self::Image,
+        of: &ImageDesc,
+        desc: &ImageViewDesc,
+    ) -> Result<Self::View, Error>;
+
+    /// A texel buffer of `desc` at `offset` into `memory`, proved within it.
+    /// Made without the device's lock.
+    fn buffer_view(
+        &self,
+        memory: &Self::Memory,
+        offset: u64,
+        desc: &BufferViewDesc,
+    ) -> Result<Self::BufferView, Error>;
+
+    /// A sampler in `context` of `desc`, which the device admits. Made
+    /// without the device's lock.
+    fn sampler(
+        &self,
+        context: &Arc<Self::Context>,
+        desc: &SamplerDesc,
+    ) -> Result<Self::Sampler, Error>;
+
+    /// The descriptors in `context` of `resources`, a bind set's every
+    /// resource in the order of `layout`, and the host bytes they keep.
+    /// Made without the device's lock: a device may be waited on for it.
+    fn set(
+        &self,
+        context: &Arc<Self::Context>,
+        layout: &BindSetLayoutState,
+        resources: &[Bound<Self>],
+    ) -> Result<(Self::Set, u64), Error>;
+
+    /// A compute pipeline's program in `context` from its checked entry
+    /// point, made without the device's lock.
     fn compute(
         &self,
+        context: &Arc<Self::Context>,
         info: &DeviceInfo,
         stage: &StagePlan<'_>,
     ) -> Result<Prepared<Self, Self::Compute>, Error>;
 
-    /// A render pipeline's programs and tables from its checked stages and
-    /// state.
+    /// A render pipeline's programs and tables in `context` from its checked
+    /// stages and state, made without the device's lock.
     fn render(
         &self,
+        context: &Arc<Self::Context>,
         info: &DeviceInfo,
         plan: &RenderPlan<'_>,
     ) -> Result<Prepared<Self, Self::Render>, Error>;

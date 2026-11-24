@@ -457,15 +457,19 @@ pub const TARGETS: &[Target] = &[
                 "validate::scale_tests::globals_to_the_bound_are_admitted_and_past_it_refused",
                 "validate::scale_tests::locals_to_the_bound_are_admitted_and_past_it_refused",
                 "validate::scale_tests::members_and_cases_to_the_bound_are_admitted_and_past_it_refused",
+                "validate::scale_tests::samplings_to_the_bound_are_admitted_and_past_it_refused",
+                "validate::scale_tests::samplings_followed_through_calls_are_admitted_within_the_work_bound_and_past_it_refused",
                 "validate::cfg::ladder_tests::the_ladder_agrees_with_the_parents_on_a_chain_as_deep_as_nesting_goes",
             ],
             reason: "each builds modules at one of the validator's fixed bounds and one past it, \
                      a hundred thousand selections in sequence, or a construct ladder as deep as \
                      nesting goes, so its extent is its assertion, and there it costs minutes to \
-                     hours interpreted. The crate holds no `unsafe`, the tests kept take the same \
-                     paths below each bound at small scale, and all eight run in full under the \
-                     ordinary test matrix; the `fuzz_spirv` harness is enrolled beside the \
-                     library. The `specialize_memory` integration test is excluded too: its two \
+                     hours interpreted: the samplings' bound about ten minutes, and the \
+                     sampling work's, a million samplings followed through sixteen thousand \
+                     calls, was unfinished when its shard was stopped at forty-five minutes. The \
+                     crate holds no `unsafe`, the tests kept take the same paths below each \
+                     bound at small scale, and all ten run in full under the ordinary test \
+                     matrix; the `fuzz_spirv` harness is enrolled beside the library. The `specialize_memory` integration test is excluded too: its two \
                      tests measure what specializing holds and allocates at a size that is \
                      their assertion, a level of two million nulls and a chain of sixteen \
                      thousand operations, and the chain was unfinished after seventeen minutes \
@@ -961,9 +965,46 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-drv-display-gpu-virtio",
         description: "`lib/virtio`'s rings and slabs along a display driver's own paths: the \
                       batch a present submits whole, a backing the device may still read, and \
-                      the pointer image the cursor queue transfers",
+                      the pointer image the cursor queue transfers; and the windows a Venus \
+                      context's host blobs are mapped through, written and read as its \
+                      exchanges and jobs travel",
         features: &[],
-        scope: Scope::AllTargets,
+        scope: Scope::LibExcept {
+            skip: &["venus::backend::tests::render_tests::records_outrunning_their_slot_split_their_pass_into_rendering_instances"],
+            reason: "the library holds all but the crate's two fuzz harnesses, enrolled beside \
+                     it, and naming it is what lets its tests be dealt across cores. The test \
+                     skipped is its extent: a pass splits only once it checks more records \
+                     than a slot holds, each read by the pinned check the test's renderer runs \
+                     on the software device's interpreter, and interpreted it took twenty-seven \
+                     minutes. It carries no `unsafe`, the job streams, blobs and checks it \
+                     reaches are the kept record tests' too, it passed interpreted, and it runs \
+                     in full under the ordinary test matrix",
+        },
+        spread: Spread::Sharded(
+            "interpreted, its tests cost twenty-six minutes in one process, each Venus test \
+             bringing a host up on a thread beside the driver's, whose waits on it spin where \
+             no kernel parks them",
+        ),
+    },
+    Target {
+        package: "tairix-drv-display-gpu-virtio",
+        description: "the answers a hostile device writes, decoded fail-closed",
+        features: &[],
+        scope: Scope::Test {
+            name: "fuzz_gpu_answers",
+            reason: "a binary of its own, so it cannot share the sharded library's listing",
+        },
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-drv-display-gpu-virtio",
+        description: "the Venus replies a hostile renderer writes, read fail-closed and \
+                      narrowed into the inline arrays of the statement the seam takes",
+        features: &[],
+        scope: Scope::Test {
+            name: "fuzz_venus_replies",
+            reason: "a binary of its own, so it cannot share the sharded library's listing",
+        },
         spread: Spread::OneProcess,
     },
     Target {

@@ -85,8 +85,8 @@ impl OutlineSource for Fetched {
         reply.glyphs.into_iter().next()
     }
 
-    /// As many runs as the service answers them in, each a prefix of what is
-    /// left: those of the cache's already hold no round trip at all.
+    /// Every scalar's outline from one run, which the client pages and the
+    /// cache serves where it can; none for each when the run goes unanswered.
     fn outlines(
         &self,
         family: FamilyKey,
@@ -95,21 +95,13 @@ impl OutlineSource for Fetched {
         style: FontStyle,
         out: &mut Vec<Option<OwnedOutline>>,
     ) {
-        let mut rest = scalars;
-        while !rest.is_empty() {
-            let Some(reply) =
-                tairix_font::outline_run(rest, family, weight, style, FontStretch::default())
-            else {
-                break;
-            };
-            let answered = reply.glyphs.len().min(rest.len());
-            if answered == 0 {
-                break;
-            }
-            out.extend(reply.glyphs.into_iter().take(answered).map(Some));
-            rest = &rest[answered..];
-        }
-        out.extend(rest.iter().map(|_| None));
+        let glyphs =
+            tairix_font::outline_run(scalars, family, weight, style, FontStretch::default())
+                .map(|reply| reply.glyphs)
+                .unwrap_or_default();
+        let answered = glyphs.len().min(scalars.len());
+        out.extend(glyphs.into_iter().take(answered).map(Some));
+        out.extend(scalars[answered..].iter().map(|_| None));
     }
 }
 

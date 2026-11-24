@@ -308,6 +308,7 @@ compiled in only under the `watchdog-diagnostics` feature:
 | 4267 | Warn  | `VOLUME_RESERVE_ENTERED`    | audit  |
 | 4268 | Info  | `VOLUME_RESERVE_LEFT`       | audit  |
 | 4269 | Warn  | `WALL_CLOCK_SET_REFUSED`    | audit  |
+| 4270 | Warn  | `DEVICE_CHANNEL_UNCONFINED` | audit  |
 | 4310 | Info  | `VIEW_BOUND`                | audit  |
 | 4311 | Warn  | `VIEW_BIND_REFUSED`         | audit  |
 | 4312 | Info  | `VIEW_UNBOUND`              | audit  |

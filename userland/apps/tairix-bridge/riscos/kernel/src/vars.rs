@@ -28,10 +28,12 @@ const LONGEST: usize = 1 << 20;
 /// The longest name.
 pub(crate) const LONGEST_NAME: usize = 255;
 
-/// The types `OS_ReadVarVal` and `OS_SetVarVal` name, a node's among them.
-pub(crate) const STRING: u8 = 0;
+/// The types `OS_ReadVarVal` and `OS_SetVarVal` name, a node's among them:
+/// a string.
+pub const STRING: u8 = 0;
 pub(crate) const NUMBER: u8 = 1;
-pub(crate) const MACRO: u8 = 2;
+/// A macro.
+pub const MACRO: u8 = 2;
 pub(crate) const EXPANDED: u8 = 3;
 pub(crate) const LITERAL: u8 = 4;
 pub(crate) const CODE: u8 = 16;

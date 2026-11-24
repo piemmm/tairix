@@ -15,7 +15,7 @@ use tairix_obey::args::substitute;
 use tairix_obey::command::MOST_LINE;
 use tairix_obey::is_terminator;
 use tairix_riscos_kernel::error::obey_error;
-use tairix_riscos_kernel::module::{Builtin, Command, CommandKind, Help};
+use tairix_riscos_kernel::module::{Builtin, Command};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::{self as swi, find};
 use tairix_riscos_kernel::swi::X;
@@ -32,18 +32,13 @@ pub static OBEY: Builtin = Builtin {
     bridge: false,
     swis: None,
     services: None,
-    commands: &[Command {
-        name: "Obey",
-        kind: CommandKind::Command,
-        min: 0,
-        max: 255,
-        translate: 0,
-        help: Help::Text(
-            "*Obey runs each line of a file as a command, the parameters given put in for %0 to %9 and %*0 to %*9. -c reads the whole file before running it, -v shows each line first.",
-        ),
-        syntax: Some("Syntax: *Obey [-c] [-v] [<filename> [<parameters>]]"),
-        run: Some(obey),
-    }],
+    commands: &[Command::new(
+        "Obey",
+        (0, 255),
+        "*Obey runs each line of a file as a command, the parameters given put in for %0 to %9 and %*0 to %*9. -c reads the whole file before running it, -v shows each line first.",
+        Some("Syntax: *Obey [-c] [-v] [<filename> [<parameters>]]"),
+        obey,
+    )],
     init: None,
     finalise: None,
     start: None,

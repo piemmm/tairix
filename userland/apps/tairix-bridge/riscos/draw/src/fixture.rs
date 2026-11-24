@@ -4,11 +4,16 @@
 use alloc::vec::Vec;
 
 use tairix_drawing::riscos::format::{
-    FONT_TABLE, MAGIC, MAJOR_VERSION, TEXT, TEXT_AREA, TEXT_COLUMN, TRANSFORMED_TEXT,
+    BARE_HEADER, FONT_TABLE, JPEG, MAGIC, MAJOR_VERSION, OBJECT_HEADER, OBJECT_SIZE, TEXT,
+    TEXT_AREA, TEXT_COLUMN, TRANSFORMED_TEXT,
 };
 
 /// The creator a made file names, padded to its twelve bytes.
 const CREATOR: &[u8; 12] = b"TAIRiX      ";
+
+/// The text area column the probes lay out and paint in: 100 points to 200
+/// both ways, in draw units.
+pub const COLUMN: [i32; 4] = [64_000, 64_000, 128_000, 128_000];
 
 /// A Draw file of `objects`, its box `bounds`.
 #[must_use]
@@ -24,10 +29,16 @@ pub fn file(bounds: [i32; 4], objects: &[&[u8]]) -> Vec<u8> {
     bytes
 }
 
+/// `values` as a file holds them, each a little-endian word.
+#[must_use]
+pub fn words(values: &[u32]) -> Vec<u8> {
+    values.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
 /// A font table naming each of `fonts` by its number.
 #[must_use]
 pub fn font_table(fonts: &[(u8, &[u8])]) -> Vec<u8> {
-    let mut bytes = alloc::vec![0; 8];
+    let mut bytes = alloc::vec![0; BARE_HEADER];
     for &(number, name) in fonts {
         bytes.push(number);
         bytes.extend_from_slice(name);
@@ -40,15 +51,15 @@ pub fn font_table(fonts: &[(u8, &[u8])]) -> Vec<u8> {
 /// box, colours, font, sizes and base point in draw units, and `string`.
 #[must_use]
 pub fn text(text: &Text<'_>, own: Option<([i32; 6], u32)>) -> Vec<u8> {
-    let mut words: Vec<u32> = alloc::vec![0, 0];
-    words.extend(text.bounds.map(i32::cast_unsigned));
+    let mut fields: Vec<u32> = alloc::vec![0, 0];
+    fields.extend(text.bounds.map(i32::cast_unsigned));
     if let Some((matrix, flags)) = own {
-        words.extend(matrix.map(i32::cast_unsigned));
-        words.push(flags);
+        fields.extend(matrix.map(i32::cast_unsigned));
+        fields.push(flags);
     }
-    words.extend([text.foreground, text.background, u32::from(text.font)]);
-    words.extend([text.sizes.0, text.sizes.1, text.at.0, text.at.1].map(i32::cast_unsigned));
-    let mut bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    fields.extend([text.foreground, text.background, u32::from(text.font)]);
+    fields.extend([text.sizes.0, text.sizes.1, text.at.0, text.at.1].map(i32::cast_unsigned));
+    let mut bytes = words(&fields);
     bytes.extend_from_slice(text.string);
     bytes.push(0);
     framed(
@@ -85,8 +96,8 @@ pub struct Text<'a> {
 fn framed(kind: u32, mut bytes: Vec<u8>) -> Vec<u8> {
     bytes.resize(bytes.len().next_multiple_of(4), 0);
     let size = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
-    bytes[..4].copy_from_slice(&kind.to_le_bytes());
-    bytes[4..8].copy_from_slice(&size.to_le_bytes());
+    bytes[..OBJECT_SIZE].copy_from_slice(&kind.to_le_bytes());
+    bytes[OBJECT_SIZE..BARE_HEADER].copy_from_slice(&size.to_le_bytes());
     bytes
 }
 
@@ -100,15 +111,37 @@ pub fn text_area(
     background: u32,
     text: &[u8],
 ) -> Vec<u8> {
-    let mut words: Vec<u32> = alloc::vec![0, 0];
-    words.extend(bounds.map(i32::cast_unsigned));
+    let column_size = u32::try_from(OBJECT_HEADER).unwrap_or(u32::MAX);
+    let mut fields: Vec<u32> = alloc::vec![0, 0];
+    fields.extend(bounds.map(i32::cast_unsigned));
     for column in columns {
-        words.extend([TEXT_COLUMN, 24]);
-        words.extend(column.map(i32::cast_unsigned));
+        fields.extend([TEXT_COLUMN, column_size]);
+        fields.extend(column.map(i32::cast_unsigned));
     }
-    words.extend([0, 0, 0, foreground, background]);
-    let mut bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    fields.extend([0, 0, 0, foreground, background]);
+    let mut bytes = words(&fields);
     bytes.extend_from_slice(text);
     bytes.push(0);
     framed(TEXT_AREA, bytes)
+}
+
+/// A JPEG object: its box, its width and height in draw units, its dots to
+/// the inch across and up, its matrix, and `data`, padded to a word.
+#[must_use]
+pub fn jpeg(
+    bounds: [i32; 4],
+    sizes: [u32; 2],
+    dpi: [u32; 2],
+    matrix: [i32; 6],
+    data: &[u8],
+) -> Vec<u8> {
+    let mut fields: Vec<u32> = alloc::vec![0, 0];
+    fields.extend(bounds.map(i32::cast_unsigned));
+    fields.extend(sizes);
+    fields.extend(dpi);
+    fields.extend(matrix.map(i32::cast_unsigned));
+    fields.push(u32::try_from(data.len()).unwrap_or(u32::MAX));
+    let mut bytes = words(&fields);
+    bytes.extend_from_slice(data);
+    framed(JPEG, bytes)
 }

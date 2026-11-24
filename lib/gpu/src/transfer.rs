@@ -23,8 +23,10 @@ use crate::{Error, MAX_COPY_REGIONS};
 
 /// Which way a copy between a buffer and an image moves texels.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Direction {
+pub enum Direction {
+    /// From the buffer into the image.
     ToImage,
+    /// From the image into the buffer.
     ToBuffer,
 }
 
@@ -34,7 +36,7 @@ pub(crate) fn image<B: Backend>(
     key: ImageKey,
     usage: ImageUsage,
 ) -> Result<&Arc<ImageState<B>>, Error> {
-    let image = context.images.get(key).ok_or(Error::Stale)?;
+    let image = context.images.table.get(key).ok_or(Error::Stale)?;
     if image.desc.usage.contains(usage) {
         Ok(image)
     } else {
@@ -81,7 +83,27 @@ struct Region {
     aspect: Aspects,
 }
 
+/// An axis a region spans along.
+#[derive(Copy, Clone, Debug)]
+enum Axis {
+    X,
+    Y,
+    Z,
+    Layers,
+}
+
 impl Region {
+    /// Where it starts along `axis`, and where it ends.
+    fn span(&self, axis: Axis) -> (u64, u64) {
+        let (start, len) = match axis {
+            Axis::X => (self.origin.x, self.extent.width),
+            Axis::Y => (self.origin.y, self.extent.height),
+            Axis::Z => (self.origin.z, self.extent.depth),
+            Axis::Layers => self.layers,
+        };
+        (u64::from(start), u64::from(start) + u64::from(len))
+    }
+
     fn meets(&self, other: &Self) -> bool {
         let along = |a: u32, a_len: u32, b: u32, b_len: u32| {
             let span = |start: u32, len: u32| u64::from(start)..u64::from(start) + u64::from(len);
@@ -112,14 +134,20 @@ impl Region {
 }
 
 /// Whether two of `regions`, each marked whether it is written, share a
-/// texel that one of them writes: swept across in order of level and first
-/// column, so a region is tested only against those it meets in that column.
+/// texel that one of them writes: swept along the axis the fewest pairs
+/// share, in order of level and start, so a region is tested only against
+/// those it meets along that axis, and regions split along any one axis
+/// cost no pair at all.
 fn overlap(regions: &mut [(Region, bool)]) -> bool {
-    regions.sort_unstable_by_key(|(region, _)| (region.level, region.origin.x));
+    let axis = [Axis::X, Axis::Y, Axis::Z, Axis::Layers]
+        .into_iter()
+        .min_by_key(|&axis| sharing(regions, axis))
+        .unwrap_or(Axis::X);
+    sort_along(regions, axis);
     for (at, (region, written)) in regions.iter().enumerate() {
-        let end = u64::from(region.origin.x) + u64::from(region.extent.width);
+        let (_, end) = region.span(axis);
         for (other, other_written) in regions.iter().skip(at + 1) {
-            if other.level != region.level || u64::from(other.origin.x) >= end {
+            if other.level != region.level || other.span(axis).0 >= end {
                 break;
             }
             if (*written || *other_written) && region.meets(other) {
@@ -128,6 +156,25 @@ fn overlap(regions: &mut [(Region, bool)]) -> bool {
         }
     }
     false
+}
+
+fn sort_along(regions: &mut [(Region, bool)], axis: Axis) {
+    regions.sort_unstable_by_key(|(region, _)| (region.level, region.span(axis).0));
+}
+
+/// How many pairs of `regions` of one level meet along `axis`.
+fn sharing(regions: &mut [(Region, bool)], axis: Axis) -> u64 {
+    sort_along(regions, axis);
+    let mut pairs = 0u64;
+    for (at, (region, _)) in regions.iter().enumerate() {
+        let (_, end) = region.span(axis);
+        let rest = regions.get(at + 1..).unwrap_or(&[]);
+        // Of one level, sorted by start: those starting before it ends lead.
+        let met = rest
+            .partition_point(|(other, _)| other.level == region.level && other.span(axis).0 < end);
+        pairs = pairs.saturating_add(met as u64);
+    }
+    pairs
 }
 
 /// Whether two of the byte spans `(offset, length)` share a byte.

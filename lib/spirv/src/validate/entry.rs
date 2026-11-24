@@ -7,12 +7,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::allow::V1_4;
-use super::binding::Binding;
+use super::binding::{Binding, SampleForms, Sampling};
 use super::body::{fold, Access, Needs};
 use super::types::{Scalar, Ty};
 use super::{
     collect, push, with_capacity, Limit, Refusal, Rule, Validator, What, MAX_CALL_DEPTH, MAX_MODES,
-    NONE,
+    MAX_SAMPLINGS, MAX_SAMPLING_WORK, NONE,
 };
 use crate::enumerant::{BuiltIn, Decoration, ExecutionMode, ExecutionModel, StorageClass};
 use crate::{Id, Instruction, Op, Value};
@@ -84,6 +84,7 @@ pub struct EntryPoint {
     pub(crate) function: Id,
     pub(crate) workgroup: Option<WorkgroupSize>,
     pub(crate) bindings: Vec<Binding>,
+    pub(crate) samplings: Vec<Sampling>,
     pub(crate) push_constants: Option<u32>,
     pub(crate) inputs: Vec<Varying>,
     pub(crate) outputs: Vec<Varying>,
@@ -130,6 +131,13 @@ impl EntryPoint {
         &self.bindings
     }
 
+    /// The images it samples and the samplers it samples them through, by
+    /// ascending set and binding of each.
+    #[must_use]
+    pub fn samplings(&self) -> &[Sampling] {
+        &self.samplings
+    }
+
     /// How many bytes of push constants it reads, if it reads any.
     #[must_use]
     pub const fn push_constants(&self) -> Option<u32> {
@@ -161,6 +169,7 @@ impl EntryPoint {
         [
             self.name.capacity() as u64,
             tairix_util::fallible::held(&self.bindings),
+            tairix_util::fallible::held(&self.samplings),
             tairix_util::fallible::held(&self.inputs),
             tairix_util::fallible::held(&self.outputs),
             tairix_util::fallible::held(&self.globals),
@@ -171,17 +180,22 @@ impl EntryPoint {
 }
 
 /// What one function does with its callees folded in: the globals it
-/// reaches and how, and how it accesses through each pointer parameter.
+/// reaches and how, how it accesses through each pointer parameter, and the
+/// images it samples through samplers, each by its root's slot — a global's
+/// or, for its callers to resolve, a parameter's.
 #[derive(Clone, Debug, Default)]
 struct Effective {
     globals: Vec<(u32, Access)>,
     parameters: Vec<Access>,
+    samplings: Vec<(u32, u32, SampleForms)>,
 }
 
 /// What an entry point reaches: its functions, the globals they name and
-/// how, and what they need of the model.
+/// how, the images they sample through samplers, by the variables' slots,
+/// and what they need of the model.
 pub(crate) struct Reach {
     pub(crate) globals: Vec<(u32, Access)>,
+    pub(crate) samplings: Vec<(u32, u32, SampleForms)>,
     pub(crate) needs: Needs,
 }
 
@@ -190,7 +204,8 @@ impl Validator<'_> {
     pub(crate) fn entry_points(&mut self) -> Result<Vec<EntryPoint>, Refusal> {
         self.workgroup = self.declared_workgroup();
         let order = self.call_order()?;
-        let effective = self.effective_accesses(&order)?;
+        let mut work = 0;
+        let effective = self.effective_accesses(&order, &mut work)?;
         self.decorations_checked()?;
         self.modes_grouped()?;
         let called = self.called()?;
@@ -220,7 +235,7 @@ impl Validator<'_> {
             let index = self.function_of(function).ok_or(refuse(Rule::EntryPoint))?;
             self.entry_function(index, &called).map_err(refuse)?;
             let reach = self
-                .reach(index, &effective, &mut stamps, stamp)
+                .reach(index, &effective, (&mut stamps, stamp), &mut work)
                 .map_err(refuse)?;
             let interface = self.interface_list(instruction).map_err(refuse)?;
             self.complete(&reach, &interface).map_err(refuse)?;
@@ -229,6 +244,7 @@ impl Validator<'_> {
             let (workgroup, early_fragment_tests) =
                 self.modes_of(function, stage, &reach).map_err(refuse)?;
             let (bindings, push_constants) = self.resources(&reach, stage).map_err(refuse)?;
+            let samplings = self.samplings(&reach).map_err(refuse)?;
             let mut globals: Vec<Id> = with_capacity(reach.globals.len())?;
             globals.extend(
                 reach.globals.iter().filter_map(|&(slot, _)| {
@@ -248,6 +264,7 @@ impl Validator<'_> {
                     function,
                     workgroup,
                     bindings,
+                    samplings,
                     push_constants,
                     inputs,
                     outputs,
@@ -329,7 +346,11 @@ impl Validator<'_> {
     /// Each function's accesses with its callees' folded in: what a callee
     /// does through a pointer parameter is charged to the argument's root,
     /// and refused where that root forbids it.
-    fn effective_accesses(&self, order: &[u32]) -> Result<Vec<Effective>, Refusal> {
+    fn effective_accesses(
+        &self,
+        order: &[u32],
+        work: &mut usize,
+    ) -> Result<Vec<Effective>, Refusal> {
         let mut effective: Vec<Effective> = with_capacity(self.functions.len())?;
         effective.resize(self.functions.len(), Effective::default());
         for &f in order {
@@ -379,14 +400,67 @@ impl Validator<'_> {
             }
             globals.sort_unstable_by_key(|&(slot, _)| slot);
             fold(&mut globals);
+            let samplings = self.effective_samplings(f, &effective, work)?;
             if let Some(slot) = effective.get_mut(f as usize) {
                 *slot = Effective {
                     globals,
                     parameters,
+                    samplings,
                 };
             }
         }
         Ok(effective)
+    }
+
+    /// Function `f`'s samplings with its callees' through its arguments
+    /// resolved: a sampling a callee makes of an image or sampler its
+    /// parameter points to is charged to what the call passes there.
+    fn effective_samplings(
+        &self,
+        f: u32,
+        effective: &[Effective],
+        work: &mut usize,
+    ) -> Result<Vec<(u32, u32, SampleForms)>, Refusal> {
+        let Some(facts) = self.facts.get(f as usize) else {
+            return Ok(Vec::new());
+        };
+        let at = |rule: Rule| match self.functions.get(f as usize) {
+            Some(function) => rule.at(self.instruction(function.at)),
+            None => rule.module(),
+        };
+        let mut samplings = Gathered::new(collect(facts.samplings.iter().copied())?, work);
+        for call in facts.arguments.chunk_by(|a, b| a.word == b.word) {
+            let Some(first) = call.first() else {
+                continue;
+            };
+            let Some(callee) = effective.get(first.callee as usize) else {
+                continue;
+            };
+            samplings.charge(callee.samplings.len()).map_err(at)?;
+            // A call's arguments are in its callee's parameters' order.
+            let through = |slot: u32| -> Option<u32> {
+                let Some(index) = self.parameter_index(first.callee, slot) else {
+                    return Some(slot);
+                };
+                let passed = call
+                    .binary_search_by_key(&index, |a| a.parameter as usize)
+                    .ok()?;
+                call.get(passed).map(|a| a.root.slot)
+            };
+            for &(image, sampler, forms) in &callee.samplings {
+                if self.parameter_index(first.callee, image).is_none()
+                    && self.parameter_index(first.callee, sampler).is_none()
+                {
+                    continue;
+                }
+                let resolved = through(image).zip(through(sampler)).ok_or(Refusal {
+                    word: first.word,
+                    rule: Rule::OpaqueUse,
+                })?;
+                samplings.add((resolved.0, resolved.1, forms)).map_err(at)?;
+            }
+        }
+        samplings.finish().map_err(at)
     }
 
     /// Which functions some call names, by index.
@@ -425,12 +499,13 @@ impl Validator<'_> {
         &self,
         index: usize,
         effective: &[Effective],
-        stamps: &mut [u32],
-        stamp: u32,
+        (stamps, stamp): (&mut [u32], u32),
+        work: &mut usize,
     ) -> Result<Reach, Rule> {
         let mut pending: Vec<u32> = Vec::new();
         push(&mut pending, u32::try_from(index).unwrap_or(NONE)).map_err(|r| r.rule)?;
         let mut globals: Vec<(u32, Access)> = Vec::new();
+        let mut samplings = Gathered::new(Vec::new(), work);
         let mut needs = Needs::NONE;
         while let Some(f) = pending.pop() {
             if core::mem::replace(stamps.get_mut(f as usize).ok_or(Rule::Call)?, stamp) == stamp {
@@ -439,6 +514,14 @@ impl Validator<'_> {
             if let Some(own) = effective.get(f as usize) {
                 for &entry in &own.globals {
                     push(&mut globals, entry).map_err(|r| r.rule)?;
+                }
+                samplings.charge(own.samplings.len())?;
+                // One through a parameter is its callers', resolved there.
+                let global = |slot: u32| self.parameter_index(f, slot).is_none();
+                for &entry in &own.samplings {
+                    if global(entry.0) && global(entry.1) {
+                        samplings.add(entry)?;
+                    }
                 }
             }
             if let Some(facts) = self.facts.get(f as usize) {
@@ -450,7 +533,11 @@ impl Validator<'_> {
         }
         globals.sort_unstable_by_key(|&(slot, _)| slot);
         fold(&mut globals);
-        Ok(Reach { globals, needs })
+        Ok(Reach {
+            globals,
+            samplings: samplings.finish()?,
+            needs,
+        })
     }
 
     /// The global variables an entry point's interface lists, by slot and
@@ -736,4 +823,59 @@ impl Validator<'_> {
             }
         )
     }
+}
+
+/// Samplings gathered under the module's sampling work, merged each time the
+/// list reaches twice the bound, so it never holds much past it.
+struct Gathered<'w> {
+    list: Vec<(u32, u32, SampleForms)>,
+    work: &'w mut usize,
+}
+
+impl<'w> Gathered<'w> {
+    const fn new(list: Vec<(u32, u32, SampleForms)>, work: &'w mut usize) -> Self {
+        Self { list, work }
+    }
+
+    /// Charge `examined` samplings to the module's work.
+    fn charge(&mut self, examined: usize) -> Result<(), Rule> {
+        *self.work = self.work.saturating_add(examined);
+        if *self.work > MAX_SAMPLING_WORK {
+            return Err(Rule::Limit(Limit::SamplingWork));
+        }
+        Ok(())
+    }
+
+    fn add(&mut self, sampling: (u32, u32, SampleForms)) -> Result<(), Rule> {
+        if self.list.len() >= 2 * MAX_SAMPLINGS {
+            self.merge()?;
+        }
+        push(&mut self.list, sampling).map_err(|refusal| refusal.rule)
+    }
+
+    fn merge(&mut self) -> Result<(), Rule> {
+        merge_samplings(&mut self.list);
+        if self.list.len() > MAX_SAMPLINGS {
+            return Err(Rule::Limit(Limit::Samplings));
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<Vec<(u32, u32, SampleForms)>, Rule> {
+        self.merge()?;
+        Ok(self.list)
+    }
+}
+
+/// Sort `samplings` and keep one of each pair of an image and a sampler, its
+/// forms all of theirs.
+fn merge_samplings(samplings: &mut Vec<(u32, u32, SampleForms)>) {
+    samplings.sort_unstable_by_key(|&(image, sampler, _)| (image, sampler));
+    samplings.dedup_by(|later, kept| {
+        let same = (later.0, later.1) == (kept.0, kept.1);
+        if same {
+            kept.2 = kept.2.with(later.2);
+        }
+        same
+    });
 }

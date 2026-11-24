@@ -68,10 +68,6 @@ pub const fn groups(width: u32, height: u32) -> [u32; 3] {
     [width.div_ceil(GROUP), height.div_ceil(GROUP), 1]
 }
 
-/// The oldest version every backend takes: the Vulkan 1.1 baseline, whose
-/// entry points name their inputs and outputs alone, never their resources.
-const VERSION: Version = Version { major: 1, minor: 3 };
-
 /// A pass being written: its module and the ids its body reads.
 pub(crate) struct Pass {
     b: Builder,
@@ -102,7 +98,9 @@ pub(crate) struct Place {
 impl Pass {
     /// A pass whose push constants are `fields` words.
     pub(crate) fn new(fields: usize) -> Result<Self, BuildError> {
-        let mut b = Builder::new(VERSION, 0)?;
+        // The oldest version, which every backend takes: its entry points name
+        // their inputs and outputs alone, never their resources.
+        let mut b = Builder::new(Version::OLDEST, 0)?;
         b.capability(Capability::SHADER)?;
         let (uint, boolean) = (b.int(32, false)?, b.boolean()?);
         let v3uint = b.vector(uint, 3)?;
@@ -191,6 +189,25 @@ impl Pass {
         })?;
         b.entry_point(ExecutionModel::GL_COMPUTE, main, "main", &[kit.global])?;
         b.execution_mode(main, ExecutionMode::LOCAL_SIZE, &[GROUP, GROUP, 1])?;
+        b.finish()
+    }
+}
+
+impl Pass {
+    /// The pass whose `main` is `body`, run by one invocation: a check of a
+    /// few words a command reads, never a picture.
+    pub(crate) fn finish_once<B>(self, body: B) -> Result<Admitted, BuildError>
+    where
+        B: FnOnce(&mut Function<'_>, &Kit) -> Result<(), BuildError>,
+    {
+        let Self { mut b, kit } = self;
+        let (void, main) = (b.void()?, b.id()?);
+        b.define(main, void, &[], |f, _| {
+            body(f, &kit)?;
+            f.emit(Op::RETURN, &[])
+        })?;
+        b.entry_point(ExecutionModel::GL_COMPUTE, main, "main", &[kit.global])?;
+        b.execution_mode(main, ExecutionMode::LOCAL_SIZE, &[1, 1, 1])?;
         b.finish()
     }
 }

@@ -75,7 +75,6 @@ use tairix_caps::CapabilitySet;
 use tairix_collections::{
     BitVec, OrderedMap, OrderedSet, RangeError, RangeKey, RangeMap, RangeSet, TryReserveError,
 };
-use tairix_kernel_ipc::senders::Endpoints;
 use tairix_kernel_ipc::EndpointId;
 use tairix_kernel_mem::vmm::FrozenAddressSpace;
 use tairix_kernel_mem::{
@@ -2756,8 +2755,8 @@ impl AddressSpaceRegistry {
         })
     }
 
-    /// Withdraw every task's per-endpoint grant naming any call endpoint in
-    /// `endpoints`, returning how many grants were revoked.
+    /// Withdraw every task's per-endpoint grant naming a call endpoint
+    /// `doomed` holds, returning how many grants were revoked.
     ///
     /// An [`HwResourceKind::Endpoint`] grant names an endpoint by its
     /// re-creatable numeric id, so a grant that survived its endpoint would
@@ -2768,15 +2767,12 @@ impl AddressSpaceRegistry {
     /// A single pass over the grant tables rather than a reverse index:
     /// teardown is a cold path, and an index would be a second source of truth
     /// whose drift would reopen exactly this hole.
-    pub fn revoke_endpoint_grants(&mut self, endpoints: &Endpoints) -> usize {
-        if endpoints.is_empty() {
-            return 0;
-        }
+    pub fn revoke_endpoint_grants(&mut self, doomed: impl Fn(EndpointId) -> bool) -> usize {
         let mut revoked = 0;
         for entry in self.grants.values_mut() {
             entry.by_handle.retain(|_, grant| {
                 let doomed = grant.resource.kind() == Some(HwResourceKind::Endpoint)
-                    && endpoints.contains(&EndpointId(grant.resource.base()));
+                    && doomed(EndpointId(grant.resource.base()));
                 revoked += usize::from(doomed);
                 !doomed
             });
@@ -6419,8 +6415,8 @@ mod tests {
             .unwrap();
         let mmio = reg.mint_grant(ProcessId(4), window()).unwrap();
 
-        let destroyed = endpoint_set(&[0xCA11_0001]);
-        assert_eq!(reg.revoke_endpoint_grants(&destroyed), 2);
+        let destroyed = |id| id == EndpointId(0xCA11_0001);
+        assert_eq!(reg.revoke_endpoint_grants(destroyed), 2);
 
         // Every holder of the destroyed endpoint lost it, whichever task.
         assert_eq!(reg.grant(ProcessId(2), holder_a), None);
@@ -6433,18 +6429,9 @@ mod tests {
             Some(HwResource::shared(0xCA11_0001))
         );
         assert_eq!(reg.grant(ProcessId(4), mmio), Some(window()));
-        // Idempotent, and an empty set is a no-op.
-        assert_eq!(reg.revoke_endpoint_grants(&destroyed), 0);
-        assert_eq!(reg.revoke_endpoint_grants(&endpoint_set(&[])), 0);
-    }
-
-    /// The endpoint set naming `ids`.
-    fn endpoint_set(ids: &[u64]) -> Endpoints {
-        let mut set = Endpoints::with_hasher(tairix_hash::BuildSipHash13::UNKEYED);
-        for &id in ids {
-            set.try_insert(EndpointId(id)).expect("room");
-        }
-        set
+        // Idempotent, and naming nothing is a no-op.
+        assert_eq!(reg.revoke_endpoint_grants(destroyed), 0);
+        assert_eq!(reg.revoke_endpoint_grants(|_| false), 0);
     }
 
     /// A handle number freed by revocation is never re-issued: the next
@@ -6456,7 +6443,10 @@ mod tests {
         let revoked = reg
             .mint_grant(ProcessId(2), HwResource::endpoint(0xCA11_0003))
             .unwrap();
-        assert_eq!(reg.revoke_endpoint_grants(&endpoint_set(&[0xCA11_0003])), 1);
+        assert_eq!(
+            reg.revoke_endpoint_grants(|id| id == EndpointId(0xCA11_0003)),
+            1
+        );
         let fresh = reg.mint_grant(ProcessId(2), window()).unwrap();
         assert_ne!(fresh, revoked);
         assert_eq!(reg.grant(ProcessId(2), revoked), None);

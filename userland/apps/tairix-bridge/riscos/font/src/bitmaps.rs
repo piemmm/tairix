@@ -18,6 +18,7 @@ use crate::units;
 use crate::x90y45;
 use tairix_riscos_kernel::os::{Fail, Os};
 use tairix_riscos_vdu::render::WHOLE;
+use tairix_util::divisor::gcd;
 
 /// The largest bitmap file read or made.
 pub(crate) const FILE_MOST: u32 = 16 << 20;
@@ -225,21 +226,14 @@ impl Ratio {
         if wanted <= 0 || held <= 0 {
             return None;
         }
-        let divisor = gcd(wanted, held);
+        let common = gcd(wanted.unsigned_abs(), held.unsigned_abs());
+        let divisor = i64::try_from(common).ok()?;
         let ratio = Self {
             wanted: wanted / divisor,
             held: held / divisor,
         };
         (ratio.wanted <= RATIO_MOST && ratio.held <= RATIO_MOST).then_some(ratio)
     }
-}
-
-/// The greatest common divisor of two numbers above nought.
-const fn gcd(mut a: i64, mut b: i64) -> i64 {
-    while b != 0 {
-        (a, b) = (b, a % b);
-    }
-    a
 }
 
 impl Scalable {

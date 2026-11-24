@@ -1,7 +1,10 @@
 //! The Draw file format's one definition (RISC OS PRM volume 4, appendix
-//! E): its header, its object types and their framing, the path elements
-//! the Draw module reads, and a path style's fields, with the walk every
-//! reader of a file's objects shares.
+//! E): its header, its object types, their framing and the fields of those
+//! RISC OS draws, the path elements the Draw module reads, a path style's
+//! fields and the stroke the format fixes, with the walk every reader of a
+//! file's objects shares.
+
+use tairix_util::endian::le_u32;
 
 /// What every Draw file begins with.
 pub const MAGIC: &[u8; 4] = b"Draw";
@@ -9,23 +12,55 @@ pub const MAGIC: &[u8; 4] = b"Draw";
 /// The format's major version, the one RISC OS writes and reads.
 pub const MAJOR_VERSION: u32 = 201;
 
+/// Where the header holds its major version.
+pub const HEADER_VERSION: usize = MAGIC.len();
+
 /// The header's length, in bytes: the magic, the two versions, the program's
 /// name and the drawing's bounds.
-pub const HEADER: usize = 40;
+pub const HEADER: usize = HEADER_BOUNDS + 2 * POINT;
 
 /// Where the header holds its bounds.
 pub const HEADER_BOUNDS: usize = 24;
 
+/// A point, in bytes: its x, then its y, each a signed word.
+pub const POINT: usize = 8;
+
+/// Where an object holds its size, after its type.
+pub const OBJECT_SIZE: usize = 4;
+
+/// The header of an object with no bounds, a font table, in bytes: its type
+/// and its size.
+pub const BARE_HEADER: usize = OBJECT_SIZE + 4;
+
+/// Where an object's header holds its bounds, after its type and size: its
+/// low corner, then its high one.
+pub const OBJECT_BOUNDS: usize = BARE_HEADER;
+
 /// An object's header, in bytes: its type, its size and its bounds.
-pub const OBJECT_HEADER: usize = 24;
+pub const OBJECT_HEADER: usize = OBJECT_BOUNDS + 2 * POINT;
 
-/// The header of an object with no bounds — a font table, the options — in
-/// bytes: its type and its size.
-pub const BARE_HEADER: usize = 8;
-
-/// A transformed object's matrix, in bytes: four entries of sixteen bits of
-/// fraction, then a translation in draw units.
+/// A transformed object's matrix, in bytes: four multipliers of
+/// [`FRACTION_BITS`] bits of fraction, then a translation in draw units.
 pub const MATRIX: usize = 24;
+
+/// The bits of fraction a matrix's multipliers hold.
+pub const FRACTION_BITS: u32 = 16;
+
+/// One, as a matrix's multipliers hold it.
+pub const FIXED_ONE: i32 = 1 << FRACTION_BITS;
+
+/// The matrix that leaves every point where it is, as its six words.
+pub const IDENTITY: [u32; 6] = {
+    let one = FIXED_ONE.cast_unsigned();
+    [one, 0, 0, one, 0, 0]
+};
+
+/// The six words of the matrix at `at` of `bytes`, each `None` where `bytes`
+/// end before it.
+#[must_use]
+pub fn matrix_words(bytes: &[u8], at: usize) -> [Option<u32>; 6] {
+    core::array::from_fn(|index| le_u32(bytes, at.checked_add(4 * index)?))
+}
 
 /// The colour word that stands for no colour at all.
 pub const NO_COLOUR: u32 = 0xFFFF_FFFF;
@@ -78,6 +113,32 @@ pub const LINE: u32 = 8;
 /// The bits of an element word its code is in; the rest are the client's.
 pub const TAG: u32 = 0xFF;
 
+/// Where an element's points begin, after the word its code is in; a
+/// continuation's address is there too.
+pub const ELEMENT_POINTS: usize = 4;
+
+/// How many points follow the code of element `tag` — three for a curve, one
+/// for a move, a gap or a line, none for a close or the end — or `None` for a
+/// continuation, which an address follows, and a code that names no element.
+#[must_use]
+pub const fn element_points(tag: u32) -> Option<usize> {
+    match tag {
+        END | CLOSE_WITH_GAP | CLOSE => Some(0),
+        MOVE | MOVE_UNWOUND | GAP | LINE => Some(1),
+        CURVE => Some(3),
+        _ => None,
+    }
+}
+
+/// The bytes element `tag` takes: its code's word and its points.
+#[must_use]
+pub const fn element_bytes(tag: u32) -> Option<usize> {
+    match element_points(tag) {
+        Some(points) => Some(ELEMENT_POINTS + POINT * points),
+        None => None,
+    }
+}
+
 /// The two bits a path style holds a join or a cap in.
 pub const CODE: u32 = 0b11;
 
@@ -115,29 +176,86 @@ pub const TRIANGLE_LENGTH_SHIFT: u32 = 24;
 /// sixteenths of the line's width.
 pub const TRIANGLE_SIZE: u32 = 0xFF;
 
-/// A path object's fields before its path: fill and outline colours, the
-/// outline's width and the style, then a dash pattern where the style says.
-pub const PATH_FIELDS: usize = 16;
+/// The parts of its line's width a triangle cap's sizes are counted in.
+pub const TRIANGLE_UNIT: u32 = 16;
+
+/// The mitre limit every path is stroked with, in line widths: PostScript's
+/// default, which the format fixes.
+pub const MITRE_LIMIT: u32 = 10;
+
+/// Where a path object holds its fill colour; its outline colour, the
+/// outline's width and its style follow, a word each.
+pub const PATH_FILL: usize = OBJECT_HEADER;
+/// Where a path object holds its outline colour.
+pub const PATH_OUTLINE: usize = PATH_FILL + 4;
+/// Where a path object holds its outline's width, in draw units.
+pub const PATH_WIDTH: usize = PATH_OUTLINE + 4;
+/// Where a path object holds its style.
+pub const PATH_STYLE: usize = PATH_WIDTH + 4;
+/// Where a path object holds its dash pattern, where its style is
+/// [`DASHED`]; its path follows the pattern, or begins here without one.
+pub const PATH_DASHES: usize = PATH_STYLE + 4;
+
+/// Where a dash pattern holds how many lengths it has, after the distance
+/// into the pattern a stroke starts at.
+pub const DASH_COUNT: usize = 4;
+/// Where a dash pattern's lengths begin, a word each.
+pub const DASH_LENGTHS: usize = DASH_COUNT + 4;
+
+/// The bytes a dash pattern of `count` lengths takes, or `None` past a
+/// `usize`.
+#[must_use]
+pub fn dash_pattern_bytes(count: usize) -> Option<usize> {
+    count.checked_mul(4)?.checked_add(DASH_LENGTHS)
+}
 
 /// A group's name, padded with spaces, in bytes.
 pub const GROUP_NAME: usize = 12;
 
+/// Where a group's objects begin, after its name.
+pub const GROUP_OBJECTS: usize = OBJECT_HEADER + GROUP_NAME;
+
+/// Where a tagged object's object begins, after its tag; the tag's data
+/// follows the object.
+pub const TAGGED_OBJECT: usize = OBJECT_HEADER + 4;
+
+/// Where a text holds its colour; its background colour, its style, its sizes
+/// and its base point follow, then its characters, ended by a zero. A
+/// transformed text holds each [`TRANSFORMED_TEXT_FIELDS`] further on.
+pub const TEXT_COLOUR: usize = OBJECT_HEADER;
+/// Where a text holds the colour it is anti-aliased against.
+pub const TEXT_BACKGROUND: usize = TEXT_COLOUR + 4;
+/// Where a text holds its style, its font's number in [`FONT_NUMBER`].
+pub const TEXT_STYLE: usize = TEXT_BACKGROUND + 4;
+/// Where a text holds its sizes, across then up, in draw units.
+pub const TEXT_SIZES: usize = TEXT_STYLE + 4;
+/// Where a text holds its base point, its baseline's start.
+pub const TEXT_BASE: usize = TEXT_SIZES + 8;
+/// Where a text's characters begin.
+pub const TEXT_CHARACTERS: usize = TEXT_BASE + POINT;
+
 /// The bits of a text style its font number is in.
 pub const FONT_NUMBER: u32 = 0xFF;
 
-/// The word at `at` in `bytes`.
-#[must_use]
-pub fn word(bytes: &[u8], at: usize) -> Option<u32> {
-    let end = at.checked_add(4)?;
-    let four = bytes.get(at..end)?;
-    Some(u32::from_le_bytes([four[0], four[1], four[2], four[3]]))
-}
+/// Where a transformed text holds its flags, after its matrix.
+pub const TRANSFORMED_TEXT_FLAGS: usize = OBJECT_HEADER + MATRIX;
+/// What a transformed text holds ahead of a text's fields: its matrix and
+/// its flags.
+pub const TRANSFORMED_TEXT_FIELDS: usize = MATRIX + 4;
+/// A transformed text's flag that kerns it.
+pub const KERNED: u32 = 1;
+/// A transformed text's flag that sets it from right to left.
+pub const RIGHT_TO_LEFT: u32 = 1 << 1;
 
-/// The signed word at `at` in `bytes`.
-#[must_use]
-pub fn int(bytes: &[u8], at: usize) -> Option<i32> {
-    word(bytes, at).map(u32::cast_signed)
-}
+/// Where a JPEG object holds its width and height, in draw units; its dots
+/// to the inch across and up follow, then its matrix.
+pub const JPEG_SIZES: usize = OBJECT_HEADER;
+/// Where a JPEG object holds its matrix.
+pub const JPEG_MATRIX: usize = JPEG_SIZES + 16;
+/// Where a JPEG object holds its data's length, after its matrix.
+pub const JPEG_LENGTH: usize = JPEG_MATRIX + MATRIX;
+/// Where a JPEG object's data begins: the JPEG itself.
+pub const JPEG_DATA: usize = JPEG_LENGTH + 4;
 
 /// One object of a file: its type, where it starts in the file, and all its
 /// bytes, header and all.
@@ -182,8 +300,8 @@ impl<'a> Iterator for Objects<'a> {
         if self.bytes.is_empty() {
             return None;
         }
-        let framed = word(self.bytes, 0)
-            .zip(word(self.bytes, 4))
+        let framed = le_u32(self.bytes, 0)
+            .zip(le_u32(self.bytes, OBJECT_SIZE))
             .and_then(|(kind, size)| {
                 let size = usize::try_from(size).ok()?;
                 (size >= BARE_HEADER && size % 4 == 0 && size <= self.bytes.len())
@@ -245,9 +363,48 @@ mod tests {
     }
 
     #[test]
-    fn a_word_past_the_bytes_is_none() {
-        assert_eq!(word(&[1, 2, 3], 0), None);
-        assert_eq!(word(&[1, 0, 0, 0], usize::MAX), None);
-        assert_eq!(int(&[0xFF; 4], 0), Some(-1));
+    fn the_fields_lie_where_the_format_puts_them() {
+        assert_eq!((HEADER, OBJECT_HEADER, OBJECT_BOUNDS), (40, 24, 8));
+        assert_eq!((TEXT_STYLE, TEXT_CHARACTERS), (32, 52));
+        assert_eq!((TRANSFORMED_TEXT_FLAGS, TRANSFORMED_TEXT_FIELDS), (48, 28));
+        assert_eq!((PATH_DASHES, JPEG_MATRIX, JPEG_DATA), (40, 40, 68));
+    }
+
+    #[test]
+    fn each_element_takes_its_code_and_its_points() {
+        for (tag, bytes) in [
+            (END, 4),
+            (MOVE, 12),
+            (MOVE_UNWOUND, 12),
+            (CLOSE_WITH_GAP, 4),
+            (CLOSE, 4),
+            (CURVE, 28),
+            (GAP, 12),
+            (LINE, 12),
+        ] {
+            assert_eq!(element_bytes(tag), Some(bytes), "{tag}");
+        }
+        for tag in [CONTINUATION, LINE + 1, TAG] {
+            assert_eq!(element_points(tag), None, "{tag}");
+            assert_eq!(element_bytes(tag), None, "{tag}");
+        }
+    }
+
+    #[test]
+    fn a_matrix_word_past_the_bytes_is_none() {
+        let bytes = words(&[0, 1, 2, 3, 4, 5, 6]);
+        let read = |at| matrix_words(&bytes, at);
+        assert_eq!(read(4), [1, 2, 3, 4, 5, 6].map(Some));
+        assert_eq!(read(12), [Some(3), Some(4), Some(5), Some(6), None, None]);
+        assert_eq!(read(usize::MAX), [None; 6]);
+        assert_eq!(IDENTITY, [0x1_0000, 0, 0, 0x1_0000, 0, 0]);
+    }
+
+    #[test]
+    fn a_dash_pattern_is_its_header_and_a_word_a_length() {
+        assert_eq!(dash_pattern_bytes(0), Some(8));
+        assert_eq!(dash_pattern_bytes(3), Some(20));
+        assert_eq!(dash_pattern_bytes(usize::MAX / 4), None);
+        assert_eq!(dash_pattern_bytes(usize::MAX), None);
     }
 }

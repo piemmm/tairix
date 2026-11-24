@@ -133,7 +133,10 @@ pub use glyph_cache::{
     GLYPH_CACHE_ENTRY_METADATA_BYTES,
 };
 #[cfg(feature = "outlines")]
-pub use outline::{FaceMetrics, OutlineReply, OwnedContour, OwnedOutline, OwnedSegment};
+pub use outline::{
+    ask_outlines, page_outlines, FaceMetrics, OutlineReply, OwnedContour, OwnedOutline,
+    OwnedSegment,
+};
 #[cfg(feature = "render")]
 pub use outline_cache::{
     outline_cache_budget, outline_cache_candidate, CachedOutline, OutlineCache, OutlineKey,
@@ -141,7 +144,7 @@ pub use outline_cache::{
 #[cfg(feature = "render")]
 pub use shadow::{KeptShadow, TextShadow};
 #[cfg(feature = "svg")]
-pub use svgfont::{seam_outlines, ServiceFonts};
+pub use svgfont::{seam_metrics, seam_outlines, wire_face, ServiceFonts, FACE_PROBE};
 #[cfg(feature = "render")]
 pub use tairix_abi::font_ipc::{
     FamilyEntry, FamilyKey, FamilyKind, FontMetrics, FontStretch, FontStyle, FontWeight,

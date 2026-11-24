@@ -42,7 +42,7 @@ const CUTOFF: u32 = 0xFF;
 const DROP_REDUNDANT: u32 = 1 << 8;
 /// The resolution RISC OS 5 gives a RISC OS 5 word it rewrites in RISC OS
 /// 3.5's form, whatever its eigen factors: the standard screen's.
-const RO35_DPI: u32 = super::format::STANDARD_DPI;
+const RO35_DPI: u32 = tairix_image::STANDARD_SPRITE_DPI;
 /// A value wholly opaque.
 const OPAQUE: u8 = 0xFF;
 

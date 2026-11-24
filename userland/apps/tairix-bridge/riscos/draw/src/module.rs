@@ -14,14 +14,16 @@ use tairix_riscos_arm::psr;
 use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::filing::filetype;
 use tairix_riscos_kernel::module::{Builtin, Resource, Swis, VectorDefault, SWI_OUT_OF_RANGE};
+use tairix_riscos_kernel::mouse::Bounds;
 use tairix_riscos_kernel::msgtrans::{Own, OwnFile};
 use tairix_riscos_kernel::os::{Entry, Fail, Os, Regs, World};
 use tairix_riscos_kernel::swi::chunk;
 use tairix_riscos_kernel::vectors;
 
 use crate::fill::Surface;
-use crate::process::{self, flag, Call, Clip, PLOTTED};
-use crate::raster::Window;
+use crate::process::special::{COUNT, FILL, FILL_EACH};
+use crate::process::{self, flag, Call, Clip, NO_DASH, PLOTTED};
+use crate::raster::class;
 use crate::stage::{Guest, Refusal, Span, Stop};
 
 /// Its SWIs, in their chunk's order.
@@ -70,10 +72,10 @@ const MESSAGES: &[u8] = include_bytes!("../resources/Draw/Messages");
 const MESSAGES_FILE: OwnFile = OwnFile::named(b"Resources:$.Resources.Draw.Messages\0");
 
 /// The fill styles a call gives for nought: a fill's, the thinnest line's
-/// and a thick line's.
-pub(crate) const FILL_STYLE: u32 = 0x30;
-const THIN_STYLE: u32 = 0x18;
-const THICK_STYLE: u32 = 0x30;
+/// and a thick line's, which fills as a fill does.
+pub(crate) const FILL_STYLE: u32 = class::INTERIOR_BOUNDARY | class::INTERIOR;
+const THIN_STYLE: u32 = class::EXTERIOR_BOUNDARY | class::INTERIOR_BOUNDARY;
+const THICK_STYLE: u32 = FILL_STYLE;
 /// The style bits the convenience calls take; a stroke's top bit plots its
 /// subpaths all at once.
 const STYLE_BITS: u32 = 0xFF;
@@ -81,13 +83,6 @@ const ALL_AT_ONCE: u32 = 1 << 31;
 /// R5 of the clipped fill's second call, which RISC OS sets with R4 its
 /// workspace.
 const CLIP_WORDS: u32 = 12;
-
-/// R6 for a call that dashes nothing: a fill, or a path transformed.
-const NO_DASH: u32 = 0;
-/// R7's values for a fill, a fill a subpath at a time, and a count.
-const FILL: u32 = 1;
-const FILL_EACH: u32 = 2;
-const COUNT: u32 = 3;
 
 /// The Draw module.
 pub(crate) static DRAW: Builtin = Builtin {
@@ -194,7 +189,7 @@ fn vector(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 }
 
 /// The error a refusal raises, in Draw's words with RISC OS's numbers.
-const fn error_of(refusal: Refusal) -> Error {
+pub(crate) const fn error_of(refusal: Refusal) -> Error {
     let (number, token) = match refusal {
         Refusal::Reserved => (0x982, "Reserved"),
         Refusal::BadElement => (0x984, "BadElement"),
@@ -251,7 +246,7 @@ fn surface(os: &mut Os<'_>) -> Surface {
         None => Surface {
             eig: (0, 0),
             origin: (0, 0),
-            window: Window {
+            window: Bounds {
                 left: 0,
                 bottom: 0,
                 right: -1,
@@ -422,9 +417,7 @@ fn transform_path(os: &mut Os<'_>, regs: &mut Regs, fp: bool) -> Result<(), Fail
 /// The clip block at `at`: its path, fill style and matrix.
 fn clip_block(os: &mut Os<'_>, at: u32) -> Result<[u32; 3], Fail> {
     let mut words = [0; 3];
-    for (i, word) in (0u32..).zip(&mut words) {
-        *word = os.read_word(at.wrapping_add(4 * i))?;
-    }
+    os.read_words(at, &mut words)?;
     Ok(words)
 }
 

@@ -190,6 +190,39 @@ struct QemuTest {
     expect: Expect,
 }
 
+impl QemuTest {
+    /// What a run of it is called in its labels and refusals.
+    const fn name(&self) -> RunName<'_> {
+        RunName(self)
+    }
+}
+
+/// What a run of an enrolment is called: its binary, and where other
+/// enrolments run the same binary, the key its sidecar files carry, so a
+/// refusal names the one run it describes and the files it left.
+#[derive(Copy, Clone)]
+pub(crate) struct RunName<'t>(&'t QemuTest);
+
+impl std::fmt::Display for RunName<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.binary)?;
+        match shared_slot(self.0) {
+            Some(slot) => write!(f, " [s{slot}]"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Where `t` stands among the enrolments, where another runs its binary too.
+fn shared_slot(t: &QemuTest) -> Option<usize> {
+    let shared = TESTS.iter().filter(|e| e.binary == t.binary).count() > 1;
+    if shared {
+        TESTS.iter().position(|e| std::ptr::eq(e, t))
+    } else {
+        None
+    }
+}
+
 /// The verdict an enrolment must reach.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Expect {
@@ -204,17 +237,21 @@ enum Expect {
 
 /// Whether a run that must stop on its kernel's fatal record did, and the
 /// record names every field `fields` lists.
-fn fatal_verdict(package: &str, fields: &[&str], outcome: &Outcome) -> Result<(), String> {
+fn fatal_verdict(
+    run: impl std::fmt::Display,
+    fields: &[&str],
+    outcome: &Outcome,
+) -> Result<(), String> {
     let Outcome::Fatal { record, .. } = outcome else {
         return Err(format!(
-            "test --qemu ({package}) FAILED: the guest never wrote its kernel's fatal record\n--- serial ---\n{}\n--- end ---",
+            "test --qemu ({run}) FAILED: the guest never wrote its kernel's fatal record\n--- serial ---\n{}\n--- end ---",
             outcome.serial()
         ));
     };
     match fields.iter().find(|field| !record.contains(**field)) {
         None => Ok(()),
         Some(missing) => Err(format!(
-            "test --qemu ({package}) FAILED: the fatal record does not name `{missing}`: {record}"
+            "test --qemu ({run}) FAILED: the fatal record does not name `{missing}`: {record}"
         )),
     }
 }
@@ -1983,6 +2020,32 @@ const DMA_TRANSLATION_RISCV64: QemuTest = QemuTest {
     package: "tairix-test-dma-translation-qemu-riscv64",
     binary: "tairix-test-dma-translation-qemu-riscv64",
     ..AUTOLOAD_INPUT_RISCV64
+};
+
+/// The Venus vertical on its `q35` board, which [`TESTS`] runs on three
+/// boards: with no unit, behind one translating the GPU, and beside one its
+/// PCI host bypasses.
+const VENUS_ON_Q35: QemuTest = QemuTest {
+    package: "tairix-test-virtio-gpu-venus-qemu-x86-64",
+    binary: "tairix-test-virtio-gpu-venus-qemu-x86-64",
+    target: X86_64_TARGET,
+    cpus: 1,
+    timeout: Duration::from_secs(300),
+    ram_mib: None,
+    disk_sectors: None,
+    netstack_peer: NetPeerMode::None,
+    display: VENUS_GPU,
+    crypto: false,
+    fs_disk: FsDisk::VenusRootDisk,
+    rtc_base: None,
+    keyboard: None,
+    typed_keys: &[],
+    screendumps: &[],
+    pointer_script: None,
+    bounded_pointer_script: false,
+    cpu: None,
+    serial: &[],
+    expect: Expect::Pass,
 };
 
 /// An enrolment [`TESTS`] runs twice, the second time with its input
@@ -11503,27 +11566,19 @@ static TESTS: &[QemuTest] = &[
     // own verdict that contexts, blobs and their mappings were made and let
     // go, a blob's second mapping read what its first wrote, and the driver's
     // Venus backend agreed with the software device.
+    VENUS_ON_Q35,
+    // `plans/GPU.md` GP11.3 (`dma_translation_gates`): behind a VT-d unit
+    // translating the GPU, whose channel is served and the check passes as
+    // above; and declaring a virtio-iommu the PCI host bypasses, whose
+    // channel the kernel refuses, audited, the check reporting the GPU
+    // unserved once the device's 3D work has run.
     QemuTest {
-        package: "tairix-test-virtio-gpu-venus-qemu-x86-64",
-        binary: "tairix-test-virtio-gpu-venus-qemu-x86-64",
-        target: X86_64_TARGET,
-        cpus: 1,
-        timeout: Duration::from_secs(300),
-        ram_mib: None,
-        disk_sectors: None,
-        netstack_peer: NetPeerMode::None,
-        display: VENUS_GPU,
-        crypto: false,
-        fs_disk: FsDisk::VenusRootDisk,
-        rtc_base: None,
-        keyboard: None,
-        typed_keys: &[],
-        screendumps: &[],
-        pointer_script: None,
-        bounded_pointer_script: false,
-        cpu: None,
-        serial: &[],
-        expect: Expect::Pass,
+        binary: "tairix-test-virtio-gpu-venus-vtd-qemu-x86-64",
+        ..VENUS_ON_Q35
+    },
+    QemuTest {
+        binary: "tairix-test-virtio-gpu-venus-unconfined-qemu-x86-64",
+        ..VENUS_ON_Q35
     },
     // `plans/NETWORK.md` N4e-riscv64 (first stage): the riscv64
     // driver-loading-by-discovery autoload vertical — the `virt`-board
@@ -12432,9 +12487,9 @@ const AARCH64_TARGET: &str = PieArch::Aarch64.target_triple();
 /// Target of the x86_64 enrolments.
 const X86_64_TARGET: &str = PieArch::X86_64.target_triple();
 
-/// The enrolments selected by an optional `--only` package-substring
-/// filter: every test whose package name contains `only`, or the whole
-/// table when no filter is given.
+/// The enrolments selected by an optional `--only` substring filter: every
+/// test whose package or binary name contains `only`, or the whole table
+/// when no filter is given.
 ///
 /// An empty selection is refused rather than silently running nothing — a
 /// mistyped filter must fail loudly, never report a vacuous green run.
@@ -12442,13 +12497,13 @@ fn enrolled(only: Option<&str>) -> Result<Vec<&'static QemuTest>, String> {
     let selected: Vec<&'static QemuTest> = match only {
         Some(needle) => TESTS
             .iter()
-            .filter(|t| t.package.contains(needle))
+            .filter(|t| t.package.contains(needle) || t.binary.contains(needle))
             .collect(),
         None => TESTS.iter().collect(),
     };
     if selected.is_empty() {
         return Err(format!(
-            "test --qemu: `--only {}` matches no enrolled package",
+            "test --qemu: `--only {}` matches no enrolled package or binary",
             only.unwrap_or_default()
         ));
     }
@@ -12604,7 +12659,7 @@ pub fn run_once(ctx: &Context, only: Option<&str>) -> Result<(), String> {
     let jobs: Vec<Job> = selected
         .into_iter()
         .map(|t| {
-            let label = format!("test --qemu (run {}) cpus={}", t.package, t.cpus);
+            let label = format!("test --qemu (run {}) cpus={}", t.name(), t.cpus);
             let weight = qemu_job_weight(t.cpus, budget);
             let target_dir = target_dir.clone();
             let stores = stores_for(ctx, t)?;
@@ -12629,8 +12684,8 @@ pub fn run_once(ctx: &Context, only: Option<&str>) -> Result<(), String> {
 /// per-repetition job factory can capture it freely.
 #[derive(Copy, Clone)]
 pub(crate) struct Enrolment {
-    /// Cargo package name, used to label the flake-hunt jobs.
-    pub package: &'static str,
+    /// What its runs are called, which labels the flake-hunt jobs.
+    pub name: RunName<'static>,
     /// Emulated-CPU count; the concurrency runner's per-job weight, so
     /// concurrent replicas of this test never oversubscribe the host.
     pub cpus: u32,
@@ -12679,7 +12734,7 @@ pub(crate) fn enrolments() -> Vec<Enrolment> {
     TESTS
         .iter()
         .map(|t| Enrolment {
-            package: t.package,
+            name: t.name(),
             cpus: t.cpus,
             test: t,
         })
@@ -12707,7 +12762,7 @@ fn root_disk_bytes(
                 t.fs_disk.root_sectors(),
                 protection,
             )
-            .map_err(|e| format!("test --qemu ({}): build root image: {e:?}", t.package))
+            .map_err(|e| format!("test --qemu ({}): build root image: {e:?}", t.name()))
         })
     })
 }
@@ -12730,7 +12785,7 @@ fn library_plant(
         tairix_mkimage::library::library_catalog(files).map_err(|e| {
             format!(
                 "test --qemu ({}): derive program-library catalog: {e:?}",
-                t.package
+                t.name()
             )
         })
     })?;
@@ -12746,7 +12801,7 @@ fn root_volume_components(t: &QemuTest, path: &str) -> Result<Vec<String>, Strin
     let relative = path.strip_prefix('/').ok_or_else(|| {
         format!(
             "test --qemu ({}): root-volume plant path {path} is not absolute",
-            t.package
+            t.name()
         )
     })?;
     Ok(relative.split('/').map(String::from).collect())
@@ -12813,7 +12868,7 @@ fn sound_plant(t: &QemuTest) -> Result<Option<(Vec<String>, String)>, String> {
     {
         return Err(format!(
             "test --qemu ({}): the sound registry will not turn `{refused}` off",
-            t.package
+            t.name()
         ));
     }
     let components = root_volume_components(t, tairix_soundtheme::MACHINE_SETTINGS)?;
@@ -12916,7 +12971,7 @@ fn user_saver_plants(
     if t.fs_disk != FsDisk::ScreensaverRootDisk {
         return Ok(Vec::new());
     }
-    let fail = |what: String| format!("test --qemu ({}): {what}", t.package);
+    let fail = |what: String| format!("test --qemu ({}): {what}", t.name());
     let (template, savers) = user_saver_manifests().map_err(fail)?;
     let template_dir = template.bundle_dir();
     let run_at = [
@@ -13173,7 +13228,7 @@ const CAPTURE_RECORDING_DUMP: &str = "capture-recording";
 /// cursor plane, which QEMU's dump of that board leaves out: there the still
 /// is held to the dump off the pointer too, and must show a pointer on it.
 fn assert_still_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
-    let fail = |what: String| format!("test --qemu ({}): capture: {what}", t.package);
+    let fail = |what: String| format!("test --qemu ({}): capture: {what}", t.name());
     let (dump, image) = capture_dump_and_disk(t, path, CAPTURE_SCREEN_DUMP)?;
     let still = kept_still(&image, (dump.width, dump.height)).map_err(fail)?;
     let mut differing = 0usize;
@@ -13211,7 +13266,7 @@ fn assert_still_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(
 /// account's Desktop, decoded as a player decodes it, is the screen it
 /// recorded off the bar as closely as the codec keeps it.
 fn assert_recording_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
-    let fail = |what: String| format!("test --qemu ({}): capture: {what}", t.package);
+    let fail = |what: String| format!("test --qemu ({}): capture: {what}", t.name());
     let (dump, image) = capture_dump_and_disk(t, path, CAPTURE_RECORDING_DUMP)?;
     let recorded = kept_recording(&image, (dump.width, dump.height)).map_err(fail)?;
     let (mut squared, mut samples) = (0u64, 0u64);
@@ -13251,7 +13306,7 @@ fn capture_dump_and_disk(
     let image = std::fs::read(&disk).map_err(|e| {
         format!(
             "test --qemu ({}): capture: read {}: {e}",
-            t.package,
+            t.name(),
             disk.display()
         )
     })?;
@@ -13469,7 +13524,7 @@ fn disk_image_plants(t: &QemuTest) -> Result<Vec<RootPlant>, String> {
         return Ok(Vec::new());
     }
     let fail = |what: &str, err: tairix_abi::DriverError| {
-        format!("test --qemu ({}): {what}: {err:?}", t.package)
+        format!("test --qemu ({}): {what}: {err:?}", t.name())
     };
     let device = |sectors| {
         tairix_mkimage::device::MemBlock::new(sectors).map_err(|err| fail("an image's device", err))
@@ -13693,7 +13748,8 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
     let arch = PieArch::from_target_triple(t.target).ok_or_else(|| {
         format!(
             "test --qemu ({}): target {} is not a freestanding cross-compile target",
-            t.package, t.target
+            t.name(),
+            t.target
         )
     })?;
     // Every QEMU vertical boots a `debug`-profile image (its kernel is the
@@ -13964,9 +14020,9 @@ fn optical_disc(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Resu
     }
     let disc = |ext: &str, image: Vec<u8>| -> Result<PathBuf, String> {
         let path = sidecar_path(kernel, t, replica, ext);
-        remove_stale_sidecar(t.package, "optical disc", &path)?;
+        remove_stale_sidecar(t.name(), "optical disc", &path)?;
         std::fs::write(&path, image)
-            .map_err(|e| format!("test --qemu ({}): write {}: {e}", t.package, path.display()))?;
+            .map_err(|e| format!("test --qemu ({}): write {}: {e}", t.name(), path.display()))?;
         Ok(path)
     };
     let first = disc("riscos.iso", tairix_test_iso9660_image::riscos_disc())?;
@@ -13997,9 +14053,9 @@ fn twin_sticks(
     let image = tairix_test_fat32_image::build_labelled_image(&tairix_test_twins::LABEL);
     for (index, serial) in TWIN_STICK_SERIALS.into_iter().enumerate() {
         let path = sidecar_path(kernel, t, replica, &format!("stick{index}.img"));
-        remove_stale_sidecar(t.package, "twin stick", &path)?;
+        remove_stale_sidecar(t.name(), "twin stick", &path)?;
         std::fs::write(&path, &image)
-            .map_err(|e| format!("test --qemu ({}): write {}: {e}", t.package, path.display()))?;
+            .map_err(|e| format!("test --qemu ({}): write {}: {e}", t.name(), path.display()))?;
         spec = spec.with_usb_stick(path, serial);
     }
     Ok(spec)
@@ -14028,12 +14084,10 @@ fn twin_sticks(
 fn sidecar_path(kernel: &Path, t: &QemuTest, replica: usize, ext: &str) -> PathBuf {
     use std::fmt::Write as _;
 
-    let shared = TESTS.iter().filter(|e| e.binary == t.binary).count() > 1;
     let mut name = String::new();
-    if shared {
-        let idx = TESTS.iter().position(|e| std::ptr::eq(e, t)).unwrap_or(0);
+    if let Some(slot) = shared_slot(t) {
         // Writing into a `String` is infallible.
-        let _ = write!(name, "s{idx}.");
+        let _ = write!(name, "s{slot}.");
     }
     if replica > 0 {
         let _ = write!(name, "r{replica}.");
@@ -14083,7 +14137,7 @@ fn run_one(
             .map(tairix_itest_witness::sector0_byte)
             .collect();
         tairix_qemu::disk::plant_raw_disk(&image, sectors, &[(0, &sector0)])
-            .map_err(|e| format!("test --qemu ({}): plant backing disk: {e}", t.package))?;
+            .map_err(|e| format!("test --qemu ({}): plant backing disk: {e}", t.name()))?;
         spec = spec.with_virtio_blk(&image);
     }
 
@@ -14101,7 +14155,7 @@ fn run_one(
             .map(|(lba, chunk)| (lba as u64, chunk))
             .collect();
         tairix_qemu::disk::plant_raw_disk(&image, fs.total_sectors, &planted)
-            .map_err(|e| format!("test --qemu ({}): plant filesystem disk: {e}", t.package))?;
+            .map_err(|e| format!("test --qemu ({}): plant filesystem disk: {e}", t.name()))?;
         spec = spec.with_virtio_blk(&image);
     }
 
@@ -14160,7 +14214,7 @@ fn assert_desktop_wallpaper(
         return Err(format!(
             "test --qemu ({}): screendump {} is {}x{}, but the desktop's wallpaper was \
              recomputed for a {}x{} screen",
-            t.package,
+            t.name(),
             path.display(),
             image.width,
             image.height,
@@ -14194,7 +14248,7 @@ fn assert_wallpaper_points(
         return Err(format!(
             "test --qemu ({}): screendump {} leaves only {} sampleable wallpaper points \
              (expected >= {MIN_SAMPLES})",
-            t.package,
+            t.name(),
             path.display(),
             samples.len(),
         ));
@@ -14204,14 +14258,14 @@ fn assert_wallpaper_points(
             format!(
                 "test --qemu ({}): screendump {}: sample point ({x}, {y}) is outside the \
                  recomputed wallpaper",
-                t.package,
+                t.name(),
                 path.display(),
             )
         })?;
         let pixel = image.pixel(x, y).map_err(|e| {
             format!(
                 "test --qemu ({}): screendump {} lacks the sampled desktop point ({x}, {y}): {e}",
-                t.package,
+                t.name(),
                 path.display(),
             )
         })?;
@@ -14219,7 +14273,7 @@ fn assert_wallpaper_points(
             return Err(format!(
                 "test --qemu ({}): screendump {} is not the composited desktop: ({x}, {y}) is \
                  {pixel:?}, but the desktop's own wallpaper draws {expected:?} there",
-                t.package,
+                t.name(),
                 path.display(),
             ));
         }
@@ -14805,7 +14859,7 @@ fn assert_wintersun_sized_witness(
         found => Err(format!(
             "test --qemu ({}): size-state witness {ordinal} is {found:?}, expected {expected:?} \
              (the game's one window, at the extent the window manager gives it, composited)",
-            t.package
+            t.name()
         )),
     }
 }
@@ -14940,7 +14994,7 @@ fn assert_wintersun_scene(
     if compared == 0 {
         return Err(format!(
             "test --qemu ({}): {} compared no pixel of the game's client",
-            t.package,
+            t.name(),
             path.display()
         ));
     }
@@ -14955,7 +15009,7 @@ fn assert_wintersun_scene(
     Err(format!(
         "test --qemu ({}): {} differs from the reference scene at {} of {compared} pixels of \
          the game's {}x{} client at ({}, {}): {}",
-        t.package,
+        t.name(),
         path.display(),
         differing.len(),
         client.width,
@@ -15008,7 +15062,9 @@ fn assert_wintersun_fullscreen_screendump(
     if window.fullscreen != screen {
         return Err(format!(
             "test --qemu ({}): fullscreen gave a {:?} client on a {:?} scan-out",
-            t.package, window.fullscreen, screen
+            t.name(),
+            window.fullscreen,
+            screen
         ));
     }
     assert_wintersun_scene(
@@ -15051,7 +15107,7 @@ fn assert_wintersun_restored_screendump(
                 return Err(format!(
                     "test --qemu ({}): restoring from fullscreen changed ({x},{y}) from {was:?} \
                      to {is:?}; the window must come back decorated where it opened",
-                    t.package
+                    t.name()
                 ));
             }
         }
@@ -15077,7 +15133,9 @@ fn assert_wintersun_maximized_screendump(
     if window.maximized.outer != window.work_area {
         return Err(format!(
             "test --qemu ({}): maximising gave a {:?} window on a {:?} work area",
-            t.package, window.maximized.outer, window.work_area
+            t.name(),
+            window.maximized.outer,
+            window.work_area
         ));
     }
     let image = read_screendump(t, path)?;
@@ -15242,7 +15300,7 @@ fn assert_cinder_reference_screendump(
     } else {
         Err(format!(
             "test --qemu ({}): {} is {}x{}, not the {}x{} scan-out",
-            t.package,
+            t.name(),
             path.display(),
             image.width,
             image.height,
@@ -15265,7 +15323,7 @@ fn assert_cinder_reference_screendump(
 fn assert_cinder_loose_screendump(t: &QemuTest, path: &Path, serial: &str) -> Result<(), String> {
     use tairix_geometry::{Point, Rect};
 
-    let fail = |what: String| format!("test --qemu ({}): {what}", t.package);
+    let fail = |what: String| format!("test --qemu ({}): {what}", t.name());
     cinder_layer_witnessed(serial).map_err(fail)?;
     let scene = cinder_scene();
     let clicks = cinder_clicks()?;
@@ -15411,9 +15469,9 @@ fn sibling_sidecar(path: &Path, own: &str, sibling: &str) -> Result<PathBuf, Str
 /// Read and fully decode a dumped scan-out image.
 fn read_screendump(t: &QemuTest, path: &Path) -> Result<tairix_qemu::screendump::Image, String> {
     let bytes = std::fs::read(path)
-        .map_err(|e| format!("test --qemu ({}): read screendump: {e}", t.package))?;
+        .map_err(|e| format!("test --qemu ({}): read screendump: {e}", t.name()))?;
     tairix_qemu::screendump::parse_ppm(&bytes)
-        .map_err(|e| format!("test --qemu ({}): decode screendump: {e}", t.package))
+        .map_err(|e| format!("test --qemu ({}): decode screendump: {e}", t.name()))
 }
 
 /// The theme a guest's desktop boots in: the shared default, in force until a
@@ -15465,7 +15523,7 @@ fn assert_virtio_gpu_console_screendump(
     // slot, which no shared-memory region rides.
     if t.target == X86_64_TARGET {
         host_visible_region_recorded(serial)
-            .map_err(|what| format!("test --qemu ({}): {what}", t.package))?;
+            .map_err(|what| format!("test --qemu ({}): {what}", t.name()))?;
     }
     let image = read_screendump(t, path)?;
     assert_virtio_gpu_console(t, path, &image)
@@ -15498,15 +15556,14 @@ fn assert_virtio_gpu_console(
     /// Fewest of them along the left edge: a few lines' first glyphs.
     const MARGIN_TEXT_PIXELS_MIN: usize = 32;
     let Display::VirtioGpu { width, height, .. } = t.display else {
-        return Err(format!(
-            "test --qemu ({}): no virtio GPU to dump",
-            t.package
-        ));
+        return Err(format!("test --qemu ({}): no virtio GPU to dump", t.name()));
     };
     if (image.width, image.height) != (width, height) {
         return Err(format!(
             "test --qemu ({}): the console dump is {}x{}, not the GPU's {width}x{height}",
-            t.package, image.width, image.height
+            t.name(),
+            image.width,
+            image.height
         ));
     }
     let pixels = image.pixels.as_chunks::<3>().0;
@@ -15522,14 +15579,14 @@ fn assert_virtio_gpu_console(
     if background * 2 < total {
         return Err(format!(
             "test --qemu ({}): no background holds most of {}: not a console",
-            t.package,
+            t.name(),
             path.display()
         ));
     }
     if total - background < TEXT_PIXELS_MIN {
         return Err(format!(
             "test --qemu ({}): {} shows no text on the console",
-            t.package,
+            t.name(),
             path.display()
         ));
     }
@@ -15546,7 +15603,7 @@ fn assert_virtio_gpu_console(
     if at_margin < MARGIN_TEXT_PIXELS_MIN {
         return Err(format!(
             "test --qemu ({}): {} shows no text where the console's lines begin",
-            t.package,
+            t.name(),
             path.display()
         ));
     }
@@ -15744,7 +15801,7 @@ fn assert_window_region_covered(
             let pixel = image.pixel(x, y).map_err(|e| {
                 format!(
                     "test --qemu ({}): screendump {} lacks the served {what} window region: {e}",
-                    t.package,
+                    t.name(),
                     path.display(),
                 )
             })?;
@@ -15765,7 +15822,7 @@ fn assert_window_region_covered(
             "test --qemu ({}): screendump {} shows no served {what} window at its cascade slot: \
              only {share:.3} of the window body differs from the desktop wallpaper behind it \
              (expected >= {MIN_WINDOW_SHARE})",
-            t.package,
+            t.name(),
             path.display(),
         ));
     }
@@ -15921,7 +15978,7 @@ fn app_slot_pixel_drift(
                     format!(
                         "test --qemu ({}): screendump {} lacks the bar's first application slot: \
                          {e}",
-                        t.package,
+                        t.name(),
                         path.display(),
                     )
                 })
@@ -15956,7 +16013,7 @@ fn baseline_dump_path(
     let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
         format!(
             "test --qemu ({}): screendump {} has no readable file name",
-            t.package,
+            t.name(),
             path.display(),
         )
     })?;
@@ -15968,7 +16025,7 @@ fn baseline_dump_path(
         return Err(format!(
             "test --qemu ({}): screendump {} is not one of the frames read against the \
              {baseline} frame, so the baseline it is compared with cannot be named",
-            t.package,
+            t.name(),
             path.display(),
         ));
     }
@@ -16128,7 +16185,7 @@ fn assert_bar_artwork_survived_screendump(
              the baseline was photographed before the slot held the picture it settles on — \
              compare the two frames at the slot to tell them apart: artwork in the baseline and \
              a glyph in this frame is the first, the reverse is the second",
-            t.package,
+            t.name(),
             path.display(),
             drift * 100.0,
             DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
@@ -16170,7 +16227,7 @@ fn assert_cascade_slot_covered(
             let pixel = image.pixel(x, y).map_err(|e| {
                 format!(
                     "test --qemu ({}): screendump {} lacks cascade slot {slot}: {e}",
-                    t.package,
+                    t.name(),
                     path.display(),
                 )
             })?;
@@ -16190,7 +16247,7 @@ fn assert_cascade_slot_covered(
         return Err(format!(
             "test --qemu ({}): screendump {} shows no window over cascade slot {slot}: only \
              {share:.3} of the probe differs from the wallpaper behind it",
-            t.package,
+            t.name(),
             path.display(),
         ));
     }
@@ -16219,7 +16276,7 @@ fn assert_app_slot_drawn(
             "test --qemu ({}): screendump {} shows no application in the bar's slot \
              {APPBAR_LAUNCHED_SLOT}: only {share:.3} of the slot differs from the same slot \
              before anything was launched (expected >= {MIN_APP_GLYPH_SHARE})",
-            t.package,
+            t.name(),
             path.display(),
         ));
     }
@@ -16251,7 +16308,7 @@ fn assert_no_slot_beyond_the_launched_app(
              one: {share:.3} of slot {APPBAR_EMPTY_SLOT} differs from the same slot before \
              anything was launched (expected <= {MAX_BARE_APP_SLOT_SHARE}). One \
              application's windows must share one slot",
-            t.package,
+            t.name(),
             path.display(),
         ));
     }
@@ -17662,7 +17719,7 @@ fn region_pixels(
                     image.pixel(x, y).map_err(|e| {
                         format!(
                             "test --qemu ({}): screendump {} lacks the {what} at ({x}, {y}): {e}",
-                            t.package,
+                            t.name(),
                             path.display(),
                         )
                     })
@@ -17814,7 +17871,7 @@ fn assert_settings_strip(
             return Err(format!(
                 "test --qemu ({}): screendump {}: only {share:.3} of the {what} at {row:?} is its \
                  fill {colour:?}",
-                t.package,
+                t.name(),
                 path.display(),
             ));
         }
@@ -17890,7 +17947,7 @@ fn assert_settings_general_screendump(
         return Err(format!(
             "test --qemu ({}): screendump {}: General's column draws {edges} plate edges \
              (expected >= {MIN_SETTINGS_PLATE_EDGES}: a plate's top and bottom rim)",
-            t.package,
+            t.name(),
             path.display(),
         ));
     }
@@ -17910,7 +17967,7 @@ fn assert_settings_lock_screendump(t: &QemuTest, path: &Path, _serial: &str) -> 
         return Err(format!(
             "test --qemu ({}): screendump {}: Lock Screen's column draws {edges} plate edges \
              (expected >= {MIN_SETTINGS_PLATE_EDGES}: a plate's top and bottom rim)",
-            t.package,
+            t.name(),
             path.display(),
         ));
     }
@@ -17938,7 +17995,7 @@ fn assert_settings_absence_screendump(
             "test --qemu ({}): screendump {}: the absence pane's column draws {edges} plate \
              edges and is {ink:.3} ink (expected none, and {MIN_SETTINGS_STATEMENT_INK} to \
              {MAX_SETTINGS_STATEMENT_INK} ink: a statement in words, on the glass and no plate)",
-            t.package,
+            t.name(),
             path.display(),
         ));
     }
@@ -18018,7 +18075,7 @@ fn assert_settings_storage_screendump(
         return Err(format!(
             "test --qemu ({}): screendump {}: Storage's column draws {edges} plate edges \
              (expected >= {MIN_SETTINGS_PLATE_EDGES}: a plate's top and bottom rim)",
-            t.package,
+            t.name(),
             path.display(),
         ));
     }
@@ -18032,7 +18089,7 @@ fn assert_settings_storage_screendump(
         return Err(format!(
             "test --qemu ({}): screendump {}: Storage's column draws no capacity track — no row \
              holds the disk fill {fill:?} meeting the groove {:?}",
-            t.package,
+            t.name(),
             path.display(),
             palette.scroll_track,
         ));
@@ -18097,7 +18154,7 @@ fn assert_restyled(
             "test --qemu ({}): screendump {}: the {what} at {rect:?} was not redrawn {}: its \
              luminance moved that way by {shift} on average, over {share:.3} of it (expected >= \
              {MIN_SETTINGS_RESTYLE} over >= {MIN_SETTINGS_RESTYLED_SHARE})",
-            t.package,
+            t.name(),
             path.display(),
             appearance.as_str(),
         ));
@@ -18196,7 +18253,7 @@ fn assert_settings_resized_screendump(
     let fail = |what: String| {
         format!(
             "test --qemu ({}): screendump {}: {what}",
-            t.package,
+            t.name(),
             path.display()
         )
     };
@@ -19676,7 +19733,7 @@ fn assert_openmicro_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Resu
         return Err(format!(
             "test --qemu ({}): screendump {}: the window shows no BASIC prompt \
              ({black} black and {white} white of {} pixels)",
-            t.package,
+            t.name(),
             path.display(),
             pixels.len(),
         ));
@@ -19708,7 +19765,7 @@ fn assert_netmap_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<
             return Err(format!(
                 "test --qemu ({}): screendump {}: the map draws no {tier} tier \
                  ({found} pixels of its hue, expected >= {NETMAP_MIN_TIER_PIXELS})",
-                t.package,
+                t.name(),
                 path.display(),
             ));
         }
@@ -20336,7 +20393,7 @@ fn assert_menu_plate_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Res
                 from.pixel(x, y).map_err(|e| {
                     format!(
                         "test --qemu ({}): screendump {} lacks the menu plate at {plate:?}: {e}",
-                        t.package,
+                        t.name(),
                         path.display(),
                     )
                 })
@@ -20372,7 +20429,7 @@ fn assert_menu_plate_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Res
             "test --qemu ({}): screendump {} shows no menu plate at {plate:?}: only {drift:.3} of \
              it differs from the same rectangle before the right-click (expected >= \
              {MIN_PLATE_DRIFT})",
-            t.package,
+            t.name(),
             path.display(),
         ));
     }
@@ -20381,7 +20438,7 @@ fn assert_menu_plate_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Res
             "test --qemu ({}): screendump {} draws something at {plate:?} that is not a plate: \
              only {ground_share:.3} of it is the theme's raised-surface colour over what was \
              behind it at the palette's chrome alpha (expected >= {MIN_PLATE_GROUND})",
-            t.package,
+            t.name(),
             path.display(),
         ));
     }
@@ -20795,13 +20852,13 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
         FsDisk::ARXFS => Some(FsImage {
             extension: "arxfs.img",
             bytes: tairix_test_arxfs_image::build_image()
-                .map_err(|e| format!("test --qemu ({}): build arxfs image: {e:?}", t.package))?,
+                .map_err(|e| format!("test --qemu ({}): build arxfs image: {e:?}", t.name()))?,
             total_sectors: tairix_test_arxfs_image::TOTAL_SECTORS,
         }),
         FsDisk::UsersRoot => Some(FsImage {
             extension: "users.img",
             bytes: tairix_test_arxfs_image::build_users_root_image().map_err(|e| {
-                format!("test --qemu ({}): build users-root image: {e:?}", t.package)
+                format!("test --qemu ({}): build users-root image: {e:?}", t.name())
             })?,
             total_sectors: tairix_test_arxfs_image::TOTAL_SECTORS,
         }),
@@ -20971,7 +21028,7 @@ fn net_root_image(
             })
         })
     })
-    .map_err(|e| format!("test --qemu ({}): build {extension}: {e:?}", t.package))?;
+    .map_err(|e| format!("test --qemu ({}): build {extension}: {e:?}", t.name()))?;
     let total_sectors = image_total_sectors(&bytes);
     Ok(FsImage {
         extension,
@@ -21044,9 +21101,13 @@ const MEMTEST_TAKEOVER_BINARIES: [&str; 3] = [
 /// The verticals that run behind a DMA translation unit, and which
 /// (`plans/IOMMU.md` MI0, MI2, MI3). [`finish_run`] puts it in front of every
 /// PCI device, so a run passes only on DMA that crossed the unit.
-const DMA_TRANSLATION_BINARIES: [(&str, DmaTranslation); 14] = [
+const DMA_TRANSLATION_BINARIES: [(&str, DmaTranslation); 15] = [
     (
         "tairix-test-dma-translation-qemu-x86-64",
+        DmaTranslation::Vtd,
+    ),
+    (
+        "tairix-test-virtio-gpu-venus-vtd-qemu-x86-64",
         DmaTranslation::Vtd,
     ),
     ("tairix-test-dma-fault-qemu-x86-64", DmaTranslation::Vtd),
@@ -21099,6 +21160,14 @@ const DMA_TRANSLATION_BINARIES: [(&str, DmaTranslation); 14] = [
         DmaTranslation::VirtioIommu,
     ),
 ];
+
+/// The verticals whose board declares a unit its PCI host bypasses, and
+/// which, so no PCI function's DMA crosses the unit the firmware declares
+/// (`plans/GPU.md` GP11.3).
+const PCI_BYPASSING_BINARIES: [(&str, DmaTranslation); 1] = [(
+    "tairix-test-virtio-gpu-venus-unconfined-qemu-x86-64",
+    DmaTranslation::VirtioIommu,
+)];
 
 /// The translated verticals whose input devices sit behind a PCIe-to-PCI
 /// bridge, so their keyboard's DMA reaches the unit only under the bridge's
@@ -21266,9 +21335,16 @@ fn base_spec(target: &str, kernel: &Path) -> Spec {
     }
 }
 
-/// The translation unit [`DMA_TRANSLATION_BINARIES`] gives `binary` on
-/// `spec`, and nothing on any other run.
+/// The translation unit [`DMA_TRANSLATION_BINARIES`] or
+/// [`PCI_BYPASSING_BINARIES`] gives `binary` on `spec`, and nothing on any
+/// other run.
 fn dma_translation_gates(spec: Spec, binary: &str) -> Spec {
+    if let Some(&(_, unit)) = PCI_BYPASSING_BINARIES
+        .iter()
+        .find(|(bypassing, _)| *bypassing == binary)
+    {
+        return spec.with_dma_translation(unit).with_pci_bypassing_unit();
+    }
     let Some(&(_, unit)) = DMA_TRANSLATION_BINARIES
         .iter()
         .find(|(translated, _)| *translated == binary)
@@ -21318,7 +21394,7 @@ fn attach_pointer_script(t: &QemuTest, mut spec: Spec) -> Result<Spec, String> {
     let Some(build_script) = t.pointer_script else {
         return Ok(spec);
     };
-    for step in build_script().map_err(|e| format!("test --qemu ({}): {e}", t.package))? {
+    for step in build_script().map_err(|e| format!("test --qemu ({}): {e}", t.name()))? {
         spec = spec.with_pointer_step(step.ready_marker, step.ready_occurrences, step.action);
     }
     let armed = armed_irq_drivers(
@@ -21372,7 +21448,7 @@ fn attach_net_peer(
     // the guard alive in `socks` for the run, and hand back the path itself.
     let wire = |socks: &mut Vec<ReservedSocket>, role: &str| {
         let guard = ReservedSocket::reserve(role)
-            .map_err(|e| format!("test --qemu ({}): {e}", t.package))?;
+            .map_err(|e| format!("test --qemu ({}): {e}", t.name()))?;
         let path = guard.path().to_path_buf();
         socks.push(guard);
         Ok::<PathBuf, String>(path)
@@ -21390,7 +21466,7 @@ fn attach_net_peer(
             let b_qemu = wire(&mut socks, "net1q")?;
             let b_peer = wire(&mut socks, "net1p")?;
             let started = super::netpeer::NetPeer::spawn_bond(&p_qemu, &p_peer, &b_qemu, &b_peer);
-            peer = Some(started.map_err(|e| format!("test --qemu ({}): {e}", t.package))?);
+            peer = Some(started.map_err(|e| format!("test --qemu ({}): {e}", t.name()))?);
             // Attach the two members in order, each with its pinned MAC and
             // its own `.pcap`, so the bond's `match.mac` binding is
             // deterministic and `net0` is the primary member.
@@ -21429,7 +21505,7 @@ fn attach_net_peer(
             let qemu_sock = wire(&mut socks, "net0q")?;
             let peer_sock = wire(&mut socks, "net0p")?;
             let started = spawn_net_peer(t.netstack_peer, &qemu_sock, &peer_sock)
-                .map_err(|e| format!("test --qemu ({}): {e}", t.package))?;
+                .map_err(|e| format!("test --qemu ({}): {e}", t.name()))?;
             // These four roles all prove success through the peer's inbound
             // echo campaign, whose confirming event — the peer receiving the
             // guest's reply — is the *last* link in the causal chain. Their
@@ -21538,7 +21614,7 @@ fn assert_audio_capture(t: &QemuTest, path: &Path, card: SoundCard) -> Result<()
     let wav = std::fs::read(path).map_err(|e| {
         format!(
             "test --qemu ({}): the audio capture {} could not be read: {e}",
-            t.package,
+            t.name(),
             path.display()
         )
     })?;
@@ -21566,7 +21642,7 @@ fn assert_audio_capture(t: &QemuTest, path: &Path, card: SoundCard) -> Result<()
         format!(
             "test --qemu ({}): the emulated sound card did not receive the signal the guest \
              played ({mismatch:?}, {} buffers reported lost); capture: {}",
-            t.package,
+            t.name(),
             loss.buffers,
             path.display()
         )
@@ -21681,7 +21757,7 @@ fn finish_run(
     let mut screendump_paths: Vec<(PathBuf, ScreendumpAssert)> = Vec::new();
     for plan in t.screendumps {
         let path = screendump_path(kernel, t, replica, plan.suffix);
-        remove_stale_sidecar(t.package, "screendump", &path)?;
+        remove_stale_sidecar(t.name(), "screendump", &path)?;
         spec = spec.with_screendump(plan.marker, plan.occurrences, &path);
         screendump_paths.push((path, plan.assert));
     }
@@ -21699,10 +21775,10 @@ fn finish_run(
     };
     let audio_capture = if let Some(card) = card {
         let path = sidecar_path(kernel, t, replica, "audio.wav");
-        remove_stale_sidecar(t.package, "audio capture", &path)?;
+        remove_stale_sidecar(t.name(), "audio capture", &path)?;
         if card == SoundCard::Hda {
             let log = tairix_qemu::hda_overrun_log(&path);
-            remove_stale_sidecar(t.package, "codec overrun log", &log)?;
+            remove_stale_sidecar(t.name(), "codec overrun log", &log)?;
         }
         spec = spec.with_audio_capture(&path, card);
         Some((path, card))
@@ -21724,18 +21800,18 @@ fn finish_run(
     }
 
     let serial_log = sidecar_path(kernel, t, replica, "serial.log");
-    remove_stale_sidecar(t.package, "serial log", &serial_log)?;
+    remove_stale_sidecar(t.name(), "serial log", &serial_log)?;
     // The CPU dump is removed too. It is written only when a run hangs or its
     // kernel dies, so leaving a stale one behind published the *previous*
     // failure's guest CPU state beside this run's transcript — and the CI
     // collector copies both. A reader then diagnosed two unrelated events as
     // one.
     let cpu_dump = sidecar_path(kernel, t, replica, "cpu.txt");
-    remove_stale_sidecar(t.package, "cpu dump", &cpu_dump)?;
+    remove_stale_sidecar(t.name(), "cpu dump", &cpu_dump)?;
 
     // Always collect the peer's verdict, even when the run itself failed,
     // so the thread never outlives the run unjoined.
-    let run = Runner::run(&spec, children).map_err(|e| format!("test --qemu ({}): {e}", t.package));
+    let run = Runner::run(&spec, children).map_err(|e| format!("test --qemu ({}): {e}", t.name()));
     let peer_verdict = peer.map(super::netpeer::NetPeer::stop_and_join);
     let outcome = run?;
     // Persist the transcript before the outcome is judged, for every run
@@ -21744,9 +21820,9 @@ fn finish_run(
     // and a run that ended sooner than its choreography needs looks exactly
     // like one that completed. Keeping the transcript is what lets a reader
     // check a suspicious pass instead of having to re-derive it.
-    persist_serial(t.package, &serial_log, outcome.serial())?;
+    persist_serial(t.name(), &serial_log, outcome.serial())?;
     let run_result = match t.expect {
-        Expect::Fatal(fields) => fatal_verdict(t.package, fields, &outcome)
+        Expect::Fatal(fields) => fatal_verdict(t.name(), fields, &outcome)
             .map_err(|e| format!("{e} (full serial: {})", serial_log.display())),
         Expect::Pass => pass_verdict(
             t,
@@ -21759,7 +21835,7 @@ fn finish_run(
                 .map(|(path, card)| (path.as_path(), *card)),
         ),
     };
-    fold_peer_verdict(t.package, &serial_log, run_result, peer_verdict)
+    fold_peer_verdict(t.name(), &serial_log, run_result, peer_verdict)
 }
 
 /// Judge a run that must pass: its outcome, then the screendump and audio
@@ -21794,7 +21870,7 @@ fn pass_verdict(
         Outcome::Fail { status, serial } => {
             Err(format!(
                 "test --qemu ({}) FAILED (qemu status {status}; full serial: {})\n--- serial ---\n{serial}\n--- end ---",
-                t.package,
+                t.name(),
                 serial_log.display()
             ))
         }
@@ -21803,11 +21879,11 @@ fn pass_verdict(
             serial,
             cpu_state,
         } => {
-            let hang = persist_cpu_state(t.package, cpu_dump, &cpu_state)?;
+            let hang = persist_cpu_state(t.name(), cpu_dump, &cpu_state)?;
             let summary = &cpu_state.summary;
             Err(format!(
                 "test --qemu ({}) HUNG: the guest fell silent for its whole {budget:?} inactivity budget; the transcript's last line is the stall point (no retries per AGENTS.md §7; full serial: {}; guest cpu state and stacks: {hang})\n--- serial ---\n{serial}\n--- guest cpu state at the kill ---\n{summary}\n--- end ---",
-                t.package,
+                t.name(),
                 serial_log.display()
             ))
         }
@@ -21823,11 +21899,11 @@ fn pass_verdict(
             // service retrying on a timer), while a silence close to the
             // ceiling means the guest went quiet early and stalled — the
             // transcript's last line is then the stall point.
-            let hang = persist_cpu_state(t.package, cpu_dump, &cpu_state)?;
+            let hang = persist_cpu_state(t.name(), cpu_dump, &cpu_state)?;
             let summary = &cpu_state.summary;
             Err(format!(
                 "test --qemu ({}) UNFINISHED at the {ceiling:?} runtime ceiling: the guest was still alive and never completed; silent for {silent_for:?} at the kill (no retries per AGENTS.md §7; full serial: {}; guest cpu state and stacks: {hang})\n--- serial ---\n{serial}\n--- guest cpu state at the kill ---\n{summary}\n--- end ---",
-                t.package,
+                t.name(),
                 serial_log.display()
             ))
         }
@@ -21836,11 +21912,11 @@ fn pass_verdict(
             serial,
             cpu_state,
         } => {
-            let dump = persist_cpu_state(t.package, cpu_dump, &cpu_state)?;
+            let dump = persist_cpu_state(t.name(), cpu_dump, &cpu_state)?;
             let summary = &cpu_state.summary;
             Err(format!(
                 "test --qemu ({}) FATAL: the guest's kernel stopped: {record} (full serial: {}; guest cpu state and stacks: {dump})\n--- serial ---\n{serial}\n--- guest cpu state at the record ---\n{summary}\n--- end ---",
-                t.package,
+                t.name(),
                 serial_log.display()
             ))
         }
@@ -21855,7 +21931,7 @@ fn pass_verdict(
 /// observer's reason was collected and then dropped, leaving the ceiling as
 /// the whole story.
 fn fold_peer_verdict(
-    package: &str,
+    run_name: impl std::fmt::Display,
     serial_log: &Path,
     run: Result<(), String>,
     peer: Option<Result<(), String>>,
@@ -21865,7 +21941,7 @@ fn fold_peer_verdict(
     };
     match run {
         Ok(()) => Err(format!(
-            "test --qemu ({package}): {peer_reason} (full serial: {})",
+            "test --qemu ({run_name}): {peer_reason} (full serial: {})",
             serial_log.display()
         )),
         Err(run_reason) => Err(format!(
@@ -21890,7 +21966,11 @@ fn fold_peer_verdict(
 /// pass's transcript and describes a different event entirely. `kind` names
 /// the artefact in the error a genuine removal failure raises; an absent file
 /// is the normal case.
-fn remove_stale_sidecar(package: &str, kind: &str, path: &Path) -> Result<(), String> {
+fn remove_stale_sidecar(
+    run: impl std::fmt::Display,
+    kind: &str,
+    path: &Path,
+) -> Result<(), String> {
     std::fs::remove_file(path)
         .or_else(|e| match e.kind() {
             std::io::ErrorKind::NotFound => Ok(()),
@@ -21898,16 +21978,20 @@ fn remove_stale_sidecar(package: &str, kind: &str, path: &Path) -> Result<(), St
         })
         .map_err(|e| {
             format!(
-                "test --qemu ({package}): remove stale {kind} {}: {e}",
+                "test --qemu ({run}): remove stale {kind} {}: {e}",
                 path.display()
             )
         })
 }
 
-fn persist_cpu_state(package: &str, path: &Path, cpu_state: &CpuState) -> Result<String, String> {
+fn persist_cpu_state(
+    run: impl std::fmt::Display,
+    path: &Path,
+    cpu_state: &CpuState,
+) -> Result<String, String> {
     std::fs::write(path, cpu_state.to_string()).map_err(|e| {
         format!(
-            "test --qemu ({package}): persist guest cpu state {}: {e}",
+            "test --qemu ({run}): persist guest cpu state {}: {e}",
             path.display()
         )
     })?;
@@ -21923,11 +22007,11 @@ fn persist_cpu_state(package: &str, path: &Path, cpu_state: &CpuState) -> Result
 /// changing the guest or rerunning the workload — which is the only way to
 /// check after the fact that a vertical's pass came from the choreography it
 /// claims and not from an early exit that scored the same.
-fn persist_serial(package: &str, path: &Path, serial: &str) -> Result<(), String> {
+fn persist_serial(run: impl std::fmt::Display, path: &Path, serial: &str) -> Result<(), String> {
     std::fs::write(path, serial).map_err(|e| {
         format!(
             "test --qemu ({}): persist serial transcript {}: {e}",
-            package,
+            run,
             path.display()
         )
     })
@@ -22038,24 +22122,25 @@ mod tests {
 
     use super::{
         appbar_pointer_script, armed_irq_drivers, autoload_desktop_pointer_script, build_targets,
-        desktop_hover_pointer_script, fatal_verdict, filepick_pointer_script, fold_peer_verdict,
-        handover_pointer_script, login_type_plant, netmap_pointer_script, pass_verdict,
-        persist_serial, qemu_host_budget_for, qemu_job_weight, row_holds_track, screendump_ext,
-        screendump_path, screensaver_pointer_script, settings_pointer_script, sibling_sidecar,
-        sidecar_path, touch_pointer_script, Expect, FsDisk, NetPeerMode, QemuTest, TypedStep,
-        AARCH64_TARGET, APPBAR_LAUNCHED_SLOT, APPBAR_SETTLED_MARKER, APPBAR_SLOT_MARKER,
-        AUDIOCUE_LINE, AUDIOCUE_SERIAL, AUDIOSEAT_LINE, AUDIOSEAT_SERIAL, AUDIOTONE_PASS_PREFIX,
-        AUTOLOAD_INPUT_KEY_MARKER, BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER,
-        DESKTOP_PRESSURE_ICONS_DRAWN_DUMP, DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP,
-        IMAGES_COMMAND_LINE, IMAGES_PASS_PREFIX, IPI_SMP_AARCH64, KEYBOARD_ONLY_ARMED_OCCURRENCES,
-        LIBRARY_SHOWN_MARKER, LIFECYCLE_SERIAL, LOGIN_PLAYED_MARKER, LOGOUT_PLAYED_MARKER,
-        MEMSOAK_PASS_PREFIX, OPTICAL_COMMAND_LINE, OPTICAL_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL,
-        RISCV64_TARGET, SCRIPTED_LIFECYCLE, STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER,
-        STARTUP_PLAYED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
-        SUPERVISOR_MOUNT_SCRIPT, SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX,
-        TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
-        VALUE_OPERAND_PHYSICAL_LINE, VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE,
-        VALUE_PIPE_PHYSICAL_MARKER, VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
+        desktop_hover_pointer_script, enrolled, fatal_verdict, filepick_pointer_script,
+        fold_peer_verdict, handover_pointer_script, login_type_plant, netmap_pointer_script,
+        pass_verdict, persist_serial, qemu_host_budget_for, qemu_job_weight, row_holds_track,
+        screendump_ext, screendump_path, screensaver_pointer_script, settings_pointer_script,
+        shared_slot, sibling_sidecar, sidecar_path, touch_pointer_script, Expect, FsDisk,
+        NetPeerMode, QemuTest, TypedStep, AARCH64_TARGET, APPBAR_LAUNCHED_SLOT,
+        APPBAR_SETTLED_MARKER, APPBAR_SLOT_MARKER, AUDIOCUE_LINE, AUDIOCUE_SERIAL, AUDIOSEAT_LINE,
+        AUDIOSEAT_SERIAL, AUDIOTONE_PASS_PREFIX, AUTOLOAD_INPUT_KEY_MARKER,
+        BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
+        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, IMAGES_COMMAND_LINE, IMAGES_PASS_PREFIX,
+        IPI_SMP_AARCH64, KEYBOARD_ONLY_ARMED_OCCURRENCES, LIBRARY_SHOWN_MARKER, LIFECYCLE_SERIAL,
+        LOGIN_PLAYED_MARKER, LOGOUT_PLAYED_MARKER, MEMSOAK_PASS_PREFIX, OPTICAL_COMMAND_LINE,
+        OPTICAL_PASS_PREFIX, PLAY_LINE, PLAY_SERIAL, RISCV64_TARGET, SCRIPTED_LIFECYCLE,
+        STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER, STARTUP_PLAYED_MARKER,
+        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
+        SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
+        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
+        VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
+        VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -23209,10 +23294,15 @@ mod tests {
     /// and only those runs get one.
     #[test]
     fn dma_translation_binaries_are_enrolled_and_alone_translated() {
-        use super::{base_spec, dma_translation_gates, DMA_TRANSLATION_BINARIES};
+        use super::{
+            base_spec, dma_translation_gates, DMA_TRANSLATION_BINARIES, PCI_BYPASSING_BINARIES,
+        };
         use tairix_qemu::{DmaTranslation, Spec};
 
-        for (binary, unit) in DMA_TRANSLATION_BINARIES {
+        for (binary, unit) in DMA_TRANSLATION_BINARIES
+            .into_iter()
+            .chain(PCI_BYPASSING_BINARIES)
+        {
             let test = TESTS
                 .iter()
                 .find(|t| t.binary == binary)
@@ -23229,12 +23319,18 @@ mod tests {
             let gated = dma_translation_gates(spec, binary);
             assert_eq!(gated.dma_translation, unit, "{binary}");
             assert_ne!(unit, DmaTranslation::Absent, "{binary}");
+            assert_eq!(
+                gated.pci_bypasses_unit,
+                PCI_BYPASSING_BINARIES.contains(&(binary, unit)),
+                "{binary}: the PCI host bypasses its unit only where listed"
+            );
         }
         let plain = dma_translation_gates(
             Spec::for_x86_64_kernel("/tmp/k"),
             "tairix-test-autoload-input-qemu-x86-64",
         );
         assert_eq!(plain.dma_translation, DmaTranslation::Absent);
+        assert!(!plain.pci_bypasses_unit);
     }
 
     /// Every run entered at EL2 is an enrolled aarch64 run, and no other run
@@ -24192,6 +24288,34 @@ mod tests {
     /// QEMU overwrite them, so a run could judge a sibling's pixels. Replica
     /// zero of a singly-enrolled binary keeps the plain `<binary>.<ext>` name,
     /// so the pull-request matrix's paths are unchanged.
+    /// Every run is named apart from every other, by its binary and, where
+    /// enrolments share a binary, by the slot its sidecar files carry; and
+    /// `--only` selects one variant of a package by its binary.
+    #[test]
+    fn every_run_has_a_name_of_its_own_and_only_selects_by_binary_too() {
+        use std::collections::HashSet;
+
+        let names: Vec<String> = TESTS.iter().map(|t| t.name().to_string()).collect();
+        let unique: HashSet<&String> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "a run name repeats");
+        for (t, name) in TESTS.iter().zip(&names) {
+            assert!(name.starts_with(t.binary), "{name} names {}", t.binary);
+            assert_eq!(name.len() > t.binary.len(), shared_slot(t).is_some());
+        }
+        let vtd = enrolled(Some("venus-vtd")).expect("a variant by its binary");
+        assert_eq!(vtd.len(), 1);
+        assert_eq!(
+            vtd[0].binary,
+            "tairix-test-virtio-gpu-venus-vtd-qemu-x86-64"
+        );
+        assert_eq!(
+            enrolled(Some("virtio-gpu-venus")).map(|selected| selected.len()),
+            Ok(3),
+            "a package's variants together by its name"
+        );
+        assert!(enrolled(Some("no-such-vertical")).is_err());
+    }
+
     #[test]
     fn sidecar_paths_never_collide_across_enrolments_or_replicas() {
         use std::collections::{HashMap, HashSet};
@@ -24768,7 +24892,7 @@ mod tests {
                 "enrolment {} budget {:?} is below the reachable floor {:?}; the \
                  inactivity budget must exceed the longest gap in a healthy \
                  guest's serial output",
-                t.package,
+                t.name(),
                 t.timeout,
                 MIN_REACHABLE_BUDGET,
             );
@@ -24885,7 +25009,7 @@ mod tests {
                          field {field:?}. An audit line is emitted once by whichever \
                          task syscalls, so it is unreachable once the search cursor \
                          has passed it; wait on output the process leaves standing",
-                        t.package,
+                        t.name(),
                     );
                 }
             }

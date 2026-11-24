@@ -5,7 +5,7 @@
 use crate::geometry::Point;
 use tairix_drawing::riscos::format::{CONTINUATION, END, TAG};
 
-use crate::path::{Element, Order};
+use crate::path::{Element, Order, POINTS_AT, POINT_BYTES};
 use crate::stage::{Guest, Refusal, Stop};
 
 /// An element as the path holds it: where, and its first word, client bits
@@ -47,18 +47,18 @@ impl Reader {
             match word & TAG {
                 END => return Ok(None),
                 CONTINUATION => {
-                    let target = guest.read_word(self.at.wrapping_add(4))?;
+                    let target = guest.read_word(self.at.wrapping_add(POINTS_AT))?;
                     if self.hops.looped(target) {
                         return Err(Refusal::Looped.into());
                     }
                     self.at = target;
                 }
                 kind => {
-                    let mut point_at = self.at.wrapping_add(4);
+                    let mut point_at = self.at.wrapping_add(POINTS_AT);
                     let element = Element::decode(kind, || -> Result<Point, Stop> {
                         let x = guest.read_word(point_at)?;
                         let y = guest.read_word(point_at.wrapping_add(4))?;
-                        point_at = point_at.wrapping_add(8);
+                        point_at = point_at.wrapping_add(POINT_BYTES);
                         Ok(Point::new(x.cast_signed(), y.cast_signed()))
                     })?
                     .ok_or(Refusal::BadElement)?;

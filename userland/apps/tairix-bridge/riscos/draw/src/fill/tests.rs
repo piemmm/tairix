@@ -7,7 +7,7 @@ use crate::stage::testkit::{feed, parse, Memory};
 const SURFACE: Surface = Surface {
     eig: (1, 1),
     origin: (0, 0),
-    window: Window {
+    window: Bounds {
         left: 0,
         bottom: 0,
         right: 63,

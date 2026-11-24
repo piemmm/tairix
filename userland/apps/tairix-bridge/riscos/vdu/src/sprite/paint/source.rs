@@ -5,12 +5,14 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use tairix_image::{sprite_type, SpriteModeWord, SPRITE_HEADER_LEN, SPRITE_PALETTE_ENTRY_LEN};
+use tairix_image::{
+    sprite_type, SpriteModeWord, SPRITE_HEADER_LEN, SPRITE_PALETTE_ENTRY_LEN, STANDARD_SPRITE_DPI,
+};
 use tairix_riscos_kernel::os::{Fail, Os};
 use tairix_util::bitfield::field_at;
 
 use super::super::alpha::{channel_room, widened, ALPHA_FLAG};
-use super::super::format::{self, Pixels, STANDARD_DPI};
+use super::super::format::{self, Pixels};
 use super::super::header::{Extents, Sprite};
 use super::super::NO_MEMORY;
 use crate::canvas::mask_between;
@@ -165,8 +167,11 @@ impl Source {
         height: u32,
         rgba: Vec<u8>,
     ) -> Result<Self, Fail> {
-        let word =
-            SpriteModeWord::dpi_word(sprite_type::DIRECT_24, (STANDARD_DPI, STANDARD_DPI), false);
+        let word = SpriteModeWord::dpi_word(
+            sprite_type::DIRECT_24,
+            (STANDARD_SPRITE_DPI, STANDARD_SPRITE_DPI),
+            false,
+        );
         let pixels = Pixels::stored(word).map_err(|error| os.error(error))?;
         let image = rgba;
         Ok(Self {

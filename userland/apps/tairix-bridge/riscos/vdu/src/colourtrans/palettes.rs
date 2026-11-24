@@ -8,11 +8,11 @@ use alloc::vec::Vec;
 use tairix_colour::Rgb;
 use tairix_image::{SPRITE_HEADER_LEN, SPRITE_PALETTE_ENTRY_LEN};
 use tairix_riscos_kernel::os::{len32, Entry, Fail, Os, Regs};
+use tairix_riscos_kernel::swi::colour_trans::{BARE_SPRITE, CURRENT};
 use tairix_vdu::mode::var;
 
 use super::calibration::Calibration;
 use super::matching::{self, Loadings, Look};
-use super::CURRENT;
 use crate::colour::{gcol_of_number, Direct};
 use crate::palette::{
     default_words, grouped_colours, is_default_256, kind, reason, EIGHT_BIT_COLOURS, GROUP_BASES,
@@ -20,6 +20,7 @@ use crate::palette::{
 };
 use crate::screen::Named;
 use crate::sprite::{Area, Naming, Sprite, UNKNOWN_MODE};
+use tairix_riscos_kernel::swi::os::CURRENT_MODE;
 
 /// How a mode holds its colours.
 #[derive(Clone, Copy)]
@@ -302,9 +303,6 @@ pub(crate) fn current_pairs(os: &mut Os<'_>, count: usize) -> Result<Vec<[u32; 2
     Ok(pairs)
 }
 
-/// A source naming the sprite at R1 outside any area.
-const BARE_SPRITE: u32 = 256;
-
 /// Whether R0 names a sprite: R1 itself where it is 256, else in R0's area,
 /// told from a mode selector by its first word, whose bottom bit a
 /// selector's has set.
@@ -375,7 +373,7 @@ fn current_mode(os: &mut Os<'_>) -> Result<u32, Fail> {
                 Named::Selector(address) => address,
             })
         }),
-        _ => Ok(CURRENT),
+        _ => Ok(CURRENT_MODE),
     }
 }
 
@@ -455,14 +453,12 @@ pub(crate) fn source(os: &mut Os<'_>, mode: u32, palette: u32) -> Result<Against
 fn of_holding(os: &mut Os<'_>, holding: Holding, palette: u32) -> Result<Against, Fail> {
     let entries = holding.entries();
     let mut words = [0u32; EIGHT_BIT_COLOURS];
-    if palette == 0 || palette == u32::MAX {
+    if palette == 0 || palette == CURRENT {
         for (word, first) in words[..entries].iter_mut().zip(default_firsts(holding)) {
             *word = first;
         }
     } else {
-        for (i, word) in (0u32..).zip(&mut words[..entries]) {
-            *word = os.read_word(palette.wrapping_add(4 * i))?;
-        }
+        os.read_words(palette, &mut words[..entries])?;
     }
     Ok(Against::of_words(holding, &words[..entries]))
 }

@@ -1258,8 +1258,10 @@ shares with the vectors' defaults are the kernel's.
 - **Its texts.** Messages FileSwitch alone gives are in its own words; the
   numbers are RISC OS 5's.
 
-The SWI and service numbers, file types, object kinds and attributes, and
-listing layout FileSwitch shares with the kernel are the kernel's tables:
+The SWI and service numbers, file types, object kinds, attributes and
+catalogue information, the listing layout and the information block a filing
+system is declared with, which FileSwitch and the filing systems share with
+the kernel, are the kernel's tables:
 `tairix_riscos_kernel::swi::os`, `tairix_riscos_kernel::service`,
 `tairix_riscos_kernel::filing::{filetype, fs}` and
 `tairix_riscos_kernel::module::VALUE_COLUMN`.
@@ -2211,6 +2213,10 @@ The `userland/apps/tairix-bridge/riscos/draw` crate is RISC OS 5.30's Draw
   matrix's scale in units and its translation and the flatness in OS units,
   loads the file into the RMA and renders it.
 
+The SWI flags and command constructor Draw and DrawFile share with the
+kernel are the kernel's: `tairix_riscos_kernel::swi` and
+`tairix_riscos_kernel::module::Command`.
+
 The corpus `draw/tests/riscos5/screens.txt` holds Draw's screens to RISC OS
 5.30's, but the dashes along a slant, thick lines' widths and long mitres'
 tips, which the crate's own tests hold to the cases recorded for them:
@@ -2300,6 +2306,11 @@ Manager 3.80 and `ROMFonts`, the fonts and encodings ResourceFS holds.
 - **The cache** is the session's, bounded by its memory policy; the area the
   guest sees is its size. A saved cache is the fonts the handles hold, in
   TAIRiX Bridge's own format.
+
+The SWI flags and string control codes, command constructors and menu layout
+the Font Manager shares with the kernel are the kernel's:
+`tairix_riscos_kernel::swi::font`, `tairix_riscos_kernel::module::Command`
+and `tairix_riscos_kernel::msgtrans::menus`.
 
 The corpus `font/tests/riscos5/screens.txt` holds what the Font Manager reads
 and writes to RISC OS 5.30's, through Draw objects rather than the screen,

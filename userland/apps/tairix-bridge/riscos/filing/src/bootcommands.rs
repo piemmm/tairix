@@ -20,7 +20,7 @@ use alloc::collections::{TryReserveError, VecDeque};
 use alloc::vec::Vec;
 
 use tairix_obey::command::MOST_LINE;
-use tairix_riscos_kernel::module::{Builtin, Command, CommandKind, Help};
+use tairix_riscos_kernel::module::{Builtin, Command};
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::{self as swi};
 use tairix_riscos_kernel::swi::X;
@@ -63,14 +63,8 @@ const fn command(
     run: tairix_riscos_kernel::module::Code,
 ) -> Command {
     Command {
-        name,
-        kind: CommandKind::Command,
-        min,
-        max,
         translate,
-        help: Help::Text(help),
-        syntax: Some(syntax),
-        run: Some(run),
+        ..Command::new(name, (min, max), help, Some(syntax), run)
     }
 }
 

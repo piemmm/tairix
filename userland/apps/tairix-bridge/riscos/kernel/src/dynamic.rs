@@ -75,10 +75,9 @@ impl Os<'_> {
         &mut self,
         request: &crate::memory::Create<'_>,
     ) -> Result<crate::memory::Created, Fail> {
-        match self.memory.create_kernel_area(request, self.world) {
-            Ok(created) => Ok(created),
-            Err(error) => Err(self.fail_area(error)),
-        }
+        let created = self.memory.create_kernel_area(request, self.world);
+        self.unwinding()?;
+        created.map_err(|error| self.fail_area(error))
     }
 
     /// Removes one of the kernel's own areas, made by
@@ -90,10 +89,7 @@ impl Os<'_> {
     /// The error `OS_DynamicArea` 1 gives for the same refusal.
     pub fn remove_kernel_area(&mut self, number: u32) -> Result<(), Fail> {
         let removed = self.memory.remove_kernel_area(number, self.world);
-        self.unwinding()?;
-        removed.map_err(|e| self.fail_area(e))?;
-        self.drop_title(number);
-        Ok(())
+        self.finish_removal(number, removed)
     }
 
     /// Dynamic area `number`'s base and size now, the area named by its plain
@@ -167,6 +163,15 @@ impl Os<'_> {
         if let Some(block) = self.world.titles.blocks.remove(&area) {
             self.free_system_node(block);
         }
+    }
+
+    /// Area `number`'s removal finished as `removed` says: an unwind its
+    /// handlers began taken first, then its refusal, else its title forgotten.
+    fn finish_removal(&mut self, number: u32, removed: Result<(), AreaError>) -> Result<(), Fail> {
+        self.unwinding()?;
+        removed.map_err(|e| self.fail_area(e))?;
+        self.drop_title(number);
+        Ok(())
     }
 
     /// `OS_ChangeDynamicArea`: `area` (application space for the free pool
@@ -379,10 +384,7 @@ impl Os<'_> {
     /// Reason 1.
     fn area_remove(&mut self, regs: &mut Regs) -> Result<(), Fail> {
         let removed = self.memory.remove_area(regs.r[1], self.world);
-        self.unwinding()?;
-        removed.map_err(|e| self.fail_area(e))?;
-        self.drop_title(regs.r[1]);
-        Ok(())
+        self.finish_removal(regs.r[1], removed)
     }
 
     /// Reason 2.
@@ -508,10 +510,8 @@ impl Os<'_> {
         let mut cursor = at;
         for _ in 0..count {
             let mut fields = [0; N];
-            for field in &mut fields {
-                *field = self.read_word(cursor)?;
-                cursor = cursor.wrapping_add(4);
-            }
+            self.read_words(cursor, &mut fields)?;
+            cursor = cursor.wrapping_add(4 * len32(N));
             out.push(entry(fields));
         }
         Ok(out)

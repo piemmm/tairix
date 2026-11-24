@@ -16,6 +16,7 @@ use crate::fill::{Fill, Surface, Use};
 use crate::flatten::Threshold;
 use crate::geometry::{Matrix, Point};
 use tairix_drawing::riscos::format::TAG;
+use tairix_riscos_kernel::os::Fail;
 
 use crate::path::Element;
 use crate::read::Reader;
@@ -43,8 +44,11 @@ pub(crate) mod flag {
     pub(crate) const KNOWN: u32 = 0xFF | BOUNDS | WIDE | CLOSE | FLATTEN | THICKEN | REFLATTEN;
 }
 
+/// R6 for a call that dashes nothing.
+pub(crate) const NO_DASH: u32 = 0;
+
 /// R7's values that are not addresses.
-mod special {
+pub(crate) mod special {
     pub(crate) const IN_PLACE: u32 = 0;
     pub(crate) const FILL: u32 = 1;
     pub(crate) const FILL_EACH: u32 = 2;
@@ -129,7 +133,7 @@ impl Call {
         }
         let lengthens = self.flags & (flag::CLOSE | flag::FLATTEN | flag::REFLATTEN) != 0
             || (self.flags & flag::THICKEN != 0 && self.thickness != 0)
-            || self.dash != 0;
+            || self.dash != NO_DASH;
         if matches!(self.destination(), Destination::InPlace) && lengthens {
             return Err(Refusal::MayChangeLength);
         }
@@ -142,14 +146,12 @@ impl Call {
 }
 
 /// The matrix the call names, the identity for none.
-pub(crate) fn matrix_at(guest: &mut dyn Guest, at: u32) -> Result<Matrix, Stop> {
+pub(crate) fn matrix_at(guest: &mut dyn Guest, at: u32) -> Result<Matrix, Fail> {
     if at == 0 {
         return Ok(Matrix::IDENTITY);
     }
     let mut words = [0; 6];
-    for (i, word) in (0u32..).zip(&mut words) {
-        *word = guest.read_word(at.wrapping_add(4 * i))?;
-    }
+    guest.read_words(at, &mut words)?;
     Ok(Matrix::from_words(words))
 }
 
@@ -223,7 +225,7 @@ pub(crate) fn process(
         thicken.insert(Thickener::new(sink, call.thickness, call.style))
     };
     let mut dash: Option<Dasher<'_>> = None;
-    let sink: &mut dyn Sink = if call.dash == 0 {
+    let sink: &mut dyn Sink = if call.dash == NO_DASH {
         sink
     } else {
         dash.insert(Dasher::new(sink, Pattern::at(call.dash)))

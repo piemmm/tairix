@@ -737,10 +737,17 @@ impl Host for Remote {
             .key()
     }
 
-    fn image_requirements(&self, desc: &ImageDesc) -> Result<MemoryRequirements, Error> {
+    fn image_requirements(
+        &self,
+        context: ContextKey,
+        desc: &ImageDesc,
+    ) -> Result<MemoryRequirements, Error> {
         let ops::Requirements { requirements } = self.channel.call(
             GpuOp::ImageRequirements,
-            &ops::ImageRequirements { desc: *desc },
+            &ops::ImageRequirements {
+                context: id(context),
+                desc: *desc,
+            },
         )?;
         Ok(requirements)
     }

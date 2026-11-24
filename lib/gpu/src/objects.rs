@@ -133,7 +133,7 @@ impl Context {
     /// [`Error::TooLarge`], [`Error::Samples`], [`Error::Usage`] or
     /// [`Error::Unsupported`].
     pub fn image_requirements(&self, desc: &ImageDesc) -> Result<MemoryRequirements, Error> {
-        self.host.image_requirements(desc)
+        self.host.image_requirements(self.key, desc)
     }
 
     /// An image placed `offset` bytes into one of this context's allocations.

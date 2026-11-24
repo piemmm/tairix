@@ -1,9 +1,31 @@
 //! Path elements as the Draw module reads and writes them: a word whose low
 //! byte is the element's code, then its points.
 
-use tairix_drawing::riscos::format::{CLOSE, CLOSE_WITH_GAP, CURVE, GAP, LINE, MOVE, MOVE_UNWOUND};
+use tairix_drawing::riscos::format::{
+    element_bytes, CLOSE, CLOSE_WITH_GAP, CURVE, ELEMENT_POINTS, GAP, LINE, MOVE, MOVE_UNWOUND,
+    POINT,
+};
 
 use crate::geometry::Point;
+
+/// Where an element's points begin after its code's word, and where a
+/// continuation's address is, as a guest address is offset.
+#[expect(clippy::cast_possible_truncation, reason = "a word")]
+pub(crate) const POINTS_AT: u32 = ELEMENT_POINTS as u32;
+
+/// A point's bytes, as a guest address is offset.
+#[expect(clippy::cast_possible_truncation, reason = "two words")]
+pub(crate) const POINT_BYTES: u32 = POINT as u32;
+
+/// The bytes the element of code `code` takes in a path, as a guest address
+/// is offset; nought for a code that names none.
+#[expect(clippy::cast_possible_truncation, reason = "seven words at most")]
+pub(crate) const fn bytes_of(code: u32) -> u32 {
+    match element_bytes(code) {
+        Some(bytes) => bytes as u32,
+        None => 0,
+    }
+}
 
 /// An element of a path, but its end and continuations, which a reader
 /// follows.
@@ -57,16 +79,7 @@ impl Element {
 
     /// The bytes it takes in a path.
     pub(crate) const fn bytes(self) -> u32 {
-        4 * (1 + 2 * self.point_count())
-    }
-
-    /// How many points follow its code.
-    pub(crate) const fn point_count(self) -> u32 {
-        match self {
-            Self::Close { .. } => 0,
-            Self::Curve { .. } => 3,
-            Self::Move { .. } | Self::Gap { .. } | Self::Line { .. } => 1,
-        }
+        bytes_of(self.code())
     }
 
     /// Its points, in the order a path holds them.
@@ -76,6 +89,14 @@ impl Element {
             Self::Curve { c1, c2, to } => [Some(c1), Some(c2), Some(to)],
             Self::Move { to, .. } | Self::Gap { to } | Self::Line { to } => [Some(to), None, None],
         }
+    }
+
+    /// Its points' words, each x then y, in the order a path holds them.
+    pub(crate) fn point_words(self) -> impl Iterator<Item = u32> {
+        self.points()
+            .into_iter()
+            .flatten()
+            .flat_map(|p| [p.x.cast_unsigned(), p.y.cast_unsigned()])
     }
 
     /// The element with each point mapped by `map`.

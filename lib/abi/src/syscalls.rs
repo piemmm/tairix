@@ -4208,6 +4208,25 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: None,
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::CALL_DESTROY,
+        name: "call_destroy",
+        arg_count: 1,
+        args: [
+            AbiType::IpcEndpoint,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::Errno,
+        // The undoing of `call_create`, in the `port_unbind` posture: the
+        // handler takes down only an endpoint of the caller's own, and the
+        // destruction and the grants it revokes are audited like the bind.
+        required_capability: None,
+        audit: true,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in

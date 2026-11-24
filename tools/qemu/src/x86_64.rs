@@ -163,7 +163,14 @@ fn push_board(argv: &mut Vec<OsString>, spec: &Spec) {
     let virtio_gpu = matches!(spec.devices.display, Display::VirtioGpu { .. });
     if unit.is_some() || past_xapic || virtio_gpu {
         argv.push("-machine".into());
-        argv.push("q35".into());
+        argv.push(
+            if spec.pci_bypasses_unit {
+                "q35,default-bus-bypass-iommu=on"
+            } else {
+                "q35"
+            }
+            .into(),
+        );
     }
     if let Some(unit) = unit {
         argv.push("-device".into());
@@ -384,6 +391,7 @@ mod tests {
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             dma_translation: crate::DmaTranslation::Absent,
+            pci_bypasses_unit: false,
             interrupts: crate::InterruptControllers::Default,
             virtualization: false,
             rtc_base_unix_secs: None,
@@ -519,6 +527,27 @@ mod tests {
 
         let plain = render(&build_argv(&fixture_spec(1), Path::new("/tmp/k.elf")));
         assert!(!plain.iter().any(|a| a.contains("iommu") || a == "q35"));
+    }
+
+    #[test]
+    fn a_pci_host_bypassing_its_unit_still_has_the_unit_built_first() {
+        let unit = crate::DmaTranslation::VirtioIommu;
+        let bypassed = fixture_spec(1)
+            .with_dma_translation(unit)
+            .with_pci_bypassing_unit();
+        let argv = render(&build_argv(&bypassed, Path::new("/tmp/k.elf")));
+        assert_eq!(
+            argv[..4],
+            [
+                "-machine",
+                "q35,default-bus-bypass-iommu=on",
+                "-device",
+                "virtio-iommu-pci,addr=0x2,granule=4k"
+            ]
+        );
+        let translated = fixture_spec(1).with_dma_translation(unit);
+        let argv = render(&build_argv(&translated, Path::new("/tmp/k.elf")));
+        assert_eq!(argv[..2], ["-machine", "q35"]);
     }
 
     #[test]

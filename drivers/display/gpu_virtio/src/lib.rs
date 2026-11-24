@@ -1465,12 +1465,8 @@ where
 
     fn service_events(&mut self) -> Result<Serviced, DriverError> {
         self.transport.ack_interrupt();
-        // What the device answered since is taken back: a display batch left
-        // to a slow device, and 3D commands.
         let _ = self.control.drain();
         let _ = self.settle_display();
-        self.take_3d_answers();
-        self.serve_desk();
         let _ = self.cursor_queue.settle(&mut self.transport, self.host);
         // A change raised while the output is read is read again, its
         // interrupt taken by the read's own wait; a read that failed is owed
@@ -1489,6 +1485,10 @@ where
         }
         self.release_given_back();
         self.show_console_rows();
+        // Last: each wait above may have taken the interrupt a 3D answer
+        // raised, and the loop parks on that interrupt next.
+        self.take_3d_answers();
+        self.serve_desk();
         moved.map(|()| Serviced::default())
     }
 

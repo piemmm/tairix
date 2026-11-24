@@ -2,9 +2,8 @@
 //! character's or pattern's definition, the palette read and written, the
 //! graphics cursors, the pointer, and the screen banks' bases.
 
-use tairix_riscos_kernel::os::{Entry, Fail, Os, Regs};
+use tairix_riscos_kernel::os::{Fail, Os, Regs};
 
-use crate::palette::PALETTE_V;
 use crate::state::with;
 
 /// The VDU drivers' `OS_Word` reasons.
@@ -59,17 +58,9 @@ fn definition(os: &mut Os<'_>, block: u32) -> Result<(), Fail> {
 /// state shown now: how it was set at +1, red, green and blue at +2 to +4.
 fn read_palette(os: &mut Os<'_>, block: u32) -> Result<(), Fail> {
     let logical = os.read_byte(block)?;
-    let mut regs = Regs::default();
-    regs.r[..5].copy_from_slice(&[
-        u32::from(logical),
-        crate::palette::kind::NORMAL,
-        0,
-        0,
-        crate::palette::reason::READ,
-    ]);
-    os.call_vector(PALETTE_V, &mut regs, Entry::Supervisor)?;
-    let second = with(os, |vdu, _| Ok(vdu.palette.second))?;
-    let shown = if second { regs.r[3] } else { regs.r[2] };
+    let [first, second] = crate::palette::read_through(os, u32::from(logical))?;
+    let in_second = with(os, |vdu, _| Ok(vdu.palette.second))?;
+    let shown = if in_second { second } else { first };
     os.write_bytes(block.wrapping_add(1), &shown.to_le_bytes())
 }
 

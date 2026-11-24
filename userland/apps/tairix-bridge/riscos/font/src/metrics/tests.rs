@@ -196,3 +196,13 @@ fn every_byte_changed_to_every_value_is_read_without_fault() {
         }
     }
 }
+
+#[test]
+fn an_offset_near_the_end_of_memory_is_malformed_not_an_overflow() {
+    let bytes = [0; 8];
+    for at in [usize::MAX - 1, usize::MAX] {
+        assert_eq!(more(&bytes, at, 0), Err(Malformed), "{at}");
+        let mut map_at = at;
+        assert_eq!(map(&bytes, &mut map_at, 2), Err(Malformed), "{at}");
+    }
+}

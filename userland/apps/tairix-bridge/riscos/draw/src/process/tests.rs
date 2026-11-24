@@ -1,9 +1,9 @@
 use alloc::vec::Vec;
 
+use tairix_riscos_kernel::mouse::Bounds;
 use tairix_riscos_kernel::os::{Fail, Unwind};
 
 use super::*;
-use crate::raster::Window;
 use crate::stage::testkit::{parse, Memory};
 
 const PATH: u32 = 0x1000;
@@ -14,7 +14,7 @@ const MATRIX: u32 = 0xA000;
 const SURFACE: Surface = Surface {
     eig: (1, 1),
     origin: (0, 0),
-    window: Window {
+    window: Bounds {
         left: 0,
         bottom: 0,
         right: 639,
@@ -27,9 +27,7 @@ fn path_words(text: &str) -> Vec<u32> {
     let mut words = Vec::new();
     for element in parse(text) {
         words.push(element.code());
-        for point in element.points().into_iter().flatten() {
-            words.extend([point.x.cast_unsigned(), point.y.cast_unsigned()]);
-        }
+        words.extend(element.point_words());
     }
     words.extend([0, 4096]);
     words

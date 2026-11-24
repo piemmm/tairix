@@ -3,7 +3,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use super::*;
-use crate::stage::testkit::{feed, parse, Collect, Memory};
+use crate::stage::testkit::{alike, feed, parse, Collect, Memory};
 
 #[path = "recorded.rs"]
 mod recorded;
@@ -33,24 +33,6 @@ fn dashed(case: &recorded::Case) -> Result<Vec<Element>, Stop> {
     Ok(out.elements)
 }
 
-/// Whether two paths have the same elements, each point within `slack`.
-fn alike(ours: &[Element], genuine: &[Element], slack: i32) -> bool {
-    ours.len() == genuine.len()
-        && ours.iter().zip(genuine).all(|(a, b)| {
-            a.code() == b.code()
-                && a.points()
-                    .iter()
-                    .zip(b.points())
-                    .all(|(p, q)| match (p, q) {
-                        (Some(p), Some(q)) => {
-                            (p.x - q.x).abs() <= slack && (p.y - q.y).abs() <= slack
-                        }
-                        (None, None) => true,
-                        _ => false,
-                    })
-        })
-}
-
 #[test]
 fn every_recorded_dash_is_cut_where_genuine_risc_os_cut_it() {
     let mut wrong: Vec<String> = Vec::new();
@@ -58,7 +40,7 @@ fn every_recorded_dash_is_cut_where_genuine_risc_os_cut_it() {
         let ours = dashed(case).expect("dashed");
         let genuine = parse(case.dashed);
         let matched = if SLANTED.contains(&case.name) {
-            alike(&ours, &genuine, SLACK)
+            alike(&ours, &genuine, |a, b| (a - b).abs() <= SLACK)
         } else {
             ours == genuine
         };

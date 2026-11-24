@@ -1487,6 +1487,10 @@ pub struct Spec {
     pub devices: AttachedDevices,
     /// How the board's PCI devices reach memory.
     pub dma_translation: DmaTranslation,
+    /// Whether the board's PCI host bypasses its translation unit, so the
+    /// firmware declares a unit that translates none of its functions; set
+    /// through [`Spec::with_pci_bypassing_unit`].
+    pub pci_bypasses_unit: bool,
     /// The interrupt controllers the board is built with.
     pub interrupts: InterruptControllers,
     /// Whether the board's CPUs implement EL2, where the kernel is entered.
@@ -1687,6 +1691,7 @@ impl Spec {
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             dma_translation: DmaTranslation::Absent,
+            pci_bypasses_unit: false,
             interrupts: InterruptControllers::Default,
             virtualization: false,
             rtc_base_unix_secs: None,
@@ -1847,6 +1852,7 @@ impl Spec {
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             dma_translation: DmaTranslation::Absent,
+            pci_bypasses_unit: false,
             interrupts: InterruptControllers::Default,
             virtualization: false,
             rtc_base_unix_secs: None,
@@ -1886,6 +1892,7 @@ impl Spec {
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             dma_translation: DmaTranslation::Absent,
+            pci_bypasses_unit: false,
             interrupts: InterruptControllers::Default,
             virtualization: false,
             rtc_base_unix_secs: None,
@@ -2065,6 +2072,15 @@ impl Spec {
     #[must_use]
     pub fn with_dma_translation(mut self, unit: DmaTranslation) -> Self {
         self.dma_translation = unit;
+        self
+    }
+
+    /// Have the board's PCI host bypass its translation unit: the unit is
+    /// declared and translates none of the host's functions. Only the x86_64
+    /// `q35` board's host is set to.
+    #[must_use]
+    pub fn with_pci_bypassing_unit(mut self) -> Self {
+        self.pci_bypasses_unit = true;
         self
     }
 
@@ -2574,6 +2590,11 @@ fn validate_boot_inputs(spec: &Spec) -> io::Result<()> {
     .or_else(|| {
         (spec.dma_translation == DmaTranslation::VirtioIommu && spec.devices.message_sources > 0)
             .then_some("the virtio-iommu takes the slot the first message source would")
+    })
+    .or_else(|| {
+        (spec.pci_bypasses_unit
+            && (spec.arch != Arch::X86_64 || spec.dma_translation == DmaTranslation::Absent))
+            .then_some("only the translated x86_64 q35 board's PCI host bypasses its unit")
     })
     .or_else(|| {
         (spec.devices.display.venus()
@@ -7107,6 +7128,7 @@ mod tests {
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             dma_translation: DmaTranslation::Absent,
+            pci_bypasses_unit: false,
             interrupts: InterruptControllers::Default,
             virtualization: false,
             rtc_base_unix_secs: None,
@@ -7248,6 +7270,29 @@ mod dma_translation_tests {
             &Spec::for_x86_64_kernel("/nonexistent/kernel")
                 .with_dma_translation(DmaTranslation::AmdVi)
                 .with_input_bridge(),
+        )
+        .expect_err("no kernel");
+        assert_eq!(x86.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// A PCI host bypasses a unit only on the translated x86_64 `q35`
+    /// board: elsewhere, or with no unit, the run is refused rather than
+    /// booted claiming a topology it lacks.
+    #[test]
+    fn a_pci_host_bypasses_a_unit_only_on_the_translated_x86_64_board() {
+        for spec in [
+            Spec::for_x86_64_kernel("/nonexistent/kernel"),
+            Spec::for_aarch64_kernel("/nonexistent/kernel")
+                .with_dma_translation(DmaTranslation::VirtioIommu),
+        ] {
+            let refused =
+                validate_boot_inputs(&spec.with_pci_bypassing_unit()).expect_err("refused");
+            assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+        }
+        let x86 = validate_boot_inputs(
+            &Spec::for_x86_64_kernel("/nonexistent/kernel")
+                .with_dma_translation(DmaTranslation::VirtioIommu)
+                .with_pci_bypassing_unit(),
         )
         .expect_err("no kernel");
         assert_eq!(x86.kind(), std::io::ErrorKind::NotFound);

@@ -404,9 +404,7 @@ impl<'o, 'a> Machine<'o, 'a> {
             .ok_or(Error::StackCorrupt)?;
         let at = self.room(length)?;
         self.os.write_word(at, Header::word(kind, aux, length))?;
-        for (i, &word) in (1..).zip(words) {
-            self.os.write_word(at + 4 * i, word)?;
-        }
+        self.os.write_words(at + 4, words)?;
         self.sp = at;
         Ok(())
     }
@@ -447,9 +445,7 @@ impl<'o, 'a> Machine<'o, 'a> {
         if carried < words.len() {
             return Err(Error::StackCorrupt.into());
         }
-        for (i, slot) in (1..).zip(words.iter_mut()) {
-            *slot = self.os.read_word(self.sp + 4 * i)?;
-        }
+        self.os.read_words(self.sp + 4, words)?;
         self.sp += header.length;
         Ok(header)
     }

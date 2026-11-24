@@ -1,24 +1,24 @@
 use alloc::vec::Vec;
 
+use tairix_drawing::riscos::format::{CLOSE, END, LINE, MOVE, NO_COLOUR, PATH};
 use tairix_riscos_filing::session::Session;
 use tairix_riscos_kernel::os::Regs;
+use tairix_riscos_kernel::swi::font::flag::{
+    BLOCK as BLOCK_FLAG, HANDLE, MATRIX as MATRIX_FLAG, OS_UNITS, WORDS,
+};
 use tairix_riscos_kernel::swi::{colour_trans, X};
 
 use super::output_flag;
 use crate::fixture::{
-    call, find, find_at, fonts, mode, read_words, write, write_words, BLOCK, MATRIX, TEXT,
+    call, find, find_at, font_paint, fonts, mode, read_words, write_words, AT, BLOCK, MATRIX, RED,
+    TEXT, WHITE,
 };
-use crate::layout::flag::{HANDLE, MATRIX as MATRIX_FLAG, OS_UNITS, WORDS};
 use crate::module::call::{CURRENT_RGB, PAINT, SET_FONT_COLOURS, SWITCH_OUTPUT_TO_BUFFER};
 
-/// Where the probes painted, and the buffer they gave.
-const AT: [u32; 2] = [100_000, 160_000];
+/// The buffer the probes gave.
 const BUFFER: u32 = 0xB000;
 const ROOM: u32 = 8000;
-const WHITE: u32 = 0xFFFF_FF00;
-const RED: u32 = 0x0000_FF00;
 const RUB_OUT: u32 = 1 << 1;
-const BLOCK_FLAG: u32 = 1 << 5;
 /// What a paint leaves alone shows as.
 const PATTERN: u32 = 0x5555_5555;
 /// `Pix`'s `A`: its advance at 16 points, in millipoints, and its
@@ -75,9 +75,7 @@ fn paint_at(
     at: [i32; 2],
     [r5, r6]: [u32; 2],
 ) -> Result<(), u32> {
-    let text = write(s, TEXT, text);
-    let [x, y] = at.map(i32::cast_unsigned);
-    call(s, PAINT, &[handle, text, HANDLE | flags, x, y, r5, r6]).map(drop)
+    font_paint(s, handle, text, flags, at.map(i32::cast_unsigned), [r5, r6])
 }
 
 /// The buffer patterned, its terminator and room set, so what a paint
@@ -109,9 +107,9 @@ fn written(s: &mut Session) -> (Vec<u32>, [u32; 2]) {
 /// A path object as RISC OS 5.30 wrote it: its size, box, fill, style and
 /// path, its outline none and of no width.
 fn object(size: u32, bbox: [u32; 4], fill: u32, style: u32, path: &[u32]) -> Vec<u32> {
-    let mut words = alloc::vec![2, size];
+    let mut words = alloc::vec![PATH, size];
     words.extend_from_slice(&bbox);
-    words.extend_from_slice(&[fill, 0xFFFF_FFFF, 0, style]);
+    words.extend_from_slice(&[fill, NO_COLOUR, 0, style]);
     words.extend_from_slice(path);
     words
 }
@@ -124,7 +122,9 @@ fn rectangle(x: u32, y: u32, width: u32, height: u32, fill: u32, style: u32) -> 
         [x, y, x1, y1],
         fill,
         style,
-        &[2, x, y, 8, x1, y, 8, x1, y1, 8, x, y1, 5, 0],
+        &[
+            MOVE, x, y, LINE, x1, y, LINE, x1, y1, LINE, x, y1, CLOSE, END,
+        ],
     )
 }
 

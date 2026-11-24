@@ -89,6 +89,37 @@ pub struct Rect {
     pub height: u32,
 }
 
+impl Rect {
+    /// The pixels it shares with `other`: none, at `other`'s corner, where
+    /// they share none, so the result lies within `other` either way.
+    pub(crate) fn within(self, other: Self) -> Self {
+        let span = |start: u32, len: u32, other_start: u32, other_len: u32| {
+            let from = start.max(other_start);
+            let to = start
+                .saturating_add(len)
+                .min(other_start.saturating_add(other_len));
+            (from, to.saturating_sub(from))
+        };
+        let (x, width) = span(self.x, self.width, other.x, other.width);
+        let (y, height) = span(self.y, self.height, other.y, other.height);
+        if width == 0 || height == 0 {
+            Self {
+                x: other.x,
+                y: other.y,
+                width: 0,
+                height: 0,
+            }
+        } else {
+            Self {
+                x,
+                y,
+                width,
+                height,
+            }
+        }
+    }
+}
+
 /// A render pass: its attachments, of one extent and sample count, and the
 /// area its draws, clears and resolves touch.
 #[derive(Copy, Clone, Debug)]
@@ -228,15 +259,20 @@ pub(crate) enum Count {
 /// `first` name, each added to `base_vertex`; and `instances` instances
 /// numbered from `first_instance`. Vertex and instance numbers wrap.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Counts {
-    pub(crate) first: u32,
-    pub(crate) positions: u32,
-    pub(crate) base_vertex: i32,
-    pub(crate) first_instance: u32,
-    pub(crate) instances: u32,
+pub struct DrawCounts {
+    /// The first vertex, or for an indexed draw the first index.
+    pub first: u32,
+    /// How many vertices, or for an indexed draw indices.
+    pub positions: u32,
+    /// What each index is added to, for an indexed draw.
+    pub base_vertex: i32,
+    /// The first instance.
+    pub first_instance: u32,
+    /// How many instances.
+    pub instances: u32,
 }
 
-impl Counts {
+impl DrawCounts {
     /// What a record of `words` names, the first four of them a draw of
     /// vertices' and all five an indexed draw's.
     pub(crate) const fn of_record(words: [u32; 5], indexed: bool) -> Self {
@@ -269,13 +305,13 @@ pub(crate) struct Records<B: Backend> {
     pub(crate) start: u64,
     pub(crate) span: u64,
     pub(crate) count: u32,
-    pub(crate) stride: u64,
+    pub(crate) stride: u32,
 }
 
 /// How many vertices and instances a checked draw makes: once, as recorded,
 /// or once for each of its records, read as the draw runs.
 pub(crate) enum Counted<B: Backend> {
-    Direct(Counts),
+    Direct(DrawCounts),
     Indirect(Records<B>),
 }
 
@@ -1201,8 +1237,12 @@ fn check_draw<B: Backend>(
     vertex_buffers
         .try_reserve_exact(recorded.vertex_buffers.len())
         .map_err(|_| Error::OutOfMemory)?;
-    for &(key, offset) in &recorded.vertex_buffers {
-        vertex_buffers.push(source(key, offset, BufferUsage::VERTEX)?);
+    for (&(key, offset), form) in recorded.vertex_buffers.iter().zip(&render.buffers) {
+        let bound = source(key, offset, BufferUsage::VERTEX)?;
+        if !bound.start.is_multiple_of(u64::from(form.alignment)) {
+            return Err(Error::Misaligned);
+        }
+        vertex_buffers.push(bound);
     }
     let index = match recorded.index {
         Some((key, offset, format)) => {
@@ -1257,7 +1297,7 @@ fn counted<B: Backend>(
             if positions.start > positions.end || instances.start > instances.end {
                 return Err(Error::OutOfRange);
             }
-            return Ok(Counted::Direct(Counts {
+            return Ok(Counted::Direct(DrawCounts {
                 first: positions.start,
                 positions: positions.end - positions.start,
                 base_vertex: *base_vertex,
@@ -1300,7 +1340,7 @@ fn counted<B: Backend>(
         start: held.offset + offset,
         span,
         count,
-        stride: u64::from(stride),
+        stride,
     }))
 }
 

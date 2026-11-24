@@ -4,8 +4,8 @@
 
 use alloc::vec::Vec;
 
-use tairix_riscos_kernel::filing::fs;
-use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
+use tairix_riscos_kernel::filing::fs::{self, Layout};
+use tairix_riscos_kernel::os::{Fail, Os, Regs};
 
 use super::call::{self, Info};
 use super::image;
@@ -57,21 +57,11 @@ pub(crate) fn read_entry(
 
 /// The record `FSEntry_Func` 15 wrote at `at`, none where its name runs on.
 fn record(os: &mut Os<'_>, at: u32) -> Result<Option<Entry>, Fail> {
-    let mut words = [0; 5];
-    for (i, word) in (0..).zip(words.iter_mut()) {
-        *word = os.read_word(at + 4 * i)?;
-    }
-    let (leaf, ended) = os.read_until(at + 20, name::NAME_MOST, |b| b == 0)?;
+    let info = os.read_listed(at)?;
+    let (leaf, ended) = os.read_until(at + Layout::Info.name_at(), name::NAME_MOST, |b| b == 0)?;
     if !ended || leaf.is_empty() {
         return Ok(None);
     }
-    let info = Info {
-        load: words[0],
-        exec: words[1],
-        length: words[2],
-        attributes: words[3],
-        kind: words[4],
-    };
     Ok(Some((leaf, info)))
 }
 
@@ -149,7 +139,7 @@ pub(crate) fn batch(
                 let Some((leaf, info)) = record(os, at)? else {
                     break;
                 };
-                at += (20 + len32(leaf.len()) + 1).next_multiple_of(4);
+                at += Layout::Info.size(&leaf);
                 if found.try_reserve(1).is_err() {
                     return Err(os.no_memory());
                 }

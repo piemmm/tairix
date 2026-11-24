@@ -754,10 +754,11 @@ impl Server {
                 done(&ops::Made::of(self.create_bind_set(key, layout, &bytes)?))?
             }
             GpuOp::ImageRequirements => {
-                let ops::ImageRequirements { desc } = decode(body)?;
-                done(&ops::Requirements {
-                    requirements: self.host.image_requirements(&desc)?,
-                })?
+                let ops::ImageRequirements { context, desc } = decode(body)?;
+                let requirements = self
+                    .host
+                    .image_requirements(self.context(caller, context)?, &desc)?;
+                done(&ops::Requirements { requirements })?
             }
             GpuOp::CreateImage => {
                 let ops::CreateImage {

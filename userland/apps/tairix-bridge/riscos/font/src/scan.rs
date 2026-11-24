@@ -10,8 +10,11 @@
 use alloc::vec::Vec;
 
 use tairix_riscos_kernel::filing::fs::kind::{DIRECTORY, FILE};
+use tairix_riscos_kernel::filing::fs::Layout;
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
+use tairix_riscos_kernel::service::international::ALPHABET_NAME;
 use tairix_riscos_kernel::swi::os::file::{CREATE_DIRECTORY, DELETE, LOAD, READ_INFO, SAVE_TYPED};
+use tairix_riscos_kernel::swi::os::var_type::{MACRO, STRING};
 use tairix_riscos_kernel::swi::os::{fs_control, gbpb};
 use tairix_riscos_kernel::swi::{chunk, os as kos, X};
 
@@ -28,7 +31,12 @@ const METRICS: &[u8] = b"IntMet";
 /// A Messages file's leaf, before its territory's number.
 const MESSAGES: &[u8] = b"Messages";
 /// ResourceFS's font directory, canonical.
-const ROM_FONTS: &[u8] = b"Resources:$.Fonts";
+pub(crate) const ROM_FONTS: &[u8] = b"Resources:$.Fonts";
+/// `Font$Path`, which fonts are found on, and `Font$Prefix`, the font
+/// library; and the element naming the library, which heads the path.
+pub(crate) const PATH: &[u8] = b"Font$Path";
+pub(crate) const PREFIX: &[u8] = b"Font$Prefix";
+pub(crate) const LIBRARY: &[u8] = b"<Font$Prefix>.";
 
 /// The most elements of `Font$Path` a catalogue reads.
 const PATH_ELEMENTS_MOST: usize = 64;
@@ -43,23 +51,9 @@ const IDENTIFIER_MOST: usize = 255;
 const MESSAGES_MOST: u32 = 64 * 1024;
 /// The room each read of a directory's entries is made into.
 const ENTRIES_ROOM: u32 = 1024;
-/// Where an `OS_GBPB` 10 record holds its object's type and its name, and
-/// the least room a record takes.
-const KIND_AT: u32 = 16;
-const NAME_AT: u32 = 20;
-const RECORD_LEAST: u32 = 24;
 /// The longest name a variable or canonical name is read to.
 const NAME_ROOM: u32 = 1024;
 
-/// `OS_SetVarVal`'s and `OS_ReadVarVal`'s types.
-const STRING: u32 = 0;
-const MACRO: u32 = 2;
-/// `OS_Byte`'s alphabet reason, and its argument that reads it.
-const ALPHABET: u32 = 71;
-const READ_ALPHABET: u32 = 127;
-/// `Service_International` and its reason for an alphabet's name.
-const SERVICE_INTERNATIONAL: u32 = 0x43;
-const ALPHABET_NAME: u32 = 3;
 /// `Territory_Number`.
 const TERRITORY_NUMBER: u32 = chunk::TERRITORY;
 
@@ -71,7 +65,7 @@ pub(crate) fn with_catalogue<T>(
     rescan: bool,
     work: impl FnOnce(&mut Os<'_>, &Catalogue) -> Result<T, Fail>,
 ) -> Result<T, Fail> {
-    let path = os.variable_text(b"Font$Path")?.unwrap_or_default();
+    let path = os.variable_text(PATH)?.unwrap_or_default();
     let kept = with(os, |state| state.catalogue.take())?;
     let catalogue = match kept {
         Some(kept) if !rescan && kept.path == path => kept,
@@ -144,15 +138,15 @@ pub(crate) fn load(os: &mut Os<'_>, name: &[u8], most: u32) -> Result<Option<Vec
     if kind != FILE {
         return Ok(None);
     }
-    let block = os.rma_claim(length.max(4))?;
-    let loaded = os.with_text(name, 0, |os, at| {
-        let mut regs = Regs::default();
-        regs.r[..4].copy_from_slice(&[LOAD, at, block, 0]);
-        os.perform(X | kos::FILE, &mut regs)?;
-        os.read_vec(block, length.min(most) as usize)
-    });
-    os.free_rma_quietly(block);
-    loaded.map(Some)
+    os.with_rma_block(length, |os, block| {
+        os.with_text(name, 0, |os, at| {
+            let mut regs = Regs::default();
+            regs.r[..4].copy_from_slice(&[LOAD, at, block, 0]);
+            os.perform(X | kos::FILE, &mut regs)?;
+            os.read_vec(block, length.min(most) as usize)
+        })
+    })
+    .map(Some)
 }
 
 /// What `name` is and its length; none where nothing is called that, or
@@ -239,7 +233,7 @@ fn listing(
     let mut found = Vec::new();
     let mut offset = 0u32;
     while *budget > 0 {
-        let asked = len32(*budget).min(ENTRIES_ROOM / RECORD_LEAST);
+        let asked = len32(*budget).min(ENTRIES_ROOM / Layout::Info.size(&[]));
         let (read, next) = os.with_text(directory, 0, |os, name| {
             os.below_supervisor_stack(ENTRIES_ROOM, |os, buffer| {
                 let mut regs = Regs::default();
@@ -283,7 +277,7 @@ fn records(os: &mut Os<'_>, buffer: u32, count: u32) -> Result<Vec<Entry>, Fail>
     let mut read = Vec::new();
     let mut at = buffer;
     for _ in 0..count {
-        let name_at = at + NAME_AT;
+        let name_at = at + Layout::Info.name_at();
         if name_at >= end {
             break;
         }
@@ -291,8 +285,8 @@ fn records(os: &mut Os<'_>, buffer: u32, count: u32) -> Result<Vec<Entry>, Fail>
         if !ended {
             break;
         }
-        let kind = os.read_word(at + KIND_AT)?;
-        at = (name_at + len32(name.len()) + 1).next_multiple_of(4);
+        let kind = os.read_listed(at)?.kind;
+        at += Layout::Info.size(&name);
         read.push(Entry { name, kind });
     }
     Ok(read)
@@ -464,24 +458,13 @@ pub(crate) fn territory(os: &mut Os<'_>) -> Result<u32, Fail> {
 /// The current alphabet's name, which names the encoding a font follows it
 /// in.
 pub(crate) fn alphabet(os: &mut Os<'_>) -> Result<Vec<u8>, Fail> {
-    let mut byte = Regs::default();
-    byte.r[..2].copy_from_slice(&[ALPHABET, READ_ALPHABET]);
-    os.perform(X | kos::BYTE, &mut byte)?;
-    let number = byte.r[1];
+    let number = os.read_alphabet()?;
     os.below_supervisor_stack(NAME_ROOM, |os, buffer| {
-        let mut regs = Regs::default();
-        regs.r[1..6].copy_from_slice(&[
-            SERVICE_INTERNATIONAL,
-            ALPHABET_NAME,
-            number,
-            buffer,
-            NAME_ROOM,
-        ]);
-        os.perform(X | kos::SERVICE_CALL, &mut regs)?;
-        if regs.r[1] != 0 {
+        let named = os.ask_international(ALPHABET_NAME, number, buffer, NAME_ROOM)?;
+        let Some((_, length)) = named else {
             return Ok(Vec::new());
-        }
-        os.read_vec(buffer, regs.r[5].min(NAME_ROOM) as usize)
+        };
+        os.read_vec(buffer, length.min(NAME_ROOM) as usize)
     })
 }
 
@@ -490,7 +473,7 @@ pub(crate) fn read_variable(os: &mut Os<'_>, name: &[u8]) -> Result<Option<Vec<u
     os.with_text(name, 0, |os, at| {
         os.below_supervisor_stack(NAME_ROOM, |os, buffer| {
             let mut regs = Regs::default();
-            regs.r[..5].copy_from_slice(&[at, buffer, NAME_ROOM, 0, STRING]);
+            regs.r[..5].copy_from_slice(&[at, buffer, NAME_ROOM, 0, u32::from(STRING)]);
             match os.perform(X | kos::READ_VAR_VAL, &mut regs) {
                 Ok(()) => Ok(Some(
                     os.read_vec(buffer, regs.r[2].min(NAME_ROOM) as usize)?,
@@ -507,7 +490,7 @@ pub(crate) fn set_macro(os: &mut Os<'_>, name: &[u8], value: &[u8]) -> Result<()
     os.with_text(name, 0, |os, at| {
         os.with_text(value, 0, |os, text| {
             let mut regs = Regs::default();
-            regs.r[..5].copy_from_slice(&[at, text, len32(value.len()), 0, MACRO]);
+            regs.r[..5].copy_from_slice(&[at, text, len32(value.len()), 0, u32::from(MACRO)]);
             os.perform(X | kos::SET_VAR_VAL, &mut regs)
         })
     })

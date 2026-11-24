@@ -1,6 +1,11 @@
-//! The filing system interface: the numbers FileSwitch calls a filing
-//! system's entries with and the words they answer in, which FileSwitch and
-//! every filing system share.
+//! The filing system interface, which FileSwitch and every filing system
+//! share: the numbers FileSwitch calls a filing system's entries with, the
+//! words they answer in, the entries a directory is listed as, and the
+//! information block a filing system is declared to FileSwitch with.
+
+use crate::module::Builtin;
+use crate::os::{len32, Fail, Os, Regs};
+use crate::swi::{os, X};
 
 /// A filing system's information word: its number in the low byte, and its
 /// flags.
@@ -62,6 +67,38 @@ pub mod block {
     pub const WORDS: usize = 12;
 }
 
+/// The entries every filing system has, by their words in its information
+/// block, in the order its module's routines give them.
+const ENTRIES: [usize; 7] = [
+    block::OPEN,
+    block::GET_BYTES,
+    block::PUT_BYTES,
+    block::ARGS,
+    block::CLOSE,
+    block::FILE,
+    block::FUNC,
+];
+
+/// A filing system as its module declares it to FileSwitch.
+#[derive(Clone, Copy, Debug)]
+pub struct Declaration {
+    /// The module whose filing system it is.
+    pub module: &'static Builtin,
+    /// The first of the module's routines that are its entries, its
+    /// `FSEntry_Open`; the rest follow in their words' order.
+    pub first_entry: usize,
+    /// Where its information block is built.
+    pub block: u32,
+    /// Its name.
+    pub name: u32,
+    /// Its start-up text.
+    pub startup: u32,
+    /// Its information word.
+    pub info: u32,
+    /// What FileSwitch hands its entries in R12.
+    pub workspace: u32,
+}
+
 /// The file information word `FSEntry_Open` answers with.
 pub mod file_info {
     /// Writing is permitted.
@@ -76,7 +113,7 @@ pub mod file_info {
     pub const INTERACTIVE: u32 = 1 << 27;
 }
 
-/// An object's kind, as `FSEntry_File` 5 gives it.
+/// An object's kind, as `OS_File` 5 and `FSEntry_File` 5 give it.
 pub mod kind {
     /// Nothing is there.
     pub const NOT_FOUND: u32 = 0;
@@ -121,6 +158,13 @@ pub mod stamp {
     pub const fn retyped(load: u32, kind: u32) -> u32 {
         (load & !TYPE) | ((kind << 8) & TYPE)
     }
+
+    /// The five-byte stamp the load address `load` and the execution address
+    /// `exec` hold between them.
+    #[must_use]
+    pub const fn of(load: u32, exec: u32) -> u64 {
+        (((load & HIGH) as u64) << 32) | exec as u64
+    }
 }
 
 /// An object's attributes: the owner's read and write, locked, and the
@@ -138,6 +182,130 @@ pub mod attribute {
     pub const PUBLIC_READ: u32 = fileswitch::PUBLIC_READ as u32;
     /// Others may write it.
     pub const PUBLIC_WRITE: u32 = fileswitch::PUBLIC_WRITE as u32;
+}
+
+/// An object's catalogue information, as `FSEntry_File` 5 gives it: by
+/// default, nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Info {
+    /// Its kind.
+    pub kind: u32,
+    /// Its load address.
+    pub load: u32,
+    /// Its execution address.
+    pub exec: u32,
+    /// Its length.
+    pub length: u32,
+    /// Its attributes.
+    pub attributes: u32,
+}
+
+/// The words of a listed entry's record, and its bytes: an object's load and
+/// execution addresses, its length, its attributes and its kind.
+const RECORD_WORDS: usize = 5;
+const RECORD_BYTES: u32 = 4 * len32(RECORD_WORDS);
+/// Where a full record holds, after the record, the object's internal name,
+/// its five-byte stamp, and its name.
+const INTERNAL_AT: u32 = RECORD_BYTES;
+const STAMP_AT: u32 = INTERNAL_AT + 4;
+const FULL_NAME_AT: u32 = STAMP_AT + 5;
+
+impl Info {
+    /// What R0 and R2 to R5 hold, as `FSEntry_File` 5 answers.
+    #[must_use]
+    pub const fn answered(regs: &Regs) -> Self {
+        Self {
+            kind: regs.r[0],
+            load: regs.r[2],
+            exec: regs.r[3],
+            length: regs.r[4],
+            attributes: regs.r[5],
+        }
+    }
+
+    /// Into R0 and R2 to R5, as `FSEntry_File` 5 and `OS_File` 5 answer.
+    pub fn answer(&self, regs: &mut Regs) {
+        regs.r[0] = self.kind;
+        regs.r[2] = self.load;
+        regs.r[3] = self.exec;
+        regs.r[4] = self.length;
+        regs.r[5] = self.attributes;
+    }
+
+    /// Its five-byte stamp.
+    #[must_use]
+    pub const fn stamp(&self) -> u64 {
+        stamp::of(self.load, self.exec)
+    }
+
+    /// Its record, which a listed entry's name follows.
+    #[must_use]
+    pub const fn record(&self) -> [u32; RECORD_WORDS] {
+        [
+            self.load,
+            self.exec,
+            self.length,
+            self.attributes,
+            self.kind,
+        ]
+    }
+
+    /// The information `record` holds.
+    const fn of_record([load, exec, length, attributes, kind]: [u32; RECORD_WORDS]) -> Self {
+        Self {
+            kind,
+            load,
+            exec,
+            length,
+            attributes,
+        }
+    }
+}
+
+/// How a directory's entries are laid out, as `FSEntry_Func` 14, 15 and 19
+/// write them and `OS_GBPB` 9 to 11 give them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Layout {
+    /// Zero-terminated names.
+    Names,
+    /// A record before each name.
+    Info,
+    /// A full record before each name: the record, the object's internal
+    /// name and its stamp.
+    FullInfo,
+}
+
+impl Layout {
+    /// The `FSEntry_Func` reason that lists entries so.
+    #[must_use]
+    pub const fn reason(self) -> u32 {
+        match self {
+            Self::Names => func::READ_NAMES,
+            Self::Info => func::READ_ENTRIES,
+            Self::FullInfo => func::READ_FULL_ENTRIES,
+        }
+    }
+
+    /// Where an entry's name starts.
+    #[must_use]
+    pub const fn name_at(self) -> u32 {
+        match self {
+            Self::Names => 0,
+            Self::Info => RECORD_BYTES,
+            Self::FullInfo => FULL_NAME_AT,
+        }
+    }
+
+    /// The room an entry of `name` takes: the name and its terminator after
+    /// any record, padded to a word where there is one.
+    #[must_use]
+    pub fn size(self, name: &[u8]) -> u32 {
+        let named = len32(name.len()).saturating_add(self.name_at() + 1);
+        match self {
+            Self::Names => named,
+            Self::Info | Self::FullInfo => named.checked_next_multiple_of(4).unwrap_or(u32::MAX),
+        }
+    }
 }
 
 /// `FSEntry_Open`'s reasons.
@@ -281,3 +449,78 @@ pub mod modifying {
     /// A rename.
     pub const RENAME: u32 = 0x208;
 }
+
+impl Os<'_> {
+    /// The information the record of the listed entry at `at` holds.
+    ///
+    /// # Errors
+    ///
+    /// The abort a read gives.
+    pub fn read_listed(&mut self, at: u32) -> Result<Info, Fail> {
+        let mut words = [0; RECORD_WORDS];
+        self.read_words(at, &mut words)?;
+        Ok(Info::of_record(words))
+    }
+
+    /// The entry named `name` written at `at` as `layout` lays it out:
+    /// `info`'s record before the name, and in a full record the object's
+    /// `internal` name and its stamp between them.
+    ///
+    /// # Errors
+    ///
+    /// The abort a write gives.
+    pub fn write_listed(
+        &mut self,
+        at: u32,
+        layout: Layout,
+        info: &Info,
+        internal: u32,
+        name: &[u8],
+    ) -> Result<(), Fail> {
+        if layout != Layout::Names {
+            self.write_words(at, &info.record())?;
+        }
+        if layout == Layout::FullInfo {
+            self.write_word(at.wrapping_add(INTERNAL_AT), internal)?;
+            self.write_five(at.wrapping_add(STAMP_AT), info.stamp())?;
+        }
+        self.write_terminated(at.wrapping_add(layout.name_at()), name, 0, name.len() + 1)
+    }
+
+    /// The filing system `declaration` describes registered with FileSwitch
+    /// by `OS_FSControl` 12, from the information block built for it of
+    /// offsets from its module; nothing while the module or one of its
+    /// entries is not there.
+    ///
+    /// # Errors
+    ///
+    /// The abort writing the block gives, or FileSwitch's refusal of it.
+    pub fn declare_filing_system(&mut self, declaration: Declaration) -> Result<(), Fail> {
+        let Some(base) = self.module_of(declaration.module) else {
+            return Ok(());
+        };
+        let mut words = [0; block::WORDS];
+        words[block::NAME] = declaration.name.wrapping_sub(base);
+        words[block::STARTUP] = declaration.startup.wrapping_sub(base);
+        words[block::INFO] = declaration.info;
+        for (offset, word) in ENTRIES.into_iter().enumerate() {
+            let routine = declaration.first_entry.saturating_add(offset);
+            let Some(at) = self.routine_of(declaration.module, routine) else {
+                return Ok(());
+            };
+            words[word] = at.wrapping_sub(base);
+        }
+        self.write_words(declaration.block, &words)?;
+        let mut regs = Regs::default();
+        regs.r[..4].copy_from_slice(&[
+            os::fs_control::ADD,
+            base,
+            declaration.block.wrapping_sub(base),
+            declaration.workspace,
+        ]);
+        self.perform(X | os::FS_CONTROL, &mut regs)
+    }
+}
+
+#[cfg(test)]
+mod tests;

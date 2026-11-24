@@ -31,9 +31,10 @@ use tairix_gpu::{
     VertexAttribute, VertexBuffer, VertexStep, ViewDimension, Viewport, DRAW_RECORD_BYTES,
     INDEXED_DRAW_RECORD_BYTES,
 };
+use tairix_gpu::{DescriptorType, SampleType, SamplerType};
 use tairix_spirv::assemble::admit;
 use tairix_spirv::enumerant::{Dim, ImageFormat};
-use tairix_spirv::{Access, BindingKind, Component, ImageShape, Stages};
+use tairix_spirv::{Access, Component, ImageShape, Stages};
 
 use super::buffers::{self, Recorded, Shape};
 use super::common::Make;
@@ -215,7 +216,7 @@ fn set_layouts(context: &Context) -> (BindSetLayout, BindSetLayout) {
     let stored = context
         .create_bind_set_layout(&[binding(
             0,
-            BindingKind::StorageBuffer,
+            DescriptorType::StorageBuffer,
             Access::READ.with(Access::WRITE),
             Stages::COMPUTE,
         )])
@@ -224,11 +225,20 @@ fn set_layouts(context: &Context) -> (BindSetLayout, BindSetLayout) {
         .create_bind_set_layout(&[
             binding(
                 0,
-                BindingKind::CombinedImageSampler(SAMPLED_2D),
+                DescriptorType::CombinedImageSampler(
+                    SAMPLED_2D,
+                    SampleType::Float,
+                    SamplerType::Filtering,
+                ),
                 Access::READ,
                 Stages::FRAGMENT,
             ),
-            binding(1, BindingKind::UniformBuffer, Access::READ, Stages::VERTEX),
+            binding(
+                1,
+                DescriptorType::UniformBuffer,
+                Access::READ,
+                Stages::VERTEX,
+            ),
         ])
         .expect("a layout");
     (stored, textured)

@@ -66,6 +66,9 @@ pub struct Version {
 }
 
 impl Version {
+    /// The oldest version a module is admitted at: the Vulkan 1.1 baseline's.
+    pub const OLDEST: Self = Self { major: 1, minor: 3 };
+
     /// The newest version the grammar describes, and so the newest a module
     /// may declare.
     pub const NEWEST: Self = Self {

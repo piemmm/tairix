@@ -1014,7 +1014,7 @@ fn a_bit_count_of_a_64_bit_integer_is_refused() {
 }
 
 #[test]
-fn a_workgroup_variable_with_an_initializer_is_refused() {
+fn a_workgroup_variable_initialized_to_anything_but_its_null_is_refused() {
     let module = after(
         COMPUTE,
         "%zero = OpConstant %uint 0",
@@ -1022,6 +1022,13 @@ fn a_workgroup_variable_with_an_initializer_is_refused() {
     );
     let module = with(&module, "\"main\" %gid %buf", "\"main\" %gid %buf %shared");
     assert_eq!(refused(&module), Rule::Initializer);
+    let nulled = after(
+        COMPUTE,
+        "%zero = OpConstant %uint 0",
+        "%null = OpConstantNull %uint\n%wg_uint = OpTypePointer Workgroup %uint\n%shared = OpVariable %wg_uint Workgroup %null",
+    );
+    let nulled = with(&nulled, "\"main\" %gid %buf", "\"main\" %gid %buf %shared");
+    assert!(admit(&nulled).is_ok(), "its null is admitted");
 }
 
 #[test]

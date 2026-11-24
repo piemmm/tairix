@@ -12,7 +12,7 @@ use tairix_raster::{Primitive, MESH_SUB_UNITS};
 use tairix_util::mathf;
 
 use super::{Area, Drawn};
-use crate::pass::{Counted, Counts, IndexFormat};
+use crate::pass::{Counted, DrawCounts, IndexFormat};
 use crate::render::{CullMode, FrontFace, Topology, VertexStep};
 use crate::software::dispatch::Workspace;
 use crate::software::shader::exec::{shade, Lanes, Placement};
@@ -44,7 +44,7 @@ const TABLE: usize = (2 * BATCH_POSITIONS).next_power_of_two();
 pub(super) struct Planned {
     pub(super) draw: usize,
     pub(super) instance: u32,
-    counts: Counts,
+    counts: DrawCounts,
     run: u32,
     length: u32,
     first: u32,
@@ -58,7 +58,7 @@ pub(super) struct Planned {
 pub(super) struct Planner {
     draw: usize,
     record: u32,
-    counts: Option<Counts>,
+    counts: Option<DrawCounts>,
     instance: u32,
     run: u32,
     length: Option<u32>,
@@ -207,7 +207,7 @@ impl Planner {
     fn find_run(
         &mut self,
         drawn: &Drawn<'_>,
-        counts: &Counts,
+        counts: &DrawCounts,
         meter: &mut Meter<'_>,
     ) -> Option<u32> {
         let positions = counts.positions;
@@ -241,7 +241,7 @@ impl Drawn<'_> {
     /// one record, else read from its records and counted on `meter` —
     /// `None` past its last. A record naming a first instance the device does
     /// not state it draws from is malformed.
-    fn counts(&self, record: u32, meter: &mut Meter<'_>) -> Result<Option<Counts>, Outcome> {
+    fn counts(&self, record: u32, meter: &mut Meter<'_>) -> Result<Option<DrawCounts>, Outcome> {
         let records = match &self.work.count {
             Counted::Direct(counts) => return Ok((record == 0).then_some(*counts)),
             Counted::Indirect(records) => records,
@@ -259,7 +259,7 @@ impl Drawn<'_> {
             return Err(Outcome::Overran);
         }
         let words = self.records.ok_or(Outcome::Fault)?;
-        let first = (u64::from(record) * records.stride)
+        let first = (u64::from(record) * u64::from(records.stride))
             .checked_add(records.start)
             .filter(|byte| byte.is_multiple_of(4))
             .and_then(|byte| usize::try_from(byte / 4).ok())
@@ -271,7 +271,7 @@ impl Drawn<'_> {
         for (word, value) in record_words.iter_mut().zip(held) {
             *word = value.load(Ordering::Relaxed);
         }
-        let counts = Counts::of_record(record_words, indexed);
+        let counts = DrawCounts::of_record(record_words, indexed);
         if counts.first_instance != 0 && !self.takes_first_instance {
             return Err(Outcome::Fault);
         }
@@ -285,7 +285,7 @@ impl Drawn<'_> {
 
     /// The raw index at `position` of `counts`' indices: zero past their
     /// buffer.
-    fn raw_index(&self, counts: &Counts, position: u32) -> u32 {
+    fn raw_index(&self, counts: &DrawCounts, position: u32) -> u32 {
         let Some((words, start, size, format)) = self.index else {
             return 0;
         };
@@ -298,7 +298,7 @@ impl Drawn<'_> {
     }
 
     /// Whether `position` of `counts`' indices holds the restart index.
-    fn is_restart(&self, counts: &Counts, position: u32) -> bool {
+    fn is_restart(&self, counts: &DrawCounts, position: u32) -> bool {
         let all = match self.index.map(|(_, _, _, format)| format) {
             Some(IndexFormat::U16) => u32::from(u16::MAX),
             _ => u32::MAX,
@@ -307,7 +307,7 @@ impl Drawn<'_> {
     }
 
     /// The vertex `position` of `counts` names.
-    fn vertex(&self, counts: &Counts, position: u32) -> u32 {
+    fn vertex(&self, counts: &DrawCounts, position: u32) -> u32 {
         if self.index.is_some() {
             self.raw_index(counts, position)
                 .cast_signed()
@@ -328,10 +328,10 @@ impl Drawn<'_> {
             .copied()
             .flatten()
             .and_then(|(words, start, size): (&[AtomicU32], u64, u64)| {
-                let (stride, _) = self.render.fixed.buffers.get(fetch.buffer as usize)?;
+                let form = self.render.fixed.buffers.get(fetch.buffer as usize)?;
                 let bytes = u64::from(format.texel_bytes());
                 let at = u64::from(element)
-                    .checked_mul(u64::from(*stride))?
+                    .checked_mul(u64::from(form.stride))?
                     .checked_add(u64::from(fetch.offset))?;
                 (at.checked_add(bytes)? <= size).then(|| raw_at(words, start + at, bytes))
             })
@@ -592,10 +592,11 @@ fn shade_vertices(
                     else {
                         return;
                     };
-                    let per_instance = matches!(
-                        render.fixed.buffers.get(fetch.buffer as usize),
-                        Some((_, VertexStep::Instance))
-                    );
+                    let per_instance = render
+                        .fixed
+                        .buffers
+                        .get(fetch.buffer as usize)
+                        .is_some_and(|form| form.step == VertexStep::Instance);
                     for ((value, &vertex), texel) in lanes.zip(&mut decoded) {
                         if word == 0 {
                             *texel = drawn

@@ -27,7 +27,9 @@ use std::sync::LazyLock;
 use common::{
     answers, command, drivers_with, rma_used, select_depth, KernelMemory, HOSTILE_CALL_WORDS,
 };
+use tairix_drawing::riscos::format::{element_points, CONTINUATION, TAG};
 use tairix_fuzzseed::Prng;
+use tairix_riscos_draw::fixture;
 use tairix_riscos_filing::session::{modules_with, Session};
 use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::module::Builtin;
@@ -69,16 +71,14 @@ fn path(rng: &mut Prng, base: u32) -> Vec<u32> {
             *rng.pick(&[2, 3, 4, 5, 6, 7, 8, 8, 8, 1, 9, 0x123_4508])
         };
         words.push(code);
-        let points = match code & 0xFF {
-            6 => 3,
-            2 | 3 | 7 | 8 => 1,
-            1 => {
+        let points = match code & TAG {
+            CONTINUATION => {
                 let into = base + 4 * u32::try_from(rng.below(16)).unwrap_or(0);
                 let target = *rng.pick(&[base, into, APPLICATION, 0]);
                 words.push(target);
                 0
             }
-            _ => 0,
+            tag => element_points(tag).unwrap_or(0),
         };
         for _ in 0..2 * points {
             words.push(coordinate(rng));
@@ -127,7 +127,7 @@ fn boot(rng: &mut Prng) -> (Session, KernelMemory) {
             *word = hostile(rng, &kernel);
         }
     }
-    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let bytes = fixture::words(&words);
     let _ = session.kernel.os().write_bytes(APPLICATION, &bytes);
     (session, kernel)
 }
@@ -207,7 +207,7 @@ fn call(session: &mut Session, rng: &mut Prng, kernel: &KernelMemory) {
 fn reaches_draw(session: &mut Session) {
     let path = [2u32, 0, 0, 8, 9000, 0, 8, 9000, 9000, 5, 0, 64];
     let at = APPLICATION + SALTED;
-    let bytes: Vec<u8> = path.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let bytes = fixture::words(&path);
     session
         .kernel
         .os()

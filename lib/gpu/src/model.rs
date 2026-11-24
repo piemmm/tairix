@@ -20,7 +20,7 @@ use crate::binding::{BindSetLayoutState, BindSetState, PipelineLayoutState};
 use crate::command::{resolve, Command, Op};
 use crate::device::AllocationDesc;
 use crate::info::{
-    BufferUsage, DeviceInfo, MemoryProperties, QueueCapabilities, MAX_MEMORY_HEAPS,
+    BufferUsage, DeviceInfo, Features, MemoryProperties, QueueCapabilities, MAX_MEMORY_HEAPS,
     MAX_QUEUE_FAMILIES,
 };
 use crate::memory::{Budget, Charge, Held, MemoryUse};
@@ -248,16 +248,16 @@ pub(crate) struct ContextState<B: Backend> {
     /// keeps room for.
     allocating: usize,
     pub(crate) buffers: Table<BufferKey, Arc<BufferState<B>>>,
-    pub(crate) images: Table<ImageKey, Arc<ImageState<B>>>,
+    pub(crate) images: Planned<ImageKey, Arc<ImageState<B>>>,
     pub(crate) views: Table<ViewKey, Arc<ViewState<B>>>,
     pub(crate) buffer_views: Table<BufferViewKey, Arc<BufferViewState<B>>>,
-    pub(crate) samplers: Table<SamplerKey, Arc<SamplerState>>,
+    pub(crate) samplers: Table<SamplerKey, Arc<SamplerState<B>>>,
     pub(crate) bind_set_layouts: Table<BindSetLayoutKey, Arc<BindSetLayoutState>>,
     pub(crate) bind_sets: Table<BindSetKey, Arc<BindSetState<B>>>,
     pub(crate) pipeline_layouts: Table<PipelineLayoutKey, Arc<PipelineLayoutState>>,
     pub(crate) shader_modules: Table<ShaderModuleKey, Arc<crate::binding::ShaderModuleState>>,
-    pub(crate) compute_pipelines: Pipelines<ComputePipelineKey, Arc<ComputePipelineState<B>>>,
-    pub(crate) render_pipelines: Pipelines<RenderPipelineKey, Arc<RenderPipelineState<B>>>,
+    pub(crate) compute_pipelines: Planned<ComputePipelineKey, Arc<ComputePipelineState<B>>>,
+    pub(crate) render_pipelines: Planned<RenderPipelineKey, Arc<RenderPipelineState<B>>>,
     exports: Table<ExportEntryKey, ExportState<B>>,
     timelines: Table<TimelineKey, TimelineState>,
     jobs: Table<JobKey, Job<B>>,
@@ -271,15 +271,37 @@ pub(crate) struct ContextState<B: Backend> {
 /// Which of a context's tables a request files its object in.
 pub(crate) type Pick<B, K, V> = fn(&mut ContextState<B>) -> &mut Table<K, V>;
 
-/// A context's pipelines of one kind, and how many it has planned and not
-/// yet filed, which the table keeps room for.
-pub(crate) struct Pipelines<K, V> {
+/// A context's objects of one kind whose making does work worth undoing no
+/// refusal after it, and how many have their room reserved and are not yet
+/// filed, which the table keeps room for.
+pub(crate) struct Planned<K, V> {
     pub(crate) table: Table<K, V>,
     planning: usize,
 }
 
-/// Which kind of pipeline a request makes.
-pub(crate) type PickPipelines<B, K, V> = fn(&mut ContextState<B>) -> &mut Pipelines<K, V>;
+impl<K: Key, V> Planned<K, V> {
+    /// An empty table, its room under `charge`.
+    fn new(charge: Charge) -> Result<Self, Error> {
+        Ok(Self {
+            table: Charged::new(SlotMap::new(), charge)?,
+            planning: 0,
+        })
+    }
+
+    /// The growth the table takes to hold every object reserved, and one
+    /// more.
+    fn room(&self) -> Option<(usize, u64)> {
+        let room = self
+            .table
+            .len()
+            .saturating_add(self.planning)
+            .saturating_add(1);
+        self.table.growth_to(room)
+    }
+}
+
+/// Which of a context's planned tables a request files its object in.
+pub(crate) type PickPlanned<B, K, V> = fn(&mut ContextState<B>) -> &mut Planned<K, V>;
 
 /// What the first phase of making a pipeline answers: what the pool lacks
 /// of it and its charge, or why it has none; and what the pool let go.
@@ -653,22 +675,14 @@ impl<B: Backend> Model<B> {
     /// admitted before any is taken, so what the plan makes is not made only
     /// to be refused after; and what the pool let go meanwhile, to be dropped
     /// without the device's lock. Filed with the kind's own creation, or its
-    /// room given back with [`Self::unreserve_pipeline`].
+    /// room given back with [`Self::unreserve`].
     pub(crate) fn plan_pipeline<K: Key, V>(
         &mut self,
-        (key, pick): (ContextKey, PickPipelines<B, K, V>),
+        (key, pick): (ContextKey, PickPlanned<B, K, V>),
         need: Need<B>,
         held: u64,
     ) -> PipelinePlan<B> {
-        let growth = self.live_mut(key).map(|context| {
-            let pipelines = pick(context);
-            let room = pipelines
-                .table
-                .len()
-                .saturating_add(pipelines.planning)
-                .saturating_add(1);
-            pipelines.table.growth_to(room)
-        });
+        let growth = self.live_mut(key).map(|context| pick(context).room());
         let growth = match growth {
             Ok(growth) => growth,
             Err(error) => return (Err(error), Default::default()),
@@ -679,30 +693,63 @@ impl<B: Backend> Model<B> {
             Err(error) => return (Err(error), shrunk),
         };
         // Admitted with the plan, so only the host can refuse them now.
-        let charged = self
-            .grow(key, |context| &mut pick(context).table, growth)
-            .and_then(|()| self.host_charge(key, held))
-            .and_then(|charge| {
-                let pipelines = pick(self.live_mut(key)?);
-                pipelines.planning = pipelines.planning.saturating_add(1);
-                Ok(charge)
-            });
+        let charged = self.keep_room((key, pick), growth, held);
         match charged {
             Ok(charge) => (Ok((plan, charge)), shrunk),
             Err(error) => (Err(error), shrunk),
         }
     }
 
-    /// Give back the room kept for a pipeline of the kind `pick` names that
-    /// [`Self::plan_pipeline`] planned and that is not to be filed.
-    pub(crate) fn unreserve_pipeline<K, V>(
+    /// The first phase of making an object of the kind `pick` names whose
+    /// making does work worth undoing no refusal after it: its room kept in
+    /// the context's table and `held` bytes charged, all admitted before any
+    /// is taken. Filed with [`Self::file_reserved`], or its room given back
+    /// with [`Self::unreserve`].
+    pub(crate) fn reserve<K: Key, V>(
         &mut self,
-        (key, pick): (ContextKey, PickPipelines<B, K, V>),
-    ) {
+        (key, pick): (ContextKey, PickPlanned<B, K, V>),
+        held: u64,
+    ) -> Result<Charge, Error> {
+        let growth = pick(self.live_mut(key)?).room();
+        let total = held.saturating_add(grown_bytes(growth));
+        let work = self.work_heap()?;
+        self.admit(key, total, &[(&work, total)])?;
+        self.keep_room((key, pick), growth, held)
+    }
+
+    /// Make `growth` in the table `pick` names and charge `held` bytes, both
+    /// admitted already, and count one more object reserved there.
+    fn keep_room<K: Key, V>(
+        &mut self,
+        (key, pick): (ContextKey, PickPlanned<B, K, V>),
+        growth: Option<(usize, u64)>,
+        held: u64,
+    ) -> Result<Charge, Error> {
+        self.grow(key, |context| &mut pick(context).table, growth)?;
+        let charge = self.host_charge(key, held)?;
+        let planned = pick(self.live_mut(key)?);
+        planned.planning = planned.planning.saturating_add(1);
+        Ok(charge)
+    }
+
+    /// Give back the room kept for an object of the kind `pick` names that
+    /// is not to be filed.
+    pub(crate) fn unreserve<K, V>(&mut self, (key, pick): (ContextKey, PickPlanned<B, K, V>)) {
         if let Ok(context) = self.existing_mut(key) {
-            let pipelines = pick(context);
-            pipelines.planning = pipelines.planning.saturating_sub(1);
+            let planned = pick(context);
+            planned.planning = planned.planning.saturating_sub(1);
         }
+    }
+
+    /// File `value` in the room [`Self::reserve`] kept in the table `pick`
+    /// names: refused only where the context was lost or let go meanwhile.
+    pub(crate) fn file_reserved<K: Key, V>(
+        &mut self,
+        (key, pick): (ContextKey, PickPlanned<B, K, V>),
+        value: V,
+    ) -> Result<K, Error> {
+        self.unreserve((key, pick));
+        pick(self.live_mut(key)?).table.try_insert(value)
     }
 
     /// The last phase of holding room in the pool: what `grown` made
@@ -843,7 +890,7 @@ impl<B: Backend> Model<B> {
             allocations: Charged::new(SlotMap::new(), none()?)?,
             allocating: 0,
             buffers: Charged::new(SlotMap::new(), none()?)?,
-            images: Charged::new(SlotMap::new(), none()?)?,
+            images: Planned::new(none()?)?,
             views: Charged::new(SlotMap::new(), none()?)?,
             buffer_views: Charged::new(SlotMap::new(), none()?)?,
             samplers: Charged::new(SlotMap::new(), none()?)?,
@@ -851,14 +898,8 @@ impl<B: Backend> Model<B> {
             bind_sets: Charged::new(SlotMap::new(), none()?)?,
             pipeline_layouts: Charged::new(SlotMap::new(), none()?)?,
             shader_modules: Charged::new(SlotMap::new(), none()?)?,
-            compute_pipelines: Pipelines {
-                table: Charged::new(SlotMap::new(), none()?)?,
-                planning: 0,
-            },
-            render_pipelines: Pipelines {
-                table: Charged::new(SlotMap::new(), none()?)?,
-                planning: 0,
-            },
+            compute_pipelines: Planned::new(none()?)?,
+            render_pipelines: Planned::new(none()?)?,
             exports: Charged::new(SlotMap::new(), none()?)?,
             timelines: Charged::new(fences, fences_room)?,
             jobs: Charged::new(SlotMap::new(), none()?)?,
@@ -1030,6 +1071,9 @@ impl<B: Backend> Model<B> {
         key: ContextKey,
         allocation: AllocationKey,
     ) -> Result<ExportKey, Error> {
+        if !self.info.features.contains(Features::SHARED_MEMORY) {
+            return Err(Error::Unsupported);
+        }
         let held = self
             .live(key)?
             .allocations

@@ -10,10 +10,12 @@
 
 use alloc::vec::Vec;
 
+use tairix_drawing::riscos::units::DRAW_UNIT_SHIFT;
+use tairix_riscos_kernel::mouse::Bounds;
 use tairix_util::fallible;
 
 use crate::path::Element;
-use crate::raster::{self, class, Rule, Segment, Window};
+use crate::raster::{self, class, Rule, Segment};
 use crate::stage::{Guest, Refusal, Sink, Span, Stop};
 
 /// What a fill is plotted on: the screen's or sprite's pixels as the VDU
@@ -25,30 +27,25 @@ pub(crate) struct Surface {
     /// The graphics origin, in OS units from the bottom left.
     pub(crate) origin: (i32, i32),
     /// The graphics window, in pixels.
-    pub(crate) window: Window,
+    pub(crate) window: Bounds,
 }
 
 impl Surface {
     /// The VDU drivers' `surface` as a fill plots on it.
     pub(crate) const fn of(surface: &tairix_riscos_vdu::render::Surface) -> Self {
-        let window = surface.window;
         Self {
             eig: surface.eig,
             origin: surface.origin,
-            window: Window {
-                left: window.left,
-                bottom: window.bottom,
-                right: window.right,
-                top: window.top,
-            },
+            window: surface.window,
         }
     }
 
     /// A point in Draw's internal units, in 256ths of a pixel from the
     /// bottom left.
     fn place(self, x: i32, y: i32) -> (i64, i64) {
-        let along =
-            |v: i32, origin: i32, eig: u32| (i64::from(v) + (i64::from(origin) << 8)) >> eig;
+        let along = |v: i32, origin: i32, eig: u32| {
+            (i64::from(v) + (i64::from(origin) << DRAW_UNIT_SHIFT)) >> eig
+        };
         (
             along(x, self.origin.0, self.eig.0),
             along(y, self.origin.1, self.eig.1),
@@ -229,21 +226,9 @@ fn within(spans: &[Span], clip: &[Span], kept: &mut Vec<Span>) -> Result<(), Sto
 /// `spans` sorted by row and column, those that touch or overlap merged:
 /// the clip made a subpath at a time, as one set.
 pub(crate) fn normalised(mut spans: Vec<Span>) -> Vec<Span> {
-    spans.sort_unstable();
-    let mut kept: usize = 0;
-    for i in 0..spans.len() {
-        let span = spans[i];
-        match kept.checked_sub(1).map(|last| spans[last]) {
-            Some((row, _, right)) if row == span.0 && span.1 <= right.saturating_add(1) => {
-                spans[kept - 1].2 = right.max(span.2);
-            }
-            _ => {
-                spans[kept] = span;
-                kept += 1;
-            }
-        }
-    }
-    spans.truncate(kept);
+    raster::coalesce(&mut spans, |(row, left, right), (next_row, from, to)| {
+        (next_row == row && from <= right.saturating_add(1)).then_some((row, left, right.max(to)))
+    });
     spans
 }
 

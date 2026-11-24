@@ -14,7 +14,7 @@ use tairix_filecore::record::DISC_RECORD_SIZE;
 use tairix_filecore::Disc;
 use tairix_riscos_arm::mmu::PAGE_SIZE;
 use tairix_riscos_kernel::error::Error;
-use tairix_riscos_kernel::module::{Builtin, Command, CommandKind, Help, Resource};
+use tairix_riscos_kernel::module::{Builtin, Command, Resource};
 use tairix_riscos_kernel::msgtrans::{Own, OwnFile};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, World};
 use tairix_riscos_kernel::ramdisc::{Occupant, AREA};
@@ -70,16 +70,13 @@ pub static RAM_FS: Builtin = Builtin {
     bridge: false,
     swis: None,
     services: None,
-    commands: &[Command {
-        name: "Ram",
-        kind: CommandKind::Command,
-        min: 0,
-        max: 0,
-        translate: 0,
-        help: Help::Text("*Ram makes the RAM disc's filing system the current one."),
-        syntax: Some("Syntax: *Ram"),
-        run: Some(select),
-    }],
+    commands: &[Command::new(
+        "Ram",
+        (0, 0),
+        "*Ram makes the RAM disc's filing system the current one.",
+        Some("Syntax: *Ram"),
+        select,
+    )],
     init: Some(init),
     finalise: Some(finalise),
     start: None,

@@ -2,7 +2,7 @@
 //!
 //! It lists the GPUs drivers serve, runs [`tairix_gpucheck::work`] on each
 //! and on the software device, and states whether they agree. Every refusal
-//! states its reason on `stderr`.
+//! states its reason, and the step it met, on `stderr`.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -22,7 +22,7 @@ mod program {
 
     use tairix_abi::gpu::GpuDeviceDescriptor;
     use tairix_gpu::Device;
-    use tairix_gpucheck::{compare, reference, work, USAGE};
+    use tairix_gpucheck::{compare, reference, work, Difference, USAGE};
     use tairix_help::HelpOnly;
     use tairix_procinfo::{for_each_gpu_device, IpcTransport, WalkStep};
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
@@ -30,7 +30,7 @@ mod program {
     const NAME: &str = "gpucheck";
 
     /// The region each GPU's bytes cross through: room for the work's
-    /// largest transfer.
+    /// largest transfer and its largest module, which crosses whole.
     const REGION: usize = 1 << 20;
 
     fn fail(reason: &str) -> i32 {
@@ -76,7 +76,7 @@ mod program {
         };
         let expected = match work(&reference) {
             Ok(expected) => expected,
-            Err(why) => return fail(&format!("the software device refused the work: {why}")),
+            Err(refused) => return fail(&format!("the software device refused {refused}")),
         };
         drop(reference);
         let mut agreed = true;
@@ -86,7 +86,10 @@ mod program {
                     agreed = false;
                     format!("gpu {}: could not be reached: {why}", gpu.node)
                 }
-                Ok(device) => match compare(&device, &expected) {
+                Ok(device) => match work(&device)
+                    .map_err(Difference::Refused)
+                    .and_then(|answered| compare(&answered, &expected))
+                {
                     Ok(()) => format!("gpu {}: agrees with the software device", gpu.node),
                     Err(difference) => {
                         agreed = false;

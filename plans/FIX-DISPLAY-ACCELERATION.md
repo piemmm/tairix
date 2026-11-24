@@ -187,9 +187,10 @@ layout moves into one `kernel/tairix-kernel` module every port calls.
   transfers synchronously, 2 where the engine reads the frame while it shows);
   `present(id, damage)` answers `Presented::Shown` or `Presented::Queued`, and
   `service_events` reports a queued present latching. The hosting loop calls
-  `service_events` on every event wake, and after every request of a driver
-  whose requests wait on its device (`requests_take_wakes`), since such a
-  request may have taken a source's wake. `memory()` states the device's own memory; `as_accelerated()` and
+  `service_events` on every event wake, and after every call driving a
+  display whose calls wait on its device (`requests_take_wakes`) — a request,
+  a lease's release, an expired present — since such a call may have taken a
+  source's wake. `memory()` states the device's own memory; `as_accelerated()` and
   `hardware_cursor()` reach the layer compositor and the cursor plane, so the
   server holds one `&mut dyn Display`, and `DisplayDeviceReport` gathers the
   three for the monitor.

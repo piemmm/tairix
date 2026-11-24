@@ -609,21 +609,18 @@ impl Os<'_> {
             }
             return Ok(true);
         }
-        let mut ask = Regs::default();
-        ask.r[1..4].copy_from_slice(&[service::INTERNATIONAL, reason::UCS_TABLE, alphabet]);
-        self.service(&mut ask)?;
-        let found = if ask.r[1] == 0 {
-            let table = ask.r[4];
-            let mut found = None;
-            for byte in 0x80..=0xFF_u8 {
-                if self.read_word(table.wrapping_add(4 * u32::from(byte)))? == code {
-                    found = Some(byte);
-                    break;
+        let found = match self.ask_international(reason::UCS_TABLE, alphabet, 0, 0)? {
+            Some((table, _)) => {
+                let mut found = None;
+                for byte in 0x80..=0xFF_u8 {
+                    if self.read_word(table.wrapping_add(4 * u32::from(byte)))? == code {
+                        found = Some(byte);
+                        break;
+                    }
                 }
+                found
             }
-            found
-        } else {
-            u8::try_from(code).ok()
+            None => u8::try_from(code).ok(),
         };
         Ok(found.is_some_and(|byte| out.try_extend_from_slice(&[0, byte]).is_ok()))
     }
@@ -720,9 +717,7 @@ impl Os<'_> {
             init.wrapping_sub(workspace),
             pending.wrapping_sub(workspace),
         ];
-        for (i, word) in (0..).zip(header) {
-            self.write_word(workspace + 4 * i, word)?;
-        }
+        self.write_words(workspace, &header)?;
         let mut inkey = [u32::MAX; 128];
         for (low, &internal) in (0..).zip(INTERNAL.iter()) {
             add_internal(&mut inkey, internal, low);
@@ -730,9 +725,7 @@ impl Os<'_> {
         for &(internal, low) in &ALSO {
             add_internal(&mut inkey, internal, low);
         }
-        for (i, word) in (0..).zip(inkey) {
-            self.write_word(workspace + INKEY_AT + 4 * i, word)?;
-        }
+        self.write_words(workspace + INKEY_AT, &inkey)?;
         let mut shifting = ArrayVec::<u8, 16>::new();
         let _ = shifting.try_push(u8::try_from(SHIFTING.len()).unwrap_or(0));
         for key in SHIFTING.iter().filter_map(|&key| u8::try_from(key).ok()) {
@@ -740,10 +733,7 @@ impl Os<'_> {
         }
         self.write_bytes(workspace + SHIFTING_AT, shifting.as_slice())?;
         let at = workspace + CODES_AT;
-        for i in 0..SPECIALS_MOST {
-            self.write_word(at + 4 * i, special.wrapping_sub(at))?;
-        }
-        Ok(())
+        self.write_words(at, &[special.wrapping_sub(at); SPECIALS_MOST as usize])
     }
 
     /// The tables `layout` changes, written to the workspace at

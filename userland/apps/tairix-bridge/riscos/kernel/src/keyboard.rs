@@ -173,9 +173,7 @@ impl Os<'_> {
             return Ok(None);
         };
         let mut words = [0; 9];
-        for (i, word) in (0..).zip(words.iter_mut().take(8)) {
-            *word = self.read_word(base.wrapping_add(4 * i))?;
-        }
+        self.read_words(base, &mut words[..8])?;
         let flagged = words[1] & (1 << 31) != 0;
         let wide = flagged && self.read_word(base.wrapping_add(32))? & 1 != 0;
         let at = |offset: u32| base.wrapping_add(offset);

@@ -122,9 +122,7 @@ fn take_handlers(os: &mut Os<'_>, builtin: &'static Builtin) -> Result<(), Fail>
         regs.r[..4].copy_from_slice(&[handler, code, ws::ARGP, buffer]);
         os.perform(X | swi::CHANGE_ENVIRONMENT, &mut regs)?;
         let saved = ws::SAVED_HANDLERS.at() + 12 * i;
-        for (j, &word) in (0..).zip(&regs.r[1..4]) {
-            os.write_word(saved + 4 * j, word)?;
-        }
+        os.write_words(saved, &regs.r[1..4])?;
     }
     Ok(())
 }
@@ -139,9 +137,7 @@ pub(crate) fn give_back_handlers(os: &mut Os<'_>) -> Result<(), Fail> {
         }
         let mut regs = Regs::default();
         regs.r[0] = handler;
-        for (j, slot) in (0..).zip(regs.r[1..4].iter_mut()) {
-            *slot = os.read_word(saved + 4 * j)?;
-        }
+        os.read_words(saved, &mut regs.r[1..4])?;
         os.perform(X | swi::CHANGE_ENVIRONMENT, &mut regs)?;
         os.fill(saved, 12, 0)?;
     }

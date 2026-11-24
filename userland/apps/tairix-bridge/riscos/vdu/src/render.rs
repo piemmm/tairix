@@ -4,15 +4,16 @@
 //! table's pixels, and a logical colour set through `PaletteV`.
 
 use tairix_riscos_kernel::mouse::Bounds;
-use tairix_riscos_kernel::os::{Entry, Fail, Os, Regs};
+use tairix_riscos_kernel::os::{Fail, Os};
 
 use alloc::vec::Vec;
 
 use crate::canvas::{Block, Canvas};
 use crate::changed::{cover, Rect};
 use crate::colour::{replicate, Direct};
-use crate::palette::{kind, reason, PALETTE_V};
+use crate::palette::{kind, set_through};
 use crate::plot::{ink_block, widen, Ink};
+use crate::sprite::alpha::widened;
 use crate::sprite::Palettised;
 use crate::state::{read, with, Vdu};
 
@@ -39,12 +40,6 @@ pub struct Surface {
     pub direct: bool,
 }
 
-/// A 4K colour mode's colours.
-const FOUR_K: u32 = 0xFFF;
-/// The depths, as powers of two, of 16M and 4K colour pixels.
-const SIXTEEN_M_BITS: u32 = 5;
-const FOUR_K_BITS: u32 = 4;
-
 /// Where output goes now; `None` where it cannot show graphics.
 pub fn surface(os: &mut Os<'_>) -> Option<Surface> {
     read(os, |vdu, _| {
@@ -56,8 +51,7 @@ pub fn surface(os: &mut Os<'_>) -> Option<Surface> {
             window: graphics.window,
             cursors: [graphics.cursor_pixels, graphics.old, graphics.older],
             log2_bpp: format.log2_bpp(),
-            tagged: format.log2_bpp() == SIXTEEN_M_BITS
-                || (format.log2_bpp() == FOUR_K_BITS && format.ncolour() == FOUR_K),
+            tagged: format.direct() && Direct::of(format).tagged(),
             direct: format.direct(),
         })
     })
@@ -208,8 +202,8 @@ pub fn blend_levels(
 
 /// The depth, as a power of two, below which a mode does not blend.
 const EIGHT_BITS: u32 = 3;
-/// What takes an eight-bit channel to five bits.
-const FIVE_BIT_SHIFT: u32 = 3;
+/// What takes an eight-bit channel to the 32K table's five bits.
+const FIVE_BIT_SHIFT: u32 = u8::BITS - Direct::FIFTEEN.channel_bits()[0];
 
 /// The colour a blend moves each pixel toward, in the destination's form,
 /// and the pixel a whole level stores.
@@ -244,7 +238,7 @@ impl Supremacy {
     fn composited(&self, direct: Direct, screen: u32, level: u8) -> u32 {
         let shift = self.tag.trailing_zeros();
         let width = self.tag.count_ones();
-        let behind = widened((screen & self.tag) >> shift, width);
+        let behind = u32::from(widened((screen & self.tag) >> shift, width));
         let shown = direct.unpack_replicated(screen);
         let coverage =
             (share(level) * (SHARES * SHARES - expanded(self.transparency)) + HALF) >> SHARE_BITS;
@@ -273,15 +267,7 @@ const fn expanded(value: u32) -> u32 {
     value + (value >> 7)
 }
 
-/// A field of `width` bits widened to eight, or eight narrowed to it.
-fn widened(value: u32, width: u32) -> u32 {
-    if width >= 8 {
-        value
-    } else {
-        value * 0xFF / ((1 << width) - 1)
-    }
-}
-
+/// A value of eight bits narrowed to a field of `width` bits.
 fn narrowed(value: u32, width: u32) -> u32 {
     value >> 8u32.saturating_sub(width)
 }
@@ -289,30 +275,28 @@ fn narrowed(value: u32, width: u32) -> u32 {
 impl<'a> Towards<'a> {
     /// Toward `foreground`, `&BBGGRRSS`, among `palettised`'s colours.
     fn palettised(palettised: &'a Palettised, foreground: u32) -> Self {
-        let [_, red, green, blue] = foreground.to_le_bytes().map(u32::from);
-        let five = [red, green, blue].map(|channel| channel >> FIVE_BIT_SHIFT);
+        let [_, red, green, blue] = foreground.to_le_bytes();
+        let cell = Direct::FIFTEEN.pack([red, green, blue]);
         Self::Palettised {
             palettised,
-            foreground: five,
-            whole: palettised.number_of_cell(Direct::FIFTEEN.pack_channels(five) as usize),
+            foreground: Direct::FIFTEEN.channels(cell),
+            whole: palettised.number_of_cell(cell as usize),
         }
     }
 
     /// Toward `foreground`, `&BBGGRRSS`, in `direct`'s pixels, whose `tag`
     /// bits keep a supremacy value a blend with `supremacy` composites.
     fn direct(direct: Direct, tag: u32, foreground: u32, supremacy: bool) -> Self {
-        let [supreme, red, green, blue] = foreground.to_le_bytes().map(u32::from);
-        let wanted = [red, green, blue];
-        let bits = direct.channel_bits();
-        let narrowed = [0, 1, 2].map(|i| wanted[i] >> 8u32.saturating_sub(bits[i]));
+        let [supreme, red, green, blue] = foreground.to_le_bytes();
+        let whole = direct.pack([red, green, blue]);
         Self::Direct {
             direct,
-            foreground: narrowed,
-            whole: direct.pack_channels(narrowed),
+            foreground: direct.channels(whole),
+            whole,
             supremacy: (supremacy && tag != 0).then_some(Supremacy {
                 tag,
-                foreground: wanted,
-                transparency: supreme,
+                foreground: [red, green, blue].map(u32::from),
+                transparency: u32::from(supreme),
             }),
         }
     }
@@ -374,6 +358,28 @@ fn blend_row(
     let line = canvas.row_of(y);
     let mut shown = Vec::new();
     let mut values = [0u32; RUN];
+    each_run(row, left, |column, levels| {
+        let last = column + u32::try_from(levels.len() - 1).unwrap_or(0);
+        shown.clear();
+        canvas.pixels(os, line, column, last, &mut shown)?;
+        for ((value, &screen), &level) in values.iter_mut().zip(&shown).zip(levels) {
+            *value = towards.blended(screen, level.min(WHOLE));
+        }
+        canvas.put_pixels(os, line, column, &values[..levels.len()])
+    })
+}
+
+/// The pixels one pass writes at most.
+const RUN: usize = 64;
+
+/// Each run of `row`'s levels above nought, at most [`RUN`] long, handed to
+/// `run` with its first column, counted from column `left`; whether there
+/// was any.
+fn each_run(
+    row: &[u8],
+    left: i32,
+    mut run: impl FnMut(u32, &[u8]) -> Result<(), Fail>,
+) -> Result<bool, Fail> {
     let mut any = false;
     let mut x = 0;
     while x < row.len() {
@@ -386,20 +392,11 @@ fn blend_row(
             x += 1;
         }
         let column = (left + i32::try_from(start).unwrap_or(0)).cast_unsigned();
-        let last = column + u32::try_from(x - start - 1).unwrap_or(0);
-        shown.clear();
-        canvas.pixels(os, line, column, last, &mut shown)?;
-        for ((value, &screen), &level) in values.iter_mut().zip(&shown).zip(&row[start..x]) {
-            *value = towards.blended(screen, level.min(WHOLE));
-        }
-        canvas.put_pixels(os, line, column, &values[..x - start])?;
+        run(column, &row[start..x])?;
         any = true;
     }
     Ok(any)
 }
-
-/// The pixels one pass writes at most.
-const RUN: usize = 64;
 
 /// Each row of `levels` within the window painted; the rectangle drawn on.
 fn paint_rows(
@@ -469,23 +466,12 @@ fn paint_row(
 ) -> Result<bool, Fail> {
     let line = canvas.row_of(y);
     let mut values = [0u32; RUN];
-    let mut any = false;
-    let mut x = 0;
-    while x < row.len() {
-        if row[x] == 0 {
-            x += 1;
-            continue;
+    each_run(row, left, |column, levels| {
+        for (value, &level) in values.iter_mut().zip(levels) {
+            *value = table[usize::from(level.min(WHOLE))] & mask;
         }
-        let start = x;
-        while x < row.len() && row[x] != 0 && x - start < RUN {
-            values[x - start] = table[usize::from(row[x].min(WHOLE))] & mask;
-            x += 1;
-        }
-        let column = left + i32::try_from(start).unwrap_or(0);
-        canvas.put_pixels(os, line, column.cast_unsigned(), &values[..x - start])?;
-        any = true;
-    }
-    Ok(any)
+        canvas.put_pixels(os, line, column, &values[..levels.len()])
+    })
 }
 
 /// Sets logical colour `logical`, both its flash states, to `colour`, a
@@ -496,23 +482,7 @@ fn paint_row(
 ///
 /// What a claimant of the vector gives.
 pub fn set_logical_colour(os: &mut Os<'_>, logical: u32, colour: u32) -> Result<(), Fail> {
-    let mut regs = Regs::new([
-        logical,
-        kind::NORMAL,
-        colour,
-        colour,
-        reason::SET,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]);
-    os.call_vector(PALETTE_V, &mut regs, Entry::Supervisor)?;
-    Ok(())
+    set_through(os, logical, kind::NORMAL, [colour; 2])
 }
 
 #[cfg(test)]

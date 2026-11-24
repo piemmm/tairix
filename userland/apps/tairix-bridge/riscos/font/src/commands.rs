@@ -5,7 +5,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_riscos_kernel::module::{Asked, Command, CommandKind, Help, Refused};
+use tairix_riscos_kernel::module::{Asked, Command, Refused};
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
 use tairix_riscos_kernel::swi::{os as kos, X};
 use tairix_riscos_kernel::Decimal;
@@ -13,72 +13,31 @@ use tairix_riscos_kernel::Decimal;
 use crate::cache;
 use crate::handles::Source;
 use crate::module::{error, message, raise, with};
-use crate::scan;
+use crate::scan::{self, LIBRARY, PATH, PREFIX};
 use crate::settings::{self, FONT_MAX_CMOS, FONT_MAX_STORED, FONT_MAX_UNIT};
 use crate::units;
 
-const fn command(
-    name: &'static str,
-    (min, max): (u8, u8),
-    help: &'static str,
-    syntax: &'static str,
-    run: tairix_riscos_kernel::module::Code,
-) -> Command {
-    Command {
-        name,
-        kind: CommandKind::Command,
-        min,
-        max,
-        translate: 0,
-        help: Help::Text(help),
-        syntax: Some(syntax),
-        run: Some(run),
-    }
-}
-
-const fn configure(
-    name: &'static str,
-    help: &'static str,
-    run: tairix_riscos_kernel::module::Code,
-) -> Command {
-    Command {
-        name,
-        kind: CommandKind::Configure,
-        min: 0,
-        max: 1,
-        translate: 0,
-        help: Help::Text(help),
-        syntax: None,
-        run: Some(run),
-    }
-}
-
 /// The commands, in RISC OS 5.30's order.
 pub(crate) static COMMANDS: [Command; 13] = [
-    command("FontList", (0, 0), "*FontList lists the fonts the Font Manager holds, each with its size, resolution, uses and memory, then the font cache's size and what of it is free.", "Syntax: *FontList", font_list),
-    command("FontCat", (0, 0), "*FontCat lists every font Font$Path reaches.", "Syntax: *FontCat", font_cat),
-    command("LoadFontCache", (1, 1), "*LoadFontCache gives the Font Manager back the fonts *SaveFontCache saved, while it holds none in use.", "Syntax: *LoadFontCache <filename>", load_font_cache),
-    command("SaveFontCache", (1, 1), "*SaveFontCache saves the fonts the Font Manager holds to a file.", "Syntax: *SaveFontCache <filename>", save_font_cache),
-    command("FontInstall", (0, 1), "*FontInstall puts a font directory at the front of Font$Path, or with none given reads every directory on it afresh.", "Syntax: *FontInstall [<prefix>]", font_install),
-    command("FontLibrary", (1, 1), "*FontLibrary makes a directory the font library: Font$Prefix, which heads Font$Path.", "Syntax: *FontLibrary <directory>", font_library),
-    command("FontRemove", (1, 1), "*FontRemove takes a font directory off Font$Path.", "Syntax: *FontRemove <prefix>", font_remove),
-    configure("FontMax1", "*Configure FontMax1 sets the largest size in points scaled from a bitmap font rather than from outlines.", configure_font_max_1),
-    configure("FontMax2", "*Configure FontMax2 sets the largest size in points scaled from outlines to anti-aliased bitmaps.", configure_font_max_2),
-    configure("FontMax3", "*Configure FontMax3 sets the largest size in points whose bitmaps are kept in the cache.", configure_font_max_3),
-    configure("FontMax4", "*Configure FontMax4 sets the largest width in points anti-aliased at quarter pixels across.", configure_font_max_4),
-    configure("FontMax5", "*Configure FontMax5 sets the largest height in points anti-aliased at quarter pixels up.", configure_font_max_5),
-    configure("FontMax", "*Configure FontMax sets the most memory the font cache should take, in 64K units or kilobytes.", configure_font_max),
+    Command::new("FontList", (0, 0), "*FontList lists the fonts the Font Manager holds, each with its size, resolution, uses and memory, then the font cache's size and what of it is free.", Some("Syntax: *FontList"), font_list),
+    Command::new("FontCat", (0, 0), "*FontCat lists every font Font$Path reaches.", Some("Syntax: *FontCat"), font_cat),
+    Command::new("LoadFontCache", (1, 1), "*LoadFontCache gives the Font Manager back the fonts *SaveFontCache saved, while it holds none in use.", Some("Syntax: *LoadFontCache <filename>"), load_font_cache),
+    Command::new("SaveFontCache", (1, 1), "*SaveFontCache saves the fonts the Font Manager holds to a file.", Some("Syntax: *SaveFontCache <filename>"), save_font_cache),
+    Command::new("FontInstall", (0, 1), "*FontInstall puts a font directory at the front of Font$Path, or with none given reads every directory on it afresh.", Some("Syntax: *FontInstall [<prefix>]"), font_install),
+    Command::new("FontLibrary", (1, 1), "*FontLibrary makes a directory the font library: Font$Prefix, which heads Font$Path.", Some("Syntax: *FontLibrary <directory>"), font_library),
+    Command::new("FontRemove", (1, 1), "*FontRemove takes a font directory off Font$Path.", Some("Syntax: *FontRemove <prefix>"), font_remove),
+    Command::configure("FontMax1", "*Configure FontMax1 sets the largest size in points scaled from a bitmap font rather than from outlines.", configure_font_max_1),
+    Command::configure("FontMax2", "*Configure FontMax2 sets the largest size in points scaled from outlines to anti-aliased bitmaps.", configure_font_max_2),
+    Command::configure("FontMax3", "*Configure FontMax3 sets the largest size in points whose bitmaps are kept in the cache.", configure_font_max_3),
+    Command::configure("FontMax4", "*Configure FontMax4 sets the largest width in points anti-aliased at quarter pixels across.", configure_font_max_4),
+    Command::configure("FontMax5", "*Configure FontMax5 sets the largest height in points anti-aliased at quarter pixels up.", configure_font_max_5),
+    Command::configure("FontMax", "*Configure FontMax sets the most memory the font cache should take, in 64K units or kilobytes.", configure_font_max),
 ];
 
 /// `Service_FontsChanged`, issued once a directory is read.
 const FONTS_CHANGED: u32 = 0x6E;
 /// The longest command tail read.
 const TAIL_MOST: usize = 256;
-/// `Font$Path` and `Font$Prefix`, and the element `*FontLibrary` heads the
-/// path with.
-const PATH: &[u8] = b"Font$Path";
-const PREFIX: &[u8] = b"Font$Prefix";
-const LIBRARY: &[u8] = b"<Font$Prefix>.";
 
 /// `*FontCat`: the identifier of each font the path reaches, in the order
 /// of their shown names.

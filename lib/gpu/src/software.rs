@@ -15,12 +15,12 @@ use tairix_parallel::JobRunner;
 use tairix_rt::sync::{Condvar, Mutex};
 
 use crate::backend::{Backend, Prepared};
-use crate::binding::Bound;
+use crate::binding::{BindSetLayoutState, Bound};
 use crate::command::Op;
 use crate::device::{notify, Shared};
 use crate::fair::{Fair, FairGuard};
 use crate::format::Format;
-use crate::image::ImageDesc;
+use crate::image::{BufferViewDesc, ImageDesc, ImageViewDesc};
 use crate::info::{
     DeviceInfo, Features, FormatTable, Limits, MemoryHeap, MemoryProperties, MemoryType,
     QueueCapabilities, QueueFamily,
@@ -30,6 +30,7 @@ use crate::model::{Model, Woken};
 use crate::pipeline::StagePlan;
 use crate::render::RenderPlan;
 use crate::resource::MemoryRequirements;
+use crate::sampler::SamplerDesc;
 use crate::{Device, Error, Loss};
 
 pub(crate) mod dispatch;
@@ -232,6 +233,11 @@ impl Backend for Software {
     type Context = ();
     type Memory = Memory;
     type Image = ImageLayout;
+    // The device reads a view's, a texel buffer's and a sampler's state where
+    // the model keeps it.
+    type View = ();
+    type BufferView = ();
+    type Sampler = ();
     type Set = dispatch::SetMemories;
     type Compute = shader::ir::Program;
     type Render = pipeline::Render;
@@ -272,6 +278,7 @@ impl Backend for Software {
 
     fn image(
         &self,
+        _: &Arc<()>,
         info: &DeviceInfo,
         desc: &ImageDesc,
     ) -> Result<(ImageLayout, MemoryRequirements), Error> {
@@ -286,7 +293,39 @@ impl Backend for Software {
         Ok((layout, requirements))
     }
 
-    fn set(&self, resources: &[Bound<Self>]) -> Result<(dispatch::SetMemories, u64), Error> {
+    fn place(&self, _: &ImageLayout, memory: &Memory, offset: u64, size: u64) -> Result<(), Error> {
+        let word = |byte: u64| usize::try_from(byte / 4).map_err(|_| Error::OutOfRange);
+        let end = offset.checked_add(size).ok_or(Error::OutOfRange)?;
+        // Placements and sizes are whole layers, every layer whole words.
+        if !offset.is_multiple_of(4) || !size.is_multiple_of(4) {
+            return Err(Error::Misaligned);
+        }
+        memory
+            .lock()
+            .get_mut(word(offset)?..word(end)?)
+            .ok_or(Error::OutOfRange)?
+            .fill(0);
+        Ok(())
+    }
+
+    fn view(&self, _: &ImageLayout, _: &ImageDesc, _: &ImageViewDesc) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn buffer_view(&self, _: &Memory, _: u64, _: &BufferViewDesc) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn sampler(&self, _: &Arc<()>, _: &SamplerDesc) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn set(
+        &self,
+        _: &Arc<()>,
+        _: &BindSetLayoutState,
+        resources: &[Bound<Self>],
+    ) -> Result<(dispatch::SetMemories, u64), Error> {
         let set = dispatch::SetMemories::of(resources)?;
         let bytes = set.held_bytes();
         Ok((set, bytes))
@@ -294,6 +333,7 @@ impl Backend for Software {
 
     fn compute(
         &self,
+        _: &Arc<()>,
         info: &DeviceInfo,
         stage: &StagePlan<'_>,
     ) -> Result<Prepared<Self, shader::ir::Program>, Error> {
@@ -302,6 +342,7 @@ impl Backend for Software {
 
     fn render(
         &self,
+        _: &Arc<()>,
         info: &DeviceInfo,
         plan: &RenderPlan<'_>,
     ) -> Result<Prepared<Self, pipeline::Render>, Error> {
@@ -453,8 +494,9 @@ pub(crate) fn info(total_ram_bytes: u64) -> Result<DeviceInfo, Error> {
         queue_families: ArrayVec::new(),
         limits: limits(heap),
         capabilities: ArrayVec::new(),
+        spirv_version: tairix_spirv::Version::NEWEST,
         features: Features::ALL,
-        formats: FormatTable::from_fn(Format::software_features),
+        formats: FormatTable::from_fn(Format::features),
     };
     let stated = tairix_spirv::CAPABILITIES
         .iter()
@@ -503,12 +545,15 @@ pub(crate) const fn limits(heap: u64) -> Limits {
         max_image_dimension_3d: MAX_IMAGE_3D,
         max_image_array_layers: MAX_LAYERS,
         max_sampler_anisotropy: 16,
+        max_sampler_lod_bias: crate::MAX_LOD_BIAS,
         max_bind_sets: 4,
-        max_binding_number: 1024,
+        max_binding_number: crate::MAX_BINDING_NUMBER,
         max_bind_set_descriptors: MAX_BIND_SET_DESCRIPTORS,
         max_push_constant_bytes: 256,
         uniform_buffer_alignment: BUFFER_ALIGNMENT,
         storage_buffer_alignment: BUFFER_ALIGNMENT,
+        uniform_buffer_size_alignment: 1,
+        storage_buffer_size_alignment: 1,
         max_uniform_buffer_range: 64 << 10,
         max_storage_buffer_range: ADDRESSED,
         max_storage_image_bytes: ADDRESSED,

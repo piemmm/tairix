@@ -55,9 +55,7 @@ impl Calibration {
     /// The fault reading it gives.
     pub(crate) fn read(os: &mut Os<'_>, at: u32) -> Result<Result<Self, Invalid>, Fail> {
         let mut counts = [0; 3];
-        for (count, i) in counts.iter_mut().zip(0..) {
-            *count = os.read_word(at.wrapping_add(4 * i))?;
-        }
+        os.read_words(at, &mut counts)?;
         if counts.iter().any(|&n| !(2..=MOST_PAIRS).contains(&n)) {
             return Ok(Err(Invalid));
         }
@@ -66,9 +64,8 @@ impl Calibration {
         if words.try_reserve_exact(length as usize).is_err() {
             return Err(os.no_memory());
         }
-        for i in 0..length {
-            words.push(os.read_word(at.wrapping_add(4 * i))?);
-        }
+        words.resize(length as usize, 0);
+        os.read_words(at, &mut words)?;
         Ok(Self::of_words(words))
     }
 
@@ -180,9 +177,7 @@ fn install(os: &mut Os<'_>, table: Option<Calibration>) -> Result<(), Fail> {
     };
     let words = table.words();
     let block = os.rma_claim(len32(4 * words.len()))?;
-    for (i, &word) in (0u32..).zip(words) {
-        os.write_word(block + 4 * i, word)?;
-    }
+    os.write_words(block, words)?;
     if let Some(state) = os.extension::<State>() {
         state.calibration = Some(Installed {
             table: Rc::new(table),
@@ -204,9 +199,7 @@ pub(super) fn read_back(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let table = screen_calibration(os);
     let words = table.as_ref().map_or(&[][..], |table| table.words());
     if regs.r[0] != 0 {
-        for (i, &word) in (0u32..).zip(words) {
-            os.write_word(regs.r[0].wrapping_add(4 * i), word)?;
-        }
+        os.write_words(regs.r[0], words)?;
     }
     regs.r[1] = len32(4 * words.len());
     Ok(())

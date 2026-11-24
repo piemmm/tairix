@@ -250,7 +250,8 @@ fn place_bindings(program: &mut Program, layout: &PipelineLayoutState) -> Result
 fn fetches(plan: &RenderPlan<'_>, vertex: &Program) -> Result<Vec<Fetch>, Error> {
     let entry = plan.vertex.entry;
     let attribute_at = |location: u32| {
-        plan.vertex_buffers
+        plan.state
+            .vertex_buffers
             .iter()
             .zip(0u32..)
             .find_map(|(buffer, index)| {

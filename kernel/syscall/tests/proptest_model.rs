@@ -1208,6 +1208,10 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn call_destroy(&self, _c: &CallerContext<'_>, _endpoint: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn call_peer_port(
         &self,
         _c: &CallerContext<'_>,

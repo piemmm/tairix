@@ -8,7 +8,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_spirv::assemble::admit;
-use tairix_spirv::{Access, BindingKind, Stages};
+use tairix_spirv::{Access, Stages};
+
+use crate::DescriptorType;
 
 use super::{Case, Ty};
 use crate::device_tests::{context, device, memory, over, queue, submit};
@@ -275,10 +277,10 @@ fn push_constants_and_a_uniform_buffer_are_read() {
     };
     let set_layout = context
         .create_bind_set_layout(&[
-            binding(0, BindingKind::UniformBuffer, Access::READ),
+            binding(0, DescriptorType::UniformBuffer, Access::READ),
             binding(
                 1,
-                BindingKind::StorageBuffer,
+                DescriptorType::StorageBuffer,
                 Access::READ.with(Access::WRITE),
             ),
         ])
@@ -401,7 +403,7 @@ fn a_chain_of_no_indexes_keeps_pointing_at_a_whole_array_of_buffers() {
     let out = dispatch(
         &context,
         &text,
-        &[Bound(BindingKind::StorageBuffer, resources)],
+        &[Bound(DescriptorType::StorageBuffer, resources)],
         &[],
         1,
     );

@@ -9,6 +9,7 @@
 use alloc::vec::Vec;
 
 use tairix_riscos_kernel::os::{len32, Fail, Os};
+use tairix_util::endian::{le_u16, le_u32};
 
 use crate::handles::{Handles, Master, Size, Slot, Source, HANDLES};
 use crate::identifier::Matrix;
@@ -167,14 +168,12 @@ impl<'a> Reader<'a> {
     }
 
     fn word(&mut self) -> Result<u32, Unsound> {
-        let bytes = self.take(4)?;
-        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+        le_u32(self.take(4)?, 0).ok_or(Unsound)
     }
 
     /// A string, or none where one is written as none.
     fn maybe(&mut self) -> Result<Option<Vec<u8>>, Unsound> {
-        let bytes = self.take(2)?;
-        let length = u16::from_le_bytes([bytes[0], bytes[1]]);
+        let length = le_u16(self.take(2)?, 0).ok_or(Unsound)?;
         if length == NONE {
             return Ok(None);
         }

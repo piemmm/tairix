@@ -2,6 +2,8 @@
 //! path's user units, mapped by the matrix into internal Draw units, 256 to
 //! the OS unit.
 
+use tairix_drawing::riscos::format::{self, FIXED_ONE, FRACTION_BITS};
+
 /// A point of a path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Point {
@@ -62,19 +64,9 @@ pub struct Matrix {
     pub f: i32,
 }
 
-/// One in a matrix entry.
-pub const ONE: i32 = 1 << 16;
-
 impl Matrix {
     /// The matrix a null pointer stands for.
-    pub const IDENTITY: Self = Self {
-        a: ONE,
-        b: 0,
-        c: 0,
-        d: ONE,
-        e: 0,
-        f: 0,
-    };
+    pub const IDENTITY: Self = Self::from_words(format::IDENTITY);
 
     /// The six words a matrix block holds, in their order.
     #[must_use]
@@ -108,8 +100,10 @@ impl Matrix {
     #[must_use]
     pub fn apply(&self, p: Point) -> Option<Point> {
         let axis = |m: i32, n: i32, t: i32| {
-            let sum = i64::from(m) * i64::from(p.x) + i64::from(n) * i64::from(p.y);
-            i32::try_from(((sum + 0x8000) >> 16) + i64::from(t)).ok()
+            // A sum past what 64 bits hold is past a word too.
+            let sum = (i64::from(m) * i64::from(p.x)).checked_add(i64::from(n) * i64::from(p.y))?;
+            let unit = sum.checked_add(i64::from(FIXED_ONE / 2))? >> FRACTION_BITS;
+            i32::try_from(unit + i64::from(t)).ok()
         };
         Some(Point::new(
             axis(self.a, self.c, self.e)?,
@@ -125,9 +119,9 @@ impl Matrix {
         let term = |m: i32, v: i32| -> i32 {
             let product = i64::from(m) * i64::from(v);
             let cut = if product < 0 {
-                -((-product) >> 16)
+                -((-product) >> FRACTION_BITS)
             } else {
-                product >> 16
+                product >> FRACTION_BITS
             };
             #[expect(
                 clippy::cast_possible_truncation,

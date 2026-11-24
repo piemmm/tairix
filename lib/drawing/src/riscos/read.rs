@@ -15,19 +15,24 @@ use tairix_collections::{try_arc, SharedSlice, SharedStr};
 use tairix_colour::Rgba;
 use tairix_fsmeta::preset::acorn::latin1_char;
 use tairix_softfloat::from_fpa_words;
+use tairix_util::endian::{le_i32, le_u32};
 use tairix_util::fallible::{self, try_push};
 
-use super::format::{int, word, Misframed, Object, Objects};
+use super::format::{dash_pattern_bytes, element_bytes, matrix_words, Misframed, Object, Objects};
 use super::format::{
-    CAP_BUTT, CAP_ROUND, CAP_SQUARE, CAP_TRIANGLE, CLOSE, CLOSE_WITH_GAP, CODE, CURVE, DASHED, END,
-    END_CAP_SHIFT, FONT_NUMBER, FONT_TABLE, GAP, GROUP, GROUP_NAME, HEADER, JOIN_BEVEL, JOIN_MITRE,
-    JOIN_ROUND, JPEG, LINE, MAJOR_VERSION, MATRIX, MOVE, OBJECT_HEADER, OPTIONS, PATH, SPRITE,
-    START_CAP_SHIFT, TAG, TAGGED, TEXT, TEXT_AREA, TEXT_COLUMN, TRANSFORMED_SPRITE,
-    TRANSFORMED_TEXT, TRIANGLE_LENGTH_SHIFT, TRIANGLE_SIZE, TRIANGLE_WIDTH_SHIFT, WINDING_EVEN_ODD,
+    BARE_HEADER, CAP_BUTT, CAP_ROUND, CAP_SQUARE, CAP_TRIANGLE, CLOSE, CLOSE_WITH_GAP, CODE, CURVE,
+    DASHED, DASH_COUNT, DASH_LENGTHS, ELEMENT_POINTS, END, END_CAP_SHIFT, FIXED_ONE, FONT_NUMBER,
+    FONT_TABLE, GAP, GROUP, GROUP_OBJECTS, HEADER, HEADER_VERSION, JOIN_BEVEL, JOIN_MITRE,
+    JOIN_ROUND, JPEG, JPEG_DATA, JPEG_LENGTH, JPEG_MATRIX, JPEG_SIZES, LINE, MAJOR_VERSION, MATRIX,
+    MITRE_LIMIT, MOVE, OBJECT_BOUNDS, OBJECT_HEADER, OPTIONS, PATH, PATH_DASHES, PATH_FILL,
+    PATH_OUTLINE, PATH_STYLE, PATH_WIDTH, POINT, RIGHT_TO_LEFT, SPRITE, START_CAP_SHIFT, TAG,
+    TAGGED, TAGGED_OBJECT, TEXT, TEXT_AREA, TEXT_BASE, TEXT_CHARACTERS, TEXT_COLOUR, TEXT_COLUMN,
+    TEXT_SIZES, TEXT_STYLE, TRANSFORMED_SPRITE, TRANSFORMED_TEXT, TRANSFORMED_TEXT_FIELDS,
+    TRANSFORMED_TEXT_FLAGS, TRIANGLE_LENGTH_SHIFT, TRIANGLE_SIZE, TRIANGLE_UNIT,
+    TRIANGLE_WIDTH_SHIFT, WINDING_EVEN_ODD,
 };
 use super::{
-    a_paper, colour_of, face_of, Face, FIXED_ONE, LANDSCAPE, MITRE_LIMIT, MONOSPACE, RIGHT_TO_LEFT,
-    TRIANGLE_UNIT, UNITS_PER_PIXEL,
+    a_paper, colour_of, face_of, pixel_pitch, Face, LANDSCAPE, MONOSPACE, UNITS_PER_PIXEL,
 };
 use crate::children::Children;
 use crate::drawing::{Drawing, Grid, Page, Unit, PAPER};
@@ -62,7 +67,7 @@ pub fn read(bytes: &[u8], ids: &mut Ids) -> Result<Read, ReadError> {
         return Err(ReadError::Unrecognised);
     }
     let header = bytes.get(..HEADER).ok_or(ReadError::Malformed)?;
-    if word(header, 4) != Some(MAJOR_VERSION) {
+    if le_u32(header, HEADER_VERSION) != Some(MAJOR_VERSION) {
         return Err(ReadError::Unrecognised);
     }
     let body = &bytes[HEADER..];
@@ -121,7 +126,7 @@ impl From<Misframed> for ReadError {
 /// The names `bytes`, a font table, gives its font numbers, set into
 /// `names`; a number a later table names again takes the later name.
 fn font_table<'a>(bytes: &'a [u8], names: &mut [Option<&'a [u8]>]) -> Result<(), ReadError> {
-    let mut at = 8;
+    let mut at = BARE_HEADER;
     while let Some(&number) = bytes.get(at) {
         if number == 0 {
             // What is left pads the table to a word.
@@ -140,7 +145,7 @@ fn font_table<'a>(bytes: &'a [u8], names: &mut [Option<&'a [u8]>]) -> Result<(),
 /// way it is turned, and the grid in the unit Draw shows it in, which the
 /// page is shown in too.
 fn options(bytes: &[u8]) -> Result<(Page, Grid), ReadError> {
-    let field = |at| word(bytes, at).ok_or(ReadError::Malformed);
+    let field = |at| le_u32(bytes, at).ok_or(ReadError::Malformed);
     // A paper Draw does not name is its default, A4.
     let paper = (field(24)? >> 8)
         .checked_sub(1)
@@ -249,8 +254,8 @@ impl<'a> Reader<'a, '_> {
         let Some(picture) = self.picture(sprite, image::decode_sprite)? else {
             return Ok(None);
         };
-        let low = self.point(bytes, 8)?;
-        let high = self.point(bytes, 16)?;
+        let low = self.point(bytes, OBJECT_BOUNDS)?;
+        let high = self.point(bytes, OBJECT_BOUNDS + POINT)?;
         let place = tairix_bezier::Bounds::from_points([low, high]);
         self.image_node(&picture, place, Affine::IDENTITY)
     }
@@ -270,13 +275,11 @@ impl<'a> Reader<'a, '_> {
             return Err(ReadError::Malformed);
         };
         let (width, height) = picture.size();
-        // Each pixel is `2^eig` OS units of 256 draw units.
-        let pitch = |eig: u8| f64::from(1_u32 << eig) * 256.0;
         let native = (
-            f64::from(width) * pitch(eig.0),
-            f64::from(height) * pitch(eig.1),
+            f64::from(width) * pixel_pitch(eig.0),
+            f64::from(height) * pixel_pitch(eig.1),
         );
-        let to_native = Affine::scale(pitch(eig.0), pitch(eig.1));
+        let to_native = Affine::scale(pixel_pitch(eig.0), pixel_pitch(eig.1));
         self.placed_raster(&picture, native, to_native, matrix)
     }
 
@@ -284,14 +287,16 @@ impl<'a> Reader<'a, '_> {
     /// object states, its foot on the origin. RISC OS draws its raster as
     /// stored, whatever turn the JPEG's own metadata asks for.
     fn jpeg(&mut self, bytes: &'a [u8]) -> Result<Option<Node>, ReadError> {
-        let field = |at: usize| word(bytes, OBJECT_HEADER + at).ok_or(ReadError::Malformed);
-        let native = (f64::from(field(0)?), f64::from(field(4)?));
-        let matrix = matrix(bytes, OBJECT_HEADER + 16)?;
-        let length = usize::try_from(field(40)?).map_err(|_| ReadError::Malformed)?;
-        let start = OBJECT_HEADER + 44;
-        let data = start
+        let field = |at: usize| le_u32(bytes, at).ok_or(ReadError::Malformed);
+        let native = (
+            f64::from(field(JPEG_SIZES)?),
+            f64::from(field(JPEG_SIZES + 4)?),
+        );
+        let matrix = matrix(bytes, JPEG_MATRIX)?;
+        let length = usize::try_from(field(JPEG_LENGTH)?).map_err(|_| ReadError::Malformed)?;
+        let data = JPEG_DATA
             .checked_add(length)
-            .and_then(|end| bytes.get(start..end))
+            .and_then(|end| bytes.get(JPEG_DATA..end))
             .ok_or(ReadError::Malformed)?;
         if native.0 <= 0.0 || native.1 <= 0.0 {
             return Ok(None);
@@ -406,14 +411,13 @@ impl<'a> Reader<'a, '_> {
 
     fn group(&mut self, group: Object<'a>, depth: usize) -> Result<Node, ReadError> {
         let bytes = group.bytes;
-        let content = OBJECT_HEADER + GROUP_NAME;
         let name = bytes
-            .get(OBJECT_HEADER..content)
+            .get(OBJECT_HEADER..GROUP_OBJECTS)
             .ok_or(ReadError::Malformed)?;
         let mut children = Vec::new();
         self.objects(
-            &bytes[content..],
-            group.at + content,
+            &bytes[GROUP_OBJECTS..],
+            group.at + GROUP_OBJECTS,
             deeper(depth)?,
             &mut children,
         )?;
@@ -433,9 +437,9 @@ impl<'a> Reader<'a, '_> {
     fn tagged(&mut self, tagged: Object<'a>, depth: usize) -> Result<Option<Node>, ReadError> {
         let wrapped = tagged
             .bytes
-            .get(OBJECT_HEADER + 4..)
+            .get(TAGGED_OBJECT..)
             .ok_or(ReadError::Malformed)?;
-        let object = Objects::new(wrapped, tagged.at + OBJECT_HEADER + 4)
+        let object = Objects::new(wrapped, tagged.at + TAGGED_OBJECT)
             .next()
             .ok_or(ReadError::Malformed)??;
         self.unkept.insert(Lost::Annotations);
@@ -443,30 +447,17 @@ impl<'a> Reader<'a, '_> {
     }
 
     fn text(&mut self, bytes: &[u8]) -> Result<Node, ReadError> {
-        let field = |at| word(bytes, at).ok_or(ReadError::Malformed);
-        let lettering = Lettering {
-            colour: field(24)?,
-            style: field(32)?,
-            sizes: (field(36)?, field(40)?),
-        };
-        let start = self.point(bytes, 44)?;
-        let content = latin1(terminated(bytes, 52)?)?;
+        let (lettering, start, content) = self.lettered(bytes, 0)?;
         self.text_node(content, &lettering, start, None)
     }
 
     fn transformed_text(&mut self, bytes: &[u8]) -> Result<Node, ReadError> {
-        let field = |at| word(bytes, at).ok_or(ReadError::Malformed);
         let matrix = matrix(bytes, OBJECT_HEADER)?;
-        if field(48)? & RIGHT_TO_LEFT != 0 {
+        let flags = le_u32(bytes, TRANSFORMED_TEXT_FLAGS).ok_or(ReadError::Malformed)?;
+        if flags & RIGHT_TO_LEFT != 0 {
             self.unkept.insert(Lost::TextPositioning);
         }
-        let lettering = Lettering {
-            colour: field(52)?,
-            style: field(60)?,
-            sizes: (field(64)?, field(68)?),
-        };
-        let start = self.point(bytes, 72)?;
-        let content = latin1(terminated(bytes, 80)?)?;
+        let (lettering, start, content) = self.lettered(bytes, TRANSFORMED_TEXT_FIELDS)?;
         // Draw's matrix maps a space whose y runs up; the drawing's runs
         // down, so the matrix is seen through that reflection.
         let placed = (matrix != Affine::IDENTITY).then_some(Affine {
@@ -478,6 +469,24 @@ impl<'a> Reader<'a, '_> {
             f: -matrix.f / UNITS_PER_PIXEL,
         });
         self.text_node(content, &lettering, start, placed)
+    }
+
+    /// A text's lettering, its baseline's start and its characters, its
+    /// fields `offset` bytes further on than a plain text's.
+    fn lettered(
+        &self,
+        bytes: &[u8],
+        offset: usize,
+    ) -> Result<(Lettering, Point, String), ReadError> {
+        let field = |at| le_u32(bytes, offset + at).ok_or(ReadError::Malformed);
+        let lettering = Lettering {
+            colour: field(TEXT_COLOUR)?,
+            style: field(TEXT_STYLE)?,
+            sizes: (field(TEXT_SIZES)?, field(TEXT_SIZES + 4)?),
+        };
+        let start = self.point(bytes, offset + TEXT_BASE)?;
+        let content = latin1(terminated(bytes, offset + TEXT_CHARACTERS)?)?;
+        Ok((lettering, start, content))
     }
 
     /// A text of `content` set as `lettering` says from `start`, its
@@ -557,21 +566,23 @@ impl<'a> Reader<'a, '_> {
     }
 
     fn path(&mut self, bytes: &[u8]) -> Result<Node, ReadError> {
-        let field = |at| word(bytes, at).ok_or(ReadError::Malformed);
-        let fill = colour_of(field(24)?);
-        let outline = colour_of(field(28)?);
-        let width = field(32)?;
-        let style = field(36)?;
+        let field = |at| le_u32(bytes, at).ok_or(ReadError::Malformed);
+        let fill = colour_of(field(PATH_FILL)?);
+        let outline = colour_of(field(PATH_OUTLINE)?);
+        let width = field(PATH_WIDTH)?;
+        let style = field(PATH_STYLE)?;
         let mut dashes = Vec::new();
         let (dash_offset, components) = if style & DASHED == 0 {
-            (0, bytes.get(40..).ok_or(ReadError::Malformed)?)
+            (0, bytes.get(PATH_DASHES..).ok_or(ReadError::Malformed)?)
         } else {
-            let count = usize::try_from(field(44)?).map_err(|_| ReadError::Malformed)?;
-            let end = count
-                .checked_mul(4)
-                .and_then(|length| length.checked_add(48))
+            let count = usize::try_from(field(PATH_DASHES + DASH_COUNT)?)
+                .map_err(|_| ReadError::Malformed)?;
+            let end = dash_pattern_bytes(count)
+                .and_then(|size| size.checked_add(PATH_DASHES))
                 .ok_or(ReadError::Malformed)?;
-            let pattern = bytes.get(48..end).ok_or(ReadError::Malformed)?;
+            let pattern = bytes
+                .get(PATH_DASHES + DASH_LENGTHS..end)
+                .ok_or(ReadError::Malformed)?;
             if !fallible::reserve(&mut dashes, count) {
                 return Err(ReadError::OutOfMemory);
             }
@@ -581,7 +592,7 @@ impl<'a> Reader<'a, '_> {
                     .iter()
                     .map(|&length| f64::from(u32::from_le_bytes(length)) / UNITS_PER_PIXEL),
             );
-            (field(40)?, &bytes[end..])
+            (field(PATH_DASHES)?, &bytes[end..])
         };
         let join = match style & CODE {
             JOIN_MITRE => Join::Miter,
@@ -609,7 +620,7 @@ impl<'a> Reader<'a, '_> {
                 paint: paint_of(outline),
                 width,
                 join,
-                miter_limit: MITRE_LIMIT,
+                miter_limit: f64::from(MITRE_LIMIT),
                 cap,
                 dashes: SharedSlice::try_from_vec(dashes)?,
                 dash_offset: f64::from(dash_offset) / UNITS_PER_PIXEL,
@@ -675,8 +686,8 @@ impl<'a> Reader<'a, '_> {
         };
         let mut at = 0;
         loop {
-            let tag = word(components, at).ok_or(ReadError::Malformed)? & TAG;
-            let point = |index: usize| self.point(components, at + 4 + 8 * index);
+            let tag = le_u32(components, at).ok_or(ReadError::Malformed)? & TAG;
+            let point = |index: usize| self.point(components, at + ELEMENT_POINTS + POINT * index);
             match tag {
                 END => return Ok((trace.contours, trace.gapped)),
                 MOVE => trace.move_to(point(0)?)?,
@@ -687,17 +698,13 @@ impl<'a> Reader<'a, '_> {
                 CLOSE_WITH_GAP => trace.close(false)?,
                 _ => return Err(ReadError::Malformed),
             }
-            at += match tag {
-                MOVE | LINE | GAP => 12,
-                CURVE => 28,
-                _ => 4,
-            };
+            at += element_bytes(tag).ok_or(ReadError::Malformed)?;
         }
     }
 
     /// The point at `at` of `bytes`, in the drawing's space.
     fn point(&self, bytes: &[u8], at: usize) -> Result<Point, ReadError> {
-        let (Some(x), Some(y)) = (int(bytes, at), int(bytes, at + 4)) else {
+        let (Some(x), Some(y)) = (le_i32(bytes, at), le_i32(bytes, at + 4)) else {
             return Err(ReadError::Malformed);
         };
         Ok(Point::new(
@@ -709,16 +716,19 @@ impl<'a> Reader<'a, '_> {
 
 /// The matrix at `at` of `bytes`, in draw units on the paper.
 fn matrix(bytes: &[u8], at: usize) -> Result<Affine, ReadError> {
+    let words = matrix_words(bytes, at);
     let entry = |index: usize| {
-        int(bytes, at + 4 * index)
+        words[index]
+            .map(u32::cast_signed)
             .map(f64::from)
             .ok_or(ReadError::Malformed)
     };
+    let one = f64::from(FIXED_ONE);
     Ok(Affine {
-        a: entry(0)? / FIXED_ONE,
-        b: entry(1)? / FIXED_ONE,
-        c: entry(2)? / FIXED_ONE,
-        d: entry(3)? / FIXED_ONE,
+        a: entry(0)? / one,
+        b: entry(1)? / one,
+        c: entry(2)? / one,
+        d: entry(3)? / one,
         e: entry(4)?,
         f: entry(5)?,
     })
@@ -875,10 +885,11 @@ fn caps(style: u32) -> (Cap, Arrowhead, Arrowhead) {
     if let Some(cap) = plain.filter(|_| start == end) {
         return (cap, Arrowhead::NONE, Arrowhead::NONE);
     }
+    let unit = f64::from(TRIANGLE_UNIT);
     let triangle = Arrowhead {
         shape: ArrowShape::Triangle,
-        width: 2.0 * f64::from((style >> TRIANGLE_WIDTH_SHIFT) & TRIANGLE_SIZE) / TRIANGLE_UNIT,
-        length: f64::from((style >> TRIANGLE_LENGTH_SHIFT) & TRIANGLE_SIZE) / TRIANGLE_UNIT,
+        width: 2.0 * f64::from((style >> TRIANGLE_WIDTH_SHIFT) & TRIANGLE_SIZE) / unit,
+        length: f64::from((style >> TRIANGLE_LENGTH_SHIFT) & TRIANGLE_SIZE) / unit,
     };
     let head = |code| match code {
         CAP_ROUND => Arrowhead {

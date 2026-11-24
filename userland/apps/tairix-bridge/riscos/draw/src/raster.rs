@@ -17,10 +17,13 @@
 
 use alloc::vec::Vec;
 
+use tairix_drawing::riscos::units::DRAW_UNITS_PER_OS_UNIT;
+use tairix_riscos_kernel::mouse::Bounds;
 use tairix_util::fallible;
 
-/// A pixel's side, in its units.
-pub(crate) const UNIT: i64 = 256;
+/// A pixel's side, in its units, which are draw units shifted down by the
+/// eigen factors.
+pub(crate) const UNIT: i64 = DRAW_UNITS_PER_OS_UNIT as i64;
 const HALF: i64 = UNIT / 2;
 
 /// A segment of a path, in 256ths of a pixel.
@@ -35,15 +38,6 @@ pub(crate) struct Segment {
     pub(crate) winds: bool,
 }
 
-/// The pixels plotting may reach, inclusive.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Window {
-    pub(crate) left: i32,
-    pub(crate) bottom: i32,
-    pub(crate) right: i32,
-    pub(crate) top: i32,
-}
-
 /// The winding rule, as a fill style's low two bits name it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -53,12 +47,22 @@ pub(crate) enum Rule {
     Positive,
 }
 
+/// The codes a fill style's low two bits name a winding rule by, three
+/// being the positive rule's.
+pub(crate) mod winding {
+    /// The bits that hold the code.
+    pub(crate) const BITS: u32 = 0b11;
+    pub(crate) const NON_ZERO: u32 = 0;
+    pub(crate) const NEGATIVE: u32 = 1;
+    pub(crate) const EVEN_ODD: u32 = 2;
+}
+
 impl Rule {
     pub(crate) const fn of(style: u32) -> Self {
-        match style & 3 {
-            0 => Self::NonZero,
-            1 => Self::Negative,
-            2 => Self::EvenOdd,
+        match style & winding::BITS {
+            winding::NON_ZERO => Self::NonZero,
+            winding::NEGATIVE => Self::Negative,
+            winding::EVEN_ODD => Self::EvenOdd,
             _ => Self::Positive,
         }
     }
@@ -349,7 +353,7 @@ pub(crate) fn scan<E: From<NoRoom>>(
     segments: &[Segment],
     rule: Rule,
     classes: u32,
-    window: Window,
+    window: Bounds,
     scratch: &mut Scratch,
     mut step: impl FnMut() -> Result<(), E>,
     mut span: impl FnMut(i32, i32, i32),
@@ -441,7 +445,9 @@ pub(crate) fn scan<E: From<NoRoom>>(
             next_end += 1;
         }
         interior(crossings, rule, left, right, inside)?;
-        merge(runs);
+        coalesce(runs, |(lo, hi), (from, to)| {
+            (from <= hi + 1).then_some((lo, hi.max(to)))
+        });
         classify(inside, runs, classes, left, right, |from, to| {
             #[expect(
                 clippy::cast_possible_truncation,
@@ -484,20 +490,24 @@ fn interior(
     Ok(())
 }
 
-/// The runs merged where they touch or overlap, in order.
-fn merge(runs: &mut Vec<(i64, i64)>) {
-    runs.sort_unstable();
-    let mut kept = 0;
-    for i in 0..runs.len() {
-        let run = runs[i];
-        if kept > 0 && run.0 <= runs[kept - 1].1 + 1 {
-            runs[kept - 1].1 = runs[kept - 1].1.max(run.1);
+/// `items` sorted, each merged into the one kept before it where `joined`
+/// makes the two one: runs that touch or overlap made one.
+pub(crate) fn coalesce<T: Copy + Ord>(items: &mut Vec<T>, joined: impl Fn(T, T) -> Option<T>) {
+    items.sort_unstable();
+    let mut kept: usize = 0;
+    for i in 0..items.len() {
+        let item = items[i];
+        if let Some(both) = kept
+            .checked_sub(1)
+            .and_then(|last| joined(items[last], item))
+        {
+            items[kept - 1] = both;
         } else {
-            runs[kept] = run;
+            items[kept] = item;
             kept += 1;
         }
     }
-    runs.truncate(kept);
+    items.truncate(kept);
 }
 
 /// The parts of the row from `left` to `right` in each class `classes`

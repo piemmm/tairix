@@ -9,9 +9,9 @@
 use alloc::vec::Vec;
 
 use tairix_riscos_arm::psr;
-use tairix_riscos_kernel::filing::fs;
+use tairix_riscos_kernel::filing::fs::{self, Layout};
 use tairix_riscos_kernel::filing::BAD_GBPB;
-use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
+use tairix_riscos_kernel::os::{Fail, Os, Regs};
 
 use super::call::{self, Need, DIRECTORY, FILE as A_FILE};
 use super::name::{self, Dir, Search};
@@ -307,28 +307,6 @@ fn current_entries(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     Ok(())
 }
 
-/// How a directory's entries are laid out.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Layout {
-    /// Zero-terminated names: reason 9, `FSEntry_Func` 14.
-    Names,
-    /// A record before each name: reason 10, `FSEntry_Func` 15.
-    Info,
-    /// A fuller record: reason 11, `FSEntry_Func` 19.
-    FullInfo,
-}
-
-impl Layout {
-    /// The entry giving it, and where a record's name starts.
-    const fn entry(self) -> (u32, u32) {
-        match self {
-            Self::Names => (fs::func::READ_NAMES, 0),
-            Self::Info => (fs::func::READ_ENTRIES, 20),
-            Self::FullInfo => (fs::func::READ_FULL_ENTRIES, 29),
-        }
-    }
-}
-
 /// The directory R1 names, resolved and read — an image file's being the
 /// image's root: refused where it is not one.
 fn directory(os: &mut Os<'_>, regs: &Regs) -> Result<name::Resolved, Fail> {
@@ -361,13 +339,12 @@ fn wildcard(os: &mut Os<'_>, at: u32) -> Result<Option<Vec<u8>>, Fail> {
 fn entries(os: &mut Os<'_>, regs: &mut Regs, layout: Layout) -> Result<(), Fail> {
     let resolved = directory(os, regs)?;
     let pattern = wildcard(os, regs.r[6])?;
-    let (reason, name_at) = layout.entry();
     let mut call = Regs::default();
     call.r[2..6].copy_from_slice(&regs.r[2..6]);
     call::func(
         os,
         &resolved.calls,
-        reason,
+        layout.reason(),
         resolved.named(),
         0,
         &mut call,
@@ -375,15 +352,7 @@ fn entries(os: &mut Os<'_>, regs: &mut Regs, layout: Layout) -> Result<(), Fail>
     )?;
     let mut count = call.r[3].min(regs.r[3]);
     if let Some(pattern) = pattern {
-        count = keep_matching(
-            os,
-            regs.r[2],
-            regs.r[5],
-            count,
-            name_at,
-            layout != Layout::Names,
-            &pattern,
-        )?;
+        count = keep_matching(os, regs.r[2], regs.r[5], count, layout, &pattern)?;
     }
     regs.r[3] = count;
     regs.r[4] = call.r[4];
@@ -391,27 +360,24 @@ fn entries(os: &mut Os<'_>, regs: &mut Regs, layout: Layout) -> Result<(), Fail>
     Ok(())
 }
 
-/// The `count` entries at `buffer` compacted to those whose name `pattern`
-/// matches: how many are left.
+/// The `count` entries at `buffer`, laid out as `layout` lays them,
+/// compacted to those whose name `pattern` matches: how many are left.
 fn keep_matching(
     os: &mut Os<'_>,
     buffer: u32,
     size: u32,
     count: u32,
-    name_at: u32,
-    aligned: bool,
+    layout: Layout,
     pattern: &[u8],
 ) -> Result<u32, Fail> {
+    let name_at = layout.name_at();
     let (mut from, mut to) = (0u32, 0u32);
     let mut kept = 0;
     let mut entry = Vec::new();
     for _ in 0..count {
         let at = buffer.wrapping_add(from);
         let (name, ended) = os.read_until(at.wrapping_add(name_at), name::NAME_MOST, |b| b == 0)?;
-        let mut length = name_at + len32(name.len()) + 1;
-        if aligned {
-            length = length.next_multiple_of(4);
-        }
+        let length = layout.size(&name);
         if !ended || from.saturating_add(length) > size {
             break;
         }
@@ -432,6 +398,9 @@ fn keep_matching(
 /// The smallest record `OS_GBPB` 12 gives: six words, then a one-character
 /// name and its terminator padded to a word.
 const SMALLEST_TYPED: u32 = 28;
+/// Where `OS_GBPB` 12's record holds its object's file type: after the
+/// record reason 10 gives, the name a word later.
+const TYPE_AT: u32 = Layout::Info.name_at();
 
 /// `OS_GBPB` 12: as reason 10 with each object's file type after its
 /// record, made in place as RISC OS 5 makes it. The filing system's
@@ -461,12 +430,13 @@ fn typed_entries(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let (mut from, mut to, mut kept) = (headroom, 0u32, 0);
     for _ in 0..call.r[3].min(wanted) {
         let record = buffer.wrapping_add(from);
-        let mut words = [0; 5];
-        for (i, word) in (0..).zip(words.iter_mut()) {
-            *word = os.read_word(record.wrapping_add(4 * i))?;
-        }
-        let (name, ended) = os.read_until(record.wrapping_add(20), name::NAME_MOST, |b| b == 0)?;
-        let length = (20 + len32(name.len()) + 1).next_multiple_of(4);
+        let info = os.read_listed(record)?;
+        let (name, ended) = os.read_until(
+            record.wrapping_add(Layout::Info.name_at()),
+            name::NAME_MOST,
+            |b| b == 0,
+        )?;
+        let length = Layout::Info.size(&name);
         if !ended || from.saturating_add(length) > size {
             break;
         }
@@ -480,14 +450,12 @@ fn typed_entries(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
             break;
         }
         let typed = buffer.wrapping_add(to);
-        for (i, word) in (0..).zip(words) {
-            os.write_word(typed.wrapping_add(4 * i), word)?;
-        }
+        os.write_words(typed, &info.record())?;
         os.write_word(
-            typed.wrapping_add(20),
-            super::file::object_type(words[4], words[0], &name),
+            typed.wrapping_add(TYPE_AT),
+            super::file::object_type(info.kind, info.load, &name),
         )?;
-        os.write_terminated(typed.wrapping_add(24), &name, 0, name.len() + 1)?;
+        os.write_terminated(typed.wrapping_add(TYPE_AT + 4), &name, 0, name.len() + 1)?;
         to += length + 4;
         kept += 1;
     }

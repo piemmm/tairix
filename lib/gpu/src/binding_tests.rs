@@ -8,15 +8,17 @@ use tairix_abi::time::MonotonicClock;
 use tairix_parallel::Serial;
 use tairix_spirv::assemble::admit;
 use tairix_spirv::enumerant::{Capability, Dim, ImageFormat};
-use tairix_spirv::{Access, BindingKind, Component, Disagreement, ImageShape, Stages};
+use tairix_spirv::{Access, Component, Disagreement, ImageShape, Stages};
 
-use super::{BindSetEntry, LayoutBinding, PushConstants, Resource};
+use super::{
+    BindSetEntry, DescriptorType, LayoutBinding, PushConstants, Resource, SampleType, SamplerType,
+};
 use crate::device_tests::{context, device, memory, over, Clock, RAM};
 use crate::image_device_tests::image;
 use crate::{
     Aspects, BufferUsage, BufferViewDesc, CompareOp, Context, Device, DeviceInfo, Error, Extent3d,
-    Filter, Format, ImageDesc, ImageDimension, ImageRange, ImageUsage, ImageViewDesc, NoThreads,
-    SamplerDesc, ViewDimension,
+    Features, Filter, Format, FormatFeatures, ImageDesc, ImageDimension, ImageRange, ImageUsage,
+    ImageViewDesc, NoThreads, SamplerDesc, ViewDimension,
 };
 
 const fn shape(dim: Dim, arrayed: bool, component: Component, format: ImageFormat) -> ImageShape {
@@ -33,7 +35,7 @@ const SAMPLED_2D: ImageShape = shape(Dim::DIM_2D, false, Component::Float, Image
 const STORAGE_2D: ImageShape = shape(Dim::DIM_2D, false, Component::Float, ImageFormat::RGBA8);
 const TEXELS: ImageShape = shape(Dim::BUFFER, false, Component::Float, ImageFormat::UNKNOWN);
 
-const fn entry(binding: u32, kind: BindingKind, access: Access) -> LayoutBinding {
+const fn entry(binding: u32, kind: DescriptorType, access: Access) -> LayoutBinding {
     LayoutBinding {
         binding,
         kind,
@@ -44,18 +46,27 @@ const fn entry(binding: u32, kind: BindingKind, access: Access) -> LayoutBinding
 }
 
 const READ: Access = Access::READ;
+const WRITE: Access = Access::WRITE;
 const READ_WRITE: Access = Access::READ.with(Access::WRITE);
 
 /// A binding of each kind, numbered in the order [`resources`] fills them.
 const EVERY_KIND: [LayoutBinding; 8] = [
-    entry(0, BindingKind::Sampler, READ),
-    entry(1, BindingKind::SampledImage(SAMPLED_2D), READ),
-    entry(2, BindingKind::StorageImage(STORAGE_2D), READ_WRITE),
-    entry(3, BindingKind::CombinedImageSampler(SAMPLED_2D), READ),
-    entry(4, BindingKind::UniformTexelBuffer(TEXELS), READ),
-    entry(5, BindingKind::StorageTexelBuffer(TEXELS), READ_WRITE),
-    entry(6, BindingKind::UniformBuffer, READ),
-    entry(7, BindingKind::StorageBuffer, READ_WRITE),
+    entry(0, DescriptorType::Sampler(SamplerType::Filtering), READ),
+    entry(
+        1,
+        DescriptorType::SampledImage(SAMPLED_2D, SampleType::Float),
+        READ,
+    ),
+    entry(2, DescriptorType::StorageImage(STORAGE_2D), READ_WRITE),
+    entry(
+        3,
+        DescriptorType::CombinedImageSampler(SAMPLED_2D, SampleType::Float, SamplerType::Filtering),
+        READ,
+    ),
+    entry(4, DescriptorType::UniformTexelBuffer(TEXELS), READ),
+    entry(5, DescriptorType::StorageTexelBuffer(TEXELS), READ_WRITE),
+    entry(6, DescriptorType::UniformBuffer, READ),
+    entry(7, DescriptorType::StorageBuffer, READ_WRITE),
 ];
 
 fn image_desc(format: Format, usage: ImageUsage, levels: u32, layers: u32) -> ImageDesc {
@@ -250,12 +261,24 @@ fn a_layout_binding_of_a_shape_no_module_declares_is_refused() {
     let stored_texels = shape(Dim::BUFFER, false, Component::Float, ImageFormat::RGBA8);
     let float_r32ui = shape(Dim::BUFFER, false, Component::Float, ImageFormat::R32UI);
     let misshapen = [
-        entry(0, BindingKind::SampledImage(layered_box), READ),
-        entry(0, BindingKind::StorageImage(multisampled), READ_WRITE),
-        entry(0, BindingKind::SampledImage(multisampled_cube), READ),
-        entry(0, BindingKind::StorageImage(stored_texels), READ_WRITE),
-        entry(0, BindingKind::UniformTexelBuffer(SAMPLED_2D), READ),
-        entry(0, BindingKind::StorageTexelBuffer(float_r32ui), READ_WRITE),
+        entry(
+            0,
+            DescriptorType::SampledImage(layered_box, SampleType::Float),
+            READ,
+        ),
+        entry(0, DescriptorType::StorageImage(multisampled), READ_WRITE),
+        entry(
+            0,
+            DescriptorType::SampledImage(multisampled_cube, SampleType::UnfilterableFloat),
+            READ,
+        ),
+        entry(0, DescriptorType::StorageImage(stored_texels), READ_WRITE),
+        entry(0, DescriptorType::UniformTexelBuffer(SAMPLED_2D), READ),
+        entry(
+            0,
+            DescriptorType::StorageTexelBuffer(float_r32ui),
+            READ_WRITE,
+        ),
     ];
     for (at, binding) in misshapen.into_iter().enumerate() {
         assert_eq!(refused(&context, binding), Some(Error::Shape), "case {at}");
@@ -376,9 +399,13 @@ fn a_sampled_view_of_another_shape_or_use_is_refused() {
         ViewDimension::D2,
         COLOUR,
     );
-    let sampled = entry(0, BindingKind::SampledImage(SAMPLED_2D), READ);
+    let sampled = entry(
+        0,
+        DescriptorType::SampledImage(SAMPLED_2D, SampleType::Float),
+        READ,
+    );
     assert_eq!(binds(&context, sampled, Resource::Image(&one)), None);
-    let storage = entry(0, BindingKind::StorageImage(STORAGE_2D), READ_WRITE);
+    let storage = entry(0, DescriptorType::StorageImage(STORAGE_2D), READ_WRITE);
     assert_eq!(
         binds(&context, storage, Resource::Image(&one)),
         Some(Error::Usage),
@@ -397,7 +424,11 @@ fn a_sampled_view_of_another_shape_or_use_is_refused() {
         Some(Error::Shape),
         "a cube for a rectangle"
     );
-    let uint = entry(0, BindingKind::SampledImage(UINT_2D), READ);
+    let uint = entry(
+        0,
+        DescriptorType::SampledImage(UINT_2D, SampleType::Uint),
+        READ,
+    );
     assert_eq!(
         binds(&context, uint, Resource::Image(&one)),
         Some(Error::Shape),
@@ -411,7 +442,7 @@ fn a_storage_view_of_more_levels_or_another_format_is_refused() {
     let context = context(&device);
     let both = ImageUsage::SAMPLED.with(ImageUsage::STORAGE);
     let (_memory, writable) = image(&context, &image_desc(Format::Rgba8Unorm, both, 2, 1));
-    let storage = entry(0, BindingKind::StorageImage(STORAGE_2D), READ_WRITE);
+    let storage = entry(0, DescriptorType::StorageImage(STORAGE_2D), READ_WRITE);
     let two = (Aspects::COLOR, 2, 1);
     let levels = view(
         &context,
@@ -446,7 +477,7 @@ fn a_storage_view_of_more_levels_or_another_format_is_refused() {
     );
     assert_eq!(binds(&context, storage, Resource::Image(&plain)), None);
     let r32 = shape(Dim::DIM_2D, false, Component::Float, ImageFormat::R32F);
-    let other = entry(0, BindingKind::StorageImage(r32), READ_WRITE);
+    let other = entry(0, DescriptorType::StorageImage(r32), READ_WRITE);
     assert_eq!(
         binds(&context, other, Resource::Image(&plain)),
         Some(Error::Shape),
@@ -454,8 +485,70 @@ fn a_storage_view_of_more_levels_or_another_format_is_refused() {
     );
     let mut unknown = STORAGE_2D;
     unknown.format = ImageFormat::UNKNOWN;
-    let any = entry(0, BindingKind::StorageImage(unknown), READ_WRITE);
+    let any = entry(0, DescriptorType::StorageImage(unknown), READ_WRITE);
     assert_eq!(binds(&context, any, Resource::Image(&plain)), None);
+}
+
+#[test]
+fn a_storage_binding_naming_no_format_accesses_a_format_only_as_it_offers() {
+    let mut unknown = STORAGE_2D;
+    unknown.format = ImageFormat::UNKNOWN;
+    let named_texels = shape(Dim::BUFFER, false, Component::Float, ImageFormat::RGBA8);
+    let images = (
+        DescriptorType::StorageImage(unknown),
+        DescriptorType::StorageImage(STORAGE_2D),
+    );
+    let texel_buffers = (
+        DescriptorType::StorageTexelBuffer(TEXELS),
+        DescriptorType::StorageTexelBuffer(named_texels),
+    );
+    let withheld = [
+        (FormatFeatures::STORAGE_READ_WITHOUT_FORMAT, READ, images),
+        (FormatFeatures::STORAGE_WRITE_WITHOUT_FORMAT, WRITE, images),
+        (
+            FormatFeatures::TEXEL_BUFFER_READ_WITHOUT_FORMAT,
+            READ,
+            texel_buffers,
+        ),
+        (
+            FormatFeatures::TEXEL_BUFFER_WRITE_WITHOUT_FORMAT,
+            WRITE,
+            texel_buffers,
+        ),
+    ];
+    for (feature, access, (unformatted, named)) in withheld {
+        let device = device_stating(|info| {
+            let stated = info.formats.clone();
+            info.formats = crate::FormatTable::from_fn(|format| {
+                let features = stated.get(format);
+                if format == Format::Rgba8Unorm {
+                    features.without(feature)
+                } else {
+                    features
+                }
+            });
+        });
+        let context = context(&device);
+        let held = resources(&context);
+        let resource = if unformatted == images.0 {
+            Resource::Image(&held.view)
+        } else {
+            Resource::TexelBuffer(&held.texels)
+        };
+        let other = READ_WRITE.without(access);
+        for (kind, access, refusal) in [
+            (unformatted, access, Some(Error::Unsupported)),
+            (unformatted, READ_WRITE, Some(Error::Unsupported)),
+            (unformatted, other, None),
+            (named, READ_WRITE, None),
+        ] {
+            assert_eq!(
+                binds(&context, entry(0, kind, access), resource),
+                refusal,
+                "{feature:?} withheld, {kind:?} accessed as {access:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -479,19 +572,37 @@ fn a_depth_stencil_view_is_sampled_one_plane_at_a_time() {
         plane(Aspects::DEPTH),
         plane(Aspects::STENCIL),
     );
-    let floats = entry(0, BindingKind::SampledImage(SAMPLED_2D), READ);
-    let uints = entry(0, BindingKind::SampledImage(UINT_2D), READ);
+    let depths = entry(
+        0,
+        DescriptorType::SampledImage(SAMPLED_2D, SampleType::Depth),
+        READ,
+    );
+    let floats = entry(
+        0,
+        DescriptorType::SampledImage(SAMPLED_2D, SampleType::Float),
+        READ,
+    );
+    let uints = entry(
+        0,
+        DescriptorType::SampledImage(UINT_2D, SampleType::Uint),
+        READ,
+    );
     assert_eq!(
-        binds(&context, floats, Resource::Image(&both)),
+        binds(&context, depths, Resource::Image(&both)),
         Some(Error::Aspect),
         "two planes at once"
     );
-    assert_eq!(binds(&context, floats, Resource::Image(&depth)), None);
+    assert_eq!(binds(&context, depths, Resource::Image(&depth)), None);
     assert_eq!(binds(&context, uints, Resource::Image(&stencil)), None);
     assert_eq!(
-        binds(&context, floats, Resource::Image(&stencil)),
-        Some(Error::Shape),
-        "a stencil reads as integers"
+        binds(&context, depths, Resource::Image(&stencil)),
+        Some(Error::Aspect),
+        "a stencil is not depth"
+    );
+    assert_eq!(
+        binds(&context, floats, Resource::Image(&depth)),
+        Some(Error::Aspect),
+        "depth is not colour"
     );
 }
 
@@ -518,20 +629,24 @@ fn integers(context: &Context) -> (crate::Allocation, crate::Image, crate::Image
 }
 
 #[test]
-fn a_combined_sampler_filters_and_compares_only_what_its_view_holds() {
+fn a_sampler_binding_takes_only_samplers_of_its_type() {
     let (device, _) = device();
     let context = context(&device);
     let (_memory, _image, uint) = integers(&context);
-    let combined = entry(0, BindingKind::CombinedImageSampler(UINT_2D), READ);
+    let integer = entry(
+        0,
+        DescriptorType::CombinedImageSampler(UINT_2D, SampleType::Uint, SamplerType::Integer),
+        READ,
+    );
     let sampler = |desc: &SamplerDesc| context.create_sampler(desc).expect("a sampler");
     let (linear, point) = (sampler(&SamplerDesc::LINEAR), sampler(&NEAREST));
     assert_eq!(
-        binds(&context, combined, Resource::ImageSampler(&uint, &linear)),
-        Some(Error::Unsupported),
+        binds(&context, integer, Resource::ImageSampler(&uint, &linear)),
+        Some(Error::Shape),
         "integers are never filtered"
     );
     assert_eq!(
-        binds(&context, combined, Resource::ImageSampler(&uint, &point)),
+        binds(&context, integer, Resource::ImageSampler(&uint, &point)),
         None
     );
     let comparing = sampler(&SamplerDesc {
@@ -539,21 +654,198 @@ fn a_combined_sampler_filters_and_compares_only_what_its_view_holds() {
         ..NEAREST
     });
     assert_eq!(
-        binds(
-            &context,
-            combined,
-            Resource::ImageSampler(&uint, &comparing)
-        ),
-        Some(Error::Aspect),
+        binds(&context, integer, Resource::ImageSampler(&uint, &comparing)),
+        Some(Error::Shape),
         "a comparison of what is not depth"
     );
+    let filtering = entry(0, DescriptorType::Sampler(SamplerType::Filtering), READ);
+    let nearest = entry(0, DescriptorType::Sampler(SamplerType::NonFiltering), READ);
+    let compared = entry(0, DescriptorType::Sampler(SamplerType::Comparison), READ);
+    let compared_nearest = entry(
+        0,
+        DescriptorType::Sampler(SamplerType::NonFilteringComparison),
+        READ,
+    );
+    let linear_comparing = sampler(&SamplerDesc {
+        compare: Some(CompareOp::Greater),
+        ..SamplerDesc::LINEAR
+    });
+    for (binding, desc, outcome, what) in [
+        (filtering, &linear, None, "filters"),
+        (filtering, &point, None, "may filter"),
+        (
+            filtering,
+            &comparing,
+            Some(Error::Shape),
+            "reads, not compares",
+        ),
+        (nearest, &point, None, "nearest"),
+        (nearest, &linear, Some(Error::Shape), "does not filter"),
+        (compared, &linear_comparing, None, "compares, filtered"),
+        (compared, &linear, Some(Error::Shape), "compares, not reads"),
+        (compared_nearest, &comparing, None, "compares, nearest"),
+        (
+            compared_nearest,
+            &linear_comparing,
+            Some(Error::Shape),
+            "compares without filtering",
+        ),
+    ] {
+        assert_eq!(
+            binds(&context, binding, Resource::Sampler(desc)),
+            outcome,
+            "{what}"
+        );
+    }
+}
+
+#[test]
+fn a_layout_s_sampling_types_agree_with_its_shapes_and_each_other() {
+    let (device, _) = device();
+    let context = context(&device);
+    let mut multisampled = SAMPLED_2D;
+    multisampled.multisampled = true;
+    let mut arrayed = UINT_2D;
+    arrayed.arrayed = true;
+    let combined = |shape, sample, sampler| {
+        entry(
+            0,
+            DescriptorType::CombinedImageSampler(shape, sample, sampler),
+            READ,
+        )
+    };
+    let misdeclared = [
+        (
+            entry(
+                0,
+                DescriptorType::SampledImage(UINT_2D, SampleType::Float),
+                READ,
+            ),
+            "integers read as floats",
+        ),
+        (
+            entry(
+                0,
+                DescriptorType::SampledImage(SAMPLED_2D, SampleType::Sint),
+                READ,
+            ),
+            "floats read as integers",
+        ),
+        (
+            entry(
+                0,
+                DescriptorType::SampledImage(multisampled, SampleType::Float),
+                READ,
+            ),
+            "samples are never filtered",
+        ),
+        (
+            entry(0, DescriptorType::Sampler(SamplerType::Unnormalized), READ),
+            "unnormalised coordinates without their image",
+        ),
+        (
+            combined(SAMPLED_2D, SampleType::Float, SamplerType::Integer),
+            "an integer sampler of floats",
+        ),
+        (
+            combined(UINT_2D, SampleType::Uint, SamplerType::NonFiltering),
+            "a float sampler of integers",
+        ),
+        (
+            combined(
+                SAMPLED_2D,
+                SampleType::UnfilterableFloat,
+                SamplerType::Filtering,
+            ),
+            "filtering what is not filtered",
+        ),
+        (
+            combined(SAMPLED_2D, SampleType::Float, SamplerType::Comparison),
+            "comparing colour",
+        ),
+        (
+            combined(
+                SAMPLED_2D,
+                SampleType::UnfilterableDepth,
+                SamplerType::Comparison,
+            ),
+            "a filtered comparison of depth that is not filtered",
+        ),
+        (
+            combined(arrayed, SampleType::Uint, SamplerType::Unnormalized),
+            "unnormalised coordinates over layers",
+        ),
+    ];
+    for (binding, what) in misdeclared {
+        assert_eq!(refused(&context, binding), Some(Error::Shape), "{what}");
+    }
+    for binding in [
+        combined(SAMPLED_2D, SampleType::Depth, SamplerType::Comparison),
+        combined(
+            SAMPLED_2D,
+            SampleType::UnfilterableDepth,
+            SamplerType::NonFilteringComparison,
+        ),
+        combined(SAMPLED_2D, SampleType::Depth, SamplerType::Filtering),
+        combined(
+            SAMPLED_2D,
+            SampleType::UnfilterableFloat,
+            SamplerType::NonFiltering,
+        ),
+        combined(UINT_2D, SampleType::Uint, SamplerType::Unnormalized),
+    ] {
+        assert_eq!(refused(&context, binding), None, "{binding:?}");
+    }
+}
+
+#[test]
+fn a_view_bound_to_be_filtered_is_of_a_format_the_device_filters() {
+    let device = device_stating(|info| {
+        let stated = info.formats.clone();
+        info.formats = crate::FormatTable::from_fn(|format| {
+            let features = stated.get(format);
+            if format == Format::Rgba8Unorm {
+                features.without(FormatFeatures::FILTERED)
+            } else {
+                features
+            }
+        });
+    });
+    let context = context(&device);
+    let (_memory, picture) = image(
+        &context,
+        &image_desc(Format::Rgba8Unorm, ImageUsage::SAMPLED, 1, 1),
+    );
+    let one = view(
+        &context,
+        &picture,
+        Format::Rgba8Unorm,
+        ViewDimension::D2,
+        COLOUR,
+    );
+    let filtered = entry(
+        0,
+        DescriptorType::SampledImage(SAMPLED_2D, SampleType::Float),
+        READ,
+    );
+    let unfiltered = entry(
+        0,
+        DescriptorType::SampledImage(SAMPLED_2D, SampleType::UnfilterableFloat),
+        READ,
+    );
+    assert_eq!(
+        binds(&context, filtered, Resource::Image(&one)),
+        Some(Error::Unsupported)
+    );
+    assert_eq!(binds(&context, unfiltered, Resource::Image(&one)), None);
 }
 
 #[test]
 fn unnormalised_coordinates_take_one_level_and_layer_of_a_rectangle() {
     let (device, _) = device();
     let context = context(&device);
-    let (_memory, picture, uint) = integers(&context);
+    let (_memory, _picture, uint) = integers(&context);
+    let point = context.create_sampler(&NEAREST).expect("a sampler");
     let unnormalized = context
         .create_sampler(&SamplerDesc {
             unnormalized: true,
@@ -561,7 +853,11 @@ fn unnormalised_coordinates_take_one_level_and_layer_of_a_rectangle() {
             ..NEAREST
         })
         .expect("a sampler");
-    let combined = entry(0, BindingKind::CombinedImageSampler(UINT_2D), READ);
+    let combined = entry(
+        0,
+        DescriptorType::CombinedImageSampler(UINT_2D, SampleType::Uint, SamplerType::Unnormalized),
+        READ,
+    );
     assert_eq!(
         binds(
             &context,
@@ -570,25 +866,141 @@ fn unnormalised_coordinates_take_one_level_and_layer_of_a_rectangle() {
         ),
         None
     );
-    let layers = (Aspects::COLOR, 1, 2);
-    let layered = view(
+    let (_levelled_memory, levelled) = image(
         &context,
-        &picture,
-        Format::R32Uint,
-        ViewDimension::D2Array,
-        layers,
+        &image_desc(Format::R32Uint, ImageUsage::SAMPLED, 2, 1),
     );
-    let mut arrayed = UINT_2D;
-    arrayed.arrayed = true;
-    let over_layers = entry(0, BindingKind::CombinedImageSampler(arrayed), READ);
+    let levels = view(
+        &context,
+        &levelled,
+        Format::R32Uint,
+        ViewDimension::D2,
+        (Aspects::COLOR, 2, 1),
+    );
     assert_eq!(
         binds(
             &context,
-            over_layers,
-            Resource::ImageSampler(&layered, &unnormalized)
+            combined,
+            Resource::ImageSampler(&levels, &unnormalized)
         ),
         Some(Error::Shape),
-        "unnormalised coordinates over layers"
+        "unnormalised coordinates over levels"
+    );
+    assert_eq!(
+        binds(&context, combined, Resource::ImageSampler(&uint, &point)),
+        Some(Error::Shape),
+        "normalised coordinates where they are not"
+    );
+}
+
+/// An unnormalised sampler filters linearly only texels its binding reads as
+/// filtered, so a stencil plane is never filtered by its depth plane's
+/// format.
+#[test]
+fn an_unnormalised_sampler_filters_only_texels_read_as_filtered() {
+    let (device, _) = device();
+    let context = context(&device);
+    let usage = ImageUsage::SAMPLED.with(ImageUsage::DEPTH_STENCIL_ATTACHMENT);
+    let format = Format::Depth32FloatStencil8;
+    let (_memory, stencilled) = image(&context, &image_desc(format, usage, 1, 1));
+    let plane = |aspects| {
+        view(
+            &context,
+            &stencilled,
+            format,
+            ViewDimension::D2,
+            (aspects, 1, 1),
+        )
+    };
+    let (depth, stencil) = (plane(Aspects::DEPTH), plane(Aspects::STENCIL));
+    let linear = context
+        .create_sampler(&SamplerDesc {
+            unnormalized: true,
+            mipmap_filter: Filter::Nearest,
+            lod_max: 0.0,
+            ..SamplerDesc::LINEAR
+        })
+        .expect("a sampler");
+    let reading = |shape, sample| {
+        entry(
+            0,
+            DescriptorType::CombinedImageSampler(shape, sample, SamplerType::Unnormalized),
+            READ,
+        )
+    };
+    let read = |entry, view| binds(&context, entry, Resource::ImageSampler(view, &linear));
+    assert_eq!(
+        read(reading(UINT_2D, SampleType::Uint), &stencil),
+        Some(Error::Shape),
+        "integer stencil texels"
+    );
+    assert_eq!(
+        read(reading(SAMPLED_2D, SampleType::UnfilterableDepth), &depth),
+        Some(Error::Shape),
+        "depth read unfiltered"
+    );
+    assert_eq!(read(reading(SAMPLED_2D, SampleType::Depth), &depth), None);
+}
+
+/// A binding of more than one descriptor is refused by a device that takes
+/// no arrays of them, and one of a single descriptor made.
+#[test]
+fn a_binding_array_is_refused_by_a_device_stating_none() {
+    let device =
+        device_stating(|info| info.features = info.features.without(Features::BINDING_ARRAYS));
+    let context = context(&device);
+    let mut array = EVERY_KIND[7];
+    array.count = 2;
+    assert_eq!(refused(&context, array), Some(Error::Unsupported));
+    assert_eq!(refused(&context, EVERY_KIND[7]), None);
+}
+
+/// A device bounding a binding's reads at a granularity coarser than a
+/// byte refuses a uniform or storage range that is not a whole number of
+/// it, so a read past the range reads zero on every device.
+#[test]
+fn a_buffer_range_off_the_devices_size_alignment_is_refused() {
+    let device = device_stating(|info| {
+        info.limits.uniform_buffer_size_alignment = 16;
+        info.limits.storage_buffer_size_alignment = 4;
+    });
+    let context = context(&device);
+    let allocation = memory(&context, 1024);
+    let buffer = over(&context, &allocation, 0, 1024);
+    let range = |size| Resource::Buffer {
+        buffer: &buffer,
+        offset: 0,
+        size,
+    };
+    let (uniform, storage) = (EVERY_KIND[6], EVERY_KIND[7]);
+    assert_eq!(binds(&context, uniform, range(48)), None);
+    assert_eq!(binds(&context, uniform, range(40)), Some(Error::Misaligned));
+    assert_eq!(binds(&context, storage, range(12)), None);
+    assert_eq!(binds(&context, storage, range(6)), Some(Error::Misaligned));
+}
+
+/// A device takes a module only at a SPIR-V version it states it runs.
+#[test]
+fn a_module_newer_than_the_device_runs_is_refused() {
+    use tairix_spirv::assemble::admit_version;
+    use tairix_spirv::Version;
+
+    let oldest = Version { major: 1, minor: 3 };
+    let device = device_stating(|info| info.spirv_version = oldest);
+    let context = context(&device);
+    // From 1.4 an entry point names every global it reaches; before, only
+    // its inputs and outputs.
+    let text = crate::pipeline::tests::doubles(4);
+    let interface_of_1_3 = text.replace("%gid %buf", "%gid");
+    let newer = Version { major: 1, minor: 4 };
+    assert!(context
+        .create_shader_module(admit_version(&interface_of_1_3, oldest).expect("admitted"))
+        .is_ok());
+    assert_eq!(
+        context
+            .create_shader_module(admit_version(&text, newer).expect("admitted"))
+            .err(),
+        Some(Error::Unsupported)
     );
 }
 
@@ -946,7 +1358,7 @@ fn a_layout_is_checked_without_the_devices_lock_and_bounded_in_descriptors() {
     let context = context(&device);
     let numbers = device.info().limits.max_binding_number;
     let long: alloc::vec::Vec<LayoutBinding> = (0..numbers + 64)
-        .map(|number| entry(number, BindingKind::UniformBuffer, READ))
+        .map(|number| entry(number, DescriptorType::UniformBuffer, READ))
         .collect();
     let before = crate::fair::held::takings();
     assert_eq!(

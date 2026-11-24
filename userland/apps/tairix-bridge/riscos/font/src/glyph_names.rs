@@ -13,9 +13,15 @@ const LIST: &str = include_str!("../assets/glyphlist.txt");
 const DINGBATS: &str = include_str!("../assets/zapfdingbats.txt");
 const NEW_FONTS: &str = include_str!("../assets/aglfn.txt");
 
-/// The surrogates a `uniXXXXYYYY` name pairs.
-const HIGH_SURROGATES: core::ops::RangeInclusive<u32> = 0xD800..=0xDBFF;
-const LOW_SURROGATES: core::ops::RangeInclusive<u32> = 0xDC00..=0xDFFF;
+/// UTF-16's surrogates, high then low, which a `uniXXXXYYYY` name and a
+/// string of halfwords pair.
+pub(crate) const HIGH_SURROGATES: core::ops::RangeInclusive<u32> = 0xD800..=0xDBFF;
+pub(crate) const LOW_SURROGATES: core::ops::RangeInclusive<u32> = 0xDC00..=0xDFFF;
+
+/// The character the surrogates `high` and `low` pair.
+pub(crate) const fn paired(high: u32, low: u32) -> u32 {
+    0x1_0000 + ((high - *HIGH_SURROGATES.start()) << 10) + (low - *LOW_SURROGATES.start())
+}
 
 /// The glyph lists, read.
 pub(crate) struct GlyphNames {
@@ -98,8 +104,8 @@ impl GlyphNames {
         match character.checked_sub(0x1_0000) {
             Some(above) => format!(
                 "uni{:04X}{:04X}",
-                0xD800 + (above >> 10),
-                0xDC00 + (above & 0x3FF)
+                *HIGH_SURROGATES.start() + (above >> 10),
+                *LOW_SURROGATES.start() + (above & 0x3FF)
             ),
             None => format!("uni{character:04X}"),
         }
@@ -124,7 +130,7 @@ fn spelled(name: &str) -> Option<u32> {
             if !HIGH_SURROGATES.contains(&high) || !LOW_SURROGATES.contains(&low) {
                 return None;
             }
-            0x1_0000 + ((high - 0xD800) << 10) + (low - 0xDC00)
+            paired(high, low)
         }
         _ => return None,
     };

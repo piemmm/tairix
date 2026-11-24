@@ -182,12 +182,12 @@ impl Machine<'_, '_, '_> {
                 0,
                 0,
             ],
-            ImageOp::Sample { .. } | ImageOp::QueryLod => match &bound.image {
-                Some(at) => self.sample_lane(image, (at, bound.sampler), &coord, lane),
-                None => widen(missing(image.component)),
+            ImageOp::Sample { .. } | ImageOp::QueryLod => match (&bound.image, bound.sampler) {
+                (Some(at), Some(sampler)) => self.sample_lane(image, (at, sampler), &coord, lane),
+                _ => widen(missing(image.component)),
             },
-            ImageOp::Gather { component, dref } => match &bound.image {
-                Some(at) => {
+            ImageOp::Gather { component, dref } => match (&bound.image, bound.sampler) {
+                (Some(at), Some(sampler)) => {
                     let point = coord.map(|bits| ops::float(image.coord_num, bits));
                     let channel = component.map_or(0, |reg| self.word(reg, 0, lane) & 3);
                     let reference = dref
@@ -202,15 +202,9 @@ impl Machine<'_, '_, '_> {
                         }
                         each
                     });
-                    widen(self.gather(
-                        at,
-                        bound.sampler,
-                        point,
-                        (channel, reference),
-                        (offset, offsets),
-                    ))
+                    widen(self.gather(at, sampler, point, (channel, reference), (offset, offsets)))
                 }
-                None => widen(missing(image.component)),
+                _ => widen(missing(image.component)),
             },
         })
     }
@@ -220,7 +214,7 @@ impl Machine<'_, '_, '_> {
     fn sample_lane(
         &self,
         image: &Image,
-        (at, sampler): (&ImageAt<'_>, Option<&SamplerDesc>),
+        (at, sampler): (&ImageAt<'_>, &SamplerDesc),
         coord: &[u64; 4],
         lane: usize,
     ) -> [u64; 4] {
@@ -291,14 +285,7 @@ impl Machine<'_, '_, '_> {
             }
             offset
         });
-        widen(self.sample(
-            at,
-            sampler,
-            (point, &level),
-            reference,
-            offset,
-            image.component,
-        ))
+        widen(self.sample(at, sampler, (point, &level), reference, offset))
     }
 
     /// The derivatives across lane `lane`'s quad of the coordinate's first
@@ -434,27 +421,22 @@ impl Machine<'_, '_, '_> {
     fn sample(
         &self,
         at: &ImageAt<'_>,
-        sampler: Option<&SamplerDesc>,
+        desc: &SamplerDesc,
         (point, lod): ([f64; 4], &Lod),
         reference: Option<f64>,
         offset: Option<[u64; 3]>,
-        component: Component,
     ) -> Texel {
-        let desc = sampler.copied().unwrap_or(SamplerDesc::LINEAR);
-        let (_, lambda) = lambda(at, sampler, lod);
+        let (_, lambda) = lambda(at, desc, lod);
         let levels = at.view.range.levels.max(1);
         let d = lambda.clamp(0.0, f64::from(levels - 1));
-        let integer = component != Component::Float;
-        let filter = if integer {
-            Filter::Nearest
-        } else if lambda <= 0.0 {
+        let filter = if lambda <= 0.0 {
             desc.mag_filter
         } else {
             desc.min_filter
         };
         let compare = reference.map(|r| (r, desc.compare.unwrap_or(CompareOp::LessOrEqual)));
-        let taps = |level: u32| self.filtered(at, &desc, level, point, (filter, compare, offset));
-        if desc.mipmap_filter == Filter::Linear && !integer && !desc.unnormalized && levels > 1 {
+        let taps = |level: u32| self.filtered(at, desc, level, point, (filter, compare, offset));
+        if desc.mipmap_filter == Filter::Linear && !desc.unnormalized && levels > 1 {
             let low = mathf::floor(d);
             let low_level = to_u32(low);
             let high_level = (low_level + 1).min(levels - 1);
@@ -649,12 +631,11 @@ impl Machine<'_, '_, '_> {
     fn gather(
         &self,
         at: &ImageAt<'_>,
-        sampler: Option<&SamplerDesc>,
+        desc: &SamplerDesc,
         point: [f64; 4],
         (channel, reference): (u64, Option<f64>),
         (offset, four): (Option<[u64; 3]>, Option<[[u64; 2]; 4]>),
     ) -> Texel {
-        let desc = sampler.copied().unwrap_or(SamplerDesc::LINEAR);
         let compare = reference.map(|r| (r, desc.compare.unwrap_or(CompareOp::LessOrEqual)));
         let channel = if compare.is_some() {
             0
@@ -731,8 +712,7 @@ impl Machine<'_, '_, '_> {
 }
 
 /// `(λ', λ)`: the level of detail before and after the sampler's clamp.
-fn lambda(at: &ImageAt<'_>, sampler: Option<&SamplerDesc>, lod: &Lod) -> (f64, f64) {
-    let sampler = sampler.copied().unwrap_or(SamplerDesc::LINEAR);
+fn lambda(at: &ImageAt<'_>, sampler: &SamplerDesc, lod: &Lod) -> (f64, f64) {
     if sampler.unnormalized {
         return (0.0, 0.0);
     }

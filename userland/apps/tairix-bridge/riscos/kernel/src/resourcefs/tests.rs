@@ -3,7 +3,9 @@
 
 use tairix_riscos_arm::psr;
 
-use super::{Object, DEREGISTER_FILES, REGISTER_FILES};
+use super::{
+    entry_offset, entry_words, push_entry, Object, ATTRIBUTES, DEREGISTER_FILES, REGISTER_FILES,
+};
 use crate::filing::filetype;
 use crate::filing::fs::{attribute, kind, stamp};
 use crate::msgtrans::tests::{block, register, session, swi, BLOCK};
@@ -491,4 +493,83 @@ fn the_disc_has_no_name() {
     s.write(ROOM, &[0xEE, 0xEE]);
     assert!(call_fs(&mut s, super::fs::func, None, [11, 0, ROOM, 0, 0, 0, 0, 0]).is_ok());
     assert_eq!(s.read(ROOM, 2), [0, 0]);
+}
+
+#[test]
+fn a_redeclaration_hands_file_switch_a_block_of_offsets_from_its_module() {
+    use crate::filing::fs::block::{FILE, FUNC, GBPB, INFO, NAME, OPEN, STARTUP};
+    use crate::service::FS_REDECLARE;
+    use crate::swi::os::{fs_control, CLAIM, SERVICE_CALL};
+    use crate::vectors::FSC;
+    let mut s = session();
+    let seen = DATA + 0x800;
+    let code = [
+        asm::mov(12, seen),
+        asm::str(0, 12, 0),
+        asm::str(1, 12, 4),
+        asm::str(2, 12, 8),
+        asm::str(3, 12, 12),
+        asm::claim(),
+    ];
+    s.poke(CODE, &code);
+    let (claimed, _) = s.user_swi(X | CLAIM, [FSC.0, CODE, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert!(!claimed.flag(psr::V), "FSCV claimed");
+    s.user_swi(
+        X | SERVICE_CALL,
+        [0, FS_REDECLARE, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+    let (base, workspace, entries) = {
+        let os = s.kernel.os();
+        let base = os.module_of(&super::RESOURCE_FS).expect("active");
+        let entries = [0, 1, 2, 3, 4, 5, 6].map(|i| {
+            let routine = os.routine_of(&super::RESOURCE_FS, super::FS_ENTRIES + i);
+            routine.expect("an entry").wrapping_sub(base)
+        });
+        let workspace = os.world.resource_fs.workspace.expect("initialised");
+        (base, workspace, entries)
+    };
+    let at = workspace + super::FS_BLOCK_AT;
+    let call: alloc::vec::Vec<u32> = (0..4).map(|i| s.peek(seen + 4 * i)).collect();
+    assert_eq!(
+        call,
+        [fs_control::ADD, base, at.wrapping_sub(base), workspace],
+        "OS_FSControl 12: the module, its block's offset and the workspace"
+    );
+    let words: alloc::vec::Vec<u32> = (0..12).map(|i| s.peek(at + 4 * i)).collect();
+    assert_eq!(s.read(base.wrapping_add(words[NAME]), 10), b"Resources\0");
+    assert_eq!(s.read(base.wrapping_add(words[STARTUP]), 1), [0]);
+    assert_eq!(words[INFO], super::FS_INFO);
+    assert_eq!(words[OPEN..=FILE], entries[..6]);
+    assert_eq!(words[FUNC], entries[6]);
+    assert_eq!(words[GBPB..], [0, 0], "no FSEntry_GBPB, no extra word");
+}
+
+#[test]
+fn an_entry_is_its_header_padded_name_length_and_padded_data() {
+    let (name, data) = (b"Ab", [1, 2, 3, 4, 5]);
+    let mut words = alloc::vec::Vec::new();
+    push_entry(&mut words, name, &data, (0xFFFF_FF12, 0x3456_7890)).expect("room");
+    assert_eq!(words.len(), entry_words(name, &data));
+    assert_eq!(
+        words,
+        [
+            36,
+            0xFFFF_FF12,
+            0x3456_7890,
+            5,
+            ATTRIBUTES,
+            u32::from_le_bytes(*b"Ab\0\0"),
+            9,
+            u32::from_le_bytes([1, 2, 3, 4]),
+            5,
+        ]
+    );
+}
+
+#[test]
+fn an_entry_longer_than_its_offset_word_can_say_is_refused() {
+    assert_eq!(entry_offset(entry_words(b"Ab", &[1, 2, 3, 4, 5])), Some(36));
+    assert_eq!(entry_offset((1 << 30) - 1), Some(u32::MAX - 3));
+    assert_eq!(entry_offset(1 << 30), None);
+    assert_eq!(entry_offset(usize::MAX), None);
 }

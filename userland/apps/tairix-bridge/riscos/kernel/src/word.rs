@@ -7,8 +7,8 @@ use tairix_riscos_arm::psr;
 
 use crate::os::{len32, Entry, Fail, Os, Regs};
 use crate::territory::{
-    CONVERT_DATE_AND_TIME, ORDINALS_TO_TIME, READ_CALENDAR_INFORMATION, STRING_TO_ORDINALS,
-    TIME_TO_ORDINALS,
+    CONVERT_DATE_AND_TIME, CURRENT, ORDINALS_TO_TIME, READ_CALENDAR_INFORMATION,
+    STRING_TO_ORDINALS, TIME_TO_ORDINALS,
 };
 use crate::vectors::{self, Carry};
 
@@ -42,8 +42,6 @@ pub mod set {
     pub const DATE_AND_TIME: u8 = 24;
 }
 
-/// The territory `-1` names: the current one.
-const CURRENT: u32 = u32::MAX;
 /// `OS_Word` 14's string form.
 pub(crate) const LONG_FORMAT: &[u8] = b"%w3,%dy %m3 %ce%yr.%24:%mi:%se\0";
 
@@ -257,18 +255,14 @@ impl Os<'_> {
         let mut convert = Regs::new([CURRENT, scratch, out, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         self.perform(crate::swi::X | TIME_TO_ORDINALS, &mut convert)?;
         let mut ordinals = [0; 9];
-        for (i, slot) in (0..).zip(ordinals.iter_mut()) {
-            *slot = self.read_word(out + 4 * i)?;
-        }
+        self.read_words(out, &mut ordinals)?;
         Ok(ordinals)
     }
 
     /// The five-byte time of local ordinals (centiseconds to year).
     fn time_of_ordinals(&mut self, ordinals: &[u32; 7]) -> Result<u64, Fail> {
         let scratch = self.world.scratch;
-        for (i, &value) in (0..).zip(ordinals) {
-            self.write_word(scratch + 8 + 4 * i, value)?;
-        }
+        self.write_words(scratch + 8, ordinals)?;
         let mut convert = Regs::new([CURRENT, scratch, scratch + 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         self.perform(crate::swi::X | ORDINALS_TO_TIME, &mut convert)?;
         self.read_five(scratch)
@@ -344,9 +338,7 @@ impl Os<'_> {
         ]);
         self.perform(crate::swi::X | STRING_TO_ORDINALS, &mut parse)?;
         let mut parsed = [0; 7];
-        for (i, slot) in (0..).zip(parsed.iter_mut()) {
-            *slot = self.read_word(scratch + 8 + 4 * i)?;
-        }
+        self.read_words(scratch + 8, &mut parsed)?;
         if sub != 24 {
             let now = self.real_time();
             let current = self.ordinals(now)?;

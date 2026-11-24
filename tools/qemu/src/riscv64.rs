@@ -316,6 +316,7 @@ mod tests {
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
             dma_translation: crate::DmaTranslation::Absent,
+            pci_bypasses_unit: false,
             interrupts: crate::InterruptControllers::Default,
             virtualization: false,
             rtc_base_unix_secs: None,

@@ -525,6 +525,12 @@ impl Direct {
         fields_of!(self.layout, |f| f.colour_bits())
     }
 
+    /// Whether a pixel keeps a byte or a nibble beside its colour, as 16M and
+    /// 4K colours' do, for an alpha or supremacy value.
+    pub(crate) const fn tagged(self) -> bool {
+        matches!(self.layout, Layout::Twelve | Layout::TwentyFour)
+    }
+
     /// A pixel's red, green and blue as it holds them, each in its own bits.
     pub(crate) const fn channels(self, pixel: u32) -> [u32; 3] {
         self.ordered(fields_of!(self.layout, |f| f.extract(pixel)))

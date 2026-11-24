@@ -234,6 +234,46 @@ pub struct Command {
     pub run: Option<Code>,
 }
 
+impl Command {
+    /// A command whose help is text, taking `min` to `max` parameters, none
+    /// of them passed through `GSTrans`.
+    #[must_use]
+    pub const fn new(
+        name: &'static str,
+        (min, max): (u8, u8),
+        help: &'static str,
+        syntax: Option<&'static str>,
+        run: Code,
+    ) -> Self {
+        Self {
+            name,
+            kind: CommandKind::Command,
+            min,
+            max,
+            translate: 0,
+            help: Help::Text(help),
+            syntax,
+            run: Some(run),
+        }
+    }
+
+    /// A `*Configure` and `*Status` keyword whose help is text, taking at
+    /// most one parameter, its code writing its syntax.
+    #[must_use]
+    pub const fn configure(name: &'static str, help: &'static str, run: Code) -> Self {
+        Self {
+            name,
+            kind: CommandKind::Configure,
+            min: 0,
+            max: 1,
+            translate: 0,
+            help: Help::Text(help),
+            syntax: None,
+            run: Some(run),
+        }
+    }
+}
+
 /// What `*Help` says of a command.
 #[derive(Debug)]
 pub enum Help {

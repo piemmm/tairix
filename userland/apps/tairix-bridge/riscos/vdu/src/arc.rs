@@ -514,8 +514,8 @@ fn on_arc(p: Point, start: Point, end: Point) -> bool {
 
 /// Whether the arc from `start` to `end` is more than half the circle.
 fn reflex(start: Point, end: Point) -> bool {
-    let cross = i64::from(start.0) * i64::from(end.1) - i64::from(start.1) * i64::from(end.0);
-    let dot = i64::from(start.0) * i64::from(end.0) + i64::from(start.1) * i64::from(end.1);
+    let cross = i128::from(start.0) * i128::from(end.1) - i128::from(start.1) * i128::from(end.0);
+    let dot = i128::from(start.0) * i128::from(end.0) + i128::from(start.1) * i128::from(end.1);
     cross < 0 || (cross == 0 && dot < 0)
 }
 

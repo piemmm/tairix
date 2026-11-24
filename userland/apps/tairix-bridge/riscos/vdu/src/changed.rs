@@ -60,27 +60,19 @@ pub(crate) fn reset(os: &mut Os<'_>) -> Result<(), Fail> {
 }
 
 fn empty(os: &mut Os<'_>) -> Result<(), Fail> {
-    for (i, &word) in (1u32..).zip(&EMPTY) {
-        os.write_word(BOX + 4 * i, word)?;
-    }
-    Ok(())
+    os.write_words(BOX + 4, &EMPTY)
 }
 
 /// The flag word and the box, as zero page holds them.
 pub(crate) fn words(os: &mut Os<'_>) -> Result<[u32; 5], Fail> {
     let mut words = [0; 5];
-    for (i, word) in (0u32..).zip(words.iter_mut()) {
-        *word = os.read_word(BOX + 4 * i)?;
-    }
+    os.read_words(BOX, &mut words)?;
     Ok(words)
 }
 
 /// Sets the flag word and the box.
 pub(crate) fn set_words(os: &mut Os<'_>, words: [u32; 5]) -> Result<(), Fail> {
-    for (i, &word) in (0u32..).zip(&words) {
-        os.write_word(BOX + 4 * i, word)?;
-    }
-    Ok(())
+    os.write_words(BOX, &words)
 }
 
 /// `OS_ChangedBox`: R0 0 disables the box, 1 enables it, 2 empties it, any

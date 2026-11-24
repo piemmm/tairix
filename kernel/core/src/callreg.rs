@@ -218,11 +218,57 @@ pub fn take_down(id: EndpointId, audit: &dyn Sink) -> bool {
     let Some(endpoint) = unregister(id) else {
         return false;
     };
+    destroy_unbound(&endpoint, audit);
+    crate::waitq::serve_wake(id.0);
+    true
+}
+
+/// Tear down `id` at its owner's asking, under a server that lives on: the
+/// grants naming it revoked under both registries' locks before it is
+/// unbound, as an exit's teardown revokes them, then its callers and its
+/// server woken as [`take_down`] wakes them, and the vanish observer told.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] where `id` is not bound, and
+/// [`Errno::PermissionDenied`] where a process other than `owner` owns it.
+pub fn destroy(
+    id: EndpointId,
+    owner: u64,
+    aspaces: &RwLock<AddressSpaceRegistry>,
+    audit: &dyn Sink,
+) -> Result<(), Errno> {
+    let (endpoint, emptied, revoked) = {
+        let mut grants = aspaces.write();
+        let mut guard = CALL_ENDPOINTS.lock();
+        let registry = guard.as_mut().ok_or(Errno::NotFound)?;
+        let bound = registry.endpoints.get(&id).ok_or(Errno::NotFound)?;
+        if bound.owner() != owner {
+            return Err(Errno::PermissionDenied);
+        }
+        let revoked = grants.revoke_endpoint_grants(|named| named == id);
+        let (endpoint, emptied) = registry.unbind(id).ok_or(Errno::NotFound)?;
+        (endpoint, emptied, revoked)
+    };
+    record_grants_revoked(owner, revoked, audit);
+    // What the unbinding emptied goes once the registry is released.
+    drop(emptied);
+    report_link_service(id);
+    destroy_unbound(&endpoint, audit);
+    crate::waitq::serve_wake(id.0);
+    if let Ok(Some(observer)) = VANISH_OBSERVER.get() {
+        observer.endpoint_vanished(id);
+    }
+    Ok(())
+}
+
+/// Destroy an endpoint already unbound, waking the callers whose calls it
+/// cancelled or who were parked for room, then those waiting for the budget
+/// those calls held.
+fn destroy_unbound(endpoint: &CallEndpoint, audit: &dyn Sink) {
     let destroyed = endpoint.destroy(audit);
     crate::waitq::call_wake_named(destroyed.tasks());
-    crate::waitq::serve_wake(id.0);
     release_callers(destroyed);
-    true
 }
 
 /// Drop what a destruction cancelled, waking those waiting for each caller's
@@ -434,7 +480,7 @@ pub fn teardown_owned_by(
             .as_mut()
             .and_then(|registry| registry.owners.take(owner));
         endpoints.map(|endpoints| {
-            let revoked = grants.revoke_endpoint_grants(&endpoints);
+            let revoked = grants.revoke_endpoint_grants(|id| endpoints.contains(&id));
             (endpoints, revoked)
         })
     };
@@ -453,9 +499,7 @@ pub fn teardown_owned_by(
         // What the unbinding emptied goes once the registry is released.
         drop(emptied);
         report_link_service(id);
-        let destroyed = endpoint.destroy(audit);
-        crate::waitq::call_wake_named(destroyed.tasks());
-        release_callers(destroyed);
+        destroy_unbound(&endpoint, audit);
         true
     });
     if let Ok(Some(observer)) = VANISH_OBSERVER.get() {
@@ -730,7 +774,7 @@ mod tests {
     #[test]
     fn taking_an_endpoint_down_wakes_its_callers_budget_waiters() {
         let (_, waiter) = crate::test_boot::claim_scheduler();
-        for (at, owned_teardown) in [(0xCA11_8410, false), (0xCA11_8411, true)] {
+        for (at, way) in [(0xCA11_8410, 0), (0xCA11_8411, 1), (0xCA11_8416, 2)] {
             let owner = crate::test_boot::claim_peer_task();
             let caller = crate::test_boot::claim_peer_task();
             let ep = endpoint(at, owner);
@@ -754,11 +798,11 @@ mod tests {
             .expect("posted");
             crate::waitq::budget_watch(ProcessId(caller), waiter, false).expect("filed");
             let _ = crate::test_boot::take_unparked();
-            if owned_teardown {
-                let aspaces = RwLock::new(AddressSpaceRegistry::new());
-                assert_eq!(teardown_owned_by(owner, &aspaces, &NullSink), 1);
-            } else {
-                assert!(take_down(ep.id(), &NullSink));
+            let aspaces = RwLock::new(AddressSpaceRegistry::new());
+            match way {
+                0 => assert!(take_down(ep.id(), &NullSink)),
+                1 => assert_eq!(teardown_owned_by(owner, &aspaces, &NullSink), 1),
+                _ => assert_eq!(destroy(ep.id(), owner, &aspaces, &NullSink), Ok(())),
             }
             let woken = crate::test_boot::take_unparked();
             crate::waitq::budget_unwatch(ProcessId(caller), waiter);
@@ -798,16 +842,22 @@ mod tests {
         assert_eq!(teardown_owned_by(other, &aspaces, &NullSink), 1);
     }
 
-    /// Taking an endpoint down under its live server wakes the callers whose
-    /// calls it cancelled and the server, which would otherwise park on an
-    /// endpoint that is gone.
+    /// Taking an endpoint down under its live server, by the kernel or at its
+    /// owner's asking, wakes the callers whose calls it cancelled and the
+    /// server, which would otherwise park on an endpoint that is gone.
     #[test]
     fn taking_an_endpoint_down_wakes_its_server_and_its_callers() {
         let (_, poster) = crate::test_boot::claim_scheduler();
+        for (at, by_owner) in [(0xCA11_8300, false), (0xCA11_8301, true)] {
+            taken_down_under_its_server(poster, at, by_owner);
+        }
+    }
+
+    fn taken_down_under_its_server(poster: u64, at: u64, by_owner: bool) {
         let owner = crate::test_boot::claim_peer_task();
         let caller = crate::test_boot::claim_peer_task();
         let server = crate::test_boot::claim_peer_task();
-        let ep = endpoint(0xCA11_8300, owner);
+        let ep = endpoint(at, owner);
         register(Arc::clone(&ep), &NullSink).expect("bound");
         let caps = TaskCapabilities::derive(
             ProcessId(caller),
@@ -834,14 +884,70 @@ mod tests {
             .register_keyed(key, server, crate::waitq::NO_DEADLINE)
             .expect("filed");
         let _ = crate::test_boot::take_unparked();
-        assert!(take_down(ep.id(), &NullSink));
+        if by_owner {
+            let aspaces = RwLock::new(AddressSpaceRegistry::new());
+            assert_eq!(destroy(ep.id(), owner, &aspaces, &NullSink), Ok(()));
+        } else {
+            assert!(take_down(ep.id(), &NullSink));
+        }
         let woken = crate::test_boot::take_unparked();
         crate::waitq::CALL_WAITQ.deregister(poster);
         crate::waitq::SERVE_WAITQ.deregister_keyed(key, server);
         assert!(woken.contains(&poster), "its caller wakes");
         assert!(woken.contains(&server), "its server wakes");
+        assert_eq!(ep.outstanding(), 0, "its call is cancelled");
         assert!(!contains(ep.id()));
         assert!(!take_down(ep.id(), &NullSink), "taken down once");
+    }
+
+    /// Only an endpoint's owner takes it down: the grants naming it go with
+    /// it and another's stay, a stranger's asking changes nothing, and once
+    /// gone its id is free to bind again.
+    #[test]
+    fn an_owner_alone_destroys_its_endpoint_and_the_grants_naming_it() {
+        let owner = crate::test_boot::claim_task();
+        let stranger = crate::test_boot::claim_peer_task();
+        let holder = crate::test_boot::claim_peer_task();
+        let (mine, theirs) = (0xCA11_8414, 0xCA11_8415);
+        register(endpoint(mine, owner), &NullSink).expect("bound");
+        register(endpoint(theirs, stranger), &NullSink).expect("bound");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        for id in [mine, theirs] {
+            aspaces
+                .write()
+                .mint_grant(ProcessId(holder), tairix_abi::HwResource::endpoint(id))
+                .expect("minted");
+        }
+        let covers = |id| {
+            aspaces
+                .read()
+                .grant_covers(ProcessId(holder), &tairix_abi::HwResource::endpoint(id))
+        };
+        assert_eq!(
+            destroy(EndpointId(mine), stranger, &aspaces, &NullSink),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(
+            contains(EndpointId(mine)) && covers(mine),
+            "a stranger's asking changes nothing"
+        );
+        assert_eq!(
+            destroy(EndpointId(mine), owner, &aspaces, &NullSink),
+            Ok(())
+        );
+        assert!(!contains(EndpointId(mine)));
+        assert!(!covers(mine), "its grant is revoked");
+        assert!(
+            covers(theirs) && contains(EndpointId(theirs)),
+            "another's stays"
+        );
+        assert_eq!(
+            destroy(EndpointId(mine), owner, &aspaces, &NullSink),
+            Err(Errno::NotFound)
+        );
+        register(endpoint(mine, stranger), &NullSink).expect("its id binds again");
+        assert_eq!(teardown_owned_by(stranger, &aspaces, &NullSink), 2);
+        assert_eq!(teardown_owned_by(owner, &aspaces, &NullSink), 0);
     }
 
     /// A receive meeting an empty queue answers at once unless it blocks; a

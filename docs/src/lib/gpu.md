@@ -22,16 +22,19 @@ A `Device` is described by a `DeviceInfo`:
 | `heaps` | pools of memory, each with its size and whether it is the device's own |
 | `memory_types` | the kinds of memory an allocation is made in, each over one heap, with its `MemoryProperties`: device-local, host-visible, host-coherent, host-cached |
 | `queue_families` | sets of queues running one kind of work — `QueueCapabilities::TRANSFER`, `COMPUTE`, `GRAPHICS` — and how many queues of each a context has, at most `MAX_QUEUES_PER_FAMILY` |
-| `limits` | the bounds it puts on what is asked of it: the largest allocation and the alignments a buffer and its bindings take, image sizes and layers, bind sets, push-constant bytes, binding ranges and texel-buffer elements, workgroup sizes, counts and memory, per-invocation memory, its subgroup size, the longest a submission may run, a render pipeline's vertex attributes, buffers, offsets, strides and stage components, its colour targets, viewports, point sizes and line widths, and the records an indirect draw reads |
+| `limits` | the bounds it puts on what is asked of it: the largest allocation, the alignments a buffer and a binding's offset take and the granularity a binding's size takes, image sizes and layers, bind sets, push-constant bytes, binding ranges and texel-buffer elements, workgroup sizes, counts and memory, per-invocation memory, its subgroup size, the longest a submission may run, a render pipeline's vertex attributes, buffers, offsets, strides and stage components, its colour targets, viewports, point sizes and line widths, and the records an indirect draw reads |
 | `capabilities` | the shader capabilities of `lib/spirv`'s allow-list it runs |
-| `features` | what it offers past the portable core: anisotropic filtering, mirror-clamp-to-edge, dual-source blending, logic operations, depth clamping, wide lines, large points, storage writes and atomics from a vertex or fragment stage, and indirect draw records naming a first instance |
-| `formats` | what it states each `Format` can be used for (`FormatFeatures`): sampled, filtered, stored, a colour or depth-stencil attachment, blended, multisampled, resolved, a texel buffer, a vertex attribute |
+| `spirv_version` | the newest SPIR-V version it takes, 1.3 to the newest `lib/spirv` admits |
+| `features` | what it offers past the portable core: anisotropic filtering, mirror-clamp-to-edge, dual-source blending, logic operations, depth clamping, wide lines, large points, storage writes and atomics from a vertex or fragment stage, indirect draw records naming a first instance, and bindings of more than one descriptor |
+| `formats` | what it states each `Format` can be used for (`FormatFeatures`): sampled (a format with depth, its depth compared or read), filtered, stored, read or written through a storage image or storage texel buffer whose binding names no format, a colour or depth-stencil attachment, blended, multisampled, resolved, a texel buffer, a vertex attribute |
 
 The portable core is what Vulkan 1.1 requires of every device; anything past
 it is a feature a device states, and creation refuses what it has not stated.
 A description with a memory type over a missing heap, an empty heap, a family
-with no queues, too many or no capability, an alignment that is not a power of
-two, a subgroup size that is not a power of two up to `MAX_SUBGROUP_SIZE`,
+with no queues, too many or no capability, an alignment or size granularity
+that is not a power of two, binding numbers past `MAX_BINDING_NUMBER`, a
+SPIR-V version older than 1.3 or newer than `lib/spirv` admits, a subgroup
+size that is not a power of two up to `MAX_SUBGROUP_SIZE`,
 capabilities out of order, no deadline at all, more colour targets than
 `MAX_PASS_ATTACHMENTS`, vertex buffers than `MAX_DRAW_VERTEX_BUFFERS` or vertex
 attributes than `MAX_VERTEX_ATTRIBUTES`, viewport bounds out of order, or no
@@ -68,9 +71,11 @@ queues are its own:
   `tairix-collections`' `SlotMap`, whose generations refuse a key that outlived
   its object however often its slot is reused.
 - **Memory is shared only by export.** `Allocation::export` makes a token
-  another context of the same device takes in with `Context::import`. The
-  memory stays charged to the context that allocated it for as long as anything
-  holds it.
+  another context of the same device takes in with `Context::import`, on a
+  device stating `Features::SHARED_MEMORY`; one whose contexts reach none of
+  one another's memory refuses the export (`Error::Unsupported`). The memory
+  stays charged to the context that allocated it for as long as anything holds
+  it.
 - **Dropping the context releases everything it holds.** Its queued work is
   dropped, work already running finishes and is discarded, every thread
   waiting on one of its timelines wakes to `Error::Destroyed`, and its handles
@@ -133,10 +138,11 @@ draw. It holds its memory while it lives.
 An `Image` is placed in an allocation like a buffer: in one of the memory
 types `Context::image_requirements` names (`Error::Usage`), at an offset that
 is a multiple of its alignment (`Error::Misaligned`) and holding its size
-(`Error::OutOfRange`) — answered by the device's backend without the device's
-lock. The texels' layout within that placement is the backend's own, and they
-enter and leave only through copies. Its `ImageDesc` is checked against the
-device:
+(`Error::OutOfRange`) — answered by the context's own device, through its
+backend and without the device's lock. The texels' layout within that
+placement is the backend's own, they enter and leave only through copies, and
+every one reads zero once placed, whatever the memory held. Its `ImageDesc` is
+checked against the device:
 
 | Refused | As |
 |---|---|
@@ -151,8 +157,11 @@ device:
 An `ImageView` sees some mip levels, layers and aspects of an image in one
 dimension — 1D, 1D array, 2D, 2D array, cube (six square layers), cube array
 (whole cubes) or 3D — and in the image's format or its sRGB twin, and refuses
-anything else (`Error::Shape`, `Error::Aspect`, `Error::OutOfRange`); a cube
-array needs a device that runs `SampledCubeArray` (`Error::Unsupported`). A
+anything else (`Error::Shape`, `Error::Aspect`, `Error::OutOfRange`). Its image
+is made for a use a view serves — sampled, stored or an attachment
+(`Error::Usage`) — and its format offers one of those its image was made for,
+so no sRGB view is of an image made only for storage; a cube array needs a
+device that runs `SampledCubeArray` (`Error::Unsupported`). A
 `BufferView` is a texel buffer: a buffer's aligned range of whole texels of a
 format the device states for the texel-buffer use the buffer was made for, at
 most `max_texel_buffer_elements`. A `Sampler` filters, addresses, clamps its
@@ -167,15 +176,28 @@ memory.
 ## Bindings and shader modules
 
 A `BindSetLayout` is a list of `LayoutBinding`s, by ascending number and one
-apiece (`Error::Bindings`). Each names its binding, the
-`tairix_spirv::BindingKind` it holds — so an image binding states the
-dimension, layers, samples, channel type and storage format a module declares —
-how many descriptors, the `Access` its shaders may make and the `Stages` that
-see it. A binding of no descriptors or stages is refused (`Error::Empty`), as is
-one past the device's `max_binding_number` (`Error::OutOfRange`), a write to a
-kind that is only read, and a shape no admitted module declares: a layered 3D
-image, a multisampled storage image or cube, a texel buffer of another
-dimension, a storage format whose channels read otherwise (`Error::Shape`); and
+apiece (`Error::Bindings`). Each names its binding, the `DescriptorType` it
+holds, how many descriptors, the `Access` its shaders may make and the
+`Stages` that see it. A descriptor type is the `tairix_spirv::BindingKind` a
+module declares — an image binding's dimension, layers, samples, channel type
+and storage format — and, as no module states it, how a sampler reads: an
+image sampled through a sampler states its `SampleType` — `Float` or `Depth`
+of a format the device filters, `UnfilterableFloat` or `UnfilterableDepth`
+read only through samplers that do not filter, `Sint`, or `Uint`, a stencil
+plane's among them — and a sampler its `SamplerType`: `Filtering`,
+`NonFiltering`, `Integer` (every filter nearest, its border read as integers),
+`Comparison`, `NonFilteringComparison`, or `Unnormalized`, a combined
+binding's alone. A binding of no descriptors or stages is refused
+(`Error::Empty`), as is one past the device's `max_binding_number`
+(`Error::OutOfRange`), one of more than one descriptor on a device not stating
+`Features::BINDING_ARRAYS` (`Error::Unsupported`), a write to a kind that is
+only read, a shape no admitted module declares — a layered 3D image, a
+multisampled storage image or cube, a texel buffer of another dimension, a
+storage format whose channels read otherwise — and a sampling its types cannot
+make: a sample type of another channel type than its shape, a filtered one of
+a multisampled image, a combined binding's sampler type that does not sample
+its sample type or reads unnormalised coordinates past one row or rectangle,
+or a separate unnormalised sampler (`Error::Shape`); and
 a layout of more descriptors, its bindings' together, than the device's
 `max_bind_set_descriptors` (`Error::TooMany`), as a set of it looks each one up
 under the device's lock. A layout is checked and its tables built before the
@@ -189,12 +211,12 @@ command naming the set checks nothing per binding:
 
 | Binding | Takes | Refused |
 |---|---|---|
-| sampler | a `Sampler` | — |
-| sampled image | an `ImageView` of one plane of an image made `SAMPLED`, of a format the device samples | another plane count (`Error::Aspect`), dimension, layers, samples or channel type (`Error::Shape`) |
-| storage image | an `ImageView` of one level of an image made `STORAGE`, of a format the device stores | another shape, or a format other than the binding's unless it names none (`Error::Shape`) |
-| combined image sampler | a view as a sampled image takes, and a `Sampler` | linear filtering of a format the device does not filter (`Error::Unsupported`), a comparison of what is not depth (`Error::Aspect`), unnormalised coordinates over more than one level or layer of a row or rectangle (`Error::Shape`) |
-| uniform or storage texel buffer | a `BufferView` over a buffer made for that texel use, of a format the device offers for it | another shape or format |
-| uniform or storage buffer | a range of a buffer made `UNIFORM` or `STORAGE`, aligned to the device's binding alignment and at most its range | an empty range (`Error::Empty`), misaligned (`Error::Misaligned`), past the buffer (`Error::OutOfRange`) or the device's range (`Error::TooLarge`) |
+| sampler | a `Sampler` of the binding's type: no comparison but where it compares, every filter nearest where it filters none, unnormalised coordinates only where it reads them | another sampler (`Error::Shape`) |
+| sampled image | an `ImageView` of the plane its sample type reads — the depth for depth, else the colour or, read as unsigned integers, the stencil — of an image made `SAMPLED`, of a format the device samples and, for a filtered sample type, filters | another plane (`Error::Aspect`), a format sampled or filtered as the device does not (`Error::Unsupported`), another dimension, layers, samples or channel type (`Error::Shape`) |
+| storage image | an `ImageView` of one level of an image made `STORAGE`, of a format the device stores and, for a binding naming no format, reads or writes so as the binding's access says | a format the device does not store or access so (`Error::Unsupported`), another shape, or a format other than the binding's unless it names none (`Error::Shape`) |
+| combined image sampler | a view as a sampled image takes, and a `Sampler` as a sampler binding takes | unnormalised coordinates over more than one level or layer of a row or rectangle, or filtering linearly texels the binding's sample type reads unfiltered — integers, a stencil plane, unfilterable float or depth (`Error::Shape`) |
+| uniform or storage texel buffer | a `BufferView` over a buffer made for that texel use, of a format the device offers for it and, for a storage binding naming no format, reads or writes so as the binding's access says | a format the device does not offer or access so (`Error::Unsupported`), another shape, or for storage a format other than the binding's unless it names none (`Error::Shape`) |
+| uniform or storage buffer | a range of a buffer made `UNIFORM` or `STORAGE`, its offset aligned to the device's binding alignment, its size a whole number of the device's size granularity, at most its range | an empty range (`Error::Empty`), misaligned (`Error::Misaligned`), past the buffer (`Error::OutOfRange`) or the device's range (`Error::TooLarge`) |
 
 A resource of another kind is refused (`Error::Shape`), one not made for the use
 too (`Error::Usage`), and a format the device does not offer for it
@@ -210,8 +232,9 @@ against, so an entry point's binding or push constants its stage cannot see is
 a disagreement like any other.
 
 A `ShaderModule` is a module `lib/spirv` admitted, made the context's; one
-declaring a capability the device does not run is refused
-(`Error::Unsupported`). `ShaderModule::module` reads it back.
+declaring a capability the device does not run, or of a newer SPIR-V version
+than it takes, is refused (`Error::Unsupported`). `ShaderModule::module`
+reads it back.
 
 ## Compute pipelines
 
@@ -225,6 +248,7 @@ calling thread and not under the device's lock. Creation refuses:
 |---|---|
 | no compute entry point of the name | `Error::EntryPoint` |
 | a binding, access, stage or push constant the layout does not provide | `Error::Disagreement` |
+| a sampling the layout's types do not take, naming the image's and the sampler's set and binding: a sampler type that does not sample the image's sample type, a comparing sampler read through or a reading one compared with, an unnormalised one at a derived level, offset, biased, projected or gathered | `Error::Sampling` |
 | a specialization value of no constant, given twice or wider than its constant, or a workgroup size it makes zero | `Error::Specialization` |
 | constants whose evaluation passes `MAX_SPECIALIZED` | `Error::TooLarge` |
 | a workgroup past `max_workgroup_size` along an axis, past `max_workgroup_invocations`, or past 1024 invocations | `Error::TooLarge` |
@@ -254,10 +278,11 @@ entry point, layout, specialization, lowering and memory — and:
 
 | Refused | As |
 |---|---|
-| a vertex input no attribute feeds, or feeds as another component type or 64 bits wide; two attributes at one location; a fragment input no vertex output provides; a fragment output with no target, of another component type or 64 bits wide; a second colour output at a location but 0; a blend reading a second colour the stage does not write, or for a target past the first | `Error::Interface` |
+| a vertex input no attribute feeds, or feeds as another component type or 64 bits wide; two attributes at one location; a fragment input no vertex output provides; a fragment output with no target, of another component type or 64 bits wide; a second colour output at a location but 0; a blend reading a second colour in a pipeline of more than one target; a blend factor or alpha-to-coverage reading a channel of the fragment's colour or second colour no output writes, or alpha-to-coverage with no fragment stage | `Error::Interface` |
 | vertex buffers, attributes or targets past `max_vertex_input_bindings`, `max_vertex_input_attributes` or `max_color_attachments` | `Error::TooMany` |
 | a stride, an attribute offset, a line width, or the vertex outputs' or fragment inputs' components past the device's | `Error::TooLarge` |
 | an attribute location past `max_vertex_input_attributes` | `Error::OutOfRange` |
+| an attribute's offset, or its buffer's stride, not a whole number of its alignment: its channel's bytes, or a packed format's whole texel's | `Error::Misaligned` |
 | a format without its use — an attribute's `VERTEX_INPUT`, a target's `COLOR_ATTACHMENT`, a blended target's `BLENDED`, a depth-stencil `DEPTH_STENCIL`, any of them `MULTISAMPLED` at four samples — or a feature the device has not stated: dual-source blending, a logic operation, depth clamping, a line wider than a pixel, a stage writing storage, images or atomics; restart of a list topology | `Error::Unsupported` |
 | a sample count other than one or four | `Error::Samples` |
 | a depth test or write of a format without depth, or a stencil test of one without stencil | `Error::Aspect` |
@@ -305,10 +330,22 @@ fixed:
 - **Colour.** A float or normalised target blends as its blend says. A logic
   operation, where the pipeline has one, takes blending's place in every target:
   it combines an integer or non-sRGB normalised target's bits, and the rest are
-  written unblended. A target's write mask keeps the channels it does not name.
-  A target no output of the fragment stage writes is left as it was; an output
-  of fewer components than its target writes zero to the rest. A four-sample
-  target resolves by its samples' average, in linear light for an sRGB format.
+  written unblended. A target's write mask keeps the channels it does not name,
+  and a target keeps every channel no output of the fragment stage writes, as
+  Vulkan defines no value for one: a target no output writes is left as it was.
+  A blend factor, or alpha-to-coverage, reading a channel no output writes is
+  refused at pipeline creation. A four-sample target resolves by its samples'
+  average, in linear light for an sRGB format.
+
+A hardware device computes the same within Vulkan's bounds, and may differ
+from the software device only there: coverage at sub-pixel precision;
+interpolation; a value converted to a normalised target, blended into one or
+resolved, which only nought and one convert to alike on every device; the
+samples alpha-to-coverage keeps; a depth bias's least step; a line's width and
+a point's size, to the device's granularity; whether a point centred outside
+the clip volume is drawn where its square reaches the viewport, and the
+samples near where a line leaves the clip volume; and, where a viewport's edge
+falls within a pixel, which of that pixel's samples a point or line covers.
 
 ## Submitting work
 
@@ -319,13 +356,13 @@ A `CommandBuffer` records:
 | `copy_buffer` | moves regions of one buffer into another | whole words; at most `MAX_COPY_REGIONS` regions; no byte written twice, and within one memory no byte both read and written |
 | `fill_buffer` | fills a span with a 32-bit word, little-endian | offset and size whole words |
 | `update_buffer` | writes bytes recorded with the command | whole words, at most `MAX_UPDATE_BYTES` |
-| `copy_buffer_to_image`, `copy_image_to_buffer` | moves texels between a buffer laid out in rows and slices and one aspect of a single-sampled image's level and layers | each region within both; a row at least the region's width and whole texels, as many rows a slice as the region; the depth of `Depth24PlusStencil8` never copied; no texel or byte written twice; the buffer's range not meeting the image's placement |
-| `copy_image` | moves texels between images of one sample count, the same plane, and texels of one size | each region within both; no texel written twice, and within one image none both read and written; two images whose placements meet refused |
-| `clear_image` | writes one value over ranges of an image, in each aspect a range names, an integer channel keeping the value's low bits | a float, signed or unsigned colour of the format's kind, or a depth within `0.0..=1.0` and a stencil value |
+| `copy_buffer_to_image`, `copy_image_to_buffer` | moves texels between a buffer laid out in rows and slices and one aspect of a single-sampled image's level and layers | each region within both; a row at least the region's width and whole texels, as many rows a slice as the region; a row's pitch at most `MAX_BYTES_PER_ROW`, 2<sup>31</sup> − 1 bytes (`Error::TooLarge`); the depth of `Depth24PlusStencil8` never copied; no texel or byte written twice; the buffer's range not meeting the image's placement |
+| `copy_image` | moves texels between images of one sample count, the same plane, and texels of one size, of one kind or a rectangle's and a volume's | each region within both; no texel written twice, and within one image none both read and written; two images whose placements meet refused |
+| `clear_image` | writes one value over ranges of an image, in each aspect a range names, an integer channel keeping the value's low bits — `ClearValue::held` answers the value as a format holds it | a float, signed or unsigned colour of the format's kind, or a depth within `0.0..=1.0` and a stencil value |
 | `dispatch` | runs a compute pipeline's workgroups, so many along each axis, with its bind sets and push constants, read as words once as they are recorded and shared by every submission | one bind set for each set of the pipeline's layout, each laid out as that set (`Error::Bindings`); the push constants exactly the layout's bytes (`Error::Shape`); counts within `max_workgroup_count` (`Error::TooLarge`); at most `MAX_DISPATCH_SETS` sets and `MAX_PUSH_BYTES` bytes (`Error::TooMany`, when recorded) |
 | `dispatch_indirect` | `dispatch` with its counts three little-endian words read from a buffer when it runs | the buffer made `INDIRECT` (`Error::Usage`), the offset whole words (`Error::Misaligned`), and twelve bytes within the buffer (`Error::OutOfRange`) |
 | `render_pass` | loads its attachments — keeping what each held or clearing it within the pass's area — runs the draws its closure records in order, and resolves its four-sample targets | some attachment (`Error::Empty`); each a two-dimensional view of one level and layer of an image made for the attachment use (`Error::Usage`, `Error::Shape`), in a format the device states the use and sample count of (`Error::Unsupported`), a depth-stencil view of all its format's aspects (`Error::Aspect`); all of one extent (`Error::Shape`) and sample count (`Error::Samples`), none meeting another (`Error::Overlap`); a resolve from four samples to one (`Error::Samples`) of the same extent and format (`Error::Shape`) the device resolves (`Error::Unsupported`); a clear of the format's kind, its depth within `0.0..=1.0` (`Error::Shape`); an area not empty (`Error::Empty`) and within the attachments (`Error::OutOfRange`); at most `max_color_attachments` targets (`Error::TooMany`), and `MAX_PASS_ATTACHMENTS` when recorded |
-| `draw`, `draw_indexed` | within a pass: instances of a range of vertices, or of the vertices a range of indices names, each index added to a base vertex, drawn with a pipeline, its bind sets, push constants and vertex buffers, a viewport, a scissor, a stencil reference and a blend constant | the pipeline's targets and depth-stencil format the pass's (`Error::Interface`), at its sample count (`Error::Samples`); sets and push constants as a dispatch's; a vertex buffer made `VERTEX` for each of the pipeline's (`Error::Bindings`, `Error::Usage`), indices made `INDEX` at a multiple of their size (`Error::Misaligned`); each buffer's offset within it, a viewport finite, wider than nought and not flat, within the device's dimensions and bounds and its depths within `0.0..=1.0`, a scissor whose far edges a `u32` holds, ranges in order and a blend constant finite (`Error::OutOfRange`); nothing a stage of it sees, nor its vertices, indices or records, reaching an attachment the pass writes, and nothing a stage of it writes reaching a depth-stencil attachment the pass only tests, which its loads keep and none of its draws writes (`Error::Overlap`); at most `MAX_DRAW_VERTEX_BUFFERS` vertex buffers when recorded (`Error::TooMany`) |
+| `draw`, `draw_indexed` | within a pass: instances of a range of vertices, or of the vertices a range of indices names, each index added to a base vertex, drawn with a pipeline, its bind sets, push constants and vertex buffers, a viewport, a scissor, a stencil reference and a blend constant | the pipeline's targets and depth-stencil format the pass's (`Error::Interface`), at its sample count (`Error::Samples`); sets and push constants as a dispatch's; a vertex buffer made `VERTEX` for each of the pipeline's (`Error::Bindings`, `Error::Usage`), indices made `INDEX` at a multiple of their size, and each vertex buffer's offset into its memory a whole number of its attributes' widest alignment (`Error::Misaligned`); each buffer's offset within it, a viewport finite, wider than nought and not flat, within the device's dimensions and bounds and its depths within `0.0..=1.0`, a scissor whose far edges a `u32` holds, ranges in order and a blend constant finite (`Error::OutOfRange`); nothing a stage of it sees, nor its vertices, indices or records, reaching an attachment the pass writes, and nothing a stage of it writes reaching a depth-stencil attachment the pass only tests, which its loads keep and none of its draws writes (`Error::Overlap`); at most `MAX_DRAW_VERTEX_BUFFERS` vertex buffers when recorded (`Error::TooMany`) |
 | `draw_indirect`, `draw_indexed_indirect` | within a pass: `draw` or `draw_indexed` once for each of `count` records in a buffer, `stride` bytes apart, each four little-endian words — its vertices, its instances, its first vertex and its first instance (`DRAW_RECORD_BYTES`) — or for an indexed draw five — its indices, its instances, its first index, the signed word added to each index and its first instance (`INDEXED_DRAW_RECORD_BYTES`) | as `draw` and `draw_indexed`; the buffer made `INDIRECT` (`Error::Usage`); its offset whole words, and where there are several records the stride too (`Error::Misaligned`); several records a record or more apart (`Error::OutOfRange`); no more than the device's `max_draw_indirect_count` (`Error::TooLarge`); every record within the buffer, and for none the offset (`Error::OutOfRange`) |
 
 Recording checks only that what is named belongs to the context. Everything
@@ -463,10 +500,33 @@ one: a job past its deadline is answered as overran, its context lost and the
 backend told through `lost`, and the job's own answer, when the device gives
 it, finds nothing to complete.
 
-The seam carries memory and transfers: copies, fills and updates
-(`JobCommand`). A description stating a format, a shader capability, a
-feature or a queue past transfers is refused (`Error::Malformed`), so a
-driver's device promises no image, bind set or pipeline it could not make.
+The seam carries memory, transfers, compute and rendering over buffers and
+images. A backend makes images (`image`, placed in memory by `place`), their
+views, texel buffers and samplers; the form of a bind set from its layout's
+bindings and what it binds (`SetResource`) — memory ranges, views, texel
+buffers and samplers; of a compute pipeline from its `PipelineStage`: the
+admitted module, its specialization as the model evaluated it, the entry
+point, its sets' layouts and its push constants; and of a render pipeline
+from its `RenderStages`: a `PipelineStage` for its vertex stage and its
+fragment one, and the fixed-function state its description gave, checked
+against what the device states, each target's channels narrowed to those the
+fragment stage writes (`RenderStages::writes`). A job's commands
+(`JobCommand`) are copies, fills and updates of memory, copies between
+buffers and images and between images, clears of images, dispatches and
+passes. A dispatch names its pipeline's and sets' forms, its push constants
+and its workgroup counts — given, or three words at an offset of a memory
+(`Counts::Indirect`), which a backend holds to the device's counts on the
+device as the software device does: counts past them run nothing and lose
+the context. A pass (`JobCommand::Pass`) names its colour targets, each a
+view with its format, its resolve and its load; its depth-stencil target and
+each aspect's load; its area; and its draws (`DrawCommand`), each naming its
+pipeline's and sets' forms, its push constants, its vertex buffers and
+indices as ranges of memory a read past reads nought, its viewport, its
+scissor already within the area, its stencil reference, its blend constant
+and its counts — given, or records at an offset of a memory
+(`DrawCount::Indirect`), of which one naming a first instance on a device
+stating none loses the context, held on the device as the software device
+holds it.
 
 ## A served device
 
@@ -628,9 +688,7 @@ machine, the run or another context's work:
   components than its view has writes zero to the rest;
 - a border colour fills only the channels a view's format holds, in what they
   read as, the rest as a texel lacking them; a depth reference is held to
-  `[0, 1]` only for a normalized format;
-- a sample with a reference through a sampler without a comparison compares
-  as `LessOrEqual`.
+  `[0, 1]` only for a normalized format.
 
 A fetch adds its offset to the integer coordinate; a projective coordinate is
 divided by the component past the view's spatial axes; and a cube's level of
@@ -909,8 +967,11 @@ fill of the whole heap runs far past a deadline.
   device whole and its fence landing once answered, an engine starting no
   more jobs than its depth, a job answered with a loss or dropped unanswered
   losing its context, the watchdog answering an overrun as overran and telling
-  the backend, a context going with the last of its memory and work, and a
-  description promising more than memory and transfers refused.
+  the backend, a context going with the last of its memory and work, a set
+  and a pipeline reaching the backend as the model checked them and their
+  dispatches as recorded, a set binding what the device states no format for
+  refused, and a description promising more than memory, transfers and
+  compute refused.
 - The served tests serve the software device in this process and compare
   what a client sees with what the device answers directly — transfers,
   refusals (bits no usage names among them), timelines and fences, imports,

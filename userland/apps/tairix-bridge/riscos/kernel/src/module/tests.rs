@@ -972,6 +972,26 @@ fn an_unwind_while_the_rma_grows_ends_the_call_rather_than_filling_it() {
 }
 
 #[test]
+fn an_unwind_while_a_kernel_area_grows_ends_its_creation() {
+    let mut s = session();
+    copy_in(&mut s, &exiter(0x4E)).expect("linked");
+    let caller = s.kernel.os().layout().kernel_bits();
+    let created = s.kernel.os().create_kernel_area(&crate::memory::Create {
+        number: None,
+        size: 0x1000,
+        base: None,
+        flags: 0,
+        max: Some(0x1_0000),
+        handler: None,
+        workspace: None,
+        title: None,
+        pool: 0,
+        caller,
+    });
+    assert!(matches!(created, Err(Fail::Unwind(_))));
+}
+
+#[test]
 fn an_unwind_while_the_system_heap_grows_ends_setting_a_variable() {
     let mut s = session();
     s.application(Bits::Bit32, 0x4_0000);

@@ -363,9 +363,7 @@ impl Machine<'_, '_> {
             self.allocate(size, Error::NoDimensionRoom)?
         };
         self.os.fill(block, size, 0)?;
-        for (i, &s) in (0..).zip(&sizes[..n]) {
-            self.os.write_word(block + 4 * i, s)?;
-        }
+        self.os.write_words(block, &sizes[..n])?;
         self.os.write_word(block + 4 * len32(n) + 4, total)?;
         Ok(self.os.write_word(pointer_at, block)?)
     }
@@ -423,9 +421,8 @@ impl Machine<'_, '_> {
     pub(crate) fn clear(&mut self) -> Step {
         self.fsa = self.lomem;
         self.os.write_word(ws::FSA.at(), self.lomem)?;
-        for index in 0..=u32::from(ws::LAST_HEAD) {
-            self.os.write_word(ws::FREE_LISTS.at() + 4 * index, 0)?;
-        }
+        self.os
+            .write_words(ws::FREE_LISTS.at(), &[0; ws::LAST_HEAD as usize + 1])?;
         for slot in [ws::LOCALARLIST, ws::LIBRARYLIST, ws::OVERPTR] {
             self.os.write_word(slot.at(), 0)?;
         }

@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 536 open, 1474 closed, 2010 total.
+**closed**, and a partial fix stays **open**. 537 open, 1474 closed, 2011 total.
 
-### Open (536)
+### Open (537)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -564,6 +564,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D2024 | xtask's budget kill can signal a process group that is no longer the step's: `children::kill` sends `SIGTERM`, sleeps a fixed two seconds, then sends `SIGKILL`, while the step's waiter thread reaps the leader the moment it exits, so the `SIGKILL` most often reaches a group already reaped and empty, whose id a cyclic pid allocator may hand a new group leader within the window, one of xtask's own children among them; and every kill costs the whole two seconds however soon the step exits | noticed reviewing the riscos emulator wait, which shares the pattern with `await_within`; not reproduced; the fix waits on the leader's exit without reaping it (`waitid` with `WNOWAIT`), so its pid stays reserved through the kill, and reaps after |
 | D2025 | WinterSun's shader keeps its own copy of Bayer's 4×4 ordered-dither order, flattened as `BAYER: [u8; 16]`, which `tairix_raster::dither::BAYER_4` now defines once for Paint's gradients and the TAIRiX Bridge's ECF patterns | **low**; noticed reviewing a merge; logged only, WinterSun's work being taken elsewhere. `userland/games/wintersun/app/src/raster.rs:1013` |
 | D2026 | TAIRiX Bridge's `OS_SpriteOp` 36 takes a masked pointer sprite's first solid pixel from the top as its active point where the sprite has no left wastage, ignoring R4 and R5, which the PRM gives as the active point; no RISC OS 5.30 recording covers a masked pointer sprite, so which is RISC OS 5's is unsettled | **low**; open question from a merge review. A recording of RISC OS 5.30 setting a masked pointer with R4 and R5 nonzero decides it, and the fix lands with that recording as its test, replacing the one pinning the present rule. `userland/apps/tairix-bridge/riscos/vdu/src/sprite/paint/pointer.rs` |
+| D2027 | on the host, `lib/rt`'s contended `Mutex` spins and every `Condvar` wait returns at once, because the host trap refuses every futex call | **low**, test builds only; raised for a ruling. A threaded host test cannot observe parking (the `lib/gpu` fair-lock proofs are white-box for this reason), a waiting test thread holds a core, and under miri two unhinted spinners cost 3.6×, which is part of why the virtio-gpu library's enrolment is sharded. A real host futex needs one process-wide wait table keyed by address — the host process is one TAIRiX process, so that is the kernel's per-process key space exactly — `std` on the host path with a build cfg keeping wasm32, whose `std` cannot block, on the refusal, and the host wait taking the word by reference, since strict provenance refuses the ABI's `u64` address turned back into a pointer. Every host wait that now returns at once would then block, so a missed wake anywhere in the workspace's host tests would hang where it passes today. The ruling: whether host builds may carry that process-wide table. `lib/rt/src/sync.rs`, `lib/abi-trap/src/lib.rs` |
 
 ### Closed (1474)
 

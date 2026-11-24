@@ -33,6 +33,7 @@ use crate::colour::{gcol_of_number, number_of_gcol};
 use calibration::Calibration;
 use matching::{Loadings, Look};
 use palettes::Against;
+use tairix_riscos_kernel::swi::os::CURRENT_MODE;
 use tairix_vdu::mode::var;
 
 /// Its SWIs, in their chunk's order.
@@ -75,9 +76,6 @@ const NAMES: &[&str] = &[
     "GenerateTable",
 ];
 
-/// The flag bit a call naming a sprite sets where R1 points at the sprite
-/// rather than naming it.
-const SPRITE_POINTER: u32 = 1;
 /// Its messages, and their file, kept at its workspace's start.
 const MESSAGES: &[u8] = include_bytes!("../resources/Colours/Messages");
 const MESSAGES_FILE: OwnFile = OwnFile::named(b"Resources:$.Resources.Colours.Messages\0");
@@ -139,9 +137,6 @@ const MAP_COMMAND: &str = "ColourTransMap";
 const MAP_SYNTAX: &str = "Syntax: *ColourTransMap <pair> ...";
 /// The most pairs one `*ColourTransMap` takes.
 const MAP_MOST: u8 = 255;
-
-/// A palette or mode argument naming the current one.
-pub(crate) const CURRENT: u32 = u32::MAX;
 
 /// ColourTrans.
 pub(crate) static COLOUR_TRANS: Builtin = Builtin {
@@ -415,7 +410,7 @@ fn matched(
         Answer::Number => against.colour_number(wanted, loadings, look),
     };
     let answer = match of {
-        Of::Named if (regs.r[1], regs.r[2]) != (CURRENT, CURRENT) => {
+        Of::Named if (regs.r[1], regs.r[2]) != (swi::CURRENT, swi::CURRENT) => {
             let named = palettes::named(os, regs.r[1], regs.r[2])?;
             let named = named.calibrated_by(screen_calibration(os));
             loadings(os).map(|loadings| answered(&named, loadings))
@@ -515,7 +510,7 @@ fn misc_op(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
             let Some(workspace) = os.extension::<State>().map(|state| state.workspace) else {
                 return Ok(());
             };
-            let [log2_bpp] = crate::vars::mode_variables(os, CURRENT, [var::LOG2_BPP])?;
+            let [log2_bpp] = crate::vars::mode_variables(os, CURRENT_MODE, [var::LOG2_BPP])?;
             let log2_bpp = log2_bpp.unwrap_or(0);
             let description = workspace + DESCRIPTION_AT;
             os.write_word(description + DEPTH_IN_DESCRIPTION, log2_bpp)?;

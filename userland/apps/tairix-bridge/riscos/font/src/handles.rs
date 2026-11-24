@@ -13,7 +13,8 @@ use crate::scan::DataFiles;
 
 /// How many handles there are, numbered from 1.
 pub(crate) const HANDLES: usize = LAST as usize;
-const LAST: u8 = u8::MAX;
+/// The last handle: a number past it is none.
+pub(crate) const LAST: u8 = u8::MAX;
 
 /// Where a font's data comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]

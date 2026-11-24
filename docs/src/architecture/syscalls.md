@@ -228,6 +228,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 173 | `fs_set_times` | `u32 dirfd`, `user_ptr?` (path), `len`, `user_ptr` (`TimesChange`), `len`, `u32 flags` | `u64` (`TimesKept`) | — (in-handler: `CAP_FS_ACCESS` of the acting identity) | yes |
 | 174 | `fs_volume_stats` | `u32 fd`, `user_ptr` (out), `len` | `u64` (bytes) | — (in-handler, as `fs_stat`) | no |
 | 175 | `mmio_unmap` | `u64 base` | `errno` | — (the caller's own window) | no |
+| 176 | `call_destroy` | `IpcEndpoint` (own endpoint) | `errno` | — (the caller's own endpoint) | yes |
 
 The table in `lib/abi/src/syscalls.rs` is the source of truth, and
 `cargo xtask abi-check` is what enforces it.
@@ -1216,7 +1217,11 @@ has collected enough to hold fewer. An id in a link
 supplier's block is bindable only by the holder of the node's duty naming it,
 whatever the role (`plans/SUPPLIERS.md` SL1), and the endpoint registry
 reports each such bind and unbind to the hardware tree, whose node then states
-whether it serves that role (`HwNode::serves`). `call_recv`
+whether it serves that role (`HwNode::serves`). An id in a device channel's
+block is bindable only by the driver loaded for the node it names; one in the
+GPU channel's block, besides, only where a DMA translation unit translates
+that node or the firmware declares no unit, a refusal audited
+(`DEVICE_CHANNEL_UNCONFINED`, `plans/GPU.md` GP11.3). `call_recv`
 blocks until a request is posted, copies it into the server's buffer and
 writes the per-call ticket, and only then takes the call into service, its
 room kept for the answer in the same step — a request larger than the buffer
@@ -1234,7 +1239,10 @@ ticket and wakes the blocked caller, copying the answer into the room the call
 was posted with, so it is never refused for memory. Both server calls resolve the endpoint
 and gate the caller against its `recv_caps` **and** owner identity before
 touching state (`AGENTS.md` §5.4); a server that exits has its endpoints torn
-down so blocked callers abandon fail-closed rather than hang, and a *caller*
+down so blocked callers abandon fail-closed rather than hang, as does one
+that takes an endpoint down itself with `call_destroy` (no. 176) — the
+grants naming it revoked before it is unbound, each call it holds failed and
+its server's next receive answered `NotFound` — and a *caller*
 that exits has the calls it posted cancelled on every endpoint so a server
 never receives a dead task's request (`AGENTS.md` §2.9;
 `docs/src/architecture/ipc.md`). The four are dispatcher-**ungated** (the per-call authority is the
@@ -2949,6 +2957,7 @@ re-validates arguments — the dispatcher does that first.
 | `ipc_send`      | `PortRegistry::lookup(endpoint)` in `KernelState.ipc`; payload copied in through `copy_from_user`, then `Port::send(caller.caps, payload)` | Unbound endpoint → `NotFound` (no extra audit). `len > port.max_payload`, or a message the sender's whole `ipc-queue-bytes` limit could not hold → `MessageTooLarge`. Faulting buffer / no registered address space → `BadAddress`. Otherwise `Port::send`'s errno (`PermissionDenied`, `MessageTooLarge`, …). |
 | `port_admit`    | `PortRegistry::lookup(port)`; the caller must be the port's owner; then `callreg::lookup(server)` and its `owner_instance` handed to `Port::admit`, which discards every queued message another instance sent and which `Port::send` checks under the mailbox lock; senders parked for the room that frees are woken | Unbound port or endpoint → `NotFound`. Another process's port → `PermissionDenied`. |
 | `port_unbind`   | `PortRegistry::lookup(endpoint)` under the registry write lock; the caller must be the port's owner; then `PortRegistry::unregister`, which withdraws its names and destroys it, dropping its queue charge; the senders it recorded as parked for room are woken to find it gone | Unbound port → `NotFound`. Another process's port → `PermissionDenied`. |
+| `call_destroy`  | `callreg::destroy`: under the address-space registry's write lock and then the call registry's, the caller must be the endpoint's owner; the grants naming it are revoked and it is unbound; then it is destroyed (audited `CALL_ENDPOINT_DESTROYED`, the revocation `CALL_ENDPOINT_GRANTS_REVOKED`), the callers its calls held and those waiting for their budget woken, its server woken to find it gone, and the vanish observer told | Unbound endpoint → `NotFound`. Another process's endpoint → `PermissionDenied`. |
 | `waitset_close` | `waitset::close(caller.process(), set)`: removes the owned set, closes it under its own lock — refusing a call that found it just before — releases its file members once that lock drops, and drops the set's charges | Not a set of the caller → `NotFound`. |
 | `ipc_recv`      | `PortRegistry::lookup(endpoint)`; the caller is gated against the port's `required_recv_caps` **before** any message is observed (the same handler-side receive gate `call_recv` applies); then `Port::recv_with` peek/commit copies the head message out through `copy_to_user`, committing the dequeue only on success | Unbound endpoint → `NotFound` (no extra audit). Caller lacking a required receive capability → `PermissionDenied` (nothing about the mailbox is revealed, message retained). Bound + empty → `WouldBlock`. Buffer smaller than the message → `BufferTooSmall` (message retained). Faulting buffer / no registered address space → `BadAddress` (message retained). Otherwise `Ok(payload_len)`. |
 | `cap_query`     | `caller.caps.has(cap)` mapped to `0` / `1`                                                                    | —                                                                         |

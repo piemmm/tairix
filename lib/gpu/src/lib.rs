@@ -111,8 +111,8 @@ mod transfer;
 mod wire;
 
 pub use binding::{
-    BindSet, BindSetEntry, BindSetLayout, LayoutBinding, PipelineLayout, PushConstants, Resource,
-    ShaderModule,
+    BindSet, BindSetEntry, BindSetLayout, DescriptorType, LayoutBinding, PipelineLayout,
+    PushConstants, Resource, SampleType, SamplerType, ShaderModule,
 };
 pub use command::{CopyRegion, CopySpan};
 pub use device::{
@@ -121,23 +121,27 @@ pub use device::{
 };
 pub use error::{Error, Loss, SubmitError};
 pub use format::{Aspects, Format, FormatFeatures};
-pub use hardware::{Commands, Hardware, Job, JobCommand};
+pub use hardware::{
+    BufferRange, Commands, Counts, DrawCommand, DrawCount, Draws, Hardware, Job, JobCommand,
+    PassDepthStencil, PassTarget, PipelineStage, RenderStages, SetResource, Sets, Sources, Targets,
+};
 pub use image::{
     level_extent, BufferImageCopy, BufferViewDesc, ClearValue, Extent3d, ImageCopy, ImageDesc,
     ImageDimension, ImageRange, ImageSubresource, ImageUsage, ImageViewDesc, Origin3d,
-    ViewDimension,
+    ViewDimension, MAX_BYTES_PER_ROW,
 };
 pub use info::{
     BufferUsage, DeviceInfo, Features, FormatTable, Limits, MemoryHeap, MemoryProperties,
-    MemoryType, QueueCapabilities, QueueFamily, MAX_CAPABILITIES, MAX_MEMORY_HEAPS,
-    MAX_MEMORY_TYPES, MAX_QUEUES_PER_FAMILY, MAX_QUEUE_FAMILIES, MAX_SUBGROUP_SIZE,
+    MemoryType, QueueCapabilities, QueueFamily, MAX_BINDING_NUMBER, MAX_CAPABILITIES,
+    MAX_MEMORY_HEAPS, MAX_MEMORY_TYPES, MAX_QUEUES_PER_FAMILY, MAX_QUEUE_FAMILIES,
+    MAX_SUBGROUP_SIZE,
 };
 pub use memory::MemoryUse;
 pub use objects::{BufferView, Image, ImageView, Sampler};
 pub use pass::{
-    ColourAttachment, DepthStencilAttachment, Draw, Drawer, IndexFormat, Indices, Indirect, Load,
-    Pass, Rect, Viewport, DRAW_RECORD_BYTES, INDEXED_DRAW_RECORD_BYTES, MAX_DRAW_VERTEX_BUFFERS,
-    MAX_PASS_ATTACHMENTS,
+    ColourAttachment, DepthStencilAttachment, Draw, DrawCounts, Drawer, IndexFormat, Indices,
+    Indirect, Load, Pass, Rect, Viewport, DRAW_RECORD_BYTES, INDEXED_DRAW_RECORD_BYTES,
+    MAX_DRAW_VERTEX_BUFFERS, MAX_PASS_ATTACHMENTS,
 };
 pub use pipeline::{ComputePipeline, ComputePipelineDesc, MAX_DISPATCH_SETS, MAX_PUSH_BYTES};
 pub use render::{
@@ -150,6 +154,7 @@ pub use resource::MemoryRequirements;
 pub use rt::{serve, MAX_SERVE_WORKERS};
 pub use sampler::{AddressMode, BorderColor, CompareOp, Filter, SamplerDesc, MAX_LOD_BIAS};
 pub use software::{NoThreads, RuntimeThreads, SoftwareDesc, Spawn, DEFAULT_SUBGROUP_SIZE};
+pub use transfer::Direction;
 
 /// The most command buffers one submission carries.
 pub const MAX_SUBMISSION_BUFFERS: usize = 64;

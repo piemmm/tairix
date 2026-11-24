@@ -55,6 +55,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_riscos_kernel::module::Builtin;
+use tairix_util::endian::le_u16;
 
 /// The built-in modules this crate provides, for the session's
 /// `Config::modules`.
@@ -66,4 +67,15 @@ pub static MODULES: [&Builtin; 2] = [&module::FONT_MANAGER, &rom::ROM_FONTS];
 #[must_use]
 pub fn encoding_files() -> Vec<(String, Vec<u8>)> {
     encodings::files(&glyph_names::GlyphNames::read())
+}
+
+/// The two's-complement 16-bit value at `at` of `bytes`, as a font file
+/// signs its halfwords; `None` where they hold fewer than two bytes there.
+pub(crate) fn le_i16(bytes: &[u8], at: usize) -> Option<i16> {
+    le_u16(bytes, at).map(u16::cast_signed)
+}
+
+/// `value` written low byte first at `at` of `out`.
+pub(crate) fn put_word(out: &mut [u8], at: usize, value: u32) {
+    out[at..at + 4].copy_from_slice(&value.to_le_bytes());
 }

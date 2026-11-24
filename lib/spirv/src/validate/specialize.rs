@@ -58,6 +58,13 @@ pub enum SpecError {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ConstantId(u32);
 
+impl ConstantId {
+    /// Its place among its specialization's constants.
+    pub(crate) const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// What an evaluated constant is.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Constant<'s> {
@@ -88,6 +95,11 @@ pub struct Specialized {
 }
 
 impl Specialized {
+    /// How many constants it holds.
+    pub(crate) fn constants(&self) -> usize {
+        self.entries.len()
+    }
+
     /// The constant `id` names in `module`, if it names one.
     #[must_use]
     pub fn constant(&self, admitted: &Admitted, id: Id) -> Option<ConstantId> {
@@ -366,6 +378,17 @@ impl Admitted {
         {
             return Err(SpecError::UnknownId(unknown));
         }
+        // A plain constant decorated `WorkgroupSize` is admitted only with
+        // no component of zero, so its evaluation is held to the same whether
+        // or not an entry point reads it.
+        if let Some(constant) = self
+            .workgroup_size_constant()
+            .and_then(|id| evaluator.out.constant(self, id))
+        {
+            if evaluator.size_of(constant)?.contains(&0) {
+                return Err(SpecError::Workgroup);
+            }
+        }
         let mut workgroups = Vec::new();
         workgroups
             .try_reserve_exact(self.entry_points().len())
@@ -375,14 +398,7 @@ impl Admitted {
                 None => None,
                 Some(WorkgroupSize::Fixed(size)) => Some(size),
                 Some(WorkgroupSize::Constant(id)) => {
-                    let constant = evaluator.constant_of(id)?;
-                    let mut size = [0u32; 3];
-                    for (axis, index) in size.iter_mut().zip(0u32..) {
-                        let part = evaluator.constituent(constant, index)?;
-                        *axis = u32::try_from(evaluator.scalar_bits(part)? & mask(32))
-                            .map_err(|_| SpecError::Malformed)?;
-                    }
-                    Some(size)
+                    Some(evaluator.size_of(evaluator.constant_of(id)?)?)
                 }
             };
             if size.is_some_and(|size| size.contains(&0)) {
@@ -396,6 +412,17 @@ impl Admitted {
 }
 
 impl Evaluator<'_> {
+    /// The workgroup size `constant`, a three-component vector, states.
+    fn size_of(&self, constant: ConstantId) -> Result<[u32; 3], SpecError> {
+        let mut size = [0u32; 3];
+        for (axis, index) in size.iter_mut().zip(0u32..) {
+            let part = self.constituent(constant, index)?;
+            *axis = u32::try_from(self.scalar_bits(part)? & mask(32))
+                .map_err(|_| SpecError::Malformed)?;
+        }
+        Ok(size)
+    }
+
     /// The constant `instruction` declares, evaluated, with its id, if it
     /// declares one; `given` holds the values by `SpecId`, sorted.
     fn declare(

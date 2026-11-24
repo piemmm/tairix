@@ -10,7 +10,7 @@ use tairix_riscos_arm::a32;
 use tairix_riscos_arm::cond::Condition;
 use tairix_riscos_arm::instruction::{BranchOp, CallOp, Instruction, Op};
 use tairix_riscos_kernel::memory::MemoryError;
-use tairix_riscos_kernel::module::{Builtin, Code, Command, CommandKind, Help};
+use tairix_riscos_kernel::module::{Builtin, Code, Command};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::{os as swi, X};
 
@@ -59,16 +59,7 @@ const SYNTAX: &str =
     "Syntax: *BASIC [-help] | [-chain | -load | -quit] <file> | [-chain | -quit] @<start>,<end>";
 
 const fn command(name: &'static str, run: Code) -> Command {
-    Command {
-        name,
-        kind: CommandKind::Command,
-        min: 0,
-        max: 255,
-        translate: 0,
-        help: Help::Text(HELP),
-        syntax: Some(SYNTAX),
-        run: Some(run),
-    }
+    Command::new(name, (0, 255), HELP, Some(SYNTAX), run)
 }
 
 /// The routines, by their place in [`ROUTINES`].

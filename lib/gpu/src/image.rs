@@ -34,7 +34,33 @@ impl ImageUsage {
         .with(Self::STORAGE)
         .with(Self::COLOR_ATTACHMENT)
         .with(Self::DEPTH_STENCIL_ATTACHMENT);
+
+    /// Every use a view serves.
+    const VIEWED: Self = {
+        let mut uses = Self::NONE;
+        let mut at = 0;
+        while at < VIEW_USES.len() {
+            uses = uses.with(VIEW_USES[at].0);
+            at += 1;
+        }
+        uses
+    };
 }
+
+/// Each use of an image a view serves, and what its format must offer for
+/// it.
+pub(crate) const VIEW_USES: [(ImageUsage, FormatFeatures); 4] = [
+    (ImageUsage::SAMPLED, FormatFeatures::SAMPLED),
+    (ImageUsage::STORAGE, FormatFeatures::STORAGE),
+    (
+        ImageUsage::COLOR_ATTACHMENT,
+        FormatFeatures::COLOR_ATTACHMENT,
+    ),
+    (
+        ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+        FormatFeatures::DEPTH_STENCIL,
+    ),
+];
 
 /// How many axes an image has.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -184,20 +210,9 @@ impl ImageDesc {
                 ) => {}
             _ => return Err(Error::Samples),
         }
-        let offered = [
-            (ImageUsage::SAMPLED, FormatFeatures::SAMPLED),
-            (ImageUsage::STORAGE, FormatFeatures::STORAGE),
-            (
-                ImageUsage::COLOR_ATTACHMENT,
-                FormatFeatures::COLOR_ATTACHMENT,
-            ),
-            (
-                ImageUsage::DEPTH_STENCIL_ATTACHMENT,
-                FormatFeatures::DEPTH_STENCIL,
-            ),
-        ]
-        .iter()
-        .all(|&(usage, feature)| !self.usage.contains(usage) || features.contains(feature));
+        let offered = VIEW_USES
+            .iter()
+            .all(|&(usage, feature)| !self.usage.contains(usage) || features.contains(feature));
         if offered {
             Ok(())
         } else {
@@ -297,12 +312,15 @@ pub struct ImageViewDesc {
 }
 
 impl ImageViewDesc {
-    /// Refuse a view an image of `desc` cannot be seen through: a format
-    /// other than its own or its twin, a range it does not hold, a dimension
-    /// its own does not take, a layer count the dimension does not, a cube of
-    /// faces that are not square, or a multisampled image seen as anything but
-    /// rectangles.
+    /// Refuse a view an image of `desc` cannot be seen through: one made for
+    /// no use a view serves, a format other than its own or its twin, a
+    /// range it does not hold, a dimension its own does not take, a layer
+    /// count the dimension does not, a cube of faces that are not square, or
+    /// a multisampled image seen as anything but rectangles.
     pub(crate) fn check(&self, desc: &ImageDesc) -> Result<(), Error> {
+        if !desc.usage.intersects(ImageUsage::VIEWED) {
+            return Err(Error::Usage);
+        }
         if self.format != desc.format && desc.format.srgb_twin() != Some(self.format) {
             return Err(Error::Shape);
         }
@@ -487,8 +505,8 @@ impl ImageSubresource {
 pub struct BufferImageCopy {
     /// Where the region's first texel lies in the buffer.
     pub buffer_offset: u64,
-    /// The bytes from one row to the next: at least a row of the region, and
-    /// a whole number of texels.
+    /// The bytes from one row to the next: at least a row of the region, a
+    /// whole number of texels, and at most [`MAX_BYTES_PER_ROW`].
     pub bytes_per_row: u32,
     /// The rows from one slice or layer to the next: at least the region's.
     pub rows_per_image: u32,
@@ -500,10 +518,16 @@ pub struct BufferImageCopy {
     pub extent: Extent3d,
 }
 
+/// The most bytes from one row of a buffer–image copy to the next: a device's
+/// copy may take a row's pitch as a signed word.
+pub const MAX_BYTES_PER_ROW: u32 = (1 << 31) - 1;
+
 impl BufferImageCopy {
     /// Refuse a region past either side, a buffer layout that does not hold
-    /// it, or a multisampled image; answer the bytes the buffer side spans
-    /// from its first texel.
+    /// it — rows and a start of whole texels, a start of whole words for
+    /// depth or stencil — a row's pitch past [`MAX_BYTES_PER_ROW`], or a
+    /// multisampled image; answer the bytes the buffer side spans from its
+    /// first texel.
     pub(crate) fn check(&self, desc: &ImageDesc) -> Result<u64, Error> {
         if desc.samples != 1 {
             return Err(Error::Samples);
@@ -513,12 +537,20 @@ impl BufferImageCopy {
             .format
             .copy_bytes(self.image.aspect)
             .ok_or(Error::Aspect)?;
+        if self.bytes_per_row > MAX_BYTES_PER_ROW {
+            return Err(Error::TooLarge);
+        }
         let row = u64::from(self.extent.width) * u64::from(texel);
         let per_row = u64::from(self.bytes_per_row);
+        let start = if self.image.aspect == Aspects::COLOR {
+            u64::from(texel)
+        } else {
+            4
+        };
         if per_row < row
             || !per_row.is_multiple_of(u64::from(texel))
             || self.rows_per_image < self.extent.height
-            || !self.buffer_offset.is_multiple_of(u64::from(texel))
+            || !self.buffer_offset.is_multiple_of(start)
         {
             return Err(Error::Misaligned);
         }
@@ -548,10 +580,14 @@ pub struct ImageCopy {
 }
 
 impl ImageCopy {
-    /// Refuse a region past either image, of a plane either lacks, or
-    /// between different layer counts.
+    /// Refuse a region past either image, of a plane either lacks, between
+    /// different layer counts, or between images of different kinds but a
+    /// rectangle's and a volume's.
     pub(crate) fn check(&self, src: &ImageDesc, dst: &ImageDesc) -> Result<(), Error> {
-        if self.src.layers != self.dst.layers || self.src.aspect != self.dst.aspect {
+        use ImageDimension::{D2, D3};
+        let kinds = (src.dimension, dst.dimension);
+        let kinds_meet = kinds.0 == kinds.1 || matches!(kinds, (D2, D3) | (D3, D2));
+        if !kinds_meet || self.src.layers != self.dst.layers || self.src.aspect != self.dst.aspect {
             return Err(Error::Shape);
         }
         self.src.check_region(src, self.src_origin, self.extent)?;
@@ -579,6 +615,28 @@ pub enum ClearValue {
 }
 
 impl ClearValue {
+    /// The value as `format` holds it, which a clear writes: each integer
+    /// channel its value's low bits, read as the channel reads them.
+    #[must_use]
+    pub fn held(self, format: Format) -> Self {
+        let widths = format.channel_widths();
+        match self {
+            Self::Uint(channels) => Self::Uint(core::array::from_fn(|at| {
+                let width = widths[at];
+                if width >= u32::BITS {
+                    channels[at]
+                } else {
+                    channels[at] & ((1 << width) - 1)
+                }
+            })),
+            Self::Sint(channels) => Self::Sint(core::array::from_fn(|at| {
+                let shift = u32::BITS.saturating_sub(widths[at]).min(u32::BITS - 1);
+                (channels[at] << shift) >> shift
+            })),
+            value => value,
+        }
+    }
+
     /// Refuse a value of another kind than `format` holds, or a depth outside
     /// `0.0..=1.0`.
     pub(crate) fn check(&self, format: Format) -> Result<(), Error> {

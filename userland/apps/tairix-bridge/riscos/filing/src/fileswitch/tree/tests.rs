@@ -59,12 +59,6 @@ fn no_range_holds_everything() {
 }
 
 #[test]
-fn a_stamp_compares_its_five_bytes() {
-    assert!(stamp_of(&info(0xFFFF_FD46, 0)) > stamp_of(&info(0xFFFF_FD45, u32::MAX)));
-    assert!(stamp_of(&info(0xFFFF_FD45, 0x6789_0ABD)) > stamp_of(&info(0xFFFF_FD45, 0x6789_0ABC)));
-}
-
-#[test]
 fn a_question_left_unanswered_by_quiet_passes_or_abandons() {
     assert_eq!(Answer::No.fate(), Fate::Kept);
     assert_eq!(Answer::Abandon.fate(), Fate::Abandoned);

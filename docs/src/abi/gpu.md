@@ -13,10 +13,17 @@ than to its driver.
 ## The channel
 
 Each served GPU has one device channel in the per-node block
-`GPU_CHANNEL_ENDPOINTS`, which only the driver bound to that node may bind. The
-driver binds it restricted-sender on `CAP_GPU`, so the kernel refuses a caller
-without it at dispatch, and publishes it as a child node carrying
-`tairix,gpu`. The System Information query
+`GPU_CHANNEL_ENDPOINTS`, which only the driver bound to that node may bind,
+and only where a DMA translation unit translates the node or the platform's
+firmware declares none (`plans/GPU.md` GP11.3). The kernel decides it from
+the path it recorded for the node's DMA when it loaded the driver, so a
+platform declaring a unit — through a malformed table too, whatever the
+administrator chose for the functions it would have described — refuses the
+bind for a node no unit translates, audited (`DEVICE_CHANNEL_UNCONFINED`,
+4270), and the driver drives the device without serving it. The driver never
+learns how its node is translated. The driver binds the channel
+restricted-sender on `CAP_GPU`, so the kernel refuses a caller without it at
+dispatch, and publishes it as a child node carrying `tairix,gpu`. The System Information query
 [`GPU_DEVICES`](sysinfo.md) lists every such channel with the node it serves.
 Every session holds `CAP_GPU`: a context reaches only what it was given and is
 charged for what it makes.
@@ -37,8 +44,11 @@ A body is at most `GPU_MAX_BODY` (256) bytes. A reply names the op it
 answers, so no reply reads as another's. Its status is `0` for success, a
 negated `Errno` for a frame refused before the device was asked (malformed, no
 region open, past a bound), or a positive `GpuError` for a device's refusal,
-whose detail — a loss, a refused command's index, a disagreement — is the
-body. A frame naming no op at all is answered with the shared status reply.
+whose detail — a loss, a refused command's index, a disagreement, the sets
+and bindings of the image and sampler a refused sampling names — is the body.
+A frame naming no op at all is answered with the shared status reply.
+`ImageRequirements`, like every request that makes an object, names its
+context, whose device answers.
 
 The ops are one for each method of the seam, numbered from 1 in this order:
 `Open`, `Close`, `Info`, `CreateContext`, `DestroyContext`, `Status`,
@@ -68,7 +78,9 @@ before it decodes it, and checks every span against the region's length.
 - **A module** crosses whole and is admitted again on arrival, so the region
   must hold the largest module the client makes a pipeline of.
 - **What the client derived** while recording — an overlap, a push range — the
-  server derives again.
+  server derives again as the commands arrive; a copy out of an image the
+  context does not hold then is refused `Stale` there, since the bytes its
+  regions write are the image's to decide.
 
 ## Clients, contexts and bounds
 

@@ -6,7 +6,7 @@
 //! area it is given or faults, the call is refused with the error its own
 //! verification gives.
 
-mod alpha;
+pub(crate) mod alpha;
 mod area;
 mod create;
 mod dump;

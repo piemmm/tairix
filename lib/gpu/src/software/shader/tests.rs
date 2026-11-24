@@ -22,7 +22,9 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use tairix_spirv::assemble::{admit, admitted_body_ops, admitted_glsl, glsl_number};
-use tairix_spirv::{Access, BindingKind, Op, Stages};
+use tairix_spirv::{Access, Op, Stages};
+
+use crate::DescriptorType;
 
 use crate::device_tests::{context, device, memory, over, queue, submit};
 use crate::{BindSetEntry, ComputePipelineDesc, Context, LayoutBinding, PushConstants, Resource};
@@ -427,7 +429,7 @@ pub(crate) fn run_case(context: &Context, case: &Case) -> Vec<Vec<u32>> {
     let module = context.create_shader_module(module).expect("a module");
     let storage = |binding| LayoutBinding {
         binding,
-        kind: BindingKind::StorageBuffer,
+        kind: DescriptorType::StorageBuffer,
         count: 1,
         access: Access::READ.with(Access::WRITE),
         stages: Stages::COMPUTE,

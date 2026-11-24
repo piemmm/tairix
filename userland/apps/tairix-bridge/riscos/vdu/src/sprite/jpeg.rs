@@ -20,16 +20,17 @@ use alloc::vec::Vec;
 
 use tairix_image::{
     jpeg_decode_stored, jpeg_frame, DecodeError, DecodeLimits, DensityUnit, JpegFrame, RasterImage,
+    STANDARD_SPRITE_DPI,
 };
 use tairix_riscos_arm::mmu::PAGE_SIZE;
 use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::module::SWI_OUT_OF_RANGE;
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
+use tairix_riscos_kernel::swi::jpeg::PARALLELOGRAM;
 use tairix_riscos_kernel::swi::os::{file as reason, FILE, SWI_NUMBER_FROM_STRING};
 use tairix_riscos_kernel::swi::X;
 
 use super::extend::{State, SPRITE_EXTEND};
-use super::format::STANDARD_DPI;
 use super::paint::{self, PlotFlags, Scale};
 use super::{NO_MEMORY, RESERVED_FLAGS};
 
@@ -82,8 +83,6 @@ const SCALED_MAPPING: u32 = 8;
 const TRANSFORMED_TRANSLUCENCY_SHIFT: u32 = 5;
 const TRANSFORMED_MAPPING: u32 = 0x10;
 const TRANSLUCENCY: u32 = 0xFF;
-/// The transformed plots' bit making R2 a destination parallelogram.
-const PARALLELOGRAM: u32 = 1;
 /// `JPEG_PDriverIntercept`'s bit passing the plots on.
 const PASS_ON: u32 = 1;
 /// The SWI the plots pass to.
@@ -204,7 +203,7 @@ fn info(os: &mut Os<'_>, bytes: &[u8], regs: &mut Regs) -> Result<(), Fail> {
 /// aspect in lowest terms, or 90 each way where it states none.
 fn density(frame: &JpegFrame) -> ((u32, u32), bool) {
     let Some(density) = frame.density else {
-        return ((STANDARD_DPI, STANDARD_DPI), true);
+        return ((STANDARD_SPRITE_DPI, STANDARD_SPRITE_DPI), true);
     };
     let whole = |(n, d): (u32, u32)| n / d.max(1);
     let (across, down) = (whole(density.across()), whole(density.down()));
@@ -214,7 +213,7 @@ fn density(frame: &JpegFrame) -> ((u32, u32), bool) {
         DensityUnit::Metre => ((inches(across, 10_000), inches(down, 10_000)), false),
         DensityUnit::Aspect => {
             let (across, down) = density.shape().unwrap_or((1, 1));
-            let scale = |v: u32| v.saturating_mul(STANDARD_DPI);
+            let scale = |v: u32| v.saturating_mul(STANDARD_SPRITE_DPI);
             ((scale(across), scale(down)), true)
         }
     }
@@ -278,7 +277,7 @@ fn plot(
     scale: Scale,
     picture: Picture,
 ) -> Result<(), Fail> {
-    let flags = PlotFlags(picture.translucency << 8);
+    let flags = PlotFlags(picture.translucency << PlotFlags::TRANSLUCENCY_SHIFT);
     let decode = |os: &mut Os<'_>| {
         jpeg_decode_stored(bytes, &LIMITS)
             .map(RasterImage::into_pixels)

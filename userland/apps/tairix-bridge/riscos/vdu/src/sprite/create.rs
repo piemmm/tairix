@@ -6,7 +6,7 @@
 use alloc::vec::Vec;
 
 use tairix_image::{sprite_area as block, SpriteName, SPRITE_HEADER_LEN, SPRITE_PALETTE_ENTRY_LEN};
-use tairix_riscos_kernel::os::{len32, Entry, Fail, Os, Regs};
+use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 
 use super::area::{read_name, Area, Naming};
 use super::format::{self, Pixels};
@@ -14,7 +14,7 @@ use super::header::Sprite;
 use super::{
     system, NOT_FOUND, NO_DEEP_NEW_PALETTE, NO_MEMORY, NO_ROOM, NO_ROOM_TO_COPY, UNRECOGNISED,
 };
-use crate::palette::{reason as palette_reason, PALETTE_V};
+use crate::palette::read_through;
 
 /// An operation's sprite: the area it is in, how R0 named it, and its
 /// control block.
@@ -137,24 +137,9 @@ pub(crate) fn screen_palette(os: &mut Os<'_>, entries: u32) -> Result<Vec<u8>, F
         return Err(os.error(NO_MEMORY));
     }
     for entry in 0..entries {
-        let mut read = Regs::new([
-            entry,
-            16,
-            0,
-            0,
-            palette_reason::READ,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ]);
-        os.call_vector(PALETTE_V, &mut read, Entry::Supervisor)?;
-        bytes.extend_from_slice(&read.r[2].to_le_bytes());
-        bytes.extend_from_slice(&read.r[3].to_le_bytes());
+        let [first, second] = read_through(os, entry)?;
+        bytes.extend_from_slice(&first.to_le_bytes());
+        bytes.extend_from_slice(&second.to_le_bytes());
     }
     Ok(bytes)
 }

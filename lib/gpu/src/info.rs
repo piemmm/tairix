@@ -4,6 +4,7 @@
 use tairix_abi::Duration64;
 use tairix_inline::ArrayVec;
 use tairix_spirv::enumerant::Capability;
+use tairix_spirv::{Admitted, Version};
 
 use crate::format::{Format, FormatFeatures};
 use crate::{Error, MAX_DRAW_VERTEX_BUFFERS, MAX_PASS_ATTACHMENTS, MAX_VERTEX_ATTRIBUTES};
@@ -101,6 +102,11 @@ tairix_util::flags! {
         /// An indirect draw's records naming a first instance other than
         /// nought.
         const DRAW_INDIRECT_FIRST_INSTANCE = 1 << 9;
+        /// Bindings of more than one descriptor, each a shader names at a
+        /// constant index.
+        const BINDING_ARRAYS = 1 << 10;
+        /// Memory one context exports and another of the device imports.
+        const SHARED_MEMORY = 1 << 11;
     }
 }
 
@@ -115,7 +121,9 @@ impl Features {
         .with(Self::LARGE_POINTS)
         .with(Self::VERTEX_STORES)
         .with(Self::FRAGMENT_STORES)
-        .with(Self::DRAW_INDIRECT_FIRST_INSTANCE);
+        .with(Self::DRAW_INDIRECT_FIRST_INSTANCE)
+        .with(Self::BINDING_ARRAYS)
+        .with(Self::SHARED_MEMORY);
 }
 
 /// What a device states each format can be used for.
@@ -202,9 +210,13 @@ pub struct Limits {
     pub max_image_array_layers: u32,
     /// The most anisotropy a sampler filters with.
     pub max_sampler_anisotropy: u32,
+    /// The furthest a sampler's level-of-detail bias moves the level sampled
+    /// either way: at most [`MAX_LOD_BIAS`](crate::MAX_LOD_BIAS).
+    pub max_sampler_lod_bias: u32,
     /// The most bind sets a pipeline layout holds.
     pub max_bind_sets: u32,
-    /// One past the highest binding number a bind set layout names.
+    /// One past the highest binding number a bind set layout names: at most
+    /// [`MAX_BINDING_NUMBER`].
     pub max_binding_number: u32,
     /// The most descriptors a bind set layout holds, its bindings' together.
     pub max_bind_set_descriptors: u32,
@@ -216,6 +228,13 @@ pub struct Limits {
     /// What a storage buffer or texel buffer binding's offset must be a
     /// multiple of: a power of two.
     pub storage_buffer_alignment: u64,
+    /// What a uniform buffer binding's size must be a multiple of: a power of
+    /// two, the granularity the device bounds a binding's reads at, so a read
+    /// past the range reads zero rather than what lies beyond it.
+    pub uniform_buffer_size_alignment: u64,
+    /// What a storage buffer binding's size must be a multiple of, as
+    /// [`Self::uniform_buffer_size_alignment`] is a uniform buffer's.
+    pub storage_buffer_size_alignment: u64,
     /// The most bytes one uniform buffer binding spans.
     pub max_uniform_buffer_range: u64,
     /// The most bytes one storage buffer binding spans.
@@ -271,6 +290,10 @@ pub struct Limits {
 /// The most shader capabilities a device states.
 pub const MAX_CAPABILITIES: usize = 64;
 
+/// One past the highest binding number any device takes: a binding's number
+/// sizes the tables a layout of it is looked up in.
+pub const MAX_BINDING_NUMBER: u32 = 1024;
+
 /// What a device is.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DeviceInfo {
@@ -284,6 +307,8 @@ pub struct DeviceInfo {
     pub limits: Limits,
     /// The shader capabilities it runs, by ascending value.
     pub capabilities: ArrayVec<Capability, MAX_CAPABILITIES>,
+    /// The newest SPIR-V version a module it runs may declare.
+    pub spirv_version: Version,
     /// What it offers past the portable core.
     pub features: Features,
     /// What it states each format can be used for.
@@ -310,17 +335,33 @@ impl DeviceInfo {
             && limits.buffer_alignment.is_power_of_two()
             && limits.uniform_buffer_alignment.is_power_of_two()
             && limits.storage_buffer_alignment.is_power_of_two()
+            && limits.uniform_buffer_size_alignment.is_power_of_two()
+            && limits.storage_buffer_size_alignment.is_power_of_two()
             && limits.max_job_time.saturating_total_nanos() > 0
             && limits.subgroup_size.is_power_of_two()
             && limits.subgroup_size <= MAX_SUBGROUP_SIZE
             && limits.max_bind_sets > 0
+            && limits.max_binding_number <= MAX_BINDING_NUMBER
+            && limits.max_sampler_lod_bias <= crate::MAX_LOD_BIAS
             && limits.max_draw_indirect_count > 0
             && limits.max_vertex_input_attributes <= MAX_VERTEX_ATTRIBUTES
             && limits.max_vertex_input_bindings as usize <= MAX_DRAW_VERTEX_BUFFERS
             && limits.max_color_attachments as usize <= MAX_PASS_ATTACHMENTS
             && limits.viewport_bounds_range[0] <= limits.viewport_bounds_range[1];
+        let meant = Format::ALL
+            .iter()
+            .all(|&format| format.features().contains(self.formats.get(format)));
         let ordered = self.capabilities.windows(2).all(|w| w[0] < w[1]);
-        if typed && sized && served && bounded && ordered && !self.memory_types.is_empty() {
+        let versioned = (Version::OLDEST..=Version::NEWEST).contains(&self.spirv_version);
+        if typed
+            && sized
+            && served
+            && bounded
+            && meant
+            && ordered
+            && versioned
+            && !self.memory_types.is_empty()
+        {
             Ok(())
         } else {
             Err(Error::Malformed)
@@ -331,6 +372,17 @@ impl DeviceInfo {
     #[must_use]
     pub fn runs(&self, capability: Capability) -> bool {
         self.capabilities.binary_search(&capability).is_ok()
+    }
+
+    /// Whether it runs `module`: every capability it declares, at a version
+    /// it takes.
+    #[must_use]
+    pub fn runs_module(&self, module: &Admitted) -> bool {
+        module.module().version() <= self.spirv_version
+            && module
+                .capabilities()
+                .iter()
+                .all(|&capability| self.runs(capability))
     }
 
     /// The memory type `index` names.

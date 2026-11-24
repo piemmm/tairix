@@ -6,7 +6,9 @@
 use alloc::vec::Vec;
 
 use tairix_fsmeta::preset::acorn;
-use tairix_riscos_kernel::filing::fs::{args, file, file_info, func, open as reasons};
+use tairix_riscos_kernel::filing::fs::{
+    args, file, file_info, func, open as reasons, Info, Layout,
+};
 use tairix_riscos_kernel::filing::{NOT_OPEN, UNSUPPORTED};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 
@@ -96,13 +98,15 @@ fn read_object(os: &mut Os<'_>, named: &Named) -> Result<Object, Fail> {
     }
 }
 
-/// `object` into R0 and R2 to R5, as `FSEntry_File` 5 answers.
-fn answer_object(regs: &mut Regs, object: &Object) {
-    regs.r[0] = object.kind.number();
-    regs.r[2] = object.load;
-    regs.r[3] = object.exec;
-    regs.r[4] = object.length;
-    regs.r[5] = u32::from(object.attributes);
+/// `object`'s catalogue information.
+fn info_of(object: &Object) -> Info {
+    Info {
+        kind: object.kind.number(),
+        load: object.load,
+        exec: object.exec,
+        length: object.length,
+        attributes: u32::from(object.attributes),
+    }
 }
 
 /// A request that answers [`Reply::Done`] made, its refusal an error.
@@ -434,7 +438,7 @@ pub(super) fn file(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     match regs.r[0] {
         file::READ_INFO | file::READ_INFO_NO_LENGTH => {
             let object = read_object(os, &named)?;
-            answer_object(regs, &object);
+            info_of(&object).answer(regs);
             Ok(())
         }
         file::CREATE => done(
@@ -485,7 +489,7 @@ pub(super) fn file(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         }
         file::DELETE => match must(os, named.place, &Request::Delete { root, path })? {
             Reply::Object(object) => {
-                answer_object(regs, &object);
+                info_of(&object).answer(regs);
                 Ok(())
             }
             _ => Err(fail(os, FAILED)),
@@ -568,17 +572,6 @@ fn read_disc(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     os.write_byte(regs.r[2].wrapping_add(1 + u32::from(length)), 0)
 }
 
-/// How a directory's entries are laid out.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Layout {
-    /// Zero-terminated names: `FSEntry_Func` 14.
-    Names,
-    /// A record before each name: `FSEntry_Func` 15.
-    Info,
-    /// A fuller record before each name: `FSEntry_Func` 19.
-    FullInfo,
-}
-
 /// `FSEntry_Func` 14, 15 and 19: from R4, up to R3 of the entries of the
 /// directory R1 names into R2's R5 bytes; R3 how many, R4 where to go on,
 /// -1 once none are left.
@@ -597,42 +590,12 @@ fn list(os: &mut Os<'_>, regs: &mut Regs, layout: Layout) -> Result<(), Fail> {
     let mut used: u32 = 0;
     let mut read: u32 = 0;
     for (name, object) in &entries {
-        let named_length = len32(name.len()) + 1;
-        let size = match layout {
-            Layout::Names => named_length,
-            Layout::Info => (20 + named_length).next_multiple_of(4),
-            Layout::FullInfo => (29 + named_length).next_multiple_of(4),
-        };
+        let size = layout.size(name);
         if used.saturating_add(size) > room {
             break;
         }
         let at = buffer.wrapping_add(used);
-        let name_at = match layout {
-            Layout::Names => 0,
-            Layout::Info => 20,
-            Layout::FullInfo => 29,
-        };
-        if layout != Layout::Names {
-            let kind = object.kind.number();
-            for (n, word) in (0..).zip([
-                object.load,
-                object.exec,
-                object.length,
-                u32::from(object.attributes),
-                kind,
-            ]) {
-                os.write_word(at.wrapping_add(4 * n), word)?;
-            }
-        }
-        if layout == Layout::FullInfo {
-            os.write_word(at.wrapping_add(20), 0)?;
-            let [low0, low1, low2, low3] = object.exec.to_le_bytes();
-            os.write_bytes(
-                at.wrapping_add(24),
-                &[low0, low1, low2, low3, object.load.to_le_bytes()[0]],
-            )?;
-        }
-        os.write_terminated(at.wrapping_add(name_at), name, 0, name.len() + 1)?;
+        os.write_listed(at, layout, &info_of(object), 0, name)?;
         used += size;
         read += 1;
     }

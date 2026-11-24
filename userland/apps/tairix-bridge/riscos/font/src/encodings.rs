@@ -15,24 +15,31 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_riscos_kernel::{ALPHABETS, UTF8_ALPHABET};
+
+use crate::encoding::{NOTDEF, PRIVATE_USE};
 use crate::glyph_names::GlyphNames;
 use crate::rom_encodings::{RomEncoding, BASE0, NONE, ROM_ENCODINGS};
 
-/// What the PRM names a code no glyph is, and a base glyph no code reaches.
-const NOTDEF: &str = ".notdef";
+/// What the PRM names a base glyph no code reaches.
 const BASE_NOTDEF: &str = ".NotDef";
-/// The UTF-8 alphabet's number.
-const UTF8_ALPHABET: u32 = 111;
 /// The names a line holds.
 const PER_LINE: usize = 8;
 
-/// Unicode's private use area, in which UTF-8 numbers RISC OS's own glyphs.
-const PRIVATE_USE: core::ops::RangeInclusive<u32> = 0xE000..=0xF8FF;
 /// Latin 1's encoding, which `/Default` follows, and the codes whose glyph
 /// `/Default` gives a name of its own: no-break space and soft hyphen, whose
 /// Latin 1 names are the space's and the hyphen's.
 const LATIN1: usize = 0;
 const OWN_NAMES: [u32; 2] = [0xA0, 0xAD];
+
+/// The name International gives alphabet `number`, which its encoding's file
+/// is named by; none for a number it names no alphabet by.
+fn alphabet_name(number: u32) -> Option<&'static str> {
+    ALPHABETS
+        .iter()
+        .find(|&&(alphabet, _)| alphabet == number)
+        .map(|&(_, name)| name)
+}
 
 /// The name base glyph `glyph` goes by.
 fn base_name(names: &GlyphNames, glyph: usize) -> String {
@@ -76,12 +83,12 @@ pub(crate) fn base0(names: &GlyphNames) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// An encoding's file: based on `/Base0`, its alphabet's number, and the
-/// name of the glyph each code shows.
-pub(crate) fn encoding(names: &GlyphNames, rom: &RomEncoding) -> Vec<u8> {
+/// An encoding's file, `name` its alphabet's: based on `/Base0`, its
+/// alphabet's number, and the name of the glyph each code shows.
+pub(crate) fn encoding(names: &GlyphNames, name: &str, rom: &RomEncoding) -> Vec<u8> {
     let mut out = format!(
-        "% {}, over the base encoding of RISC OS's own fonts\n%%RISCOS_BasedOn 0\n%%RISCOS_Alphabet {}\n",
-        rom.name, rom.alphabet
+        "% {name}, over the base encoding of RISC OS's own fonts\n%%RISCOS_BasedOn 0\n%%RISCOS_Alphabet {}\n",
+        rom.alphabet
     );
     let code_name = |code: usize| {
         let glyph = rom.glyphs[code];
@@ -113,26 +120,31 @@ pub(crate) fn default(names: &GlyphNames) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// The UTF-8 encoding's file, which names no glyph: a font in it reads a
-/// string a character at a time, each the base glyph it reaches, and is
-/// based as the alphabets' encodings are.
-pub(crate) fn utf8() -> Vec<u8> {
+/// The UTF-8 encoding's file, `name` its alphabet's, which names no glyph: a
+/// font in it reads a string a character at a time, each the base glyph it
+/// reaches, and is based as the alphabets' encodings are.
+pub(crate) fn utf8(name: &str) -> Vec<u8> {
     format!(
-        "% UTF8: each character shows the glyph it reaches\n%%RISCOS_BasedOn 0\n%%RISCOS_Alphabet {UTF8_ALPHABET}\n"
+        "% {name}: each character shows the glyph it reaches\n%%RISCOS_BasedOn 0\n%%RISCOS_Alphabet {UTF8_ALPHABET}\n"
     )
     .into_bytes()
 }
 
-/// Every encoding file, by its leaf in `Encodings`.
+/// Every encoding file, by its leaf in `Encodings`: an alphabet's named as
+/// International names the alphabet.
 pub(crate) fn files(names: &GlyphNames) -> Vec<(String, Vec<u8>)> {
     let mut files = alloc::vec![
         (String::from("/Base0"), base0(names)),
         (String::from("/Default"), default(names)),
     ];
     for rom in &ROM_ENCODINGS {
-        files.push((String::from(rom.name), encoding(names, rom)));
+        if let Some(name) = alphabet_name(rom.alphabet) {
+            files.push((String::from(name), encoding(names, name, rom)));
+        }
     }
-    files.push((String::from("UTF8"), utf8()));
+    if let Some(name) = alphabet_name(UTF8_ALPHABET) {
+        files.push((String::from(name), utf8(name)));
+    }
     files
 }
 

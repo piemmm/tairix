@@ -22,8 +22,8 @@ tairix-colour = { path = "../../../../../lib/colour", version = "=0.0.0" }
 # RISC OS 5's numbered modes, the control codes, the system font and the
 # palettes' arithmetic.
 tairix-vdu = { path = "../../../../../lib/vdu", version = "=0.0.0" }
-# Sprite areas, control blocks, mode words and names: the format's one
-# definition.
+# Sprite areas, control blocks, mode words and names, and the standard
+# screen's resolution: the format's one definition.
 tairix-image = { path = "../../../../../lib/image", version = "=0.0.0" }
 # Mode 7's character generator.
 tairix-teletext = { path = "../../../../../lib/teletext", version = "=0.0.0" }
@@ -36,8 +36,9 @@ tairix-util = { path = "../../../../../lib/util", version = "=0.0.0" }
 tairix-raster = { path = "../../../../../lib/raster", version = "=0.0.0" }
 # The longest command line, which a saved calibration's lines keep within.
 tairix-obey = { path = "../../../../../lib/obey", version = "=0.0.0" }
-# The Draw path's element codes, in which the transformed plots hand Draw
-# the corners they map.
+# The Draw path's elements and their sizes, the matrix's fraction bits and
+# the draw unit, in which the transformed plots hand Draw the corners they map
+# and read a matrix's scale.
 tairix-drawing = { path = "../../../../../lib/drawing", version = "=0.0.0" }
 
 [dev-dependencies]

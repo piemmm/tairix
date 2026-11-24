@@ -316,7 +316,10 @@ body!(
 );
 body!(
     /// [`GpuOp::ImageRequirements`](tairix_abi::gpu::GpuOp::ImageRequirements).
-    ImageRequirements { desc: ImageDesc }
+    ImageRequirements {
+        context: ContextId,
+        desc: ImageDesc
+    }
 );
 body!(
     /// [`GpuOp::ImageRequirements`](tairix_abi::gpu::GpuOp::ImageRequirements)'s

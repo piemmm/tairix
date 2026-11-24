@@ -14,6 +14,7 @@
 use alloc::vec::Vec;
 
 use tairix_bezier::{Path as BezierPath, PathEl, Point as BezierPoint};
+use tairix_drawing::riscos::format::{self, FIXED_ONE, NO_COLOUR, PATH, WINDING_EVEN_ODD};
 
 use tairix_riscos_kernel::error::BUFFER_OVERFLOW;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
@@ -80,31 +81,36 @@ pub(crate) fn switch_output_to_buffer(os: &mut Os<'_>, regs: &mut Regs) -> Resul
     Ok(())
 }
 
-/// A Draw object's type, and the bytes of a path object's header, where in
-/// it its colours begin, and a word.
-const PATH_OBJECT: u32 = 2;
-const HEADER_BYTES: u32 = 40;
-const COLOURS_AT: u32 = 24;
+/// Where a path object's colours begin, and its path, which no dash pattern
+/// comes before; and a word.
+#[expect(clippy::cast_possible_truncation, reason = "within an object's header")]
+const COLOURS_AT: u32 = format::PATH_FILL as u32;
+#[expect(clippy::cast_possible_truncation, reason = "within an object's header")]
+const HEADER_BYTES: u32 = format::PATH_DASHES as u32;
 const WORD: u32 = 4;
 /// A rectangle's object: its header, a move, three lines, a close and an
 /// end.
-const RECTANGLE_WORDS: u32 = 24;
-const RECTANGLE_BYTES: u32 = WORD * RECTANGLE_WORDS;
-/// No outline colour.
-const TRANSPARENT: u32 = u32::MAX;
-/// A path's style word: filled by the even-odd rule, else non-zero.
-const EVEN_ODD: u32 = 1 << 6;
+const RECTANGLE_BYTES: u32 = HEADER_BYTES
+    + element(tag::MOVE)
+    + 3 * element(tag::LINE)
+    + element(tag::CLOSE)
+    + element(tag::END);
+const RECTANGLE_WORDS: u32 = RECTANGLE_BYTES / WORD;
+/// A path's style word filled by the non-zero rule: the even-odd bit clear.
 const NON_ZERO: u32 = 0;
 /// A path's element tags.
 mod tag {
-    pub(super) const END: u32 = 0;
-    pub(super) const MOVE: u32 = 2;
-    pub(super) const CLOSE: u32 = 5;
-    pub(super) const CURVE: u32 = 6;
-    pub(super) const LINE: u32 = 8;
+    pub(super) use tairix_drawing::riscos::format::{CLOSE, CURVE, END, LINE, MOVE};
 }
-/// One in a matrix's multipliers.
-const ONE: f64 = 65536.0;
+
+/// The bytes element `code` takes, nought for a code no element has.
+#[expect(clippy::cast_possible_truncation, reason = "an element's few bytes")]
+const fn element(code: u32) -> u32 {
+    match format::element_bytes(code) {
+        Some(bytes) => bytes as u32,
+        None => 0,
+    }
+}
 
 /// A word of a glyph's path: an element's tag, or a coordinate across or up,
 /// both in 512ths of a pixel from the glyph's origin and in Draw's units
@@ -364,11 +370,11 @@ impl Recorder {
         let left = i64::from(room) - i64::from(WORD) * i64::try_from(copied).unwrap_or(i64::MAX);
         let marker = path_end(path, copied);
         let whole = copied == words;
-        let colours = [self.fill, TRANSPARENT, 0, style];
+        let colours = [self.fill, NO_COLOUR, 0, style];
         if words > 0 && whole && left >= i64::from(WORD) {
             let size = marker.wrapping_add(WORD).wrapping_sub(object);
             let bounds = glyph.bounds.unwrap_or_default().map(i32::cast_unsigned);
-            let header = [PATH_OBJECT, size].into_iter().chain(bounds).chain(colours);
+            let header = [PATH, size].into_iter().chain(bounds).chain(colours);
             let path = glyph.words.iter().map(|word| word.value(true));
             let end = [
                 tag::END,
@@ -379,7 +385,7 @@ impl Recorder {
             self.advance(size);
             return Ok(());
         }
-        self.put(os, object, &[PATH_OBJECT])?;
+        self.put(os, object, &[PATH])?;
         self.put(os, object.wrapping_add(COLOURS_AT), &colours)?;
         let copy = glyph.words[..copied].iter().map(|word| word.value(whole));
         self.put_each(os, path, copy)?;
@@ -415,14 +421,14 @@ fn rectangle(fill: u32, low: (i32, i32), high: (i32, i32)) -> [u32; RECTANGLE_WO
     ]
     .map(i32::cast_unsigned);
     [
-        PATH_OBJECT,
+        PATH,
         RECTANGLE_BYTES,
         bounds[0],
         bounds[1],
         bounds[2],
         bounds[3],
         fill,
-        TRANSPARENT,
+        NO_COLOUR,
         0,
         NON_ZERO,
         tag::MOVE,
@@ -504,7 +510,7 @@ impl Visit for Recorder {
         let place = |(x, y): (f64, f64)| {
             let product = |by: i64, coordinate: f64| {
                 i64::from(saturated(tairix_util::mathf::floor(
-                    exactly(by) * coordinate / ONE,
+                    exactly(by) * coordinate / f64::from(FIXED_ONE),
                 )))
             };
             let along = |by_x: i64, by_y: i64| product(by_x, x).saturating_add(product(by_y, y));
@@ -521,7 +527,7 @@ impl Visit for Recorder {
         let style = if font.data.non_zero() {
             NON_ZERO
         } else {
-            EVEN_ODD
+            WINDING_EVEN_ODD
         };
         let traced = match &outline {
             Outline::Design { glyph, .. } => design_path(&mut path, &glyph.fill, &place),

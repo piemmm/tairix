@@ -162,3 +162,18 @@ fn in_16m_colours_a_blend_keeps_the_supremacy_byte_and_supremacy_composites_it()
         );
     }
 }
+
+#[test]
+fn a_row_s_levels_above_nought_are_handed_over_at_most_a_pass_at_a_time() {
+    let mut row = [5; RUN + 9];
+    row[..3].fill(0);
+    row[RUN + 5..RUN + 7].fill(0);
+    let mut runs = Vec::new();
+    let any = each_run(&row, 10, |column, levels| {
+        runs.push((column, levels.len()));
+        Ok(())
+    });
+    assert_eq!(any, Ok(true));
+    assert_eq!(runs, [(13, RUN), (77, 2), (81, 2)]);
+    assert_eq!(each_run(&[0; 4], 0, |_, _| Ok(())), Ok(false));
+}

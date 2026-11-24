@@ -12,6 +12,7 @@
 
 pub mod format;
 mod read;
+pub mod units;
 mod write;
 
 use alloc::string::String;
@@ -19,7 +20,7 @@ use alloc::string::String;
 use tairix_collections::SharedStr;
 use tairix_colour::{Rgb, Rgba};
 
-use crate::drawing::{Paper, PAPER};
+use crate::drawing::{Paper, PAPER, PIXELS_PER_INCH};
 use crate::ReadError;
 
 use format::{MAGIC, NO_COLOUR};
@@ -27,23 +28,8 @@ use format::{MAGIC, NO_COLOUR};
 pub use read::read;
 pub use write::{write, Dropped, Written};
 
-/// Draw units to the drawing's pixel: 640 to the point, 72 points and 96
-/// pixels to the inch.
-const UNITS_PER_PIXEL: f64 = 480.0;
-
-/// A triangle cap is measured in sixteenths of its line's width, its breadth
-/// on each side of the line.
-const TRIANGLE_UNIT: f64 = 16.0;
-
-/// The mitre limit every Draw file is stroked with: PostScript's default,
-/// which the format fixes.
-const MITRE_LIMIT: f64 = 10.0;
-
-/// One in a transformed text's matrix, which holds sixteen bits of fraction.
-const FIXED_ONE: f64 = 65536.0;
-
-/// A transformed text set from right to left.
-const RIGHT_TO_LEFT: u32 = 1 << 1;
+/// Draw units to the drawing's pixel.
+const UNITS_PER_PIXEL: f64 = units::DRAW_UNITS_PER_INCH as f64 / PIXELS_PER_INCH as f64;
 
 /// The options object's size, in bytes.
 const OPTIONS_SIZE: u32 = 88;
@@ -101,10 +87,16 @@ pub fn recognised(bytes: &[u8]) -> bool {
 /// case, or `None` for a family RISC OS does not ship.
 #[must_use]
 pub fn riscos_family_generic(family: &str) -> Option<&'static str> {
+    own_family(family).map(|(kind, _)| kind)
+}
+
+/// The generic kind and slant of RISC OS's own font family `family`, matched
+/// ignoring case.
+fn own_family(family: &str) -> Option<(&'static str, Slant)> {
     FAMILIES
         .iter()
         .find(|(own, _, _)| own.eq_ignore_ascii_case(family))
-        .map(|&(_, kind, _)| kind)
+        .map(|&(_, kind, slant)| (kind, slant))
 }
 
 /// The colour a Draw colour word holds, or none.
@@ -118,6 +110,12 @@ const fn colour_of(word: u32) -> Option<Rgba> {
 /// `colour` as a Draw colour word, its alpha set aside.
 const fn word_of(colour: Rgba) -> u32 {
     Rgb::new(colour.r, colour.g, colour.b).riscos_word()
+}
+
+/// The draw units a sprite's pixel spans on an axis of eigen factor `eig`:
+/// `2^eig` OS units.
+fn pixel_pitch(eig: u8) -> f64 {
+    f64::from(1_u32 << eig) * f64::from(units::DRAW_UNITS_PER_OS_UNIT)
 }
 
 /// The A-series paper numbered `n`, A0 being the largest.
@@ -208,9 +206,7 @@ pub struct RiscosFace {
 #[must_use]
 pub fn riscos_face(name: &str) -> Option<RiscosFace> {
     let family = name.split('.').next()?.trim();
-    let &(_, generic, slant) = FAMILIES
-        .iter()
-        .find(|(own, _, _)| own.eq_ignore_ascii_case(family))?;
+    let (generic, slant) = own_family(family)?;
     let (weight, slanted) = riscos_styles(name);
     Some(RiscosFace {
         generic,

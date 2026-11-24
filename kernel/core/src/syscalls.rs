@@ -83,6 +83,7 @@ use tairix_abi::driver::filesystem::DirVisit;
 use tairix_abi::driver::filesystem::NodeKind;
 use tairix_abi::driver::filesystem::VolumeStats;
 use tairix_abi::driver::{DriverEnding, RegionCaching};
+use tairix_abi::gpu::GPU_CHANNEL_ENDPOINTS;
 use tairix_abi::hwlink::LinkRole;
 use tairix_abi::hwtree::{HwResource, HwResourceKind, NodeEndpointBlock};
 use tairix_abi::input::{KeyEdge, PointerInput, POINTER_EDGE_UNTIMED};
@@ -2177,6 +2178,20 @@ where
     /// The soft bound `caller`'s process is held to for `kind`.
     fn soft_limit(&self, caller: &CallerContext<'_>, kind: LimitKind) -> u64 {
         self.aspaces.read().limits(caller.process()).get(kind).soft
+    }
+
+    /// Whether a device whose DMA takes `dma` may be served to client
+    /// processes: through units translating it, or around them only where
+    /// the firmware declares no unit at all — counting one a malformed table
+    /// described, whatever the administrator chose for its functions.
+    fn may_serve_clients(&self, dma: crate::iommu::DmaPath) -> bool {
+        match dma {
+            crate::iommu::DmaPath::Translated { .. } => true,
+            crate::iommu::DmaPath::Untranslated => {
+                self.dma_translation.is_none() && self.malformed_units.is_none()
+            }
+            crate::iommu::DmaPath::Stranded { .. } => false,
+        }
     }
 
     /// Make the channel a filesystem server serves over: an endpoint in the
@@ -12376,8 +12391,19 @@ where
         // A device's channel is its node's, served by the driver loaded for
         // that node alone: no other driver can stand in for the device.
         if let Some(node) = NodeEndpointBlock::device_channel_node(endpoint_id) {
-            if self.aspaces.read().loaded_node(caller.process()) != Some(node) {
+            let driver = self
+                .aspaces
+                .read()
+                .loaded_driver(caller.process())
+                .filter(|driver| driver.node == node);
+            let Some(driver) = driver else {
                 CallEndpoint::record_create_denied(EndpointId(endpoint_id), self.audit);
+                return Err(Errno::PermissionDenied);
+            };
+            // A GPU runs whatever its clients submit, so the enforcement is
+            // here rather than in its driver, whose bugs are the threat.
+            if GPU_CHANNEL_ENDPOINTS.contains(endpoint_id) && !self.may_serve_clients(driver.dma) {
+                audit_channel_unconfined(self.audit, endpoint_id, node, driver.dma);
                 return Err(Errno::PermissionDenied);
             }
         }
@@ -15729,6 +15755,16 @@ where
         Ok(0)
     }
 
+    fn call_destroy(&self, caller: &CallerContext<'_>, endpoint: u64) -> SyscallResult {
+        crate::callreg::destroy(
+            EndpointId(endpoint),
+            caller.caps.process().0,
+            self.aspaces,
+            self.audit,
+        )
+        .map(|()| 0)
+    }
+
     fn waitset_close(&self, caller: &CallerContext<'_>, set: u64) -> SyscallResult {
         crate::waitset::close(caller.process().0, set).map(|()| 0)
     }
@@ -17176,6 +17212,36 @@ fn audit_stranded(audit: &(dyn Sink + Sync), node: u32, unit: Option<u32>) {
             Field {
                 key: "reason",
                 value: tairix_log::FieldValue::Str("stranded"),
+            },
+        ],
+    );
+}
+
+/// Record that the driver loaded for `node`, whose DMA takes `dma`, was
+/// refused its GPU channel `endpoint`.
+fn audit_channel_unconfined(
+    audit: &(dyn Sink + Sync),
+    endpoint: u64,
+    node: u32,
+    dma: crate::iommu::DmaPath,
+) {
+    let mut endpoint_buf = [0u8; 16];
+    crate::audit::emit(
+        audit,
+        Level::Warn,
+        AuditEvent::DeviceChannelUnconfined,
+        &[
+            Field {
+                key: "endpoint",
+                value: tairix_log::FieldValue::Str(format_hex_u64(endpoint, &mut endpoint_buf)),
+            },
+            Field {
+                key: "node",
+                value: tairix_log::FieldValue::UnsignedInt(u64::from(node)),
+            },
+            Field {
+                key: "dma",
+                value: tairix_log::FieldValue::Str(dma.name()),
             },
         ],
     );
@@ -49711,6 +49777,205 @@ mod tests {
         crate::callreg::unregister(EndpointId(other));
     }
 
+    /// The kernel state a GPU channel's bind reads: a driver admitted for a
+    /// GPU node on each DMA path given, each able to bind its node's channel.
+    struct GpuDrivers {
+        sink: &'static TestSink,
+        arch: Arc<TestArch>,
+        sched: Scheduler<TestArch>,
+        table: RwLock<CapTable>,
+        ipc: RwLock<PortRegistry>,
+        aspaces: RwLock<AddressSpaceRegistry>,
+        rng: RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        irq: IrqTable,
+        drivers: Vec<(u64, TaskCapabilities)>,
+    }
+
+    impl GpuDrivers {
+        /// A driver for each node of `paths`, admitted with its DMA path.
+        fn admitted(paths: &[(u32, crate::iommu::DmaPath)]) -> Self {
+            install_trace_filter();
+            let sink = make_sink();
+            let arch = Arc::new(TestArch::with_cpus(1));
+            let aspaces = RwLock::new(AddressSpaceRegistry::new());
+            let mut drivers = Vec::new();
+            for (at, &(node, dma)) in paths.iter().enumerate() {
+                let task = if at == 0 {
+                    crate::test_boot::claim_task()
+                } else {
+                    crate::test_boot::claim_peer_task()
+                };
+                let (space, physmap) = call_aspace(&one_cap_image(CapabilityId::GPU));
+                let mut registry = aspaces.write();
+                registry
+                    .register(ProcessId(task), space, physmap)
+                    .expect("registration succeeds");
+                registry
+                    .admit_driver(ProcessId(task), node, dma)
+                    .expect("the node has no live driver");
+                drop(registry);
+                let caps = make_caps_record(task, &[CapabilityId::IPC_BIND_PRIVILEGED], sink);
+                drivers.push((task, caps));
+            }
+            Self {
+                sink,
+                sched: make_sched(arch.clone()),
+                arch,
+                table: RwLock::new(CapTable::new()),
+                ipc: RwLock::new(PortRegistry::new()),
+                aspaces,
+                rng: unseeded_rng(),
+                irq: IrqTable::new(31),
+                drivers,
+            }
+        }
+
+        fn handlers(&self) -> KernelSyscallHandlers<'_, TestArch> {
+            KernelSyscallHandlers::new(
+                &self.sched,
+                &self.table,
+                &self.arch,
+                self.sink,
+                &self.irq,
+                &UnsupportedController,
+                &self.ipc,
+                &self.aspaces,
+                &self.rng,
+            )
+        }
+
+        /// The `at`th driver binding the channel `id` through `h`.
+        fn bind(
+            &self,
+            h: &KernelSyscallHandlers<'_, TestArch>,
+            at: usize,
+            id: u64,
+        ) -> SyscallResult {
+            let (task, caps) = &self.drivers[at];
+            let ctx = CallerContext {
+                task_id: SecTaskId(*task),
+                caps,
+            };
+            h.call_create(&ctx, id, 0x1000, 0x2000, 64, 64, 4)
+        }
+
+        /// The fields of every GPU channel refusal recorded so far.
+        fn refusals(&self) -> Vec<Vec<(String, String)>> {
+            self.sink
+                .snapshot()
+                .into_iter()
+                .filter(|event| event.id == AuditEvent::DeviceChannelUnconfined.id())
+                .map(|event| event.fields)
+                .collect()
+        }
+    }
+
+    /// A GPU's channel binds for a node a unit translates, and for any node
+    /// where the firmware declares no unit.
+    #[test]
+    fn call_create_serves_a_gpu_from_a_translated_node_or_where_no_unit_is_declared() {
+        use crate::iommu::DmaPath;
+        let _registry = crate::callreg::registry_guard();
+        let (translated, unitless) = (0x31, 0x34);
+        let world = GpuDrivers::admitted(&[
+            (
+                translated,
+                DmaPath::Translated {
+                    output_limit: 1 << 39,
+                },
+            ),
+            (unitless, DmaPath::Untranslated),
+        ]);
+        let unbind = |id: u64| assert!(crate::callreg::unregister(EndpointId(id)).is_some());
+
+        let gpu = GPU_CHANNEL_ENDPOINTS.endpoint(unitless);
+        assert_eq!(
+            world.bind(&world.handlers(), 1, gpu),
+            Ok(0),
+            "no unit to confine it by"
+        );
+        unbind(gpu);
+
+        let (translation, _, _) =
+            translation_over(&[], tairix_kernel_iommu_api::model::Behaviour::Correct);
+        let gpu = GPU_CHANNEL_ENDPOINTS.endpoint(translated);
+        assert_eq!(
+            world.bind(&world.handlers().with_dma_translation(translation), 0, gpu),
+            Ok(0)
+        );
+        unbind(gpu);
+        assert!(world.refusals().is_empty());
+    }
+
+    /// On a platform declaring a unit — through a malformed table too — a
+    /// node no unit translates is refused its GPU channel and the refusal
+    /// audited, left with no endpoint and no grant, while another device's
+    /// channel on it binds as before.
+    #[test]
+    fn call_create_refuses_a_gpu_no_declared_unit_translates() {
+        use crate::iommu::DmaPath;
+        use tairix_abi::driver::audio_channel::AUDIO_CHANNEL_ENDPOINTS;
+        let _registry = crate::callreg::registry_guard();
+        let (untranslated, stranded) = (0x32, 0x33);
+        let world = GpuDrivers::admitted(&[
+            (untranslated, DmaPath::Untranslated),
+            (
+                stranded,
+                DmaPath::Stranded {
+                    unit: Some(TRANSLATION_UNIT_NODE),
+                },
+            ),
+        ]);
+        let gpu = |node| GPU_CHANNEL_ENDPOINTS.endpoint(node);
+        let (translation, _, _) =
+            translation_over(&[], tairix_kernel_iommu_api::model::Behaviour::Correct);
+        let behind_unit = world.handlers().with_dma_translation(translation);
+        world.sink.clear();
+        for (at, node) in [(0, untranslated), (1, stranded)] {
+            assert_eq!(
+                world.bind(&behind_unit, at, gpu(node)),
+                Err(Errno::PermissionDenied)
+            );
+            assert!(crate::callreg::lookup(EndpointId(gpu(node))).is_none());
+            assert!(!world.aspaces.read().grant_covers(
+                ProcessId(world.drivers[at].0),
+                &tairix_abi::HwResource::endpoint(gpu(node))
+            ));
+        }
+        let field = |key: &str, value: &str| (String::from(key), String::from(value));
+        let mut endpoint_buf = [0u8; 16];
+        let refused =
+            [(untranslated, "untranslated"), (stranded, "stranded")].map(|(node, dma)| {
+                alloc::vec![
+                    field("endpoint", format_hex_u64(gpu(node), &mut endpoint_buf)),
+                    field("node", &alloc::format!("{node}")),
+                    field("dma", dma),
+                ]
+            });
+        assert_eq!(world.refusals(), refused);
+        let audio = AUDIO_CHANNEL_ENDPOINTS.endpoint(untranslated);
+        assert_eq!(
+            world.bind(&behind_unit, 0, audio),
+            Ok(0),
+            "the rule is the GPU's alone"
+        );
+        assert!(crate::callreg::unregister(EndpointId(audio)).is_some());
+
+        let malformed = world
+            .handlers()
+            .with_malformed_units(crate::iommu::MalformedUnits {
+                family: tairix_abi::sysinfo::DmaUnitFamily::Vtd,
+                unconfined: true,
+            });
+        world.sink.clear();
+        assert_eq!(
+            world.bind(&malformed, 0, gpu(untranslated)),
+            Err(Errno::PermissionDenied),
+            "the administrator's unconfined functions serve no client"
+        );
+        assert_eq!(world.refusals().len(), 1);
+    }
+
     /// Register a grant-restricted endpoint (required send cap
     /// `CAP_IPC_ENDPOINT`) owned by the calling test, returning it for
     /// unregistration.
@@ -49910,6 +50175,48 @@ mod tests {
             "a revoked grant must not retarget onto a re-created endpoint id"
         );
         crate::callreg::teardown_owned_by(second_owner, &aspaces, sink);
+    }
+
+    /// `call_destroy` takes down an endpoint for the process that bound it
+    /// alone, auditing the destruction, and answers an id nothing is bound to
+    /// as not found.
+    #[test]
+    fn call_destroy_takes_down_only_the_callers_own_endpoint() {
+        let _registry = crate::callreg::registry_guard();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let owner = crate::test_boot::claim_task();
+        let stranger = crate::test_boot::claim_peer_task();
+        let id = 0xCA11_4006;
+        let _serving = register_grant_restricted_endpoint_owned_by(owner, id, sink);
+        let destroyed_by = |task| {
+            let caps = make_caps_record(task, &[], sink);
+            let ctx = CallerContext {
+                task_id: SecTaskId(task),
+                caps: &caps,
+            };
+            h.call_destroy(&ctx, id)
+        };
+        assert_eq!(destroyed_by(stranger), Err(Errno::PermissionDenied));
+        assert!(crate::callreg::lookup(EndpointId(id)).is_some());
+        assert_eq!(destroyed_by(owner), Ok(0));
+        assert!(crate::callreg::lookup(EndpointId(id)).is_none());
+        let destroyed = tairix_kernel_ipc::AuditEvent::CallEndpointDestroyed.id();
+        assert!(
+            sink.snapshot().iter().any(|event| event.id == destroyed),
+            "the destruction is audited"
+        );
+        assert_eq!(destroyed_by(owner), Err(Errno::NotFound));
     }
 
     /// A recording [`crate::devres::SharedMemFacility`] double: it hands out

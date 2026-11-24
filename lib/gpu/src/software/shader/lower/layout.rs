@@ -1289,6 +1289,12 @@ impl Lowering<'_> {
             if instruction.op() != Op::VARIABLE || self.operands(&instruction) <= 3 {
                 continue;
             }
+            // Workgroup memory starts zeroed, and its one admitted initializer
+            // says so; each invocation laying it again would undo what
+            // another wrote before a barrier.
+            if StorageClass(self.word(&instruction, 2)?) == StorageClass::WORKGROUP {
+                continue;
+            }
             // A variable the entry point does not reach was never declared.
             let Some(pointer) = self.globals.get(at).copied().flatten() else {
                 continue;

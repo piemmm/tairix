@@ -296,6 +296,19 @@ impl Admitted {
             .map(TypeId)
     }
 
+    /// The id decorated `WorkgroupSize`, where one is.
+    pub(crate) fn workgroup_size_constant(&self) -> Option<Id> {
+        self.kept
+            .decorations
+            .iter()
+            .find(|deco| {
+                deco.decoration == Decoration::BUILT_IN
+                    && deco.member == NONE
+                    && self.param(deco) == Some(BuiltIn::WORKGROUP_SIZE.0)
+            })
+            .map(|deco| deco.target)
+    }
+
     /// The `ArrayStride` of the array type `ty`, where it has one.
     #[must_use]
     pub fn array_stride(&self, ty: TypeId) -> Option<u32> {

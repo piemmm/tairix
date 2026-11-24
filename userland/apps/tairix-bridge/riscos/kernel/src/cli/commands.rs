@@ -299,7 +299,7 @@ pub(crate) fn time(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
         word.r[..2].copy_from_slice(&[READ_CLOCK, block]);
         os.perform(X | os::WORD, &mut word)?;
         let mut convert = Regs::default();
-        convert.r[..5].copy_from_slice(&[u32::MAX, block, buffer, 256, format]);
+        convert.r[..5].copy_from_slice(&[crate::territory::CURRENT, block, buffer, 256, format]);
         os.perform(X | crate::territory::CONVERT_DATE_AND_TIME, &mut convert)?;
         let (text, _) = os.read_until(convert.r[0], 256, |b| b == 0)?;
         os.write_line(&text)

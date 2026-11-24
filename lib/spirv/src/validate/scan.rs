@@ -21,7 +21,7 @@ use super::{
 };
 use crate::enumerant::{AddressingModel, Capability, MemoryModel};
 use crate::grammar::Shape;
-use crate::{Id, Instruction, Module, Op, Value};
+use crate::{Id, Instruction, Module, Op, Value, Version};
 
 /// One function: where its definition starts and ends, how many parameters
 /// it has, and its blocks.
@@ -126,6 +126,9 @@ pub(crate) struct Validator<'m> {
     pub(crate) facts: Vec<Facts>,
     /// Each pointer's, and each image loaded through one's, root, by slot.
     pub(crate) roots: Vec<Root>,
+    /// The slot of the sampler root each sampled image samples through, by
+    /// slot.
+    pub(crate) samplers: Vec<u32>,
     /// The ids decorated `FPRoundingMode`, ascending.
     pub(crate) rounded: Vec<Id>,
     /// `OpEntryPoint` instructions, by index.
@@ -150,7 +153,7 @@ impl<'m> Validator<'m> {
         module: &'m Module,
     ) -> Result<(Vec<Capability>, Vec<EntryPoint>, Kept), Refusal> {
         let enabled = Enabled::collect(module)?;
-        if enabled.version < allow::OLDEST {
+        if enabled.version < Version::OLDEST {
             return Err(Rule::Version.module());
         }
         let mut v = Self {
@@ -170,6 +173,7 @@ impl<'m> Validator<'m> {
             function_ids: Vec::new(),
             facts: Vec::new(),
             roots: Vec::new(),
+            samplers: Vec::new(),
             rounded: Vec::new(),
             entry_points: Vec::new(),
             modes: Vec::new(),
@@ -197,6 +201,8 @@ impl<'m> Validator<'m> {
                 forbid: Access::NONE,
             },
         );
+        v.samplers = with_capacity(v.defs.len())?;
+        v.samplers.resize(v.defs.len(), NONE);
         v.declare()?;
         if v.m
             .instructions()

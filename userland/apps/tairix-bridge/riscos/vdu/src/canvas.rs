@@ -33,9 +33,7 @@ impl Block {
     /// The block of the sixteen words at `address`, wherever it lies.
     pub(crate) fn read_at(os: &mut Os<'_>, address: u32) -> Result<Self, Fail> {
         let mut words = [0u32; 16];
-        for (i, word) in (0u32..).zip(words.iter_mut()) {
-            *word = os.read_word(address.wrapping_add(4 * i))?;
-        }
+        os.read_words(address, &mut words)?;
         Self::of_words(os, words)
     }
 

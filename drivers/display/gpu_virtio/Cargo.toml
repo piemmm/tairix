@@ -39,6 +39,12 @@ tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
 # The GPU seam a Venus context serves: the model its jobs are checked and
 # ordered by, the hardware backend it drives, and the runtime serving it.
 tairix-gpu = { path = "../../../lib/gpu", version = "=0.0.0" }
+# The check an indirect dispatch's counts are held to on the device.
+tairix-shaders = { path = "../../../lib/shaders", version = "=0.0.0" }
+# The modules a pipeline is made of, folded as the host compiles them.
+tairix-spirv = { path = "../../../lib/spirv", version = "=0.0.0" }
+# The claims a Venus context's jobs hold their feedback slots by.
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 # The rounding a host's viewport bounds are stated with.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The bus-agnostic virtio split-virtqueue protocol.
@@ -65,6 +71,10 @@ tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0", features = [
 tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 # The Venus reply rounds, for the harness that drives them.
 tairix-drv-display-gpu-virtio = { path = ".", version = "=0.0.0", features = ["test-support"] }
+# The runner the test host's software device runs its dispatches on.
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0" }
+# The assembler the image dispatch tests write their modules in.
+tairix-spirv = { path = "../../../lib/spirv", version = "=0.0.0", features = ["test-support"] }
 
 [build-dependencies]
 tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

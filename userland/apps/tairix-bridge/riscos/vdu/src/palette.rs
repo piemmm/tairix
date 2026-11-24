@@ -277,18 +277,23 @@ pub(crate) fn is_default_256(colours: &[Rgb], kept: u8) -> bool {
 /// VIDC1's palette registers, a pixel's low four bits choosing one.
 pub(crate) const GROUP_BASES: usize = 16;
 
-/// The bits of a channel VIDC1 held a colour in: its top four.
-pub(crate) const VIDC1_CHANNEL: u8 = 0xF0;
+pub(crate) use tairix_vdu::palette::VIDC1_CHANNEL;
 
 /// The colour pixel `pixel` of a 256-colour mode whose palette is grouped
 /// shows from base colour `base` at VIDC1's four bits a channel, as RISC OS
 /// 5's ColourTrans and sprite palettes take it: each channel's
 /// [`VIDC1_CHANNEL`] bits, repeated below.
 const fn vidc1_shown(base: [u8; 3], pixel: u8) -> [u8; 3] {
-    const fn held(channel: u8) -> u8 {
-        (channel & VIDC1_CHANNEL) | (channel >> 4)
-    }
-    tairix_vdu::palette::grouped([held(base[0]), held(base[1]), held(base[2])], pixel)
+    use tairix_vdu::palette::{grouped, vidc1_channel};
+    let [red, green, blue] = base;
+    grouped(
+        [
+            vidc1_channel(red),
+            vidc1_channel(green),
+            vidc1_channel(blue),
+        ],
+        pixel,
+    )
 }
 
 /// The 256 colours a grouped palette of base words `bases` shows, as VIDC1
@@ -357,26 +362,32 @@ pub(crate) fn write_through(
             current(&vdu.palette, &format, u32::from(logical), how),
         ))
     })?;
-    let Some((how, [first, second])) = set else {
+    let Some((how, pair)) = set else {
         return Ok(());
     };
-    let mut regs = Regs::new([
-        u32::from(logical),
-        how,
-        first,
-        second,
-        reason::SET,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-    ]);
+    set_through(os, u32::from(logical), how, pair)
+}
+
+/// Logical colour `logical`, its entry `how`, set through `PaletteV` to the
+/// flash states `first` and `second`.
+pub(crate) fn set_through(
+    os: &mut Os<'_>,
+    logical: u32,
+    how: u32,
+    [first, second]: [u32; 2],
+) -> Result<(), Fail> {
+    let mut regs = Regs::default();
+    regs.r[..5].copy_from_slice(&[logical, how, first, second, reason::SET]);
     os.call_vector(PALETTE_V, &mut regs, Entry::Supervisor)?;
     Ok(())
+}
+
+/// Logical colour `logical`'s two flash states, as `PaletteV` reads them.
+pub(crate) fn read_through(os: &mut Os<'_>, logical: u32) -> Result<[u32; 2], Fail> {
+    let mut regs = Regs::default();
+    regs.r[..5].copy_from_slice(&[logical, kind::NORMAL, 0, 0, reason::READ]);
+    os.call_vector(PALETTE_V, &mut regs, Entry::Supervisor)?;
+    Ok([regs.r[2], regs.r[3]])
 }
 
 /// `VDU 20`'s palette through `PaletteV`.

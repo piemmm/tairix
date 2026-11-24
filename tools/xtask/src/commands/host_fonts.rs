@@ -6,25 +6,24 @@
 //! could not draw. Verifying such an asset therefore needs the same
 //! resolution the running system does — so this drives the **real** `fontd`
 //! service over the committed `lib/font/assets/` tree through the store
-//! seam that service already has for host testing. Nothing about family
-//! resolution, per-scalar fallback, weight instancing or outline decoding is
-//! re-implemented here; only the on-disk reading is.
+//! seam that service already has for host testing, asked through `lib/font`'s
+//! own outline request and paging. Nothing about family resolution,
+//! per-scalar fallback, weight instancing or outline decoding is
+//! re-implemented here.
 
 use std::path::Path;
 
-use tairix_abi::font_ipc::{
-    decode_outlines_reply, FamilyKey, FontRequest, FontStretch, FontStyle, FontWeight, GlyphRun,
-    FONT_MAX_OUTLINE_REPLY,
+use tairix_abi::font_ipc::{FamilyKey, FontStretch, FontStyle, FontWeight, FONT_MAX_OUTLINE_REPLY};
+use tairix_font::{
+    ask_outlines, page_outlines, seam_metrics, seam_outlines, wire_face, OutlineReply, FACE_PROBE,
 };
-use tairix_font::{seam_outlines, OutlineReply};
 use tairix_fontd::discovery::discover;
 use tairix_fontd::host::DirectoryStore;
 use tairix_fontd::FontService;
-use tairix_log::{Event, Sink};
+use tairix_log::DiscardSink;
 use tairix_reclaim::{PressureBand, ReportedPressure};
 use tairix_svg::font::{
-    FaceId, FaceMetrics, FaceRequest, FontProvider, FontStyle as SvgStyle, FontUnavailable,
-    GlyphOutline,
+    FaceId, FaceMetrics, FaceRequest, FontProvider, FontUnavailable, GlyphOutline,
 };
 
 /// The RAM figure the build-time glyph cache is sized from: a build host has
@@ -37,17 +36,10 @@ const HOST_RAM_BYTES: u64 = 1 << 30;
 const HOST_HASH_KEY: tairix_hash::HashSeed =
     tairix_hash::HashSeed::from_words(0x7873_6B00_464F_4E54, 0x7873_6B00_464F_4E55);
 
-/// A log sink for a pass that has nowhere to send records.
-struct DiscardSink;
-
-impl Sink for DiscardSink {
-    fn write_event(&self, _event: &Event<'_>) {}
-}
-
 /// The build's font provider: the real service, over the committed store.
 pub struct HostFonts {
     service: FontService<'static>,
-    faces: Vec<(FamilyKey, FontWeight, FontStyle, FontStretch)>,
+    faces: Vec<(FamilyKey, (FontWeight, FontStyle, FontStretch))>,
     reply: Vec<u8>,
 }
 
@@ -78,64 +70,34 @@ impl HostFonts {
         })
     }
 
-    /// Ask the service for one run's outlines, exactly as a client would.
+    /// Ask the service for the outlines of a prefix of `run` in `face`,
+    /// exactly as a client would.
     fn ask(
         &mut self,
-        family: FamilyKey,
-        weight: FontWeight,
-        style: FontStyle,
-        stretch: FontStretch,
-        scalars: &[char],
+        run: &[char],
+        face: (FamilyKey, (FontWeight, FontStyle, FontStretch)),
     ) -> Option<OutlineReply> {
-        let run = GlyphRun::new(scalars).ok()?;
-        let request = FontRequest::Outlines {
-            family,
-            scalars: run,
-            weight,
-            style,
-            stretch,
-        }
-        .to_le_bytes();
-        let len = self.service.handle(&request, &mut self.reply);
-        let frame = self.reply.get(..len)?;
-        let batch = decode_outlines_reply(frame).ok()?;
-        Some(OutlineReply::from_batch(&batch))
+        let (family, instance) = face;
+        let service = &mut self.service;
+        ask_outlines(run, family, instance, &mut self.reply, |request, reply| {
+            Some(service.handle(request, reply))
+        })
     }
 }
 
 impl FontProvider for HostFonts {
     fn select(&mut self, req: &FaceRequest<'_>) -> Result<FaceMetrics, FontUnavailable> {
-        let family = FamilyKey::new(req.family).map_err(|_| FontUnavailable)?;
-        let weight = FontWeight::new(req.weight).map_err(|_| FontUnavailable)?;
-        let style = match req.style {
-            SvgStyle::Normal => FontStyle::Normal,
-            SvgStyle::Italic => FontStyle::Italic,
-            SvgStyle::Oblique => FontStyle::Oblique,
-        };
-        let stretch = FontStretch::new(req.stretch).map_err(|_| FontUnavailable)?;
-        let instance = (family, weight, style, stretch);
-        let held = self.faces.iter().position(|face| *face == instance);
-        let reply = self
-            .ask(family, weight, style, stretch, &[' '])
-            .ok_or(FontUnavailable)?;
+        let face = wire_face(req)?;
+        let held = self.faces.iter().position(|known| *known == face);
+        let reply = self.ask(&[FACE_PROBE], face).ok_or(FontUnavailable)?;
         let index = if let Some(index) = held {
             index
         } else {
-            self.faces.push(instance);
+            self.faces.push(face);
             self.faces.len() - 1
         };
-        let metrics = FaceMetrics {
-            id: FaceId::new(u32::try_from(index).map_err(|_| FontUnavailable)?),
-            units_per_em: f64::from(reply.units_per_em),
-            ascent: f64::from(reply.ascent),
-            descent: f64::from(reply.descent),
-            line_gap: f64::from(reply.line_gap),
-        };
-        if metrics.is_usable() {
-            Ok(metrics)
-        } else {
-            Err(FontUnavailable)
-        }
+        let id = FaceId::new(u32::try_from(index).map_err(|_| FontUnavailable)?);
+        seam_metrics(id, reply.face)
     }
 
     fn outlines(
@@ -144,21 +106,14 @@ impl FontProvider for HostFonts {
         run: &[char],
         out: &mut Vec<GlyphOutline>,
     ) -> Result<(), FontUnavailable> {
-        let (family, weight, style, stretch) =
-            *self.faces.get(face.get() as usize).ok_or(FontUnavailable)?;
-        let mut left = run;
-        while !left.is_empty() {
-            let reply = self
-                .ask(family, weight, style, stretch, left)
-                .ok_or(FontUnavailable)?;
-            if reply.glyphs.is_empty() {
-                return Err(FontUnavailable);
-            }
-            let answered = reply.glyphs.len();
-            out.extend(seam_outlines(reply));
-            left = &left[answered..];
-        }
-        Ok(())
+        let wire = *self.faces.get(face.get() as usize).ok_or(FontUnavailable)?;
+        page_outlines(
+            self,
+            run,
+            |fonts, asked| fonts.ask(asked, wire),
+            |_, _, reply| out.extend(seam_outlines(reply)),
+        )
+        .ok_or(FontUnavailable)
     }
 }
 
@@ -166,7 +121,8 @@ impl FontProvider for HostFonts {
 mod tests {
     use std::path::PathBuf;
 
-    use tairix_svg::font::{FaceRequest, FontProvider, FontStyle};
+    use tairix_abi::font_ipc::FONT_MAX_GLYPH_RUN;
+    use tairix_svg::font::{FaceId, FaceRequest, FontProvider, FontStyle};
 
     use super::super::font_store::ASSETS_DIR;
     use super::HostFonts;
@@ -177,8 +133,8 @@ mod tests {
             .join(ASSETS_DIR)
     }
 
-    #[test]
-    fn the_committed_store_draws_text_through_the_service() {
+    /// The committed store's provider, and its sans-serif face.
+    fn sans_serif() -> (HostFonts, FaceId) {
         let mut fonts = HostFonts::open(&committed_store()).expect("the committed store");
         let face = fonts
             .select(&FaceRequest {
@@ -188,13 +144,28 @@ mod tests {
                 stretch: 10_000,
             })
             .expect("a sans-serif face");
+        (fonts, face.id)
+    }
+
+    #[test]
+    fn the_committed_store_draws_text_through_the_service() {
+        let (mut fonts, face) = sans_serif();
         let mut outlines = Vec::new();
         // The alef is drawn by a fallback face, read only once it is asked for.
         fonts
-            .outlines(face.id, &['T', 'a', '\u{05D0}'], &mut outlines)
+            .outlines(face, &['T', 'a', '\u{05D0}'], &mut outlines)
             .expect("outlines");
         assert_eq!(outlines.len(), 3);
         assert!(outlines.iter().all(|glyph| glyph.advance > 0.0));
+    }
+
+    #[test]
+    fn a_run_longer_than_one_request_carries_is_drawn_whole() {
+        let (mut fonts, face) = sans_serif();
+        let run = ['a'; FONT_MAX_GLYPH_RUN + 8];
+        let mut outlines = Vec::new();
+        fonts.outlines(face, &run, &mut outlines).expect("outlines");
+        assert_eq!(outlines.len(), run.len());
     }
 
     #[test]

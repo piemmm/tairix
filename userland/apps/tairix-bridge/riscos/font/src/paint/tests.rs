@@ -1,18 +1,15 @@
 use alloc::vec::Vec;
 
 use tairix_riscos_filing::session::Session;
+use tairix_riscos_kernel::swi::font::flag::{HANDLE, WORDS};
 use tairix_riscos_kernel::swi::font::TRUE_COLOURS;
 
 use crate::fixture::{
-    call, fill, find, find_at, fonts, mode, pixels, write, write_words, BLOCK, TEXT,
+    call, fill, find, find_at, font_paint, fonts, mode, pixels, write, write_words, AT, BLOCK, TEXT,
 };
-use crate::layout::flag::{HANDLE, WORDS};
 use crate::module::call::{
     CARET, CURRENT_FONT, PAINT, SET_FONT_COLOURS, SET_FONT_MAX, SET_PALETTE,
 };
-
-/// Where the probes painted: 125 pixels across and 200 up in mode 28.
-const AT: [u32; 2] = [100_000, 160_000];
 
 /// `FontMax` to `FontMax5` as the machine the probes ran on had them
 /// configured.
@@ -37,8 +34,7 @@ fn mode_28() -> Session {
 
 /// `Font_Paint` of `text` in `handle` with `flags` from the probes' point.
 fn paint(s: &mut Session, handle: u32, text: &[u8], flags: u32) -> Result<(), u32> {
-    let at = write(s, TEXT, text);
-    call(s, PAINT, &[handle, at, HANDLE | flags, AT[0], AT[1]]).map(drop)
+    font_paint(s, handle, text, flags, AT, [0, 0])
 }
 
 /// The rows, from the screen's top, of `rows` that hold any pixel other

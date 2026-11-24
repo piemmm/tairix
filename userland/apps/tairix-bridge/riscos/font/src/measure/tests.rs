@@ -1,5 +1,6 @@
 //! Each number here is one RISC OS 5.30 gave for the same fonts and strings.
 
+use super::flag::{BBOX, CARET, COUNT, MATRIX_OUT};
 use super::*;
 use crate::fixture::{
     call, find, find_at, fonts, read_words, write, write_words, BLOCK, MATRIX, TEXT,
@@ -10,17 +11,10 @@ use crate::module::call::{
     SET_FONT, SET_FONT_COLOURS, STRING_BBOX, STRING_WIDTH,
 };
 use tairix_riscos_filing::session::Session;
-
-const FONT: u32 = 1 << 8;
-const KERN: u32 = 1 << 9;
-const BLOCKED: u32 = 1 << 5;
-const MATRIXED: u32 = 1 << 6;
-const LENGTH: u32 = 1 << 7;
-const RTL: u32 = 1 << 10;
-const CARET: u32 = 1 << 17;
-const BBOX: u32 = 1 << 18;
-const MATRIX_OUT: u32 = 1 << 19;
-const COUNT: u32 = 1 << 20;
+use tairix_riscos_kernel::swi::font::flag::{
+    BLOCK as BLOCKED, HALFWORDS, HANDLE as FONT, KERN, LENGTH, MATRIX as MATRIXED, OS_UNITS,
+    RIGHT_TO_LEFT as RTL, WORDS,
+};
 const NONE: i32 = -1;
 const FAR: i32 = i32::MAX;
 
@@ -773,11 +767,11 @@ fn wide_strings_take_wide_units_and_a_utf8_font_reads_utf8() {
         (regs.r[1] - at, regs.r[3].cast_signed())
     };
     assert_eq!(
-        wide(&mut s, h, &halfwords(&[65, 66, 0]), 1 << 12),
+        wide(&mut s, h, &halfwords(&[65, 66, 0]), HALFWORDS),
         (4, 16200)
     );
     assert_eq!(
-        wide(&mut s, h, &halfwords(&[65, 0x141, 66, 0]), 1 << 12),
+        wide(&mut s, h, &halfwords(&[65, 0x141, 66, 0]), HALFWORDS),
         (6, 16200)
     );
     assert_eq!(
@@ -785,7 +779,7 @@ fn wide_strings_take_wide_units_and_a_utf8_font_reads_utf8() {
             &mut s,
             h,
             &halfwords(&[65, 9, 0xFC18, 0xFFFF, 66, 0]),
-            1 << 12
+            HALFWORDS
         ),
         (10, 15200)
     );
@@ -794,7 +788,7 @@ fn wide_strings_take_wide_units_and_a_utf8_font_reads_utf8() {
             &mut s,
             h,
             &halfwords(&[65, 21, 0x100, 0x1F, 66, 0]),
-            1 << 12
+            HALFWORDS
         ),
         (10, 16200)
     );
@@ -803,12 +797,12 @@ fn wide_strings_take_wide_units_and_a_utf8_font_reads_utf8() {
             &mut s,
             h,
             &words(&[65, 9, (-1000i32).cast_unsigned(), 66, 0]),
-            1 << 13
+            WORDS
         ),
         (16, 15200)
     );
     assert_eq!(
-        wide(&mut s, h, &words(&[65, 66, 0]), 3 << 12),
+        wide(&mut s, h, &words(&[65, 66, 0]), HALFWORDS | WORDS),
         (8, 16200),
         "words where both are asked"
     );
@@ -824,7 +818,7 @@ fn wide_strings_take_wide_units_and_a_utf8_font_reads_utf8() {
             &mut s,
             utf8,
             &halfwords(&[65, 0xD800, 0xDC00, 66, 0]),
-            1 << 12
+            HALFWORDS
         ),
         (8, 16200)
     );
@@ -1008,14 +1002,14 @@ fn character_boxes_in_os_units_are_rounded_pixels_two_further_out() {
         (105, [-2, -4, 10, 20]),
         (90, [0, 0, 0, 0]),
     ] {
-        assert_eq!(cbb(&mut s, h, code, 1 << 4), expected, "{code}");
+        assert_eq!(cbb(&mut s, h, code, OS_UNITS), expected, "{code}");
     }
     let tall = find_at(&mut s, b"Scan", (160, 240), (90, 45)).expect("10 by 15");
-    assert_eq!(cbb(&mut s, tall, 65, 1 << 4), [-2, -4, 20, 18]);
+    assert_eq!(cbb(&mut s, tall, 65, OS_UNITS), [-2, -4, 20, 18]);
     assert_eq!(cbb(&mut s, tall, 69, 0), [-1000, 1500, 11010, 13515]);
     let sheared = find(&mut s, b"Scan\\M65536 0 16384 65536 100 -50", 192);
     assert_eq!(cbb(&mut s, sheared, 69, 0), [-800, 1150, 16015, 10762]);
-    assert_eq!(cbb(&mut s, sheared, 65, 1 << 4), [-2, -4, 30, 24]);
+    assert_eq!(cbb(&mut s, sheared, 65, OS_UNITS), [-2, -4, 30, 24]);
     let info = |s: &mut Session, font: u32| {
         let r = call(s, READ_INFO, &[font]).expect("info");
         r.r[1..5]

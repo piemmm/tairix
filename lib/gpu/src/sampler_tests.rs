@@ -1,4 +1,4 @@
-use super::{CompareOp, Filter, SamplerDesc, MAX_LOD_BIAS};
+use super::{CompareOp, Filter, SamplerDesc};
 use crate::Error;
 
 fn device() -> crate::DeviceInfo {
@@ -28,11 +28,20 @@ fn level_of_detail_clamps_and_bias_are_held_to_their_range() {
         ..SamplerDesc::LINEAR
     };
     assert_eq!(infinite.check(&device()), Err(Error::OutOfRange));
-    let biased = SamplerDesc {
-        lod_bias: MAX_LOD_BIAS + 1.0,
-        ..SamplerDesc::LINEAR
-    };
-    assert_eq!(biased.check(&device()), Err(Error::OutOfRange));
+    let mut biased = device();
+    biased.limits.max_sampler_lod_bias = 2;
+    for (bias, outcome) in [
+        (2.0, Ok(())),
+        (-2.0, Ok(())),
+        (2.5, Err(Error::OutOfRange)),
+        (-2.5, Err(Error::OutOfRange)),
+    ] {
+        let sampler = SamplerDesc {
+            lod_bias: bias,
+            ..SamplerDesc::LINEAR
+        };
+        assert_eq!(sampler.check(&biased), outcome, "a bias of {bias}");
+    }
 }
 
 #[test]

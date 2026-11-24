@@ -18,7 +18,7 @@ use tairix_colour::Rgba;
 use tairix_fsmeta::preset::acorn::latin1_byte;
 use tairix_image::{
     DensityUnit, EncodeError, JpegFrame, SpriteInput, SpriteMode, SpriteName, SpritePalette,
-    SurfacePicture,
+    SurfacePicture, STANDARD_SPRITE_DPI, STANDARD_SPRITE_EIG,
 };
 use tairix_raster::Surface;
 use tairix_softfloat::fpa_words;
@@ -27,17 +27,18 @@ use tairix_util::mathf::{fabs, floor, fmax, fmin, round_i32, sqrt};
 
 use super::format::{
     CAP_BUTT, CAP_ROUND, CAP_SQUARE, CAP_TRIANGLE, CLOSE, CURVE, DASHED, END, END_CAP_SHIFT,
-    FONT_TABLE, GROUP, GROUP_NAME, JOIN_BEVEL, JOIN_MITRE, JOIN_ROUND, JPEG, LINE, MAGIC,
-    MAJOR_VERSION, MOVE, NO_COLOUR, OBJECT_HEADER, OPTIONS, PATH, SPRITE, START_CAP_SHIFT, TEXT,
-    TRANSFORMED_SPRITE, TRANSFORMED_TEXT, TRIANGLE_LENGTH_SHIFT, TRIANGLE_SIZE,
-    TRIANGLE_WIDTH_SHIFT, WINDING_EVEN_ODD,
+    FIXED_ONE, FONT_TABLE, GROUP, GROUP_NAME, JOIN_BEVEL, JOIN_MITRE, JOIN_ROUND, JPEG, LINE,
+    MAGIC, MAJOR_VERSION, MITRE_LIMIT, MOVE, NO_COLOUR, OBJECT_BOUNDS, OBJECT_HEADER, OBJECT_SIZE,
+    OPTIONS, PATH, SPRITE, START_CAP_SHIFT, TEXT, TRANSFORMED_SPRITE, TRANSFORMED_TEXT,
+    TRIANGLE_LENGTH_SHIFT, TRIANGLE_SIZE, TRIANGLE_UNIT, TRIANGLE_WIDTH_SHIFT, WINDING_EVEN_ODD,
 };
+use super::units::DRAW_UNITS_PER_INCH;
 use super::{
-    a_paper, word_of, Font, FIXED_ONE, LANDSCAPE, MITRE_LIMIT, MOST_A_PAPER, OPTIONS_SIZE,
-    PAPER_LIMITS_SHOWN, TRIANGLE_UNIT, UNITS_PER_PIXEL,
+    a_paper, pixel_pitch, word_of, Font, LANDSCAPE, MOST_A_PAPER, OPTIONS_SIZE, PAPER_LIMITS_SHOWN,
+    UNITS_PER_PIXEL,
 };
 use crate::children::Children;
-use crate::drawing::{Drawing, Grid, Page, Unit, PAPER_WHITE, PIXELS_PER_INCH};
+use crate::drawing::{Drawing, Grid, Page, Unit, PAPER_WHITE};
 use crate::image::{survey, Encoding, Image, Source};
 use crate::node::{Kind, Node};
 use crate::render::{arrowheads, stroke_area};
@@ -268,7 +269,8 @@ impl Out {
     /// word.
     fn sized(&mut self, at: usize) -> Result<(), DrawingError> {
         let size = u32::try_from(self.0.len() - at).map_err(|_| DrawingError::TooComplex)?;
-        self.0[at + 4..at + 8].copy_from_slice(&size.to_le_bytes());
+        let field = at + OBJECT_SIZE;
+        self.0[field..field + 4].copy_from_slice(&size.to_le_bytes());
         Ok(())
     }
 
@@ -277,7 +279,7 @@ impl Out {
     fn begin(&mut self, kind: u32) -> Result<usize, DrawingError> {
         let at = self.0.len();
         self.word(kind)?;
-        self.bytes(&[0; OBJECT_HEADER - 4])?;
+        self.bytes(&[0; OBJECT_HEADER - OBJECT_SIZE])?;
         Ok(at)
     }
 
@@ -287,7 +289,7 @@ impl Out {
         self.pad()?;
         self.sized(at)?;
         for (index, corner) in extent.0.iter().enumerate() {
-            let field = at + 8 + 4 * index;
+            let field = at + OBJECT_BOUNDS + 4 * index;
             self.0[field..field + 4].copy_from_slice(&corner.to_le_bytes());
         }
         Ok(())
@@ -365,14 +367,14 @@ impl Pen {
         let width = f64::from(self.width);
         let half = width / 2.0;
         let join = if self.join == JOIN_MITRE {
-            MITRE_LIMIT
+            f64::from(MITRE_LIMIT)
         } else {
             1.0
         };
         let (across, along) = self.caps.triangle;
         fmax(
             half * fmax(join, core::f64::consts::SQRT_2),
-            f64::from(across + along) / TRIANGLE_UNIT * width + half,
+            f64::from(across + along) / f64::from(TRIANGLE_UNIT) * width + half,
         )
     }
 }
@@ -522,16 +524,15 @@ impl Writer<'_> {
         (width, height): (u32, u32),
         to_paper: Affine,
     ) -> Result<Option<Extent>, DrawingError> {
-        let pitch = |eig: u8| f64::from(1_u32 << eig) * 256.0;
         let native = Point::new(
-            f64::from(width) * pitch(eig.0),
-            f64::from(height) * pitch(eig.1),
+            f64::from(width) * pixel_pitch(eig.0),
+            f64::from(height) * pixel_pitch(eig.1),
         );
         let from_native = Affine {
-            a: 1.0 / pitch(eig.0),
+            a: 1.0 / pixel_pitch(eig.0),
             b: 0.0,
             c: 0.0,
-            d: -1.0 / pitch(eig.1),
+            d: -1.0 / pixel_pitch(eig.1),
             e: 0.0,
             f: f64::from(height),
         }
@@ -578,9 +579,9 @@ impl Writer<'_> {
         let (across, down) = frame
             .density
             .and_then(|density| density.whole_in(DensityUnit::Inch))
-            .unwrap_or((DESKTOP_DPI, DESKTOP_DPI));
+            .unwrap_or((STANDARD_SPRITE_DPI, STANDARD_SPRITE_DPI));
         let (stored_width, stored_height) = frame.stored;
-        let units_per_inch = UNITS_PER_PIXEL * f64::from(PIXELS_PER_INCH);
+        let units_per_inch = f64::from(DRAW_UNITS_PER_INCH);
         let span = |pixels: u32, dpi: u32| {
             size_unit(f64::from(pixels) * units_per_inch / f64::from(dpi)).map(|units| units.max(1))
         };
@@ -616,7 +617,7 @@ impl Writer<'_> {
     /// object's matrix holds it.
     fn matrix(&mut self, map: Affine) -> Result<(), DrawingError> {
         for entry in [map.a, map.b, map.c, map.d] {
-            self.out.int(unit(entry * FIXED_ONE)?)?;
+            self.out.int(unit(entry * f64::from(FIXED_ONE))?)?;
         }
         self.out.int(unit(map.e)?)?;
         self.out.int(unit(map.f)?)
@@ -1200,7 +1201,7 @@ fn head_caps(path: &Path, stroke: &Stroke, solid: bool) -> Option<Caps> {
 
 /// `widths` stroke widths in a triangle cap's sixteenths, where they fit.
 fn sixteenths(widths: f64) -> Option<u32> {
-    u32::try_from(round_i32(widths * TRIANGLE_UNIT))
+    u32::try_from(round_i32(widths * f64::from(TRIANGLE_UNIT)))
         .ok()
         .filter(|&sixteenths| sixteenths <= TRIANGLE_SIZE)
 }
@@ -1263,8 +1264,8 @@ fn mitres_differ(path: &Path, stroke: &Stroke) -> bool {
     if stroke.join != Join::Miter {
         return false;
     }
-    let low = fmin(stroke.miter_limit, MITRE_LIMIT) * (1.0 - NEAR);
-    let high = fmax(stroke.miter_limit, MITRE_LIMIT) * (1.0 + NEAR);
+    let low = fmin(stroke.miter_limit, f64::from(MITRE_LIMIT)) * (1.0 - NEAR);
+    let high = fmax(stroke.miter_limit, f64::from(MITRE_LIMIT)) * (1.0 + NEAR);
     // A corner's mitre, in half the stroke's width, as the stroker measures
     // it: the secant of half the angle the path turns through.
     let differs = |arriving: Point, leaving: Point| {
@@ -1323,12 +1324,9 @@ fn average(gradient: &Gradient) -> Rgba {
     Rgba::new(r, g, b, a)
 }
 
-/// The eigen factors a sprite made of a picture's pixels is drawn at: two OS
-/// units a pixel, the desktop's ninety to the inch.
-const SPRITE_EIG: (u8, u8) = (1, 1);
-
-/// The dots to the inch RISC OS takes a picture stating none to be at.
-const DESKTOP_DPI: u32 = 90;
+/// The eigen factors a sprite made of a picture's pixels is drawn at: the
+/// standard screen's.
+const SPRITE_EIG: (u8, u8) = (STANDARD_SPRITE_EIG, STANDARD_SPRITE_EIG);
 
 /// `pixels` as a 32-bit sprite, masked as they need: a mask bit where each
 /// pixel is wholly shown or hidden, an eight-bit mask where any is partly.

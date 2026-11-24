@@ -43,7 +43,8 @@ tairix-softfloat = { path = "../softfloat", version = "=0.0.0" }
 tairix-collections = { path = "../collections", version = "=0.0.0" }
 # The decoders a picture a document embeds is read through — PNG, JPEG and
 # RISC OS sprites, only ever in the parser sandbox — and the encoders a
-# writer makes one with where its bytes cannot pass on as they came.
+# writer makes one with where its bytes cannot pass on as they came; and the
+# OS unit and standard screen resolution RISC OS's units are derived from.
 tairix-image = { path = "../image", version = "=0.0.0" }
 
 [lints]

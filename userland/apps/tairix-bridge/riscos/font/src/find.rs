@@ -23,9 +23,9 @@ use crate::fontdata::{self, FontData, Unloaded, UTF8};
 use crate::grid::Axis;
 use crate::handles::bitmap_directory;
 use crate::handles::{Master, Size, Source, HANDLES};
-use crate::identifier::{self, encoding_key, Asked, Matrix};
+use crate::identifier::{self, encoding_key, letter, Asked, Matrix, FIELD};
 use crate::module::{error, raise, with};
-use crate::scan::{self, Unreadable};
+use crate::scan::{self, Unreadable, LIBRARY, PATH, PREFIX, ROM_FONTS};
 use crate::settings;
 
 /// The longest identifier read from the guest: past it, the rest is not
@@ -43,21 +43,21 @@ const NO_SIZE: i32 = -1;
 /// The encoding that is no encoding: a font's glyphs in its files' order.
 const GLYPH: &[u8] = b"glyph";
 
-/// `Font$Path` and `Font$Prefix` as the Font Manager starts them where they
-/// are not set: the library `Font$Prefix` names, then ResourceFS's fonts.
-const PATH: &[u8] = b"Font$Path";
-const PATH_DEFAULT: &[u8] = b"<Font$Prefix>.,Resources:$.Fonts.";
-const PREFIX: &[u8] = b"Font$Prefix";
+/// `Font$Prefix` as the Font Manager starts it where it is not set.
 const PREFIX_DEFAULT: &[u8] = b" ";
 
 /// Sets `Font$Path` and `Font$Prefix` to their defaults where they are not
-/// set.
+/// set: the path the library `Font$Prefix` names, then ResourceFS's fonts.
 pub(crate) fn set_path_defaults(os: &mut Os<'_>) -> Result<(), Fail> {
     if os.variable_text(PREFIX)?.is_none() {
         os.set_string_variable(PREFIX, PREFIX_DEFAULT)?;
     }
     if scan::read_variable(os, PATH)?.is_none() {
-        scan::set_macro(os, PATH, PATH_DEFAULT)?;
+        let mut path = LIBRARY.to_vec();
+        path.push(b',');
+        path.extend_from_slice(ROM_FONTS);
+        path.push(b'.');
+        scan::set_macro(os, PATH, &path)?;
     }
     Ok(())
 }
@@ -307,10 +307,10 @@ fn defn(os: &mut Os<'_>, handle: u32, full: bool) -> Result<Defn, Fail> {
 /// its name where a Messages file gives one, its encoding and its matrix.
 fn full_identifier(master: &Master, matrix: Option<Matrix>, territory: u32) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(b"\\F");
+    out.extend_from_slice(&[FIELD, letter::FONT]);
     out.extend_from_slice(&master.identifier);
     if let Some(name) = &master.name {
-        out.extend_from_slice(b"\\f");
+        out.extend_from_slice(&[FIELD, letter::FONT_NAME]);
         out.extend_from_slice(
             tairix_riscos_kernel::Decimal::of(territory.cast_signed()).as_bytes(),
         );
@@ -318,11 +318,11 @@ fn full_identifier(master: &Master, matrix: Option<Matrix>, territory: u32) -> V
         out.extend_from_slice(name);
     }
     if let Some(encoding) = &master.encoding {
-        out.extend_from_slice(b"\\E");
+        out.extend_from_slice(&[FIELD, letter::ENCODING]);
         out.extend_from_slice(encoding);
     }
     if let Some(matrix) = matrix {
-        out.extend_from_slice(b"\\M");
+        out.extend_from_slice(&[FIELD, letter::MATRIX]);
         out.extend_from_slice(&matrix.spelled());
     }
     out

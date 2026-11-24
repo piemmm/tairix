@@ -95,11 +95,6 @@ fn parse_attributes(text: &[u8]) -> Option<u32> {
     Some(bits)
 }
 
-/// A stamp's five bytes, as one is compared with another.
-const fn stamp_of(info: &Info) -> u64 {
-    ((info.load as u64 & 0xFF) << 32) | info.exec as u64
-}
-
 /// The stamps R4 to R7 bound where R3 asks for a range, as RISC OS 5 reads
 /// them: R4 and R6 the low words, R5 and R7 the high bytes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -110,15 +105,14 @@ struct Range {
 
 impl Range {
     fn of(regs: &Regs) -> Option<Self> {
-        let stamp = |low: u32, high: u32| (u64::from(high & 0xFF) << 32) | u64::from(low);
         (regs.r[3] & flag::TIMES != 0).then(|| Self {
-            from: stamp(regs.r[4], regs.r[5]),
-            to: stamp(regs.r[6], regs.r[7]),
+            from: fs::stamp::of(regs.r[5], regs.r[4]),
+            to: fs::stamp::of(regs.r[7], regs.r[6]),
         })
     }
 
     fn holds(range: Option<Self>, info: &Info) -> bool {
-        range.is_none_or(|range| (range.from..=range.to).contains(&stamp_of(info)))
+        range.is_none_or(|range| (range.from..=range.to).contains(&info.stamp()))
     }
 }
 
@@ -622,7 +616,7 @@ impl Copy {
         if is_directory(there) {
             return Err(name::named_error(os, error::WRONG_KIND, &to.path));
         }
-        let newer = self.flags & flag::NEWER == 0 || stamp_of(source) > stamp_of(there);
+        let newer = self.flags & flag::NEWER == 0 || source.stamp() > there.stamp();
         Ok(there.kind == NOTHING || (self.flags & flag::FORCE != 0 && newer))
     }
 

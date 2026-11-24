@@ -198,9 +198,11 @@ pub use sprite::{
     opaque_sprite_writes_back, sprite_type, LoneSprite, MaskDepth as SpriteMaskDepth,
     ModeWord as SpriteModeWord, NamedSprite, OpaqueSprite, Sprite, SpriteAreaReader, SpriteEntry,
     SpriteLayout, SpriteMode, SpriteName, SpritePalette, MAX_EIG as MAX_SPRITE_EIG,
-    PALETTE_ENTRY_LEN as SPRITE_PALETTE_ENTRY_LEN, SPRITE_HEADER_LEN,
+    OS_UNITS_PER_INCH, PALETTE_ENTRY_LEN as SPRITE_PALETTE_ENTRY_LEN, SPRITE_HEADER_LEN,
+    STANDARD_DPI as STANDARD_SPRITE_DPI, STANDARD_EIG as STANDARD_SPRITE_EIG,
 };
 pub use sprite_encode::SpriteInput;
+pub(crate) use tairix_util::endian::{le_u16, le_u32};
 pub use tiff::undo_horizontal_big_endian as undo_tiff_horizontal_big_endian;
 
 /// Bytes one decoded pixel occupies: straight-alpha RGBA8, the one output
@@ -262,26 +264,6 @@ pub(crate) fn same_shape(shape: (u32, u32), canvas: (u32, u32)) -> bool {
     let skew = (u64::from(shape.0) * u64::from(canvas.1))
         .abs_diff(u64::from(shape.1) * u64::from(canvas.0));
     skew <= u64::from(canvas.0.max(canvas.1))
-}
-
-/// The little-endian 16-bit value at `at`, or `None` where the input holds
-/// fewer than two bytes there.
-///
-/// The one definition of a little-endian field read: the formats that use
-/// one each name their own refusal for a missing field, but none of them
-/// needs its own copy of the read.
-pub(crate) fn le_u16(data: &[u8], at: usize) -> Option<u16> {
-    data.get(at..)
-        .and_then(<[u8]>::first_chunk::<2>)
-        .map(|bytes| u16::from_le_bytes(*bytes))
-}
-
-/// The little-endian 32-bit value at `at`, or `None` where the input holds
-/// fewer than four bytes there.
-pub(crate) fn le_u32(data: &[u8], at: usize) -> Option<u32> {
-    data.get(at..)
-        .and_then(<[u8]>::first_chunk::<4>)
-        .map(|bytes| u32::from_le_bytes(*bytes))
 }
 
 /// The big-endian 16-bit value at `at`, for a format that carries its own

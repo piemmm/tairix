@@ -1040,8 +1040,18 @@ impl Round {
         if from.desc.samples != into.desc.samples {
             return Err(Error::Samples);
         }
+        // Images of different kinds copy only between a rectangle and a volume.
+        let kinds = (from.desc.dimension, into.desc.dimension);
+        let kinds_meet = kinds.0 == kinds.1
+            || matches!(
+                kinds,
+                (ImageDimension::D2, ImageDimension::D3) | (ImageDimension::D3, ImageDimension::D2)
+            );
         for copy in regions {
-            if copy.src.layers != copy.dst.layers || copy.src.aspect != copy.dst.aspect {
+            if !kinds_meet
+                || copy.src.layers != copy.dst.layers
+                || copy.src.aspect != copy.dst.aspect
+            {
                 return Err(Error::Shape);
             }
             part_within(&from.desc, &copy.src, copy.src_origin, copy.extent)?;

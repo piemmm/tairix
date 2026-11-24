@@ -5,7 +5,7 @@
 //! draw binds overlapping what the pass writes.
 
 use crate::device::as_software;
-use tairix_spirv::{Access, BindingKind, Component, ImageShape, Stages};
+use tairix_spirv::{Access, Component, ImageShape, Stages};
 
 use crate::device_tests::{context, queue, submit};
 use crate::render::tests::{
@@ -196,7 +196,7 @@ fn a_draw_its_pipeline_could_not_run_is_refused_at_the_draw() {
             )
             .expect("recorded");
     };
-    let draws: [(&str, Error, Draw<'_>); 2] = [
+    let draws: [(&str, Error, Draw<'_>); 3] = [
         (
             "a viewport past the device's bounds",
             Error::OutOfRange,
@@ -210,6 +210,14 @@ fn a_draw_its_pipeline_could_not_run_is_refused_at_the_draw() {
             Error::Bindings,
             Draw {
                 vertex_buffers: &[],
+                ..draw
+            },
+        ),
+        (
+            "vertices bound off their attributes' alignment",
+            Error::Misaligned,
+            Draw {
+                vertex_buffers: &[(&buffer, 2)],
                 ..draw
             },
         ),
@@ -423,18 +431,21 @@ fn an_indirect_draw_of_more_records_than_its_device_reads_is_refused() {
     }
 }
 
-/// A layout of one sampled image the fragment stage reads.
-fn sampling(context: &Context) -> (BindSetLayout, PipelineLayout) {
+/// A layout of one sampled image of `sample` the fragment stage reads.
+fn sampling(context: &Context, sample: crate::SampleType) -> (BindSetLayout, PipelineLayout) {
     let set_layout = context
         .create_bind_set_layout(&[crate::LayoutBinding {
             binding: 0,
-            kind: BindingKind::SampledImage(ImageShape {
-                dim: tairix_spirv::enumerant::Dim::DIM_2D,
-                arrayed: false,
-                multisampled: false,
-                component: Component::Float,
-                format: tairix_spirv::enumerant::ImageFormat::UNKNOWN,
-            }),
+            kind: crate::DescriptorType::SampledImage(
+                ImageShape {
+                    dim: tairix_spirv::enumerant::Dim::DIM_2D,
+                    arrayed: false,
+                    multisampled: false,
+                    component: Component::Float,
+                    format: tairix_spirv::enumerant::ImageFormat::UNKNOWN,
+                },
+                sample,
+            ),
             count: 1,
             access: Access::READ,
             stages: Stages::FRAGMENT,
@@ -504,7 +515,7 @@ fn draw_sampling(
 fn a_draw_binding_what_its_pass_writes_is_refused() {
     let device = rendering();
     let context = context(&device);
-    let (set_layout, layout) = sampling(&context);
+    let (set_layout, layout) = sampling(&context, crate::SampleType::UnfilterableFloat);
     let targets = [plain(Format::Rgba8Unorm)];
     let pipeline = plain_pipeline(&context, &layout, &targets, None);
     let colour = target(&context, Format::Rgba8Unorm, (8, 8), 1);
@@ -521,7 +532,7 @@ fn a_draw_binding_what_its_pass_writes_is_refused() {
 fn a_depth_attachment_only_tested_may_be_sampled_and_one_written_may_not() {
     let device = rendering();
     let context = context(&device);
-    let (set_layout, layout) = sampling(&context);
+    let (set_layout, layout) = sampling(&context, crate::SampleType::UnfilterableDepth);
     let targets = [plain(Format::Rgba8Unorm)];
     let colour = target(&context, Format::Rgba8Unorm, (8, 8), 1);
     let depth = target(&context, Format::Depth32Float, (8, 8), 1);
@@ -811,13 +822,16 @@ fn sampled_set(
     let set_layout = context
         .create_bind_set_layout(&[crate::LayoutBinding {
             binding: 0,
-            kind: BindingKind::SampledImage(ImageShape {
-                dim: tairix_spirv::enumerant::Dim::DIM_2D,
-                arrayed: false,
-                multisampled: false,
-                component: Component::Float,
-                format: tairix_spirv::enumerant::ImageFormat::UNKNOWN,
-            }),
+            kind: crate::DescriptorType::SampledImage(
+                ImageShape {
+                    dim: tairix_spirv::enumerant::Dim::DIM_2D,
+                    arrayed: false,
+                    multisampled: false,
+                    component: Component::Float,
+                    format: tairix_spirv::enumerant::ImageFormat::UNKNOWN,
+                },
+                crate::SampleType::UnfilterableFloat,
+            ),
             count: 1,
             access: Access::READ,
             stages: Stages::FRAGMENT,
@@ -948,7 +962,8 @@ fn nothing_is_made_under_the_devices_lock() {
     assert_eq!(makings_under(), before, "each made with the lock let go");
     // The note counts what is made under the lock.
     let held = as_software(&context.host).model.lock();
-    let made = as_software(&context.host).image_form(rendered.image.desc());
+    let device = held.device(context.key).expect("live");
+    let made = as_software(&context.host).image_form(&device, rendered.image.desc());
     drop(held);
     assert!(made.is_ok());
     assert_eq!(makings_under(), before + 1, "and so would catch one");
@@ -1023,7 +1038,7 @@ fn a_draw_writing_a_depth_attachment_it_only_tests_is_refused() {
 fn an_attachment_of_a_format_the_device_does_not_render_to_is_refused() {
     let device = crate::binding::tests::device_stating(|info| {
         info.formats = crate::FormatTable::from_fn(|format| {
-            let stated = format.software_features();
+            let stated = format.features();
             if format == Format::Rgba8UnormSrgb {
                 stated.without(crate::FormatFeatures::COLOR_ATTACHMENT)
             } else {

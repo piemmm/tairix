@@ -9,12 +9,16 @@
 //! is checked on each axis a step changes. Where a limit is passed the walk
 //! stops before the step, or with a split character at the last one met.
 
+use tairix_colour::Rgb;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
+use tairix_riscos_kernel::swi::font::{code, flag};
 
 use crate::colours::Colours;
+use crate::glyph_names::{paired, HIGH_SURROGATES, LOW_SURROGATES};
 use crate::identifier::Matrix;
 use crate::metrics;
 use crate::module::{error, raise};
+use crate::outlines::sign_extend;
 use crate::resolve::{self, Font};
 use crate::transform::{scaled, scaled_box, Transform};
 use crate::units;
@@ -93,25 +97,6 @@ pub(crate) struct Walked {
     pub(crate) past: Option<Place>,
 }
 
-/// The flag bits `Font_ScanString` and `Font_Paint` share in R2.
-pub(crate) mod flag {
-    /// R4 and R5 are in OS units: `Font_Paint`'s, and `Font_CharBBox`'s R2.
-    pub(crate) const OS_UNITS: u32 = 1 << 4;
-    /// R5 points at a block: justification offsets first.
-    pub(crate) const BLOCK: u32 = 1 << 5;
-    /// R6 points at a matrix.
-    pub(crate) const MATRIX: u32 = 1 << 6;
-    /// R7 holds the string's length in bytes.
-    pub(crate) const LENGTH: u32 = 1 << 7;
-    /// R0 holds the font, nought for the current one.
-    pub(crate) const HANDLE: u32 = 1 << 8;
-    pub(crate) const KERN: u32 = 1 << 9;
-    pub(crate) const RIGHT_TO_LEFT: u32 = 1 << 10;
-    /// The string's units are halfwords, or words.
-    pub(crate) const HALFWORDS: u32 = 1 << 12;
-    pub(crate) const WORDS: u32 = 1 << 13;
-}
-
 /// The font and the request R0 to R7 make of a string walk as
 /// `Font_ScanString` and `Font_Paint` both take them, every limit and split
 /// character left to the caller.
@@ -130,10 +115,10 @@ pub(crate) fn requested(os: &mut Os<'_>, regs: &Regs) -> Result<(Font, Request),
         Form::Bytes
     };
     let (space, letter) = if flags & flag::BLOCK != 0 {
-        let block = regs.r[5];
-        let word =
-            |os: &mut Os<'_>, at: u32| os.read_word(block.wrapping_add(at)).map(u32::cast_signed);
-        ((word(os, 0)?, word(os, 4)?), (word(os, 8)?, word(os, 12)?))
+        let mut block = [0; 4];
+        os.read_words(regs.r[5], &mut block)?;
+        let [space_x, space_y, letter_x, letter_y] = block.map(u32::cast_signed);
+        ((space_x, space_y), (letter_x, letter_y))
     } else {
         ((0, 0), (0, 0))
     };
@@ -159,11 +144,9 @@ pub(crate) fn requested(os: &mut Os<'_>, regs: &Regs) -> Result<(Font, Request),
 
 /// The matrix of six words at `at`.
 pub(crate) fn read_matrix(os: &mut Os<'_>, at: u32) -> Result<Matrix, Fail> {
-    let mut words = [0i32; 6];
-    for (i, word) in (0u32..).zip(words.iter_mut()) {
-        *word = os.read_word(at.wrapping_add(4 * i))?.cast_signed();
-    }
-    Ok(Matrix(words))
+    let mut words = [0; 6];
+    os.read_words(at, &mut words)?;
+    Ok(Matrix(words.map(u32::cast_signed)))
 }
 
 /// A character a walk places: its glyph, where none is defined, the pen it
@@ -247,25 +230,6 @@ impl Visit for Measuring {
     }
 }
 
-/// The control codes a string holds.
-mod code {
-    pub(super) const END: u32 = 0;
-    pub(super) const MOVE_ACROSS: u32 = 9;
-    pub(super) const LINE_FEED: u32 = 10;
-    pub(super) const MOVE_UP: u32 = 11;
-    pub(super) const RETURN: u32 = 13;
-    pub(super) const COLOUR: u32 = 17;
-    pub(super) const COLOURS: u32 = 18;
-    pub(super) const RGB: u32 = 19;
-    pub(super) const COMMENT: u32 = 21;
-    pub(super) const UNDERLINE: u32 = 25;
-    pub(super) const FONT: u32 = 26;
-    pub(super) const MATRIX: u32 = 27;
-    pub(super) const MATRIX_MOVED: u32 = 28;
-    pub(super) const SPACE: u32 = 32;
-    pub(super) const BACKGROUND: u32 = 0x80;
-}
-
 /// What a step of the string is.
 #[derive(Clone, Copy)]
 enum Step {
@@ -333,20 +297,20 @@ impl Text {
         let width = self.form.width();
         let first = self.unit(os, offset)?;
         let after = offset + width;
-        if first >= code::SPACE {
+        let Some(control) = u8::try_from(first).ok().filter(|&unit| unit < code::SPACE) else {
             return self.character(os, offset, first, utf8);
-        }
+        };
         let mut params = Params {
             text: self,
             at: after,
         };
-        let step = match first {
+        let step = match control {
             code::END | code::LINE_FEED | code::RETURN => return Ok(Some((Step::End, offset))),
             code::MOVE_ACROSS | code::MOVE_UP => {
                 let Some(by) = params.distance(os)? else {
                     return Ok(None);
                 };
-                if first == code::MOVE_ACROSS {
+                if control == code::MOVE_ACROSS {
                     Step::Move(by, 0)
                 } else {
                     Step::Move(0, by)
@@ -368,7 +332,7 @@ impl Text {
             },
             code::COMMENT => loop {
                 match params.units(os, 1)? {
-                    Some([unit, ..]) if unit < code::SPACE => break Step::Passed,
+                    Some([unit, ..]) if unit < u32::from(code::SPACE) => break Step::Passed,
                     Some(_) => {}
                     None => return Ok(None),
                 }
@@ -384,7 +348,7 @@ impl Text {
                 None => return Ok(None),
             },
             code::MATRIX | code::MATRIX_MOVED => {
-                let words = if first == code::MATRIX { 4 } else { 6 };
+                let words = if control == code::MATRIX { 4 } else { 6 };
                 match params.matrix(os, words)? {
                     Some(matrix) => Step::Matrix(matrix),
                     None => return Ok(None),
@@ -410,8 +374,8 @@ impl Text {
             return Ok(Some((Step::Character(first), after)));
         }
         if self.form == Form::Halfwords {
-            if !(0xD800..=0xDBFF).contains(&first) {
-                let character = if (0xDC00..=0xDFFF).contains(&first) {
+            if !HIGH_SURROGATES.contains(&first) {
+                let character = if LOW_SURROGATES.contains(&first) {
                     REPLACEMENT
                 } else {
                     first
@@ -422,11 +386,10 @@ impl Text {
                 return Ok(None);
             }
             let low = self.unit(os, after)?;
-            if !(0xDC00..=0xDFFF).contains(&low) {
+            if !LOW_SURROGATES.contains(&low) {
                 return Ok(Some((Step::Character(REPLACEMENT), after)));
             }
-            let character = 0x1_0000 + ((first - 0xD800) << 10) + (low - 0xDC00);
-            return Ok(Some((Step::Character(character), after + width)));
+            return Ok(Some((Step::Character(paired(first, low)), after + width)));
         }
         let (more, lead_bits) = match first {
             0x00..=0x7F => return Ok(Some((Step::Character(first), after))),
@@ -480,10 +443,9 @@ impl Params<'_> {
     /// A move's distance: three bytes, two halfwords or a word, signed.
     fn distance(&mut self, os: &mut Os<'_>) -> Result<Option<i32>, Fail> {
         let distance = match self.text.form {
-            Form::Bytes => self.units(os, 3)?.map(|[a, b, c, _]| {
-                let packed = a | b << 8 | c << 16;
-                ((packed << 8).cast_signed()) >> 8
-            }),
+            Form::Bytes => self
+                .units(os, 3)?
+                .map(|[a, b, c, _]| sign_extend(a | b << 8 | c << 16, 24)),
             Form::Halfwords => self
                 .units(os, 2)?
                 .map(|[low, high, ..]| (low | high << 16).cast_signed()),
@@ -506,8 +468,11 @@ impl Params<'_> {
                 let Some([most, ..]) = self.units(os, 1)? else {
                     return Ok(None);
                 };
-                let rgb = |r: u32, g: u32, b: u32| r << 8 | g << 16 | b << 24;
-                Step::Rgb(rgb(r, g, b), rgb(fr, fg, fb), self.text.signed(most))
+                let rgb = |channels: [u32; 3]| {
+                    let [red, green, blue] = channels.map(|unit| unit.to_le_bytes()[0]);
+                    Rgb::new(red, green, blue).riscos_word()
+                };
+                Step::Rgb(rgb([r, g, b]), rgb([fr, fg, fb]), self.text.signed(most))
             }
             Form::Halfwords => {
                 let Some([bl, bh, fl, fh]) = self.units(os, 4)? else {
@@ -601,8 +566,8 @@ impl Walker {
                 self.place.pen = (from.0.wrapping_add(x), from.1.wrapping_add(y));
                 visit.moved(os, from, self.place.pen)?;
             }
-            Step::Colour(colour) if colour & code::BACKGROUND != 0 => {
-                colours.background = colour & !code::BACKGROUND;
+            Step::Colour(colour) if colour & u32::from(code::BACKGROUND) != 0 => {
+                colours.background = colour & !u32::from(code::BACKGROUND);
                 colours.rgb = None;
                 visit.colours(os, colours)?;
             }
@@ -681,7 +646,7 @@ impl Walker {
             step(&mut pen, advance, sign);
             origin
         };
-        if character == code::SPACE {
+        if character == u32::from(code::SPACE) {
             step(&mut pen, self.request.space, sign);
         }
         let inked = measured.map_or(metrics::Box::default(), |m| {

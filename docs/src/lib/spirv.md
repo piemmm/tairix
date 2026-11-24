@@ -95,7 +95,8 @@ broken. An admitted module carries:
   must support to run it;
 - its entry points.
 
-What is admitted is `plans/SHADER.md` §2.1: SPIR-V 1.3 to 1.6, the capability
+What is admitted is `plans/SHADER.md` §2.1: SPIR-V 1.3 to 1.6 (`Version::OLDEST`
+to `Version::NEWEST`), the capability
 and extension allow-lists, the forms refused although SPIR-V allows them, and
 the fixed bounds.
 
@@ -107,7 +108,7 @@ the fixed bounds.
 | types well formed; a non-aggregate type declared once; array lengths constant; a run-time array only as the last member of a storage buffer; each width only with its capability | `Type`, `DuplicateType`, `ArrayLength`, `RuntimeArray`, `Contents` |
 | constants and specialization operations typed; a narrow constant's literal, and a switch case's on a narrow selector, written as its type holds it — sign-extended where signed, zero-extended where not | `Constant`, `SpecConstantOp`, `OperandValue` |
 | decorations only on what they may decorate, each once, none conflicting; buffers laid out by the Vulkan environment's extended alignment (uniform buffers) or base alignment (storage buffers, push constants) | `DecorationTarget`, `DuplicateDecoration`, `ConflictingDecorations`, `ExplicitLayout` |
-| variables in admitted storage classes, of types those allow; pointers logical; each access to memory that may be accessed that way | `StorageClass`, `VariableType`, `Initializer`, `LogicalPointer`, `AccessChain`, `NotWritable`, `NotReadable`, `OpaqueUse` |
+| variables in admitted storage classes, of types those allow, a workgroup variable's initializer only its null; pointers logical; each access to memory that may be accessed that way | `StorageClass`, `VariableType`, `Initializer`, `LogicalPointer`, `AccessChain`, `NotWritable`, `NotReadable`, `OpaqueUse` |
 | every operand and result typed as the specification gives; scopes, memory semantics and image operands admitted | `OperandType`, `ResultType`, `OperandValue`, `Semantics`, `ImageOperands` |
 | structured control flow | `Block`, `BranchTarget`, `BlockOrder`, `Phi`, `Merge`, `MergeBlock`, `ContinueTarget`, `BackEdge`, `ConstructExit`, `ConstructEntry`, `Fallthrough`, `NoExit` |
 | calls matching their callees; no recursion; returns typed | `Call`, `Recursion`, `Return` |
@@ -157,7 +158,20 @@ therefore known, and held to its declarations, through any depth of calls.
   whether it is taken at the centroid;
 - the module-scope variables its call tree names (`EntryPoint::globals`), so a
   consumer lowering one entry point of a module of several leaves the others'
-  variables alone.
+  variables alone;
+- its samplings (`EntryPoint::samplings`): each image its call tree samples,
+  the sampler it samples it through — a combined image sampler's own binding —
+  both as a set and a binding, and the `SampleForms` it is sampled in: compared
+  or read, at an implicit level, projected, biased, offset or gathered, with
+  `OpImageQueryLod` an implicit-level sampling. A sampling inside a function is
+  held against the parameters it reaches and mapped at each call to the
+  caller's roots, so an image or sampler passed through any depth of calls is
+  named by its binding; one rooted at no variable is refused as `OpaqueUse`,
+  a function or an entry point of more than `MAX_SAMPLINGS`, its pairs
+  joined, as `Limit` (`Limit::Samplings`), and a module whose calls and entry
+  points map or gather more than `MAX_SAMPLING_WORK` samplings in all as
+  `Limit` (`Limit::SamplingWork`), a bound on work that grows with calls
+  rather than with the module.
 
 `Admitted::held_bytes` states the host memory an admitted module keeps — its
 words, its instruction and operand tables, and every table the validator kept
@@ -229,13 +243,27 @@ Every operation is total over every bit pattern:
 
 A value for a `SpecId` no specialization constant carries, two for one id, one
 wider than its constant's type (a Boolean's anything but one or zero), and a
-workgroup size with a zero component are refused with a `SpecError`. Every
+workgroup size with a zero component — an entry point's, or the
+`WorkgroupSize` built-in's whether or not an entry point reads it — are
+refused with a `SpecError`. Every
 constant and constituent evaluation keeps counts against `MAX_SPECIALIZED` — a
 null composite's spelled out where an insertion changes one among them — and
 nothing is listed on the way: an insertion builds its deepest level first, and
 an operation reads its operands' components where they are kept. Past the bound
 it is refused with `SpecError::Budget`, so a module of a few hundred bytes
 cannot make it hold or walk more.
+
+**Folding.** `Admitted::fold` answers the module a specialization means as a
+module of its own, admitted again, for a backend that hands a host compiler
+one: every specialization constant the constant it evaluated to, its `SpecId`
+decorations gone, and every value the module could read before writing it
+defined — an `OpUndef` its type's null, and a private, workgroup or function
+variable without an initializer given its null — so the host compiles the one
+meaning the seam admitted, and nothing another program left shows through. A
+module with nothing to fold folds to its own bytes. Another module's
+specialization is refused (`FoldError::Malformed`), as are a folded module past
+the encoder's bounds (`TooLarge`) and one the validator would not admit again
+(`Refused`).
 
 ## Encoding
 
@@ -336,16 +364,17 @@ way.
   `Malformed`, and its view must answer every type it declares. One seed,
   written with the test assembler, holds specialization constants that every
   family of specialization operation reaches, and a specialized workgroup
-  size.
+  size. Every admitted module's specialization must fold to a module admitted
+  again, holding no specialization constant, its workgroup sizes as before.
   Beside the mutations, it has the builder write random structured programs —
   nested selections and loops, early returns, arithmetic, extended
   instructions and the locals that carry values out of a construct — and
   holds each to being admitted and to building the same bytes twice.
 - `cargo xtask miri` interprets the crate's tests, dealt across the host's
-  cores, and the harness. It leaves out eight whose extent is their assertion
+  cores, and the harness. It leaves out ten whose extent is their assertion
   and costs minutes to hours interpreted: the bounds on nesting, call depth,
-  bindings, globals, locals, and members and cases, a hundred thousand
-  selections, and a ladder as deep as nesting goes. It leaves out the
+  bindings, globals, locals, members and cases, samplings and sampling work, a
+  hundred thousand selections, and a ladder as deep as nesting goes. It leaves out the
   `specialize_memory` binary too, whose peak and allocation measurements are
   taken at a size that is their assertion. The ordinary matrix runs those in
   full.

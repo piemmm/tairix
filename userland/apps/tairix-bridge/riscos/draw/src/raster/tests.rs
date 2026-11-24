@@ -36,7 +36,7 @@ fn square() -> [Segment; 4] {
 /// Each pixel of a `width` by `height` window's class, as a recording
 /// writes it.
 fn classes_of(segments: &[Segment], rule: Rule, width: i32, height: i32) -> Vec<Vec<char>> {
-    let window = Window {
+    let window = Bounds {
         left: 0,
         bottom: 0,
         right: width - 1,
@@ -112,7 +112,7 @@ fn every_recorded_box_is_classed_as_genuine_risc_os_classed_it() {
 #[test]
 fn a_window_bounds_the_rows_and_columns_classed() {
     let square = square();
-    let window = Window {
+    let window = Bounds {
         left: 3,
         bottom: 4,
         right: 5,
@@ -142,7 +142,7 @@ fn a_segment_far_outside_the_window_costs_only_its_rows() {
         boundary: true,
         winds: false,
     };
-    let window = Window {
+    let window = Bounds {
         left: 0,
         bottom: 0,
         right: 9,
@@ -177,7 +177,7 @@ fn an_empty_style_or_window_plots_nothing() {
         boundary: true,
         winds: true,
     };
-    let window = Window {
+    let window = Bounds {
         left: 0,
         bottom: 0,
         right: 9,
@@ -194,7 +194,7 @@ fn an_empty_style_or_window_plots_nothing() {
         |_, _, _| any = true,
     )
     .expect("room");
-    let inverted = Window {
+    let inverted = Bounds {
         left: 9,
         bottom: 0,
         right: 0,
@@ -215,7 +215,7 @@ fn an_empty_style_or_window_plots_nothing() {
 
 #[test]
 fn only_the_exterior_class_scans_the_rows_no_segment_reaches() {
-    let window = Window {
+    let window = Bounds {
         left: 0,
         bottom: 0,
         right: 99,
@@ -246,7 +246,7 @@ fn only_the_exterior_class_scans_the_rows_no_segment_reaches() {
 
 #[test]
 fn a_scan_stops_at_the_step_its_host_refuses() {
-    let window = Window {
+    let window = Bounds {
         left: 0,
         bottom: 0,
         right: 99,
@@ -276,7 +276,7 @@ fn a_scan_stops_at_the_step_its_host_refuses() {
 
 #[test]
 fn a_scratch_kept_from_one_scan_gives_the_next_what_a_fresh_one_would() {
-    let window = Window {
+    let window = Bounds {
         left: 0,
         bottom: 0,
         right: 63,

@@ -7,14 +7,17 @@ use core::fmt;
 use core::ops::Range;
 
 use tairix_spirv::enumerant::{Dim, ImageFormat};
-use tairix_spirv::{Access, Admitted, Binding, BindingKind, ImageShape, Layout, Stages};
+use tairix_spirv::{
+    Access, Admitted, Binding, BindingKind, Component, EntryPoint, ImageShape, Layout, SampleForms,
+    Stages,
+};
 
 use crate::backend::Backend;
 use crate::device::{Buffer, Context, Shared};
 use crate::format::{Aspects, Format, FormatFeatures};
 use crate::host::{owned, Host, Object};
 use crate::image::{ImageUsage, ViewDimension};
-use crate::info::{BufferUsage, DeviceInfo};
+use crate::info::{BufferUsage, DeviceInfo, Features};
 use tairix_util::fallible;
 
 use crate::memory::{overlaps, Charge};
@@ -24,8 +27,201 @@ use crate::model::{
 };
 use crate::objects::{BufferView, ImageView, Sampler};
 use crate::resource::{BufferViewState, SamplerState, ViewState};
-use crate::sampler::Filter;
+use crate::sampler::{Filter, SamplerDesc};
 use crate::Error;
+
+/// What a sampled image binding's texels are, and whether its samplers may
+/// filter them.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum SampleType {
+    /// Float colour of a format the device filters.
+    Float,
+    /// Float colour, read through samplers that do not filter.
+    UnfilterableFloat,
+    /// Depth of a format the device filters, compared or read.
+    Depth,
+    /// Depth, compared or read through samplers that do not filter.
+    UnfilterableDepth,
+    /// Signed integer colour.
+    Sint,
+    /// Unsigned integer colour, or a stencil plane.
+    Uint,
+}
+
+impl SampleType {
+    /// What a module reads its texels as.
+    const fn component(self) -> Component {
+        match self {
+            Self::Float | Self::UnfilterableFloat | Self::Depth | Self::UnfilterableDepth => {
+                Component::Float
+            }
+            Self::Sint => Component::Sint,
+            Self::Uint => Component::Uint,
+        }
+    }
+
+    /// Whether a view bound to it is of a format the device filters.
+    const fn filtered(self) -> bool {
+        matches!(self, Self::Float | Self::Depth)
+    }
+
+    /// Whether a view bound to it sees depth.
+    const fn depth(self) -> bool {
+        matches!(self, Self::Depth | Self::UnfilterableDepth)
+    }
+}
+
+/// What a sampler binding's samplers do.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum SamplerType {
+    /// Read float colour or depth, filtered or not.
+    Filtering,
+    /// Read float colour or depth, every filter nearest.
+    NonFiltering,
+    /// Read integer texels, every filter nearest, the border read as integers.
+    Integer,
+    /// Compare depth, filtered or not.
+    Comparison,
+    /// Compare depth, every filter nearest.
+    NonFilteringComparison,
+    /// Read texels at unnormalised coordinates: a combined image sampler's
+    /// alone, sampled at an explicit level of detail with no offset, bias,
+    /// projection or gather.
+    Unnormalized,
+}
+
+impl SamplerType {
+    /// Whether it samples texels of `sample`.
+    const fn samples(self, sample: SampleType) -> bool {
+        use SampleType as S;
+        match self {
+            Self::Filtering => matches!(sample, S::Float | S::Depth),
+            Self::NonFiltering => matches!(
+                sample,
+                S::Float | S::UnfilterableFloat | S::Depth | S::UnfilterableDepth
+            ),
+            Self::Integer => matches!(sample, S::Sint | S::Uint),
+            Self::Comparison => matches!(sample, S::Depth),
+            Self::NonFilteringComparison => matches!(sample, S::Depth | S::UnfilterableDepth),
+            Self::Unnormalized => true,
+        }
+    }
+
+    /// Whether a module may sample through it in `forms`: a comparing
+    /// sampler compares and every other reads, and an unnormalised one
+    /// reads only at an explicit level with no offset, bias, projection or
+    /// gather.
+    fn takes(self, forms: SampleForms) -> bool {
+        let compares = matches!(self, Self::Comparison | Self::NonFilteringComparison);
+        let other = if compares {
+            SampleForms::READ
+        } else {
+            SampleForms::COMPARE
+        };
+        let unnormalized = SampleForms::IMPLICIT
+            .with(SampleForms::PROJECTIVE)
+            .with(SampleForms::BIAS)
+            .with(SampleForms::OFFSET)
+            .with(SampleForms::GATHER);
+        !forms.intersects(other) && (self != Self::Unnormalized || !forms.intersects(unnormalized))
+    }
+
+    /// Whether `desc` is a sampler of it.
+    fn admits(self, desc: &SamplerDesc) -> bool {
+        let nearest = [desc.mag_filter, desc.min_filter, desc.mipmap_filter]
+            .iter()
+            .all(|&filter| filter == Filter::Nearest);
+        let normalized = !desc.unnormalized;
+        match self {
+            Self::Filtering => desc.compare.is_none() && normalized,
+            Self::NonFiltering | Self::Integer => desc.compare.is_none() && normalized && nearest,
+            Self::Comparison => desc.compare.is_some() && normalized,
+            Self::NonFilteringComparison => desc.compare.is_some() && normalized && nearest,
+            Self::Unnormalized => desc.unnormalized,
+        }
+    }
+}
+
+/// What a binding holds, and for an image sampled through a sampler, how.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DescriptorType {
+    /// A sampler.
+    Sampler(SamplerType),
+    /// An image of the shape a module declares, for sampling.
+    SampledImage(ImageShape, SampleType),
+    /// An image of the shape a module declares, read and written by texel.
+    StorageImage(ImageShape),
+    /// An image of the shape a module declares and the sampler it is
+    /// sampled with.
+    CombinedImageSampler(ImageShape, SampleType, SamplerType),
+    /// A buffer of texels read through a format.
+    UniformTexelBuffer(ImageShape),
+    /// A buffer of texels read and written through a format.
+    StorageTexelBuffer(ImageShape),
+    /// A uniform buffer.
+    UniformBuffer,
+    /// A storage buffer.
+    StorageBuffer,
+}
+
+impl DescriptorType {
+    /// What a module declares for a binding of it.
+    #[must_use]
+    pub const fn kind(self) -> BindingKind {
+        match self {
+            Self::Sampler(_) => BindingKind::Sampler,
+            Self::SampledImage(shape, _) => BindingKind::SampledImage(shape),
+            Self::StorageImage(shape) => BindingKind::StorageImage(shape),
+            Self::CombinedImageSampler(shape, ..) => BindingKind::CombinedImageSampler(shape),
+            Self::UniformTexelBuffer(shape) => BindingKind::UniformTexelBuffer(shape),
+            Self::StorageTexelBuffer(shape) => BindingKind::StorageTexelBuffer(shape),
+            Self::UniformBuffer => BindingKind::UniformBuffer,
+            Self::StorageBuffer => BindingKind::StorageBuffer,
+        }
+    }
+
+    /// The texels an image sampled through a sampler is of.
+    const fn sample(self) -> Option<SampleType> {
+        match self {
+            Self::SampledImage(_, sample) | Self::CombinedImageSampler(_, sample, _) => {
+                Some(sample)
+            }
+            _ => None,
+        }
+    }
+
+    /// What its samplers do.
+    const fn sampler(self) -> Option<SamplerType> {
+        match self {
+            Self::Sampler(sampler) | Self::CombinedImageSampler(_, _, sampler) => Some(sampler),
+            _ => None,
+        }
+    }
+
+    /// Whether it holds what its sampling says it does: an image's texels
+    /// what its shape reads, unfiltered where it is multisampled; a combined
+    /// sampler's of a type its image's texels take, its unnormalised
+    /// coordinates over one row or rectangle; and no separate sampler's
+    /// unnormalised.
+    fn sampled_as_shaped(self) -> bool {
+        let image = |shape: ImageShape, sample: SampleType| {
+            sample.component() == shape.component && !(shape.multisampled && sample.filtered())
+        };
+        match self {
+            Self::Sampler(sampler) => sampler != SamplerType::Unnormalized,
+            Self::SampledImage(shape, sample) => image(shape, sample),
+            Self::CombinedImageSampler(shape, sample, sampler) => {
+                let plain = matches!(shape.dim, Dim::DIM_1D | Dim::DIM_2D)
+                    && !shape.arrayed
+                    && !shape.multisampled;
+                image(shape, sample)
+                    && sampler.samples(sample)
+                    && (sampler != SamplerType::Unnormalized || plain)
+            }
+            _ => true,
+        }
+    }
+}
 
 /// One binding of a bind set layout.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -33,7 +229,7 @@ pub struct LayoutBinding {
     /// Its number within the set.
     pub binding: u32,
     /// What it holds; an image binding states the shape a module declares.
-    pub kind: BindingKind,
+    pub kind: DescriptorType,
     /// How many descriptors it holds.
     pub count: u32,
     /// How the shaders it is bound for may access it.
@@ -43,8 +239,34 @@ pub struct LayoutBinding {
 }
 
 impl LayoutBinding {
+    /// The binding providing what `binding` of a module's entry point needs,
+    /// seen by `stages`; `None` for a sampler or an image sampled through
+    /// one, whose sample and sampler types no module states.
+    #[must_use]
+    pub fn unsampled(binding: &Binding, stages: Stages) -> Option<Self> {
+        let kind = match binding.kind {
+            BindingKind::StorageImage(shape) => DescriptorType::StorageImage(shape),
+            BindingKind::UniformTexelBuffer(shape) => DescriptorType::UniformTexelBuffer(shape),
+            BindingKind::StorageTexelBuffer(shape) => DescriptorType::StorageTexelBuffer(shape),
+            BindingKind::UniformBuffer => DescriptorType::UniformBuffer,
+            BindingKind::StorageBuffer => DescriptorType::StorageBuffer,
+            BindingKind::Sampler
+            | BindingKind::SampledImage(_)
+            | BindingKind::CombinedImageSampler(_) => return None,
+        };
+        Some(Self {
+            binding: binding.binding,
+            kind,
+            count: binding.count,
+            access: binding.access,
+            stages,
+        })
+    }
+
     /// Refuse a binding of no descriptors or stages, past the device's
-    /// binding numbers, or of an access or shape its kind does not take.
+    /// binding numbers, of more than one descriptor where the device takes no
+    /// arrays of them, or of an access, shape or sampling its kind does not
+    /// take.
     fn check(&self, device: &DeviceInfo) -> Result<(), Error> {
         if self.count == 0 || self.stages == Stages::NONE {
             return Err(Error::Empty);
@@ -52,12 +274,16 @@ impl LayoutBinding {
         if self.binding >= device.limits.max_binding_number {
             return Err(Error::OutOfRange);
         }
-        let allowed = if writable(self.kind) {
+        if self.count > 1 && !device.features.contains(Features::BINDING_ARRAYS) {
+            return Err(Error::Unsupported);
+        }
+        let kind = self.kind.kind();
+        let allowed = if writable(kind) {
             Access::READ.with(Access::WRITE)
         } else {
             Access::READ
         };
-        let shaped = match self.kind {
+        let shaped = match kind {
             BindingKind::Sampler | BindingKind::UniformBuffer | BindingKind::StorageBuffer => true,
             BindingKind::SampledImage(shape) | BindingKind::CombinedImageSampler(shape) => {
                 image_shape(shape, true)
@@ -66,7 +292,11 @@ impl LayoutBinding {
             BindingKind::UniformTexelBuffer(shape) => texel_shape(shape),
             BindingKind::StorageTexelBuffer(shape) => texel_shape(shape) && storage_format(shape),
         };
-        if shaped && Stages::ALL.contains(self.stages) && allowed.contains(self.access) {
+        if shaped
+            && self.kind.sampled_as_shaped()
+            && Stages::ALL.contains(self.stages)
+            && allowed.contains(self.access)
+        {
             Ok(())
         } else {
             Err(Error::Shape)
@@ -121,6 +351,20 @@ fn serves(have: ImageShape, need: ImageShape, storage: bool) -> bool {
         && format
 }
 
+/// Whether a format of `features` is accessed as `access` through a storage
+/// binding of `shape`: one naming no format reads it only where it offers
+/// `read`, and writes it only where it offers `write`.
+fn accessed(
+    features: FormatFeatures,
+    shape: ImageShape,
+    access: Access,
+    [read, write]: [FormatFeatures; 2],
+) -> bool {
+    let offers = |accessed, feature| !access.contains(accessed) || features.contains(feature);
+    shape.format != ImageFormat::UNKNOWN
+        || (offers(Access::READ, read) && offers(Access::WRITE, write))
+}
+
 /// A bind set layout: its bindings, by ascending number.
 #[derive(Debug)]
 pub(crate) struct BindSetLayoutState {
@@ -154,9 +398,9 @@ impl BindSetLayoutState {
 /// is.
 #[derive(Debug)]
 pub(crate) enum Bound<B: Backend> {
-    Sampler(Arc<SamplerState>),
+    Sampler(Arc<SamplerState<B>>),
     Image(Arc<ViewState<B>>),
-    ImageSampler(Arc<ViewState<B>>, Arc<SamplerState>),
+    ImageSampler(Arc<ViewState<B>>, Arc<SamplerState<B>>),
     TexelBuffer(Arc<BufferViewState<B>>),
     /// `size` bytes from `offset` into the buffer.
     Buffer {
@@ -582,6 +826,33 @@ impl PipelineLayoutState {
             push_constant_stages: self.push_constants.stages,
         }
     }
+
+    /// Refuse an entry point, agreed with the layout, that samples an image
+    /// through a sampler in a way their types do not take.
+    pub(crate) fn sampling(&self, entry: &EntryPoint) -> Result<(), Error> {
+        for sampling in entry.samplings() {
+            let refused = Error::Sampling(sampling.image, sampling.sampler);
+            let sample = self
+                .descriptor(sampling.image)
+                .and_then(DescriptorType::sample)
+                .ok_or(refused)?;
+            let sampler = self
+                .descriptor(sampling.sampler)
+                .and_then(DescriptorType::sampler)
+                .ok_or(refused)?;
+            if !sampler.samples(sample) || !sampler.takes(sampling.forms) {
+                return Err(refused);
+            }
+        }
+        Ok(())
+    }
+
+    /// What the binding at `(set, binding)` holds.
+    fn descriptor(&self, (set, binding): (u32, u32)) -> Option<DescriptorType> {
+        let layout = self.sets.get(set as usize)?;
+        let (at, _) = layout.find(binding)?;
+        Some(layout.bindings.get(at)?.kind)
+    }
 }
 
 /// What one descriptor of a bind set binds.
@@ -661,6 +932,14 @@ pub(crate) struct SetRequest<'a> {
     pub(crate) resources: &'a [Named],
 }
 
+/// What a bind set is made of, looked up under the device's lock: the context
+/// as the device holds it, the set's layout, and its resources.
+type SetParts<B> = (
+    Arc<<B as Backend>::Context>,
+    Arc<BindSetLayoutState>,
+    Vec<Bound<B>>,
+);
+
 /// A bind set layout's tables, checked against the device's description and
 /// built before its lock is taken: what is left under it is the filing.
 pub(crate) struct LayoutTables {
@@ -737,7 +1016,7 @@ impl<B: Backend> Model<B> {
         &self,
         key: ContextKey,
         request: &SetRequest<'_>,
-    ) -> Result<(Arc<BindSetLayoutState>, Vec<Bound<B>>), Error> {
+    ) -> Result<SetParts<B>, Error> {
         let info = self.info();
         let context = self.live(key)?;
         let layout = Arc::clone(
@@ -772,10 +1051,10 @@ impl<B: Backend> Model<B> {
         let mut named = request.resources.iter();
         for (binding, &(_, count)) in layout.bindings.iter().zip(request.entries) {
             for &resource in named.by_ref().take(count) {
-                resources.push(bound(info, context, binding.kind, resource)?);
+                resources.push(bound(info, context, binding, resource)?);
             }
         }
-        Ok((layout, resources))
+        Ok((Arc::clone(&context.device), layout, resources))
     }
 
     pub(crate) fn create_pipeline_layout(
@@ -815,7 +1094,7 @@ impl<B: Backend> Model<B> {
             bindings.extend(layout.bindings.iter().map(|b| Binding {
                 set,
                 binding: b.binding,
-                kind: b.kind,
+                kind: b.kind.kind(),
                 count: b.count,
                 access: b.access,
                 stages: b.stages,
@@ -844,11 +1123,7 @@ impl<B: Backend> Model<B> {
         key: ContextKey,
         module: &Arc<Admitted>,
     ) -> Result<ShaderModuleKey, Error> {
-        if !module
-            .capabilities()
-            .iter()
-            .all(|&capability| self.info().runs(capability))
-        {
+        if !self.info().runs_module(module) {
             return Err(Error::Unsupported);
         }
         let bytes = shared_bytes::<ShaderModuleState>()
@@ -868,47 +1143,54 @@ impl<B: Backend> Model<B> {
     }
 }
 
-/// `resource` held for a binding of `kind`, or why it cannot be.
+/// `resource` held for `binding`, or why it cannot be.
 fn bound<B: Backend>(
     info: &DeviceInfo,
     context: &ContextState<B>,
-    kind: BindingKind,
+    binding: &LayoutBinding,
     resource: Named,
 ) -> Result<Bound<B>, Error> {
     let limits = &info.limits;
+    let kind = binding.kind;
     match (kind, resource) {
-        (BindingKind::Sampler, Named::Sampler(sampler)) => {
-            Ok(Bound::Sampler(sampler_state(context, sampler)?))
+        (DescriptorType::Sampler(sampler), Named::Sampler(key)) => {
+            let state = sampler_state(context, key)?;
+            admitted(sampler, &state)?;
+            Ok(Bound::Sampler(state))
         }
-        (BindingKind::SampledImage(shape), Named::Image(view)) => {
+        (DescriptorType::SampledImage(shape, sample), Named::Image(view)) => {
             let view = view_state(context, view)?;
-            sampled(info, &view, shape)?;
+            sampled(info, &view, shape, sample)?;
             Ok(Bound::Image(view))
         }
-        (BindingKind::StorageImage(shape), Named::Image(view)) => {
+        (DescriptorType::StorageImage(shape), Named::Image(view)) => {
             let view = view_state(context, view)?;
-            storage(info, &view, shape)?;
+            storage(info, &view, shape, binding.access)?;
             Ok(Bound::Image(view))
         }
-        (BindingKind::CombinedImageSampler(shape), Named::ImageSampler(view, sampler)) => {
+        (
+            DescriptorType::CombinedImageSampler(shape, sample, sampler),
+            Named::ImageSampler(view, key),
+        ) => {
             let view = view_state(context, view)?;
-            let sampler = sampler_state(context, sampler)?;
-            sampled(info, &view, shape)?;
-            combined(info, &view, &sampler)?;
-            Ok(Bound::ImageSampler(view, sampler))
+            let state = sampler_state(context, key)?;
+            sampled(info, &view, shape, sample)?;
+            admitted(sampler, &state)?;
+            unnormalized(&view, sample, &state)?;
+            Ok(Bound::ImageSampler(view, state))
         }
-        (BindingKind::UniformTexelBuffer(shape), Named::TexelBuffer(view)) => {
+        (DescriptorType::UniformTexelBuffer(shape), Named::TexelBuffer(view)) => {
             let view = texel_state(context, view)?;
-            texel(info, &view, shape, false)?;
+            texel(info, &view, shape, None)?;
             Ok(Bound::TexelBuffer(view))
         }
-        (BindingKind::StorageTexelBuffer(shape), Named::TexelBuffer(view)) => {
+        (DescriptorType::StorageTexelBuffer(shape), Named::TexelBuffer(view)) => {
             let view = texel_state(context, view)?;
-            texel(info, &view, shape, true)?;
+            texel(info, &view, shape, Some(binding.access))?;
             Ok(Bound::TexelBuffer(view))
         }
         (
-            BindingKind::UniformBuffer | BindingKind::StorageBuffer,
+            DescriptorType::UniformBuffer | DescriptorType::StorageBuffer,
             Named::Buffer {
                 buffer,
                 offset,
@@ -916,16 +1198,18 @@ fn bound<B: Backend>(
             },
         ) => {
             let state = context.buffers.get(buffer).ok_or(Error::Stale)?;
-            let need = if kind == BindingKind::UniformBuffer {
+            let need = if kind == DescriptorType::UniformBuffer {
                 Span {
                     usage: BufferUsage::UNIFORM,
                     alignment: limits.uniform_buffer_alignment,
+                    size_alignment: limits.uniform_buffer_size_alignment,
                     longest: limits.max_uniform_buffer_range,
                 }
             } else {
                 Span {
                     usage: BufferUsage::STORAGE,
                     alignment: limits.storage_buffer_alignment,
+                    size_alignment: limits.storage_buffer_size_alignment,
                     longest: limits.max_storage_buffer_range,
                 }
             };
@@ -943,7 +1227,7 @@ fn bound<B: Backend>(
 fn sampler_state<B: Backend>(
     context: &ContextState<B>,
     sampler: SamplerKey,
-) -> Result<Arc<SamplerState>, Error> {
+) -> Result<Arc<SamplerState<B>>, Error> {
     context.samplers.get(sampler).cloned().ok_or(Error::Stale)
 }
 
@@ -961,25 +1245,31 @@ fn texel_state<B: Backend>(
     context.buffer_views.get(view).cloned().ok_or(Error::Stale)
 }
 
-/// Refuse a view a sampled binding of `shape` cannot read: of an image not
-/// made for sampling, of more than one plane, of a format the device does not
-/// sample, or of another shape.
+/// Refuse a view a sampled binding of `shape` and `sample` cannot read: of an
+/// image not made for sampling, of a plane other than its texels', of a
+/// format the device does not sample or, where its samplers may filter, does
+/// not filter, or of another shape.
 fn sampled<B: Backend>(
     info: &DeviceInfo,
     view: &ViewState<B>,
     shape: ImageShape,
+    sample: SampleType,
 ) -> Result<(), Error> {
     if !view.image.desc.usage.contains(ImageUsage::SAMPLED) {
         return Err(Error::Usage);
     }
     let aspects = view.desc.range.aspects;
-    if aspects != Aspects::COLOR && aspects != Aspects::DEPTH && aspects != Aspects::STENCIL {
+    let plane = if sample.depth() {
+        aspects == Aspects::DEPTH
+    } else {
+        aspects == Aspects::COLOR || (sample == SampleType::Uint && aspects == Aspects::STENCIL)
+    };
+    if !plane {
         return Err(Error::Aspect);
     }
-    if !info
-        .formats
-        .get(view.desc.format)
-        .contains(FormatFeatures::SAMPLED)
+    let features = info.formats.get(view.desc.format);
+    if !features.contains(FormatFeatures::SAMPLED)
+        || (sample.filtered() && !features.contains(FormatFeatures::FILTERED))
     {
         return Err(Error::Unsupported);
     }
@@ -990,13 +1280,24 @@ fn sampled<B: Backend>(
     }
 }
 
-/// Refuse a view a storage binding of `shape` cannot read and write: of an
-/// image not made for storage, of more than one level, of a format the device
-/// does not store, or of another shape or format.
+/// Refuse a sampler a binding of `sampler` does not take.
+fn admitted<B: Backend>(sampler: SamplerType, state: &SamplerState<B>) -> Result<(), Error> {
+    if sampler.admits(&state.desc) {
+        Ok(())
+    } else {
+        Err(Error::Shape)
+    }
+}
+
+/// Refuse a view a storage binding of `shape` cannot access as `access`: of
+/// an image not made for storage, of more than one level, of a format the
+/// device does not store or, for a binding naming no format, does not read or
+/// write so, or of another shape or format.
 fn storage<B: Backend>(
     info: &DeviceInfo,
     view: &ViewState<B>,
     shape: ImageShape,
+    access: Access,
 ) -> Result<(), Error> {
     if !view.image.desc.usage.contains(ImageUsage::STORAGE) {
         return Err(Error::Usage);
@@ -1004,10 +1305,13 @@ fn storage<B: Backend>(
     if view.desc.range.levels != 1 {
         return Err(Error::Shape);
     }
-    if !info
-        .formats
-        .get(view.desc.format)
-        .contains(FormatFeatures::STORAGE)
+    let unformatted = [
+        FormatFeatures::STORAGE_READ_WITHOUT_FORMAT,
+        FormatFeatures::STORAGE_WRITE_WITHOUT_FORMAT,
+    ];
+    let features = info.formats.get(view.desc.format);
+    if !features.contains(FormatFeatures::STORAGE)
+        || !accessed(features, shape, access, unformatted)
     {
         return Err(Error::Unsupported);
     }
@@ -1018,63 +1322,71 @@ fn storage<B: Backend>(
     }
 }
 
-/// Refuse a sampler the view cannot be sampled with: filtering a format the
-/// device does not filter, comparing what is not depth, or unnormalised
-/// coordinates over anything but one level and layer of a row or rectangle.
-fn combined<B: Backend>(
-    info: &DeviceInfo,
+/// Refuse a view an unnormalised sampler cannot sample: anything but one
+/// level and layer of a row or rectangle, and texels read as `sample` that
+/// are not filtered where the sampler filters.
+fn unnormalized<B: Backend>(
     view: &ViewState<B>,
-    sampler: &SamplerState,
+    sample: SampleType,
+    sampler: &SamplerState<B>,
 ) -> Result<(), Error> {
     let desc = &sampler.desc;
-    let filtered = [desc.mag_filter, desc.min_filter, desc.mipmap_filter].contains(&Filter::Linear);
-    if filtered
-        && !info
-            .formats
-            .get(view.desc.format)
-            .contains(FormatFeatures::FILTERED)
-    {
-        return Err(Error::Unsupported);
-    }
-    if desc.compare.is_some() && view.desc.range.aspects != Aspects::DEPTH {
-        return Err(Error::Aspect);
+    if !desc.unnormalized {
+        return Ok(());
     }
     let plain = matches!(view.desc.dimension, ViewDimension::D1 | ViewDimension::D2)
         && view.desc.range.levels == 1
         && view.desc.range.layers == 1;
-    if desc.unnormalized && !plain {
+    if !plain {
+        return Err(Error::Shape);
+    }
+    // Unnormalised coordinates take one filter for both and no mip filter. A
+    // filtered sample type is of a format the device filters, as `sampled`
+    // holds; a plane's format alone says nothing of the other plane.
+    if desc.mag_filter == Filter::Linear && !sample.filtered() {
         return Err(Error::Shape);
     }
     Ok(())
 }
 
-/// Refuse a texel buffer a binding of `shape` cannot read, or with `storage`
-/// read and write: over a buffer not made for that use, of a format the
-/// device does not offer for it, or of another shape or format.
+/// Refuse a texel buffer a binding of `shape` cannot read, or as a storage
+/// binding accessed as `storage` cannot access so: over a buffer not made for
+/// that use, of a format the device does not offer for it or, for a storage
+/// binding naming no format, does not read or write so, or of another shape
+/// or format.
 fn texel<B: Backend>(
     info: &DeviceInfo,
     view: &BufferViewState<B>,
     shape: ImageShape,
-    storage: bool,
+    storage: Option<Access>,
 ) -> Result<(), Error> {
-    let (usage, feature) = if storage {
-        (
+    let features = info.formats.get(view.desc.format);
+    let (usage, offered) = match storage {
+        Some(access) => (
             BufferUsage::STORAGE_TEXEL,
-            FormatFeatures::STORAGE_TEXEL_BUFFER,
-        )
-    } else {
-        (
+            features.contains(FormatFeatures::STORAGE_TEXEL_BUFFER)
+                && accessed(
+                    features,
+                    shape,
+                    access,
+                    [
+                        FormatFeatures::TEXEL_BUFFER_READ_WITHOUT_FORMAT,
+                        FormatFeatures::TEXEL_BUFFER_WRITE_WITHOUT_FORMAT,
+                    ],
+                ),
+        ),
+        None => (
             BufferUsage::UNIFORM_TEXEL,
-            FormatFeatures::UNIFORM_TEXEL_BUFFER,
-        )
+            features.contains(FormatFeatures::UNIFORM_TEXEL_BUFFER),
+        ),
     };
     if !view.buffer.usage.contains(usage) {
         return Err(Error::Usage);
     }
-    if !info.formats.get(view.desc.format).contains(feature) {
+    if !offered {
         return Err(Error::Unsupported);
     }
-    if serves(view.desc.shape(), shape, storage) {
+    if serves(view.desc.shape(), shape, storage.is_some()) {
         Ok(())
     } else {
         Err(Error::Shape)
@@ -1082,10 +1394,12 @@ fn texel<B: Backend>(
 }
 
 /// What a buffer binding's range needs: a buffer made for `usage`, an
-/// offset a multiple of `alignment`, and a span of at most `longest`.
+/// offset a multiple of `alignment`, a size a multiple of `size_alignment`,
+/// and a span of at most `longest`.
 struct Span {
     usage: BufferUsage,
     alignment: u64,
+    size_alignment: u64,
     longest: u64,
 }
 
@@ -1102,7 +1416,7 @@ impl Span {
         if size == 0 {
             return Err(Error::Empty);
         }
-        if !offset.is_multiple_of(self.alignment) {
+        if !offset.is_multiple_of(self.alignment) || !size.is_multiple_of(self.size_alignment) {
             return Err(Error::Misaligned);
         }
         if offset.checked_add(size).is_none_or(|end| end > buffer.size) {
@@ -1123,7 +1437,9 @@ impl Context {
     /// [`Error::Bindings`] for bindings out of order or repeated,
     /// [`Error::Empty`] for one of no descriptors or stages,
     /// [`Error::OutOfRange`] for one past the device's binding numbers,
-    /// [`Error::Shape`] for an access or shape its kind does not take, and
+    /// [`Error::Unsupported`] for one of more than one descriptor on a device
+    /// not stating [`Features::BINDING_ARRAYS`], [`Error::Shape`] for an
+    /// access or shape its kind does not take, and
     /// [`Error::TooMany`] for more descriptors than the device's
     /// [`max_bind_set_descriptors`](crate::Limits::max_bind_set_descriptors).
     ///
@@ -1152,9 +1468,9 @@ impl Context {
     /// kind or shape, [`Error::Usage`] for one not made for the use,
     /// [`Error::Aspect`] for a view of more than one plane or a comparison of
     /// what is not depth, [`Error::Unsupported`] for a format the device does
-    /// not offer for it, and [`Error::Empty`], [`Error::Misaligned`],
-    /// [`Error::OutOfRange`] or [`Error::TooLarge`] for a buffer range the
-    /// binding cannot hold.
+    /// not offer for it, and [`Error::Empty`], [`Error::Misaligned`] — an
+    /// offset or a size off the device's alignments — [`Error::OutOfRange`]
+    /// or [`Error::TooLarge`] for a buffer range the binding cannot hold.
     ///
     /// And those of every request that makes memory ([`Context#memory`]).
     pub fn create_bind_set(
@@ -1246,7 +1562,7 @@ impl Context {
     /// # Errors
     ///
     /// [`Error::Unsupported`] for a module needing a capability the device
-    /// does not run.
+    /// does not run, or of a newer SPIR-V version than it takes.
     ///
     /// And those of every request that makes memory ([`Context#memory`]).
     pub fn create_shader_module(&self, module: Admitted) -> Result<ShaderModule, Error> {
@@ -1271,11 +1587,11 @@ impl<B: Backend> Shared<B> {
         context: ContextKey,
         request: &SetRequest<'_>,
     ) -> Result<BindSetKey, Error> {
-        let (layout, resources) = self.model.lock().bind_set_resources(context, request)?;
+        let (device, layout, resources) = self.model.lock().bind_set_resources(context, request)?;
         #[cfg(test)]
         crate::fair::held::note_making();
         let reach = Reach::of(&layout, &resources)?;
-        let (form, form_bytes) = self.backend.set(&resources)?;
+        let (form, form_bytes) = self.backend.set(&device, &layout, &resources)?;
         let bytes = [
             shared_bytes::<BindSetState<B>>(),
             fallible::held(&resources),
@@ -1361,3 +1677,7 @@ impl fmt::Debug for ShaderModule {
 #[cfg(test)]
 #[path = "binding_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "sampling_tests.rs"]
+mod sampling_tests;

@@ -2,10 +2,13 @@
 
 The Acorn VDU vocabulary the BBC Micro's MOS and RISC OS share. OpenMicro's
 MOS builds its character set, control-code table, plot codes and default
-palettes from it, `lib/image` reads a sprite's numbered mode and its
-256-colour palettes through it, TAIRiX Bridge's BASIC takes its plot codes
-from it, and its VDU drivers use every part (`plans/RISCOS-EMULATOR.md` RO8,
-RO21).
+palettes from it, and `lib/image` reads a sprite's numbered mode and its
+256-colour palettes through it. In TAIRiX Bridge the kernel takes the system
+font, the default mode and a VDU variable's number from it, FileSwitch its
+mode variables, the Font Manager its mode variables and VIDC1's channel,
+BASIC its plot codes, Draw its mode variables, a numbered mode's eigen
+factors, control codes and plot codes, and the VDU drivers every part
+(`plans/RISCOS-EMULATOR.md` RO8, RO21).
 
 ## Control codes
 
@@ -61,7 +64,8 @@ eight, the low two shared. `palette::grouped` is the colour a 256-colour pixel
 shows when the entry its low four bits select is a given base: the pixel's
 top four bits give red's bit 3, green's bits 2 and 3 and blue's bit 3 in both
 nibbles of each channel, the rest the base's, as RISC OS 5.30 reads its own
-palette back.
+palette back. `palette::vidc1_channel` is a channel as VIDC1 showed it: its
+top four bits (`VIDC1_CHANNEL`), repeated below them.
 
 ## The system character set
 

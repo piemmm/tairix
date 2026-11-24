@@ -217,8 +217,8 @@ resource**, before the resource is committed, and fails closed (`AGENTS.md`
   the check runs after the bounds are validated and the bind is authorised, so
   a malformed request is still `LengthOutOfRange`, and a bind past the soft
   bound is refused with `LimitExceeded` and binds nothing. The charge also
-  bounds how many endpoints a process holds; `port_unbind` and the owner's exit
-  return it. What a sender queues is charged to the *sender*: its lane's storage
+  bounds how many endpoints a process holds; `port_unbind`, `call_destroy` and
+  the owner's exit return it. What a sender queues is charged to the *sender*: its lane's storage
   as it grows, for as long as the lane holds anything, a message's payload —
   never less than its own record — until its port's owner takes it, a call —
   the larger of its request and reply, so a reply never fails for its caller's

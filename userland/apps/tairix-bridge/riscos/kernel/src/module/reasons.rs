@@ -22,6 +22,8 @@ use crate::swi::X;
 
 /// The start offset's bits that make it a branch rather than an offset.
 const BRANCH: u32 = 0xFF00_0003;
+/// The least block of the RMA a file is read or loaded into: a word.
+const LEAST_FILE_BLOCK: u32 = 4;
 
 /// Where the start entry of a module at `code` is: `start` past it, or —
 /// for a start that is no offset, unaligned or with bits in its top byte —
@@ -163,11 +165,29 @@ impl Os<'_> {
         length: u32,
         fill: impl FnOnce(&mut Self, u32) -> Result<(), Fail>,
     ) -> Result<Vec<u8>, Fail> {
-        let block = self.rma_claim(length.max(4))?;
+        let block = self.rma_claim(length.max(LEAST_FILE_BLOCK))?;
         let read = fill(self, block).and_then(|()| self.read_vec(block, length as usize));
         let freed = self.rma_free(block);
         let read = read?;
         freed.map(|()| read)
+    }
+
+    /// `work` done with a block of the RMA `length` bytes long, at least a
+    /// word, the block given back whatever `work` answers: how a file is
+    /// loaded into guest memory and used there.
+    ///
+    /// # Errors
+    ///
+    /// The RMA's "full" error, or `work`'s.
+    pub fn with_rma_block<T>(
+        &mut self,
+        length: u32,
+        work: impl FnOnce(&mut Self, u32) -> Result<T, Fail>,
+    ) -> Result<T, Fail> {
+        let block = self.rma_claim(length.max(LEAST_FILE_BLOCK))?;
+        let done = work(self, block);
+        self.free_rma_quietly(block);
+        done
     }
 
     /// `OS_Module` 1: the module file R1 names loaded into the RMA and

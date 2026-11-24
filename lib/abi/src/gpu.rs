@@ -11,9 +11,10 @@
 //! encoded by `lib/gpu`; this module is the frame every one of them shares.
 //!
 //! The channel is a per-node device channel ([`GPU_CHANNEL_ENDPOINTS`]),
-//! bound only by its node's driver, restricted-sender on
-//! [`CapabilityId::GPU`](crate::CapabilityId::GPU), and published as a child
-//! node carrying [`GPU_NODE_COMPATIBLE`].
+//! bound only by its node's driver, and only where a DMA translation unit
+//! translates the node or the platform's firmware declares none;
+//! restricted-sender on [`CapabilityId::GPU`](crate::CapabilityId::GPU), and
+//! published as a child node carrying [`GPU_NODE_COMPATIBLE`].
 
 use crate::hwtree::NodeEndpointBlock;
 use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
@@ -418,11 +419,13 @@ pub enum GpuError {
     Specialization = 29,
     /// Stages whose interfaces do not meet.
     Interface = 30,
+    /// A sampling a layout's sample and sampler types do not take.
+    Sampling = 31,
 }
 
 impl GpuError {
     /// Every code, in order.
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::Lost,
         Self::Destroyed,
         Self::Foreign,
@@ -453,6 +456,7 @@ impl GpuError {
         Self::Disagreement,
         Self::Specialization,
         Self::Interface,
+        Self::Sampling,
     ];
 
     /// The code `raw` names.

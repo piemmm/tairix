@@ -396,7 +396,8 @@ impl Os<'_> {
 
     /// The current territory's thousands separator.
     fn thousands_separator(&mut self) -> Result<Vec<u8>, Fail> {
-        let mut symbols = Regs::new([u32::MAX, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let mut symbols = Regs::default();
+        symbols.r[..2].copy_from_slice(&[crate::territory::CURRENT, 1]);
         self.perform(crate::swi::X | crate::territory::READ_SYMBOLS, &mut symbols)?;
         self.read_zstring(symbols.r[0], 16)
     }
@@ -693,7 +694,7 @@ impl Os<'_> {
             return Err(self.buffer_overflow());
         }
         let mut call = Regs::new([
-            u32::MAX,
+            crate::territory::CURRENT,
             regs.r[0],
             regs.r[1],
             regs.r[2],
@@ -721,7 +722,7 @@ impl Os<'_> {
             return Err(self.buffer_overflow());
         }
         let mut call = Regs::new([
-            u32::MAX,
+            crate::territory::CURRENT,
             regs.r[0],
             regs.r[1],
             regs.r[2],

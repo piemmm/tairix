@@ -3,14 +3,16 @@
 //! matrix painting it, each product of a matrix and a coordinate floored on
 //! its own, and positions kept in 32 bits that wrap.
 
+use tairix_drawing::riscos::format::{FIXED_ONE, FRACTION_BITS};
+
 use crate::identifier::Matrix;
 use crate::metrics;
 use crate::units;
 
 /// One in a matrix's multipliers.
-const ONE: i64 = 1 << 16;
+const ONE: i64 = FIXED_ONE as i64;
 
-/// A matrix: four multipliers with a binary point after bit 16, and a
+/// A matrix: four multipliers with `FRACTION_BITS` bits of fraction, and a
 /// translation in millipoints.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Transform {
@@ -48,7 +50,8 @@ impl Transform {
     /// and `self`'s translation carried through `outer` in one floor.
     pub(crate) fn then(self, outer: Self) -> Self {
         let mul = |p: i64, q: i64, r: i64, s: i64| {
-            let product = (i128::from(p) * i128::from(q) + i128::from(r) * i128::from(s)) >> 16;
+            let product =
+                (i128::from(p) * i128::from(q) + i128::from(r) * i128::from(s)) >> FRACTION_BITS;
             i64::from(low32(product))
         };
         Self {
@@ -64,8 +67,8 @@ impl Transform {
     /// The displacement `(x, y)` carried through the multipliers alone.
     pub(crate) fn vector(&self, (x, y): (i32, i32)) -> (i32, i32) {
         let (x, y) = (i64::from(x), i64::from(y));
-        let across = ((self.a * x) >> 16) + ((self.c * y) >> 16);
-        let up = ((self.b * x) >> 16) + ((self.d * y) >> 16);
+        let across = ((self.a * x) >> FRACTION_BITS) + ((self.c * y) >> FRACTION_BITS);
+        let up = ((self.b * x) >> FRACTION_BITS) + ((self.d * y) >> FRACTION_BITS);
         (wrap(across), wrap(up))
     }
 
@@ -80,7 +83,7 @@ impl Transform {
     pub(crate) fn exact(&self, (x, y): (f64, f64)) -> (f64, f64) {
         let [xx, xy, yx, yy, dx, dy] =
             [self.a, self.b, self.c, self.d, self.e, self.f].map(|v| f64::from(wrap(v)));
-        let one = f64::from(1 << 16);
+        let one = f64::from(FIXED_ONE);
         ((xx * x + yx * y) / one + dx, (xy * x + yy * y) / one + dy)
     }
 
@@ -95,7 +98,7 @@ impl Transform {
     /// on the screen draw from.
     pub(crate) fn scales(&self) -> (f64, f64) {
         let [a, b, c, d] = [self.a, self.b, self.c, self.d].map(|v| f64::from(wrap(v)));
-        let one = f64::from(1 << 16);
+        let one = f64::from(FIXED_ONE);
         let length = |x: f64, y: f64| tairix_util::mathf::sqrt(x * x + y * y) / one;
         (length(a, c), length(b, d))
     }

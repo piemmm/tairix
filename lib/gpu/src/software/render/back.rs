@@ -707,10 +707,12 @@ impl Drawing<'_, '_, '_> {
                     }
                     (None, None, None) => encode(format, Plane::Colour, source, srgb),
                 };
-                let result = if target.write_mask == ColourMask::ALL {
+                // A channel no output writes keeps what it held.
+                let mask = ColourMask::from_bits(target.write_mask.bits() & channels);
+                let result = if mask == ColourMask::ALL {
                     result
                 } else {
-                    masked(format, (result, stored), target.write_mask, srgb)
+                    masked(format, (result, stored), mask, srgb)
                 };
                 held.write(pixel, sample, result);
             }

@@ -30,8 +30,12 @@ loads.
   alpha from the converter's pieces of each row, `coverage::Shape`), `mask`
   (an ink through a coverage plane) and `picture` (rounded or toned), each
   described in its push by its own type and refused past its bounds.
-- `SET`: every module's name, the source that builds it, and its committed
-  bytes, for `cargo xtask shaders` to hold together.
+- `indirect::counts`: the check a hardware backend runs on an indirect
+  dispatch's counts before the dispatch reads them, zeroing counts past the
+  device's and setting the slot's fault (`plans/GPU.md` GP5.4).
+- `SET`: every module's name, the source that builds it, its committed bytes,
+  for `cargo xtask shaders` to hold together, and a `Sample` of it run on a
+  known input, which `gpucheck` holds every device to.
 - `GROUP` and `groups`: the square workgroup every pass runs in, and the
   dispatch that covers a grid.
 
@@ -70,5 +74,6 @@ clients far past their cut; the shadow at either level and between them
 equal to `shadow_row`'s rows; the resample reducing, enlarging and copying
 equal to `resample_window_into`; plates, washes, rings, covered and washed
 shapes, strokes, tinted masks and rounded and toned pictures equal to the
-`Surface` calls they are; and each description refused just past each
-bound.
+`Surface` calls they are; each description refused just past each bound;
+the indirect counts' check zeroing a slot past the device's and keeping one
+within; and every sample changing what it is given.

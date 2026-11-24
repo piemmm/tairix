@@ -228,6 +228,12 @@ impl<T: Send> Desk<T> {
     pub(crate) fn has_orders(&self) -> bool {
         !self.state.lock().orders.is_empty()
     }
+
+    /// Whether an answer waits for the answering thread.
+    #[cfg(test)]
+    pub(crate) fn has_answers(&self) -> bool {
+        !self.state.lock().answers.is_empty()
+    }
 }
 
 #[cfg(test)]

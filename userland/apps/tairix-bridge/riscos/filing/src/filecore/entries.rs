@@ -11,7 +11,7 @@ use tairix_filecore::{Error, Fault};
 use tairix_fsmeta::preset::acorn;
 use tairix_riscos_kernel::filing::filetype::DATA;
 use tairix_riscos_kernel::filing::fs::{
-    args, attribute, file, file_info, func, kind, open as reasons, opt,
+    args, attribute, file, file_info, func, kind, open as reasons, opt, Info, Layout,
 };
 use tairix_riscos_kernel::filing::UNSUPPORTED;
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
@@ -33,16 +33,6 @@ const HARD_DISC: u32 = 0xFCD;
 /// The directory an open root is held under: none holds the root's entry,
 /// and none lies at address zero.
 const ROOT_PARENT: u32 = 0;
-
-/// An object as `FSEntry_File` 5 answers it.
-#[derive(Clone, Copy, Default)]
-struct Info {
-    kind: u32,
-    load: u32,
-    exec: u32,
-    length: u32,
-    attributes: u32,
-}
 
 /// `object`, an entry of a directory, as FileSwitch reads it.
 fn info_of(object: &Object) -> Info {
@@ -78,14 +68,6 @@ fn root_info(volume: &Volume<ClientDisc<'_, '_>>, seen: Seen) -> Info {
         length,
         attributes: ROOT_ATTRIBUTES,
     }
-}
-
-fn answer(regs: &mut Regs, info: Info) {
-    regs.r[0] = info.kind;
-    regs.r[2] = info.load;
-    regs.r[3] = info.exec;
-    regs.r[4] = info.length;
-    regs.r[5] = info.attributes;
 }
 
 /// The instance an entry is called for, by its workspace in R12, and its
@@ -152,7 +134,7 @@ pub(super) fn file(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
                     Some(Found::Missing { .. }) | None => Info::default(),
                 })
             })?;
-            answer(regs, info);
+            info.answer(regs);
             Ok(())
         }
         file::SAVE => save(os, workspace, &client, regs),
@@ -395,7 +377,7 @@ fn delete(os: &mut Os<'_>, workspace: u32, client: &Client, regs: &mut Regs) -> 
         }
     })?;
     let Some((parent, object, empty)) = found else {
-        answer(regs, Info::default());
+        Info::default().answer(regs);
         return Ok(());
     };
     if object.attr & acorn::ATTR_LOCKED != 0 {
@@ -413,7 +395,7 @@ fn delete(os: &mut Os<'_>, workspace: u32, client: &Client, regs: &mut Regs) -> 
         }
         volume.release_maybe_shared(object.indaddr, object.size, parent)
     })?;
-    answer(regs, info_of(&object));
+    info_of(&object).answer(regs);
     Ok(())
 }
 
@@ -1109,17 +1091,6 @@ fn read_disc(os: &mut Os<'_>, workspace: u32, client: &Client, regs: &Regs) -> R
     os.write_byte(regs.r[2].wrapping_add(1 + len32(len)), option)
 }
 
-/// How a directory's entries are laid out.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Layout {
-    /// Zero-terminated names: `FSEntry_Func` 14.
-    Names,
-    /// A record before each name: `FSEntry_Func` 15.
-    Info,
-    /// A fuller record before each name: `FSEntry_Func` 19.
-    FullInfo,
-}
-
 /// `FSEntry_Func` 14, 15 and 19: from R4, up to R3 of the entries of the
 /// directory R1 names into R2's R5 bytes; R3 how many, R4 where to go on,
 /// -1 once none are left.
@@ -1161,37 +1132,12 @@ fn list(
     let mut read: u32 = 0;
     for object in &entries {
         let name = object.name();
-        let named_length = len32(name.len()) + 1;
-        let (size, name_at) = match layout {
-            Layout::Names => (named_length, 0),
-            Layout::Info => ((20 + named_length).next_multiple_of(4), 20),
-            Layout::FullInfo => ((29 + named_length).next_multiple_of(4), 29),
-        };
+        let size = layout.size(name);
         if used.saturating_add(size) > room {
             break;
         }
         let at = buffer.wrapping_add(used);
-        if layout != Layout::Names {
-            let info = info_of(object);
-            for (n, word) in (0..).zip([
-                info.load,
-                info.exec,
-                info.length,
-                info.attributes,
-                info.kind,
-            ]) {
-                os.write_word(at.wrapping_add(4 * n), word)?;
-            }
-        }
-        if layout == Layout::FullInfo {
-            os.write_word(at.wrapping_add(20), object.indaddr)?;
-            let [low0, low1, low2, low3] = object.exec.to_le_bytes();
-            os.write_bytes(
-                at.wrapping_add(24),
-                &[low0, low1, low2, low3, object.load.to_le_bytes()[0]],
-            )?;
-        }
-        os.write_terminated(at.wrapping_add(name_at), name, 0, name.len() + 1)?;
+        os.write_listed(at, layout, &info_of(object), object.indaddr, name)?;
         used += size;
         read += 1;
     }

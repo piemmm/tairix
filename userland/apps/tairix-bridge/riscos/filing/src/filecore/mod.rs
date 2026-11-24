@@ -26,7 +26,7 @@ mod swis;
 use alloc::vec::Vec;
 
 use tairix_riscos_kernel::error::Error;
-use tairix_riscos_kernel::filing::fs::{block, info};
+use tairix_riscos_kernel::filing::fs::{block, info, Declaration};
 use tairix_riscos_kernel::module::{Builtin, Resource, Services, Swis};
 use tairix_riscos_kernel::msgtrans::{Own, OwnFile};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, Target, Unwind, World};
@@ -132,10 +132,7 @@ pub(crate) fn write_descriptor(
         disc_op,
         misc_op,
     ];
-    for (n, word) in (0..).zip(words) {
-        os.write_word(at + 4 * n, word)?;
-    }
-    Ok(())
+    os.write_words(at, &words)
 }
 
 /// The descriptor block a client hands over at `at`: its flags, its filing
@@ -147,23 +144,14 @@ pub(crate) fn read_descriptor(
 ) -> Result<(u32, u8, [u32; DESCRIPTOR_WORDS - 1]), Fail> {
     let first = os.read_word(at)?;
     let mut entries = [0; DESCRIPTOR_WORDS - 1];
-    for (n, entry) in (1..).zip(&mut entries) {
-        *entry = os.read_word(at.wrapping_add(4 * n))?;
-    }
+    os.read_words(at.wrapping_add(4), &mut entries)?;
     let number = u8::try_from(first >> DESCRIPTOR_NUMBER_SHIFT).unwrap_or(u8::MAX);
     Ok((first & DESCRIPTOR_FLAGS, number, entries))
 }
 
-/// The routines each filing system's information block names, by its word.
-const ENTRIES: [(usize, usize); 7] = [
-    (block::OPEN, 0),
-    (block::GET_BYTES, 1),
-    (block::PUT_BYTES, 2),
-    (block::ARGS, 3),
-    (block::CLOSE, 4),
-    (block::FILE, 5),
-    (block::FUNC, 6),
-];
+/// The first of its routines that are the entries each filing system's
+/// information block names.
+const ENTRIES: usize = 0;
 /// The routines `FileCore_Create` hands its client: a background transfer's
 /// completion, for floppies and hard discs, and the release of FIQ.
 const BACKGROUND_FLOPPY: usize = 7;
@@ -564,30 +552,15 @@ fn create_instance(os: &mut Os<'_>, private_word: u32, client: Client) -> Result
 /// `client`'s filing system registered with FileSwitch from its information
 /// block, built in the instance's `workspace`.
 fn declare(os: &mut Os<'_>, workspace: u32, client: &Client) -> Result<(), Fail> {
-    let Some(base) = os.module_of(&FILE_CORE) else {
-        return Ok(());
-    };
-    let mut words = [0; block::WORDS];
-    words[block::NAME] = client.title.wrapping_sub(base);
-    words[block::STARTUP] = (workspace + EMPTY_AT).wrapping_sub(base);
-    words[block::INFO] = u32::from(client.number) | INFO;
-    for (word, routine) in ENTRIES {
-        let Some(at) = os.routine_of(&FILE_CORE, routine) else {
-            return Ok(());
-        };
-        words[word] = at.wrapping_sub(base);
-    }
-    for (n, word) in (0..).zip(words) {
-        os.write_word(workspace + INFO_AT + 4 * n, word)?;
-    }
-    let mut regs = Regs::default();
-    regs.r[..4].copy_from_slice(&[
-        fs_control::ADD,
-        base,
-        (workspace + INFO_AT).wrapping_sub(base),
+    os.declare_filing_system(Declaration {
+        module: &FILE_CORE,
+        first_entry: ENTRIES,
+        block: workspace + INFO_AT,
+        name: client.title,
+        startup: workspace + EMPTY_AT,
+        info: u32::from(client.number) | INFO,
         workspace,
-    ]);
-    os.perform(X | FS_CONTROL, &mut regs)
+    })
 }
 
 /// Its service handler: `Service_FSRedeclare`, every instance's filing

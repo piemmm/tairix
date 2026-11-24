@@ -354,6 +354,12 @@ pub(crate) fn put_error(writer: &mut Writer<'_>, error: Error) -> Result<GpuErro
             id.put(writer)?;
             GpuError::Specialization
         }
+        Error::Sampling(image, sampler) => {
+            for word in [image.0, image.1, sampler.0, sampler.1] {
+                word.put(writer)?;
+            }
+            GpuError::Sampling
+        }
         plain => plain_code(plain),
     };
     Ok(code)
@@ -390,6 +396,11 @@ pub(crate) fn take_error(code: GpuError, reader: &mut Reader<'_>) -> Result<Erro
                 6 => SpecError::Malformed,
                 _ => return Err(Error::Malformed),
             })
+        }
+        GpuError::Sampling => {
+            let image = (u32::take(reader)?, u32::take(reader)?);
+            let sampler = (u32::take(reader)?, u32::take(reader)?);
+            Error::Sampling(image, sampler)
         }
         plain => of_plain_code(plain).ok_or(Error::Malformed)?,
     };
@@ -429,6 +440,7 @@ fn plain_code(error: Error) -> GpuError {
         Error::Lost(_) => GpuError::Lost,
         Error::Disagreement(_) => GpuError::Disagreement,
         Error::Specialization(_) => GpuError::Specialization,
+        Error::Sampling(..) => GpuError::Sampling,
     }
 }
 
@@ -462,7 +474,9 @@ fn of_plain_code(code: GpuError) -> Option<Error> {
         GpuError::Bindings => Error::Bindings,
         GpuError::EntryPoint => Error::EntryPoint,
         GpuError::Interface => Error::Interface,
-        GpuError::Lost | GpuError::Disagreement | GpuError::Specialization => return None,
+        GpuError::Lost | GpuError::Disagreement | GpuError::Specialization | GpuError::Sampling => {
+            return None
+        }
     })
 }
 

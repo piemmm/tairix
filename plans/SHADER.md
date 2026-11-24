@@ -26,6 +26,7 @@ bounds stay fixed), §26.4 (untrusted input is hostile).
 | SH1 | `lib/spirv`: the module model, and the total, bounded binary decoder and encoder | done | SH2 |
 | SH2 | The validator: the capability allow-list, the addressing-model refusal, structural control flow, types, and resource binding | done | GP3 |
 | SH8 | The lowering view: an admitted module's resolved types and explicit layouts kept and exposed, its specialization evaluated once for every backend, and stage visibility in a pipeline layout's agreement | done | GP3.2, GP3.3 |
+| SH9 | Each entry point's samplings: which image each sampler samples and in which forms, followed through calls, so a layout's sample and sampler types are agreed against them | done | GP5.5 |
 | SH3 | The builder: a Rust API that emits validated modules, plus `cargo xtask shaders` and the pinned first-party set | done | GP4 |
 | SH4 | The compile sandbox: the service process, its request/answer protocol, its capability floor, and containment on crash | planned | GP8 |
 | SH5 | `lib/wgsl`: the WGSL front end — lexer, parser, resolver, and SPIR-V emission | planned | GP8 |
@@ -34,7 +35,7 @@ bounds stay fixed), §26.4 (untrusted input is hostile).
 
 Items are built in ledger order. SH7's harness is written *with* SH1–SH6 rather
 than after them: a validator whose refusals are untested has no property worth
-naming. SH8 follows SH2, which it extends.
+naming. SH8 and SH9 follow SH2, which they extend.
 
 ## 0. Binding decisions
 
@@ -273,7 +274,9 @@ be the duplication §2.2 forbids, and two readings can disagree.
   `OpSpecConstantOp` operation computed total over every bit pattern — with
   each entry point's final workgroup size. A value for an id no constant
   carries, two for one id, one wider than its constant (a Boolean's past one),
-  and a zero workgroup component are refused; every constant and constituent
+  and a zero workgroup component — an entry point's, or the `WorkgroupSize`
+  built-in's whether or not an entry point reads it — are refused; every
+  constant and constituent
   evaluation keeps counts against `MAX_SPECIALIZED`, a null composite's spelled
   out where an insertion changes one among them, and it lists nothing on the
   way, so its time and memory are bounded whatever a module of fixed size
@@ -282,6 +285,39 @@ be the duplication §2.2 forbids, and two readings can disagree.
   stages that see them, and `EntryPoint::agree` refuses a use from a stage that
   cannot: a binding's as `Disagreement::Stage`, push constants as
   `Disagreement::PushConstants`.
+- **Folding.** A backend that hands a host compiler a module hands it the one
+  meaning decided here: `Admitted::fold` answers the module with every
+  specialization constant the value evaluated and its `SpecId` gone, an
+  `OpUndef` its type's null, and every private, workgroup and function
+  variable without an initializer given its null, admitted again. A host
+  compiler therefore re-evaluates no specialization and resolves no undefined
+  value its own way. A workgroup variable's initializer is admitted only as
+  its null, which hosts zero-initializing workgroup memory accept.
+
+### 2.3 SH9 — samplings
+
+A binding's declaration says what an image holds, never how a sampler reads
+it: whether its texels are filtered, compared or read as integers is the
+pairing's. The validator records each pairing so a layout's sample and sampler
+types (`plans/GPU.md` §1.1) are agreed against what a module does, once, at
+pipeline creation.
+
+- **A sampling** is an image's set and binding, its sampler's — a combined
+  image sampler's its own — and the forms it is sampled in: compared or read,
+  at an implicit level, projected, biased, offset or gathered. Every sampling
+  instruction records one, `OpImageQueryLod` included.
+- **Through calls.** An image, sampler or sampled image a function receives as
+  a parameter is recorded against the parameter, and each call maps it to the
+  caller's own roots; an argument rooted at no variable is refused as
+  `OpaqueUse`, so every sampling names bindings.
+- **Bounded and exposed.** `EntryPoint::samplings` answers one per pairing,
+  sorted, its forms joined. A function or an entry point of more than
+  `MAX_SAMPLINGS` pairings, the most bindings an entry point may reach, is
+  refused as `Limit::Samplings`. Following samplings through calls grows
+  with calls and entry points rather than with the module, so every sampling
+  a call maps or an entry point gathers is charged to `MAX_SAMPLING_WORK`
+  for the module, refused past it as `Limit::SamplingWork`, and a list being
+  gathered is merged whenever it reaches twice its bound.
 
 ## 3. SH3 — the builder and the pinned set
 

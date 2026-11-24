@@ -36,12 +36,18 @@ pub enum Unit {
 /// The pixels the drawing counts to the inch: CSS's, and SVG's user unit.
 pub const PIXELS_PER_INCH: u32 = 96;
 
+/// Points to the inch.
+pub const POINTS_PER_INCH: u32 = 72;
+
 /// The white a page with no ground of its own is laid on, and the ground a
 /// page is first given.
 pub const PAPER_WHITE: Rgba = Rgba::new(255, 255, 255, 255);
 
 /// [`PIXELS_PER_INCH`], to measure with.
 const INCH: f64 = PIXELS_PER_INCH as f64;
+
+/// The point, in the drawing's pixels.
+const POINT: f64 = INCH / POINTS_PER_INCH as f64;
 
 impl Unit {
     /// Every unit, in the order a chooser offers them.
@@ -52,7 +58,7 @@ impl Unit {
     pub const fn pixels(self) -> f64 {
         match self {
             Self::Px => 1.0,
-            Self::Pt => INCH / 72.0,
+            Self::Pt => POINT,
             Self::Pc => INCH / 6.0,
             Self::Mm => INCH / 25.4,
             Self::Cm => INCH / 2.54,

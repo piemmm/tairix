@@ -135,7 +135,11 @@ pub(crate) trait Host: Send + Sync {
         module: &Arc<Admitted>,
     ) -> Result<ShaderModuleKey, Error>;
 
-    fn image_requirements(&self, desc: &ImageDesc) -> Result<MemoryRequirements, Error>;
+    fn image_requirements(
+        &self,
+        context: ContextKey,
+        desc: &ImageDesc,
+    ) -> Result<MemoryRequirements, Error>;
     fn create_image(
         &self,
         context: ContextKey,
@@ -246,7 +250,7 @@ impl<B: Backend> Host for Shared<B> {
                 let released = self.model.lock().destroy_timeline(context, key);
                 drop(released);
             }
-            Object::Image(key) => self.take(context, |c| &mut c.images, key),
+            Object::Image(key) => self.take(context, |c| &mut c.images.table, key),
             Object::View(key) => self.take(context, |c| &mut c.views, key),
             Object::BufferView(key) => self.take(context, |c| &mut c.buffer_views, key),
             Object::Sampler(key) => self.take(context, |c| &mut c.samplers, key),
@@ -470,8 +474,12 @@ impl<B: Backend> Host for Shared<B> {
         self.model.lock().create_shader_module(context, module)
     }
 
-    fn image_requirements(&self, desc: &ImageDesc) -> Result<MemoryRequirements, Error> {
-        self.image_form(desc).map(|(_, requirements)| requirements)
+    fn image_requirements(
+        &self,
+        context: ContextKey,
+        desc: &ImageDesc,
+    ) -> Result<MemoryRequirements, Error> {
+        Self::image_requirements(self, context, desc)
     }
 
     fn create_image(
@@ -489,7 +497,7 @@ impl<B: Backend> Host for Shared<B> {
         image: ImageKey,
         desc: &ImageViewDesc,
     ) -> Result<ViewKey, Error> {
-        self.model.lock().create_view(context, image, desc)
+        Self::create_view(self, context, image, desc)
     }
 
     fn create_buffer_view(
@@ -498,11 +506,11 @@ impl<B: Backend> Host for Shared<B> {
         buffer: BufferKey,
         desc: &BufferViewDesc,
     ) -> Result<BufferViewKey, Error> {
-        self.model.lock().create_buffer_view(context, buffer, desc)
+        Self::create_buffer_view(self, context, buffer, desc)
     }
 
     fn create_sampler(&self, context: ContextKey, desc: &SamplerDesc) -> Result<SamplerKey, Error> {
-        self.model.lock().create_sampler(context, desc)
+        Self::create_sampler(self, context, desc)
     }
 
     fn create_compute_pipeline(
@@ -546,6 +554,7 @@ impl<B: Backend> Served for Shared<B> {
             .live(context)
             .ok()?
             .images
+            .table
             .get(image)
             .map(|state| state.desc)
     }

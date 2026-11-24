@@ -3,6 +3,7 @@ extern crate std;
 use alloc::vec::Vec;
 use std::sync::LazyLock;
 
+use tairix_drawing::riscos::units::DRAW_UNIT_SHIFT;
 use tairix_riscos_filing::session::{modules_with, session, Setup, SLOT_BYTES};
 use tairix_riscos_kernel::module::Builtin;
 
@@ -23,7 +24,12 @@ fn filled(points: &[(i32, i32)]) -> Vec<Span> {
     });
     let mut os = s.kernel.os();
     let surface = render::surface(&mut os).expect("a graphics mode");
-    let unit = |(x, y): (i32, i32)| Point::new(x << (8 + surface.eig.0), y << (8 + surface.eig.1));
+    let unit = |(x, y): (i32, i32)| {
+        Point::new(
+            x << (DRAW_UNIT_SHIFT + surface.eig.0),
+            y << (DRAW_UNIT_SHIFT + surface.eig.1),
+        )
+    };
     let mut path = Vec::new();
     let (first, rest) = points.split_first().expect("a point");
     path.push(Element::Move {

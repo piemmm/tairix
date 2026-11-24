@@ -45,6 +45,16 @@ fn a_point_rounds_its_exact_sum_half_up_then_adds_the_translation() {
 }
 
 #[test]
+fn products_summed_past_64_bits_are_refused_rather_than_overflowing() {
+    let most = m(i32::MIN, i32::MIN, i32::MIN, i32::MIN, 0, 0);
+    assert_eq!(most.apply(Point::new(i32::MIN, i32::MIN)), None);
+    assert_eq!(
+        most.apply(Point::new(1, 1)),
+        Some(Point::new(-0x1_0000, -0x1_0000))
+    );
+}
+
+#[test]
 fn a_result_outside_a_word_is_refused() {
     let wide = m(0x10001, 0, 0, 0xFFFF, 0, 0);
     assert_eq!(wide.apply(Point::new(0x7FFF_FFFF, 0)), None);

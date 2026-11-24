@@ -200,6 +200,7 @@ extern "C" {
 #define TAIRIX_SYS_FS_SET_TIMES 173u
 #define TAIRIX_SYS_FS_VOLUME_STATS 174u
 #define TAIRIX_SYS_MMIO_UNMAP 175u
+#define TAIRIX_SYS_CALL_DESTROY 176u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -1013,6 +1014,7 @@ uint64_t tairix_sys_code_install(int64_t a0, int64_t a1, uint64_t a2, uintptr_t 
 uint64_t tairix_sys_fs_set_times(uint32_t a0, void * a1, uintptr_t a2, void * a3, uintptr_t a4, uint32_t a5);
 uint64_t tairix_sys_fs_volume_stats(uint32_t a0, void * a1, uintptr_t a2);
 int32_t tairix_sys_mmio_unmap(uint64_t a0);
+int32_t tairix_sys_call_destroy(uint64_t a0);
 
 #ifdef __cplusplus
 } /* extern "C" */

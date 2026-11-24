@@ -14,12 +14,14 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 
 use crate::glyphs::{Bitmap, Refused};
+use crate::le_i16;
 use crate::metrics;
 use crate::units;
 use tairix_riscos_vdu::render::WHOLE;
+use tairix_util::endian::{le_u16, le_u32};
 
 /// The header's fields.
-const MAGIC: &[u8; 4] = b"FONT";
+pub(crate) const MAGIC: &[u8; 4] = b"FONT";
 const BPP: usize = 4;
 const VERSION: usize = 5;
 /// An outlines file's design size, a bitmap file's flags.
@@ -34,11 +36,12 @@ const SCAFFOLD_FLAGS: usize = 28;
 /// The scaffold flag saying the outlines are not to be anti-aliased.
 const MONOCHROME: u32 = 1 << 1;
 /// Where the table starts.
-const TABLE: usize = 52;
-/// The versions an outlines file may be, and the ones past which a chunk
-/// opens with a flag word and its offsets are from its index.
+pub(crate) const TABLE: usize = 52;
+/// The versions an outlines file may be, the last the one a file is made
+/// at, and the ones past which a chunk opens with a flag word and its
+/// offsets are from its index.
 const FIRST_VERSION: u8 = 4;
-const LAST_VERSION: u8 = 8;
+pub(crate) const LAST_VERSION: u8 = 8;
 const FLAGGED_CHUNKS: u8 = 7;
 /// The chunks a file before version 8 has.
 const OLD_CHUNKS: usize = 8;
@@ -48,18 +51,18 @@ pub(crate) const CHUNK: usize = 32;
 pub(crate) const REDIRECT_BELOW: usize = 256;
 /// A chunk flag word's bits: subpixel placement across and up, and the
 /// bit that must be set.
-const CHUNK_HORIZONTAL: u32 = 1;
-const CHUNK_VERTICAL: u32 = 1 << 1;
-const CHUNK_MUST: u32 = 1 << 31;
+pub(crate) const CHUNK_HORIZONTAL: u32 = 1;
+pub(crate) const CHUNK_VERTICAL: u32 = 1 << 1;
+pub(crate) const CHUNK_MUST: u32 = 1 << 31;
 /// The sub-placements a chunk holds a character at along an axis with
 /// subpixel placement.
 pub(crate) const PLACEMENTS: usize = 4;
 /// A character's flag bits.
-mod character {
-    pub(super) const WIDE: u8 = 1;
-    pub(super) const ONE_BIT: u8 = 1 << 1;
+pub(crate) mod character {
+    pub(crate) const WIDE: u8 = 1;
+    pub(crate) const ONE_BIT: u8 = 1 << 1;
     pub(super) const BLACK_FIRST: u8 = 1 << 2;
-    pub(super) const OUTLINE: u8 = 1 << 3;
+    pub(crate) const OUTLINE: u8 = 1 << 3;
     pub(super) const BASE: u8 = 1 << 4;
     pub(super) const ACCENT: u8 = 1 << 5;
     pub(super) const WIDE_CODES: u8 = 1 << 6;
@@ -67,15 +70,16 @@ mod character {
     pub(super) const PACKING_SHIFT: u32 = 4;
 }
 /// A bitmap file's table: its size, then its sizes and resolutions.
-const BITMAP_TABLE: u16 = 10;
+pub(crate) const BITMAP_TABLE: u16 = 10;
 /// A segment's type, in its first byte's low bits.
 const SEGMENT_TYPE: u8 = 3;
-const TERMINATOR: u8 = 0;
-const MOVE: u8 = 1;
-const LINE: u8 = 2;
+pub(crate) const TERMINATOR: u8 = 0;
+pub(crate) const MOVE: u8 = 1;
+pub(crate) const LINE: u8 = 2;
+pub(crate) const CURVE: u8 = 3;
 /// A terminator's bits: stroke paths follow, and inclusions follow.
-const STROKES_FOLLOW: u8 = 1 << 2;
-const INCLUSIONS_FOLLOW: u8 = 1 << 3;
+pub(crate) const STROKES_FOLLOW: u8 = 1 << 2;
+pub(crate) const INCLUSIONS_FOLLOW: u8 = 1 << 3;
 /// How deep composites nest, and how many inclusions one character draws.
 const COMPOSITE_DEPTH: usize = 4;
 const INCLUSIONS_MOST: usize = 64;
@@ -176,20 +180,26 @@ impl File {
     /// The file `bytes`.
     pub(crate) fn read(bytes: Vec<u8>) -> Result<Self, Malformed> {
         if bytes.len() < REDIRECT_BELOW {
-            let end = bytes.iter().position(|&b| b < b' ').unwrap_or(bytes.len());
-            let mut name = bytes;
-            name.truncate(end);
-            return Ok(Self::Redirect(name));
+            return Ok(Self::Redirect(redirection(bytes)));
         }
         if bytes.get(..MAGIC.len()) != Some(MAGIC.as_slice()) {
             return Err(Malformed);
         }
         match byte(&bytes, BPP)? {
             0 => Outlines::read(bytes).map(Self::Outlines),
-            1 | 4 => Bitmaps::read(bytes).map(Self::Bitmaps),
+            bits if Depth::of_bits(bits).is_some() => Bitmaps::read(bytes).map(Self::Bitmaps),
             _ => Err(Malformed),
         }
     }
+}
+
+/// What a file shorter than [`REDIRECT_BELOW`] names, another font or the
+/// file whose bitmaps are the master ones: its bytes to their first control
+/// character.
+pub(crate) fn redirection(mut bytes: Vec<u8>) -> Vec<u8> {
+    let end = bytes.iter().position(|&b| b < b' ').unwrap_or(bytes.len());
+    bytes.truncate(end);
+    bytes
 }
 
 /// A file's characters in chunks of 32: its bytes, its version, and each
@@ -211,8 +221,8 @@ impl Chunks {
         let (offsets_at, count) = if version < LAST_VERSION {
             (CHUNK_OFFSETS, OLD_CHUNKS)
         } else {
-            let at = usize::try_from(u32_at(&bytes, CHUNK_TABLE)?).map_err(|_| Malformed)?;
-            let count = usize::try_from(u32_at(&bytes, CHUNK_COUNT)?).map_err(|_| Malformed)?;
+            let at = file_offset(&bytes, CHUNK_TABLE)?;
+            let count = file_offset(&bytes, CHUNK_COUNT)?;
             (at, count)
         };
         if count > CHUNKS_MOST {
@@ -228,10 +238,8 @@ impl Chunks {
         let mut spans = Vec::new();
         spans.try_reserve(count).map_err(|_| Malformed)?;
         for chunk in 0..count {
-            let start =
-                usize::try_from(u32_at(&bytes, offsets_at + 4 * chunk)?).map_err(|_| Malformed)?;
-            let end = usize::try_from(u32_at(&bytes, offsets_at + 4 * chunk + 4)?)
-                .map_err(|_| Malformed)?;
+            let start = file_offset(&bytes, offsets_at + 4 * chunk)?;
+            let end = file_offset(&bytes, offsets_at + 4 * chunk + 4)?;
             if start > end || end > bytes.len() || (start != end && start < TABLE) {
                 return Err(Malformed);
             }
@@ -269,7 +277,7 @@ impl Chunks {
         }
         let chunk = &self.bytes[start..end];
         let (index, (across, up)) = if self.version >= FLAGGED_CHUNKS {
-            let flags = u32_at(chunk, 0)?;
+            let flags = le_u32(chunk, 0).ok_or(Malformed)?;
             if flags & CHUNK_MUST == 0 {
                 return Err(Malformed);
             }
@@ -280,7 +288,7 @@ impl Chunks {
         };
         let variant = placement.0.min(across - 1) * up + placement.1.min(up - 1);
         let entry = index + 4 * (variant * CHUNK + code % CHUNK);
-        let offset = usize::try_from(u32_at(chunk, entry)?).map_err(|_| Malformed)?;
+        let offset = file_offset(chunk, entry)?;
         if offset == 0 {
             return Ok(None);
         }
@@ -322,24 +330,24 @@ pub(crate) struct Outlines {
 
 /// The header's box: `x0, y0, x1, y1`.
 fn header_box(bytes: &[u8]) -> Result<[i32; 4], Malformed> {
-    let x0 = i32::from(i16_at(bytes, BBOX)?);
-    let y0 = i32::from(i16_at(bytes, BBOX + 2)?);
-    let width = i32::from(u16_at(bytes, BBOX + 4)?);
-    let height = i32::from(u16_at(bytes, BBOX + 6)?);
+    let x0 = i32::from(le_i16(bytes, BBOX).ok_or(Malformed)?);
+    let y0 = i32::from(le_i16(bytes, BBOX + 2).ok_or(Malformed)?);
+    let width = i32::from(le_u16(bytes, BBOX + 4).ok_or(Malformed)?);
+    let height = i32::from(le_u16(bytes, BBOX + 6).ok_or(Malformed)?);
     Ok([x0, y0, x0 + width, y0 + height])
 }
 
 impl Outlines {
     fn read(bytes: Vec<u8>) -> Result<Self, Malformed> {
-        let design_size = u16_at(&bytes, DESIGN_SIZE)?;
+        let design_size = le_u16(&bytes, DESIGN_SIZE).ok_or(Malformed)?;
         if design_size == 0 {
             return Err(Malformed);
         }
         let bbox = header_box(&bytes)?;
         let chunks = Chunks::read(bytes)?;
         let monochrome = if chunks.version >= LAST_VERSION {
-            u32_at(&chunks.bytes, SCAFFOLD_ENTRIES)?;
-            u32_at(&chunks.bytes, SCAFFOLD_FLAGS)? & MONOCHROME != 0
+            le_u32(&chunks.bytes, SCAFFOLD_ENTRIES).ok_or(Malformed)?;
+            le_u32(&chunks.bytes, SCAFFOLD_FLAGS).ok_or(Malformed)? & MONOCHROME != 0
         } else {
             false
         };
@@ -484,6 +492,23 @@ pub(crate) enum Depth {
     Four,
 }
 
+impl Depth {
+    /// Its bits a pixel, as a bitmap file's header gives them.
+    pub(crate) const fn bits(self) -> u8 {
+        match self {
+            Self::One => 1,
+            Self::Four => 4,
+        }
+    }
+
+    /// The depth of `bits` a pixel; none for one no bitmap file has.
+    fn of_bits(bits: u8) -> Option<Self> {
+        [Self::One, Self::Four]
+            .into_iter()
+            .find(|depth| depth.bits() == bits)
+    }
+}
+
 /// A bitmap file's characters, all at one size.
 #[derive(Debug)]
 pub(crate) struct Bitmaps {
@@ -501,25 +526,23 @@ pub(crate) struct Bitmaps {
 /// A bitmap file's flag bits: sub-placement across and up, and the chunks'
 /// flag words, which a file of version 7 or later has and an earlier one
 /// has not.
-mod bitmap_flag {
-    pub(super) const ACROSS: u16 = 1;
-    pub(super) const UP: u16 = 1 << 1;
-    pub(super) const FLAGGED: u16 = 1 << 6;
+pub(crate) mod bitmap_flag {
+    pub(crate) const ACROSS: u16 = 1;
+    pub(crate) const UP: u16 = 1 << 1;
+    pub(crate) const FLAGGED: u16 = 1 << 6;
     pub(super) const KNOWN: u16 = ACROSS | UP | FLAGGED;
 }
 
 impl Bitmaps {
     fn read(bytes: Vec<u8>) -> Result<Self, Malformed> {
-        let depth = match byte(&bytes, BPP)? {
-            1 => Depth::One,
-            4 => Depth::Four,
-            _ => return Err(Malformed),
-        };
-        let flags = u16_at(&bytes, BITMAP_FLAGS)?;
-        if flags & !bitmap_flag::KNOWN != 0 || u16_at(&bytes, TABLE)? != BITMAP_TABLE {
+        let depth = Depth::of_bits(byte(&bytes, BPP)?).ok_or(Malformed)?;
+        let flags = le_u16(&bytes, BITMAP_FLAGS).ok_or(Malformed)?;
+        if flags & !bitmap_flag::KNOWN != 0
+            || le_u16(&bytes, TABLE).ok_or(Malformed)? != BITMAP_TABLE
+        {
             return Err(Malformed);
         }
-        let table = |at: usize| u16_at(&bytes, TABLE + 2 + 2 * at);
+        let table = |at: usize| le_u16(&bytes, TABLE + 2 + 2 * at).ok_or(Malformed);
         let (points, resolution) = ((table(0)?, table(2)?), (table(1)?, table(3)?));
         let chunks = Chunks::read(bytes)?;
         if (flags & bitmap_flag::FLAGGED != 0) != (chunks.version >= FLAGGED_CHUNKS) {
@@ -815,7 +838,7 @@ impl Reader<'_> {
                 TERMINATOR => return Ok(segment),
                 MOVE => Element::Move(self.point()?),
                 LINE => Element::Line(self.point()?),
-                _ => Element::Curve(self.point()?, self.point()?, self.point()?),
+                CURVE.. => Element::Curve(self.point()?, self.point()?, self.point()?),
             };
             if out.len() >= ELEMENTS_MOST {
                 return Err(Malformed);
@@ -827,31 +850,28 @@ impl Reader<'_> {
 }
 
 /// `value`'s low `bits` bits, sign-extended.
-const fn sign_extend(value: u32, bits: u32) -> i32 {
+pub(crate) const fn sign_extend(value: u32, bits: u32) -> i32 {
     let shift = 32 - bits;
     ((value << shift).cast_signed()) >> shift
+}
+
+/// A point's two coordinates in the three bytes a wide character holds one
+/// in, twelve bits each, across first.
+pub(crate) fn wide_point(x: i32, y: i32) -> [u8; 3] {
+    let packed = (x.cast_unsigned() & 0xFFF) | ((y.cast_unsigned() & 0xFFF) << 12);
+    let [low, middle, high, _] = packed.to_le_bytes();
+    [low, middle, high]
 }
 
 fn byte(bytes: &[u8], at: usize) -> Result<u8, Malformed> {
     bytes.get(at).copied().ok_or(Malformed)
 }
 
-fn u16_at(bytes: &[u8], at: usize) -> Result<u16, Malformed> {
-    let pair = bytes
-        .get(at..at.checked_add(2).ok_or(Malformed)?)
-        .ok_or(Malformed)?;
-    Ok(u16::from_le_bytes([pair[0], pair[1]]))
-}
-
-fn i16_at(bytes: &[u8], at: usize) -> Result<i16, Malformed> {
-    u16_at(bytes, at).map(u16::cast_signed)
-}
-
-fn u32_at(bytes: &[u8], at: usize) -> Result<u32, Malformed> {
-    let word = bytes
-        .get(at..at.checked_add(4).ok_or(Malformed)?)
-        .ok_or(Malformed)?;
-    Ok(u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+/// The word at `at` of `bytes`: an offset or a length within a file.
+pub(crate) fn file_offset(bytes: &[u8], at: usize) -> Result<usize, Malformed> {
+    le_u32(bytes, at)
+        .and_then(|word| usize::try_from(word).ok())
+        .ok_or(Malformed)
 }
 
 #[cfg(test)]

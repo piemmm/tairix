@@ -11,7 +11,7 @@ use crate::error::Error;
 use crate::os::{Fail, Os, Regs};
 
 use super::calendar::{standard_year, time_of, year_start};
-use super::{entry, own, SCRATCH_AT, UNKNOWN_SWI, UNKNOWN_TERRITORY};
+use super::{entry, own, CURRENT, SCRATCH_AT, UNKNOWN_SWI, UNKNOWN_TERRITORY};
 
 /// "No rule for given timezone".
 pub(super) const NO_RULE: Error = Error {
@@ -32,8 +32,7 @@ const AUTO_BIT: u8 = 1;
 const HAS_RULES: u32 = 0;
 const YEAR_BOUNDS: u32 = 1;
 
-/// The current territory, and the time zone its rules are kept for.
-const CURRENT: u32 = u32::MAX;
+/// The time zone the current territory's rules are kept for.
 const FIRST_ZONE: u32 = 0;
 
 /// Whether `time` lies where a year's `bounds` put daylight saving in force:

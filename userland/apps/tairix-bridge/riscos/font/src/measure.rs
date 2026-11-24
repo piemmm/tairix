@@ -20,8 +20,10 @@ use crate::units;
 
 /// `Font_ScanString`'s own flags, beside those it shares with `Font_Paint`.
 mod flag {
-    pub(super) use crate::layout::flag::{BLOCK, OS_UNITS};
-    use crate::layout::flag::{HALFWORDS, HANDLE, KERN, LENGTH, MATRIX, RIGHT_TO_LEFT, WORDS};
+    pub(super) use tairix_riscos_kernel::swi::font::flag::{BLOCK, OS_UNITS};
+    use tairix_riscos_kernel::swi::font::flag::{
+        HALFWORDS, HANDLE, KERN, LENGTH, MATRIX, RIGHT_TO_LEFT, WORDS,
+    };
 
     pub(super) const CARET: u32 = 1 << 17;
     pub(super) const BBOX: u32 = 1 << 18;
@@ -85,18 +87,14 @@ pub(crate) fn scan_string(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> 
     let Walked { stop, .. } = layout::walk(os, &request, font, colours, &mut layout::Measuring)?;
     if flags & flag::BBOX != 0 {
         let bbox = stop.bbox.map_or(NOTHING, |b| [b.x0, b.y0, b.x1, b.y1]);
-        write_words(
-            os,
-            regs.r[5].wrapping_add(20),
-            &bbox.map(i32::cast_unsigned),
-        )?;
+        os.write_words(regs.r[5].wrapping_add(20), &bbox.map(i32::cast_unsigned))?;
     }
     if flags & flag::MATRIX_OUT != 0 {
         let words = stop
             .matrix
             .map_or(Transform::IDENTITY, Transform::of)
             .words();
-        write_words(os, regs.r[6], &words)?;
+        os.write_words(regs.r[6], &words)?;
     }
     leave(os, &stop)?;
     regs.r[1] = regs.r[1].wrapping_add(stop.offset);
@@ -104,13 +102,6 @@ pub(crate) fn scan_string(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> 
     regs.r[4] = stop.pen.1.cast_unsigned();
     if flags & flag::COUNT != 0 {
         regs.r[7] = stop.count;
-    }
-    Ok(())
-}
-
-fn write_words(os: &mut Os<'_>, at: u32, words: &[u32]) -> Result<(), Fail> {
-    for (i, &word) in (0u32..).zip(words) {
-        os.write_word(at.wrapping_add(4 * i), word)?;
     }
     Ok(())
 }

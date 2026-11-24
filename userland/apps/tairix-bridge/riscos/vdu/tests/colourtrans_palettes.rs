@@ -5,7 +5,7 @@
 
 mod common;
 
-use common::{call, error_number, select_depth};
+use common::{call, error_number, read_words, select_depth, write_words};
 use tairix_riscos_filing::session::Session;
 use tairix_riscos_kernel::os::Fail;
 use tairix_riscos_kernel::swi::chunk::BLEND_TABLE;
@@ -27,20 +27,6 @@ const NORMAL: u32 = 16;
 
 fn mode(session: &mut Session, number: u8) {
     common::vdu(session, &[22, number]).expect("a mode");
-}
-
-fn write_words(session: &mut Session, at: u32, words: &[u32]) {
-    let os = &mut session.kernel.os();
-    for (i, &word) in (0u32..).zip(words) {
-        os.write_word(at + 4 * i, word).expect("written");
-    }
-}
-
-fn read_words(session: &mut Session, at: u32, count: u32) -> Vec<u32> {
-    let os = &mut session.kernel.os();
-    (0..count)
-        .map(|i| os.read_word(at + 4 * i).expect("read"))
-        .collect()
 }
 
 /// `OS_ReadPalette`'s two words for `logical`.

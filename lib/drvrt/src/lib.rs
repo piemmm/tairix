@@ -68,6 +68,8 @@ pub use host::{GrantedResource, RtDriverHost, MAX_GRANTS};
 pub use supplier::{refusal, Recorder, RtSupplier, Supplier, SupplierHost};
 pub use syscalls::{DmaRelease, GrantSyscalls, RtDmaRelease, RtGrantSyscalls};
 
+#[cfg(any(target_os = "none", test))]
+mod channel;
 #[cfg(target_os = "none")]
 pub mod serve;
 #[cfg(any(target_os = "none", test))]

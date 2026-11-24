@@ -7,8 +7,8 @@ use tairix_abi::DriverError;
 use tairix_inline::ArrayVec;
 
 use super::{
-    Command, Structure, VkResult, MAX_MEMORY_HEAPS, MAX_MEMORY_TYPES, PHYSICAL_DEVICE_NAME_LEN,
-    UUID_LEN,
+    extension, Command, Structure, VkResult, CORE_FEATURES, EXTENSION_NAME_LEN, MAX_MEMORY_HEAPS,
+    MAX_MEMORY_TYPES, PHYSICAL_DEVICE_NAME_LEN, UUID_LEN,
 };
 
 /// The most queue families the driver reads of a physical device.
@@ -149,19 +149,66 @@ impl<'b> Reader<'b> {
         self.present()
     }
 
+    /// A Boolean member, which must be one or nought.
+    fn boolean(&mut self) -> Result<bool, DriverError> {
+        match self.u32()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(FAULT),
+        }
+    }
+
+    /// The structures of a chain whose first is `first`, each with an
+    /// extension chained to it but the last.
+    fn chain_of(&mut self, first: Structure, rest: &[Structure]) -> Result<(), DriverError> {
+        match rest.split_last() {
+            None => self.structure(first),
+            Some((&last, middle)) => {
+                self.chained(first)?;
+                for &structure in middle {
+                    self.chained(structure)?;
+                }
+                self.structure(last)
+            }
+        }
+    }
+
     /// [`Command::GetPhysicalDeviceProperties2`], as
     /// [`Encoder::get_physical_device_properties2`](super::encode::Encoder::get_physical_device_properties2)
-    /// asks: the innermost extension's members first.
-    pub(crate) fn properties(&mut self) -> Result<HostProperties, DriverError> {
+    /// asks with `robustness` or without: the innermost extension's members
+    /// first.
+    pub(crate) fn properties(&mut self, robustness: bool) -> Result<HostProperties, DriverError> {
         self.header(Command::GetPhysicalDeviceProperties2)?;
         self.present()?;
-        self.chained(Structure::PhysicalDeviceProperties2)?;
-        self.chained(Structure::PhysicalDeviceSubgroupProperties)?;
-        self.structure(Structure::PhysicalDeviceMaintenance3Properties)?;
+        let robust_alignments = if robustness {
+            self.chain_of(
+                Structure::PhysicalDeviceProperties2,
+                &[
+                    Structure::PhysicalDeviceSubgroupProperties,
+                    Structure::PhysicalDeviceMaintenance3Properties,
+                    Structure::PhysicalDeviceRobustness2Properties,
+                ],
+            )?;
+            Some(RobustAlignments {
+                storage: self.u64()?,
+                uniform: self.u64()?,
+            })
+        } else {
+            self.chain_of(
+                Structure::PhysicalDeviceProperties2,
+                &[
+                    Structure::PhysicalDeviceSubgroupProperties,
+                    Structure::PhysicalDeviceMaintenance3Properties,
+                ],
+            )?;
+            None
+        };
         let max_set_descriptors = self.u32()?;
         let max_allocation_size = self.u64()?;
         let subgroup_size = self.u32()?;
-        // The stages and operations a subgroup offers, and its quads'.
+        // The stages subgroup operations run in, the operations, and whether
+        // quad operations run in every stage: no subgroup capability is
+        // stated.
         self.words(3)?;
         let api_version = self.u32()?;
         let _driver_version = self.u32()?;
@@ -184,7 +231,84 @@ impl<'b> Reader<'b> {
             subgroup_size,
             max_allocation_size,
             max_set_descriptors,
+            robust_alignments,
         })
+    }
+
+    /// [`Command::EnumerateDeviceExtensionProperties`]: its result, how many
+    /// extensions the physical device has, and which of those read, at most
+    /// `asked`, the driver asks for.
+    pub(crate) fn extensions(
+        &mut self,
+        asked: usize,
+    ) -> Result<(VkResult, u32, HostExtensions), DriverError> {
+        self.header(Command::EnumerateDeviceExtensionProperties)?;
+        let result = self.result()?;
+        self.present()?;
+        let count = self.u32()?;
+        let read = usize::try_from(self.u64()?).map_err(|_| FAULT)?;
+        if read > asked || read > count as usize {
+            return Err(FAULT);
+        }
+        let mut found = HostExtensions::NONE;
+        for _ in 0..read {
+            self.sized(EXTENSION_NAME_LEN)?;
+            let name: [u8; EXTENSION_NAME_LEN] = self.array()?;
+            let _spec_version = self.u32()?;
+            let len = name.iter().position(|&byte| byte == 0).ok_or(FAULT)?;
+            let named = name.get(..len).ok_or(FAULT)?;
+            for (wanted, flag) in ASKED {
+                if named == wanted.as_bytes() {
+                    found = found.with(flag);
+                }
+            }
+        }
+        Ok((result, count, found))
+    }
+
+    /// [`Command::GetPhysicalDeviceFeatures2`], as
+    /// [`Encoder::get_physical_device_features2`](super::encode::Encoder::get_physical_device_features2)
+    /// asks with `chain`: each extension structure's Boolean members, in the
+    /// chain's order, and the core features'.
+    pub(crate) fn features(&mut self, chain: &[Structure]) -> Result<HostFeatures, DriverError> {
+        self.header(Command::GetPhysicalDeviceFeatures2)?;
+        self.present()?;
+        self.chain_of(Structure::PhysicalDeviceFeatures2, chain)?;
+        let mut chained: ArrayVec<ArrayVec<bool, MAX_CHAINED_MEMBERS>, MAX_CHAINED> =
+            ArrayVec::new();
+        for _ in chain {
+            chained.try_push(ArrayVec::new()).map_err(|_| FAULT)?;
+        }
+        for (&structure, members) in chain.iter().zip(chained.as_mut_slice()).rev() {
+            for _ in 0..chained_members(structure).ok_or(FAULT)? {
+                members.try_push(self.boolean()?).map_err(|_| FAULT)?;
+            }
+        }
+        let mut core = [false; CORE_FEATURES];
+        for member in &mut core {
+            *member = self.boolean()?;
+        }
+        Ok(HostFeatures { core, chained })
+    }
+
+    /// A physical device's per-set descriptor counts, the dynamic buffers'
+    /// and input attachments' read past.
+    fn set_descriptors(&mut self) -> Result<[u32; 5], DriverError> {
+        let samplers = self.u32()?;
+        let uniform_buffers = self.u32()?;
+        let _uniform_dynamic = self.u32()?;
+        let storage_buffers = self.u32()?;
+        let _storage_dynamic = self.u32()?;
+        let sampled_images = self.u32()?;
+        let storage_images = self.u32()?;
+        let _input_attachments = self.u32()?;
+        Ok([
+            samplers,
+            uniform_buffers,
+            storage_buffers,
+            sampled_images,
+            storage_images,
+        ])
     }
 
     /// A physical device's limits, every member in its order, those the
@@ -193,28 +317,21 @@ impl<'b> Reader<'b> {
         let image_1d = self.u32()?;
         let image_2d = self.u32()?;
         let image_3d = self.u32()?;
-        let _cube = self.u32()?;
+        let image_cube = self.u32()?;
         let array_layers = self.u32()?;
         let texel_buffer_elements = self.u32()?;
         let uniform_buffer_range = self.u32()?;
         let storage_buffer_range = self.u32()?;
         let push_constants = self.u32()?;
-        // Allocation and sampler counts, the buffer-image granularity and the
-        // sparse address space.
+        // Allocation and sampler counts.
         self.words(2)?;
-        self.u64()?;
+        let buffer_image_granularity = self.u64()?;
+        // The sparse address space.
         self.u64()?;
         let bound_sets = self.u32()?;
         // Per-stage descriptor counts, seven.
         self.words(7)?;
-        let set_samplers = self.u32()?;
-        let set_uniform_buffers = self.u32()?;
-        let _set_uniform_dynamic = self.u32()?;
-        let set_storage_buffers = self.u32()?;
-        let _set_storage_dynamic = self.u32()?;
-        let set_sampled_images = self.u32()?;
-        let set_storage_images = self.u32()?;
-        let _set_input_attachments = self.u32()?;
+        let set_descriptors = self.set_descriptors()?;
         let vertex_attributes = self.u32()?;
         let vertex_bindings = self.u32()?;
         let vertex_attribute_offset = self.u32()?;
@@ -232,27 +349,32 @@ impl<'b> Reader<'b> {
         // Sub-pixel, sub-texel and mipmap precision, the largest index.
         self.words(4)?;
         let draw_indirect_count = self.u32()?;
-        let _lod_bias = self.f32()?;
+        let sampler_lod_bias = self.f32()?;
         let sampler_anisotropy = self.f32()?;
         let _viewports = self.u32()?;
         let viewport_dimensions = self.u32s::<2>()?;
         let viewport_bounds = self.f32s::<2>()?;
         let _viewport_sub_pixel_bits = self.u32()?;
         let _map_alignment = self.u64()?;
-        let _texel_offset_alignment = self.u64()?;
+        let texel_offset_alignment = self.u64()?;
         let uniform_offset_alignment = self.u64()?;
         let storage_offset_alignment = self.u64()?;
-        // Texel and gather offsets, interpolation offsets and their bits, the
-        // framebuffer's extent and its four sample counts.
-        self.words(4 + 3 + 3 + 4)?;
+        // Texel and gather offsets, interpolation offsets and their bits.
+        self.words(4 + 3)?;
+        // Two members, not an array.
+        let framebuffer = [self.u32()?, self.u32()?];
+        // Its layers and its four sample counts.
+        self.words(1 + 4)?;
         let colour_attachments = self.u32()?;
         // Sampled and storage image sample counts, the sample-mask words, the
         // timestamps, clip and cull distances, queue priorities.
         self.words(5 + 1 + 2 + 3 + 1)?;
         let point_sizes = self.f32s::<2>()?;
         let line_widths = self.f32s::<2>()?;
-        // Their granularities, strict lines and standard sample locations.
-        self.words(4)?;
+        // Their granularities.
+        self.words(2)?;
+        let strict_lines = self.boolean()?;
+        let standard_sample_locations = self.boolean()?;
         // The optimal copy alignments and the non-coherent atom.
         self.u64()?;
         self.u64()?;
@@ -261,19 +383,15 @@ impl<'b> Reader<'b> {
             image_1d,
             image_2d,
             image_3d,
+            image_cube,
             array_layers,
+            buffer_image_granularity,
             texel_buffer_elements,
             uniform_buffer_range,
             storage_buffer_range,
             push_constants,
             bound_sets,
-            set_descriptors: [
-                set_samplers,
-                set_uniform_buffers,
-                set_storage_buffers,
-                set_sampled_images,
-                set_storage_images,
-            ],
+            set_descriptors,
             vertex_attributes,
             vertex_bindings,
             vertex_attribute_offset,
@@ -285,14 +403,19 @@ impl<'b> Reader<'b> {
             workgroup_invocations,
             workgroup_size,
             draw_indirect_count,
+            sampler_lod_bias,
             sampler_anisotropy,
             viewport_dimensions,
             viewport_bounds,
+            texel_offset_alignment,
             uniform_offset_alignment,
             storage_offset_alignment,
             colour_attachments,
             point_sizes,
             line_widths,
+            framebuffer,
+            strict_lines,
+            standard_sample_locations,
         })
     }
 
@@ -359,8 +482,11 @@ impl<'b> Reader<'b> {
     }
 
     /// [`Command::GetBufferMemoryRequirements2`].
-    pub(crate) fn memory_requirements(&mut self) -> Result<HostRequirements, DriverError> {
-        self.header(Command::GetBufferMemoryRequirements2)?;
+    pub(crate) fn memory_requirements(
+        &mut self,
+        command: Command,
+    ) -> Result<HostRequirements, DriverError> {
+        self.header(command)?;
         self.present()?;
         self.structure(Structure::MemoryRequirements2)?;
         Ok(HostRequirements {
@@ -370,9 +496,73 @@ impl<'b> Reader<'b> {
         })
     }
 
-    /// [`Command::AllocateCommandBuffers`] of `ids`.
-    pub(crate) fn command_buffers(&mut self, ids: &[u64]) -> Result<VkResult, DriverError> {
-        self.header(Command::AllocateCommandBuffers)?;
+    /// [`Command::GetPhysicalDeviceFormatProperties2`], asked with Vulkan
+    /// 1.3's format features chained where `stated`, whose 64-bit features it
+    /// then answers.
+    pub(crate) fn format_properties(
+        &mut self,
+        stated: bool,
+    ) -> Result<HostFormatFeatures, DriverError> {
+        self.header(Command::GetPhysicalDeviceFormatProperties2)?;
+        self.present()?;
+        if !stated {
+            self.structure(Structure::FormatProperties2)?;
+            let _linear = self.u32()?;
+            return Ok(HostFormatFeatures {
+                optimal: u64::from(self.u32()?),
+                buffer: u64::from(self.u32()?),
+            });
+        }
+        self.chain_of(
+            Structure::FormatProperties2,
+            &[Structure::FormatProperties3],
+        )?;
+        let _linear = self.u64()?;
+        let features = HostFormatFeatures {
+            optimal: self.u64()?,
+            buffer: self.u64()?,
+        };
+        // The first 31 bits again, which the 64-bit features include.
+        self.words(3)?;
+        Ok(features)
+    }
+
+    /// [`Command::GetPhysicalDeviceImageFormatProperties2`], asked with no
+    /// extension structure: the most an image of what was asked may be, or
+    /// `None` where none of it is made, whose properties then mean nothing.
+    pub(crate) fn image_format_properties(
+        &mut self,
+    ) -> Result<Option<HostImageLimits>, DriverError> {
+        self.header(Command::GetPhysicalDeviceImageFormatProperties2)?;
+        let result = self.result()?;
+        self.present()?;
+        self.structure(Structure::ImageFormatProperties2)?;
+        let limits = HostImageLimits {
+            // An extent is a structure of three words, not an array.
+            extent: [self.u32()?, self.u32()?, self.u32()?],
+            levels: self.u32()?,
+            layers: self.u32()?,
+            samples: self.u32()?,
+        };
+        let _resource_size = self.u64()?;
+        match result {
+            VkResult::Success => Ok(Some(limits)),
+            // Host and device memory exhausted: the image may be made later.
+            VkResult::Failed(-1 | -2) => Err(DriverError::OutOfMemory),
+            VkResult::Failed(_) => Ok(None),
+            VkResult::Partial(_) => Err(FAULT),
+        }
+    }
+
+    /// A reply of `command`, which made the objects `ids` as an array
+    /// rather than through a pointer — command buffers, descriptor sets and
+    /// pipelines — answering its result: they exist only where it succeeded.
+    pub(crate) fn allocated(
+        &mut self,
+        command: Command,
+        ids: &[u64],
+    ) -> Result<VkResult, DriverError> {
+        self.header(command)?;
         let result = self.result()?;
         self.sized(ids.len())?;
         for &id in ids {
@@ -382,6 +572,123 @@ impl<'b> Reader<'b> {
         }
         Ok(result)
     }
+}
+
+/// Every extension structure the driver chains to the core features.
+pub(crate) const CHAINED: [Structure; 7] = [
+    Structure::PhysicalDeviceRobustness2Features,
+    Structure::PhysicalDeviceZeroInitializeWorkgroupMemoryFeatures,
+    Structure::PhysicalDevice16BitStorageFeatures,
+    Structure::PhysicalDeviceShaderFloat16Int8Features,
+    Structure::PhysicalDeviceDynamicRenderingFeatures,
+    Structure::PhysicalDeviceMaintenance5Features,
+    Structure::PhysicalDeviceLineRasterizationFeatures,
+];
+
+/// The most extension structures the driver chains to the core features.
+pub(crate) const MAX_CHAINED: usize = CHAINED.len();
+
+/// The most Boolean members a chained feature structure holds.
+pub(crate) const MAX_CHAINED_MEMBERS: usize = {
+    let mut most = 0;
+    let mut at = 0;
+    while at < CHAINED.len() {
+        match chained_members(CHAINED[at]) {
+            Some(members) if members > most => most = members,
+            Some(_) => {}
+            None => panic!("a chained structure of no known members"),
+        }
+        at += 1;
+    }
+    most
+};
+
+/// How many Boolean members a feature structure the driver chains holds.
+pub(crate) const fn chained_members(structure: Structure) -> Option<usize> {
+    match structure {
+        Structure::PhysicalDeviceRobustness2Features => Some(3),
+        Structure::PhysicalDevice16BitStorageFeatures => Some(4),
+        Structure::PhysicalDeviceShaderFloat16Int8Features => Some(2),
+        Structure::PhysicalDeviceZeroInitializeWorkgroupMemoryFeatures
+        | Structure::PhysicalDeviceDynamicRenderingFeatures
+        | Structure::PhysicalDeviceMaintenance5Features => Some(1),
+        Structure::PhysicalDeviceLineRasterizationFeatures => Some(6),
+        _ => None,
+    }
+}
+
+tairix_util::flags! {
+    /// Which of the extensions the driver asks for a physical device offers.
+    pub(crate) struct HostExtensions(u16) {
+        const ROBUSTNESS2_KHR = 1;
+        const ROBUSTNESS2_EXT = 1 << 1;
+        const ZERO_INITIALIZE_WORKGROUP_MEMORY = 1 << 2;
+        const SHADER_FLOAT16_INT8 = 1 << 3;
+        const SAMPLER_MIRROR_CLAMP_TO_EDGE = 1 << 4;
+        const DEPTH_RANGE_UNRESTRICTED = 1 << 5;
+        const FORMAT_FEATURE_FLAGS2 = 1 << 6;
+        const MAINTENANCE5 = 1 << 7;
+        const LINE_RASTERIZATION_KHR = 1 << 8;
+        const LINE_RASTERIZATION_EXT = 1 << 9;
+    }
+}
+
+impl HostExtensions {
+    /// Either name of the second robustness level.
+    pub(crate) const ROBUSTNESS2: Self = Self::ROBUSTNESS2_KHR.with(Self::ROBUSTNESS2_EXT);
+    /// Either name of line rasterization.
+    pub(crate) const LINE_RASTERIZATION: Self =
+        Self::LINE_RASTERIZATION_KHR.with(Self::LINE_RASTERIZATION_EXT);
+}
+
+/// The extensions the driver asks for, each by name.
+pub(crate) const ASKED: [(&str, HostExtensions); 10] = [
+    (extension::ROBUSTNESS2_KHR, HostExtensions::ROBUSTNESS2_KHR),
+    (extension::ROBUSTNESS2_EXT, HostExtensions::ROBUSTNESS2_EXT),
+    (
+        extension::ZERO_INITIALIZE_WORKGROUP_MEMORY,
+        HostExtensions::ZERO_INITIALIZE_WORKGROUP_MEMORY,
+    ),
+    (
+        extension::SHADER_FLOAT16_INT8,
+        HostExtensions::SHADER_FLOAT16_INT8,
+    ),
+    (
+        extension::SAMPLER_MIRROR_CLAMP_TO_EDGE,
+        HostExtensions::SAMPLER_MIRROR_CLAMP_TO_EDGE,
+    ),
+    (
+        extension::DEPTH_RANGE_UNRESTRICTED,
+        HostExtensions::DEPTH_RANGE_UNRESTRICTED,
+    ),
+    (
+        extension::FORMAT_FEATURE_FLAGS2,
+        HostExtensions::FORMAT_FEATURE_FLAGS2,
+    ),
+    (extension::MAINTENANCE5, HostExtensions::MAINTENANCE5),
+    (
+        extension::LINE_RASTERIZATION_KHR,
+        HostExtensions::LINE_RASTERIZATION_KHR,
+    ),
+    (
+        extension::LINE_RASTERIZATION_EXT,
+        HostExtensions::LINE_RASTERIZATION_EXT,
+    ),
+];
+
+/// A physical device's features: its core ones' Boolean members in their
+/// order, and each extension structure's asked for, in the chain's order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HostFeatures {
+    pub(crate) core: [bool; CORE_FEATURES],
+    pub(crate) chained: ArrayVec<ArrayVec<bool, MAX_CHAINED_MEMBERS>, MAX_CHAINED>,
+}
+
+/// The granularity a physical device bounds robust accesses at.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RobustAlignments {
+    pub(crate) storage: u64,
+    pub(crate) uniform: u64,
 }
 
 /// What a physical device states of itself that the driver reads.
@@ -398,6 +705,8 @@ pub(crate) struct HostProperties {
     pub(crate) max_allocation_size: u64,
     /// The most descriptors one set layout holds.
     pub(crate) max_set_descriptors: u32,
+    /// The granularity it bounds robust accesses at, where it was asked.
+    pub(crate) robust_alignments: Option<RobustAlignments>,
 }
 
 /// The limits of a physical device the seam names.
@@ -406,7 +715,10 @@ pub(crate) struct HostLimits {
     pub(crate) image_1d: u32,
     pub(crate) image_2d: u32,
     pub(crate) image_3d: u32,
+    pub(crate) image_cube: u32,
     pub(crate) array_layers: u32,
+    /// The run of bytes past which a buffer and an image share no memory.
+    pub(crate) buffer_image_granularity: u64,
     pub(crate) texel_buffer_elements: u32,
     pub(crate) uniform_buffer_range: u32,
     pub(crate) storage_buffer_range: u32,
@@ -426,14 +738,22 @@ pub(crate) struct HostLimits {
     pub(crate) workgroup_invocations: u32,
     pub(crate) workgroup_size: [u32; 3],
     pub(crate) draw_indirect_count: u32,
+    pub(crate) sampler_lod_bias: f32,
     pub(crate) sampler_anisotropy: f32,
     pub(crate) viewport_dimensions: [u32; 2],
     pub(crate) viewport_bounds: [f32; 2],
+    pub(crate) texel_offset_alignment: u64,
     pub(crate) uniform_offset_alignment: u64,
     pub(crate) storage_offset_alignment: u64,
     pub(crate) colour_attachments: u32,
     pub(crate) point_sizes: [f32; 2],
     pub(crate) line_widths: [f32; 2],
+    /// The widest and tallest a rendering instance's area reaches.
+    pub(crate) framebuffer: [u32; 2],
+    /// Whether its lines are rectangles extruded from them.
+    pub(crate) strict_lines: bool,
+    /// Whether four samples lie at Vulkan's standard positions.
+    pub(crate) standard_sample_locations: bool,
 }
 
 /// A queue family's flags and its queues.
@@ -464,7 +784,24 @@ pub(crate) struct HostMemory {
     pub(crate) heaps: ArrayVec<HostMemoryHeap, MAX_MEMORY_HEAPS>,
 }
 
-/// What a buffer needs of the memory it is bound to.
+/// What a format offers an image laid out as the device chooses, and a
+/// buffer.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct HostFormatFeatures {
+    pub(crate) optimal: u64,
+    pub(crate) buffer: u64,
+}
+
+/// The most an image of one format, kind, usage and creation flags may be.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HostImageLimits {
+    pub(crate) extent: [u32; 3],
+    pub(crate) levels: u32,
+    pub(crate) layers: u32,
+    pub(crate) samples: u32,
+}
+
+/// What a buffer or an image needs of the memory it is bound to.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HostRequirements {
     pub(crate) size: u64,

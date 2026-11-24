@@ -3,20 +3,21 @@
 
 use tairix_inline::ArrayVec;
 use tairix_spirv::enumerant::{Capability, Dim, ImageFormat};
-use tairix_spirv::{Access, BindingKind, Component, ImageShape, SpecValue, Stages};
+use tairix_spirv::{Access, Component, ImageShape, SpecValue, Stages, Version};
 
 use super::{wire_enum, wire_flags, Reader, Wire, Writer};
 use crate::info::{FormatTable, MemoryHeap, MemoryType, QueueFamily};
 use crate::{
     AddressMode, AllocationDesc, Aspects, Blend, BlendFactor, BlendOp, BorderColor, BufferDesc,
     BufferImageCopy, BufferUsage, BufferViewDesc, ClearValue, ColourMask, ColourTarget, CompareOp,
-    CopyRegion, CullMode, DepthBias, DepthStencilState, DeviceInfo, Error, Extent3d, Features,
-    Filter, Format, FormatFeatures, FrontFace, ImageCopy, ImageDesc, ImageDimension, ImageRange,
-    ImageSubresource, ImageUsage, ImageViewDesc, IndexFormat, LayoutBinding, Limits, Load, LogicOp,
-    MemoryProperties, MemoryRequirements, MemoryUse, Multisample, Origin3d, PushConstants,
-    QueueCapabilities, Rasterization, Rect, SamplerDesc, StencilFaceState, StencilOp, Topology,
-    VertexAttribute, VertexStep, ViewDimension, Viewport, MAX_CAPABILITIES, MAX_MEMORY_HEAPS,
-    MAX_MEMORY_TYPES, MAX_QUEUE_FAMILIES,
+    CopyRegion, CullMode, DepthBias, DepthStencilState, DescriptorType, DeviceInfo, Error,
+    Extent3d, Features, Filter, Format, FormatFeatures, FrontFace, ImageCopy, ImageDesc,
+    ImageDimension, ImageRange, ImageSubresource, ImageUsage, ImageViewDesc, IndexFormat,
+    LayoutBinding, Limits, Load, LogicOp, MemoryProperties, MemoryRequirements, MemoryUse,
+    Multisample, Origin3d, PushConstants, QueueCapabilities, Rasterization, Rect, SampleType,
+    SamplerDesc, SamplerType, StencilFaceState, StencilOp, Topology, VertexAttribute, VertexStep,
+    ViewDimension, Viewport, MAX_CAPABILITIES, MAX_MEMORY_HEAPS, MAX_MEMORY_TYPES,
+    MAX_QUEUE_FAMILIES,
 };
 
 wire_enum!(ImageDimension { D1 = 0, D2 = 1, D3 = 2 });
@@ -36,6 +37,22 @@ wire_enum!(AddressMode {
     ClampToEdge = 2,
     MirrorClampToEdge = 3,
     ClampToBorder = 4,
+});
+wire_enum!(SampleType {
+    Float = 0,
+    UnfilterableFloat = 1,
+    Depth = 2,
+    UnfilterableDepth = 3,
+    Sint = 4,
+    Uint = 5,
+});
+wire_enum!(SamplerType {
+    Filtering = 0,
+    NonFiltering = 1,
+    Integer = 2,
+    Comparison = 3,
+    NonFilteringComparison = 4,
+    Unnormalized = 5,
 });
 wire_enum!(BorderColor {
     TransparentBlack = 0,
@@ -354,28 +371,51 @@ impl Wire for Capability {
     }
 }
 
-impl Wire for BindingKind {
+impl Wire for DescriptorType {
     fn put(&self, writer: &mut Writer<'_>) -> Result<(), Error> {
-        let (index, shape): (u8, Option<&ImageShape>) = match self {
-            Self::Sampler => (0, None),
-            Self::SampledImage(shape) => (1, Some(shape)),
-            Self::StorageImage(shape) => (2, Some(shape)),
-            Self::CombinedImageSampler(shape) => (3, Some(shape)),
-            Self::UniformTexelBuffer(shape) => (4, Some(shape)),
-            Self::StorageTexelBuffer(shape) => (5, Some(shape)),
-            Self::UniformBuffer => (6, None),
-            Self::StorageBuffer => (7, None),
-        };
-        index.put(writer)?;
-        shape.map_or(Ok(()), |shape| shape.put(writer))
+        match *self {
+            Self::Sampler(sampler) => {
+                0u8.put(writer)?;
+                sampler.put(writer)
+            }
+            Self::SampledImage(shape, sample) => {
+                1u8.put(writer)?;
+                shape.put(writer)?;
+                sample.put(writer)
+            }
+            Self::StorageImage(shape) => {
+                2u8.put(writer)?;
+                shape.put(writer)
+            }
+            Self::CombinedImageSampler(shape, sample, sampler) => {
+                3u8.put(writer)?;
+                shape.put(writer)?;
+                sample.put(writer)?;
+                sampler.put(writer)
+            }
+            Self::UniformTexelBuffer(shape) => {
+                4u8.put(writer)?;
+                shape.put(writer)
+            }
+            Self::StorageTexelBuffer(shape) => {
+                5u8.put(writer)?;
+                shape.put(writer)
+            }
+            Self::UniformBuffer => 6u8.put(writer),
+            Self::StorageBuffer => 7u8.put(writer),
+        }
     }
 
     fn take(reader: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(match u8::take(reader)? {
-            0 => Self::Sampler,
-            1 => Self::SampledImage(ImageShape::take(reader)?),
+            0 => Self::Sampler(SamplerType::take(reader)?),
+            1 => Self::SampledImage(ImageShape::take(reader)?, SampleType::take(reader)?),
             2 => Self::StorageImage(ImageShape::take(reader)?),
-            3 => Self::CombinedImageSampler(ImageShape::take(reader)?),
+            3 => Self::CombinedImageSampler(
+                ImageShape::take(reader)?,
+                SampleType::take(reader)?,
+                SamplerType::take(reader)?,
+            ),
             4 => Self::UniformTexelBuffer(ImageShape::take(reader)?),
             5 => Self::StorageTexelBuffer(ImageShape::take(reader)?),
             6 => Self::UniformBuffer,
@@ -515,12 +555,15 @@ wire_struct!(Limits {
     max_image_dimension_3d,
     max_image_array_layers,
     max_sampler_anisotropy,
+    max_sampler_lod_bias,
     max_bind_sets,
     max_binding_number,
     max_bind_set_descriptors,
     max_push_constant_bytes,
     uniform_buffer_alignment,
     storage_buffer_alignment,
+    uniform_buffer_size_alignment,
+    storage_buffer_size_alignment,
     max_uniform_buffer_range,
     max_storage_buffer_range,
     max_storage_image_bytes,
@@ -554,6 +597,8 @@ pub(crate) fn put_info(writer: &mut Writer<'_>, info: &DeviceInfo) -> Result<(),
     writer.list(&info.capabilities, |writer, capability| {
         capability.put(writer)
     })?;
+    u32::from(info.spirv_version.major).put(writer)?;
+    u32::from(info.spirv_version.minor).put(writer)?;
     info.features.put(writer)?;
     Format::ALL
         .iter()
@@ -567,6 +612,12 @@ pub(crate) fn take_info(reader: &mut Reader<'_>) -> Result<DeviceInfo, Error> {
     let queue_families = array_vec::<QueueFamily, MAX_QUEUE_FAMILIES>(reader)?;
     let limits = Limits::take(reader)?;
     let capabilities = array_vec::<Capability, MAX_CAPABILITIES>(reader)?;
+    let version =
+        |reader: &mut Reader<'_>| u8::try_from(u32::take(reader)?).map_err(|_| Error::Malformed);
+    let spirv_version = Version {
+        major: version(reader)?,
+        minor: version(reader)?,
+    };
     let features = Features::take(reader)?;
     let mut formats = [FormatFeatures::NONE; Format::ALL.len()];
     for features in &mut formats {
@@ -578,6 +629,7 @@ pub(crate) fn take_info(reader: &mut Reader<'_>) -> Result<DeviceInfo, Error> {
         queue_families,
         limits,
         capabilities,
+        spirv_version,
         features,
         formats: FormatTable::from_fn(|format| formats[format.index()]),
     };

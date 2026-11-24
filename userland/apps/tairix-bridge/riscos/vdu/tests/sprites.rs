@@ -409,10 +409,8 @@ fn flipping_left_to_right_moves_an_old_format_sprite_s_wastage_across() {
     {
         let mut os = session.kernel.os();
         let at = AREA + 16;
-        for (i, word) in (0u32..).zip([0x38, u32::from(b'f'), 0, 0, 0, 2, 0, 0x13, 0x2C, 0x2C, 12])
-        {
-            os.write_word(at + 4 * i, word).expect("written");
-        }
+        let block = [0x38, u32::from(b'f'), 0, 0, 0, 2, 0, 0x13, 0x2C, 0x2C, 12];
+        os.write_words(at, &block).expect("written");
         os.write_word(AREA + 4, 1).expect("written");
         os.write_word(AREA + 12, 16 + 0x38).expect("written");
         for row in 0..3 {
@@ -946,10 +944,8 @@ fn a_jpeg_of_no_rows_is_refused_however_it_is_plotted() {
     {
         let os = &mut session.kernel.os();
         os.write_bytes(at, &none_high).expect("written");
-        for (i, word) in (0u32..).zip([0, 256, 256, 256, 256, 0, 0, 0]) {
-            os.write_word(shape + 4 * i, word)
-                .expect("a scaling parallelogram");
-        }
+        os.write_words(shape, &[0, 256, 256, 256, 256, 0, 0, 0])
+            .expect("a scaling parallelogram");
     }
     let length = u32::try_from(none_high.len()).expect("short");
     let bad = (0x71A, b"The JPEG cannot be read".to_vec());
@@ -1252,13 +1248,8 @@ fn a_jpeg_through_a_matrix_takes_its_pixels_as_the_standard_screen_s() {
     let screen = screen_start(&mut session);
     for (scale, side) in [(0x1_0000, 16), (0x2_0000, 32)] {
         vdu(&mut session, &[12]).expect("cleared");
-        for (i, word) in (0u32..).zip([scale, 0, 0, scale, 100 << 8, 100 << 8]) {
-            session
-                .kernel
-                .os()
-                .write_word(matrix + 4 * i, word)
-                .expect("written");
-        }
+        let words = [scale, 0, 0, scale, 100 << 8, 100 << 8];
+        common::write_words(&mut session, matrix, &words);
         swi(
             &mut session,
             JPEG_PLOT_TRANSFORMED,

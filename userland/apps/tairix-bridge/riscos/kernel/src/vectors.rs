@@ -578,9 +578,7 @@ impl Os<'_> {
                     return Err(self.error(crate::error::BUFFER_OVERFLOW));
                 }
                 let claimant = self.world.vectors.chains[vector as usize][position];
-                for (i, word) in (0..).zip([vector, claimant.address, claimant.workspace]) {
-                    self.write_word(at.wrapping_add(4 * i), word)?;
-                }
+                self.write_words(at, &[vector, claimant.address, claimant.workspace])?;
                 self.world.vectors.chains[vector as usize].remove(position);
                 self.free_node(claimant.node);
                 at = at.wrapping_add(DELINKED);
@@ -601,9 +599,7 @@ impl Os<'_> {
         while end > start {
             end -= DELINKED;
             let mut add = Regs::default();
-            for (i, slot) in (0..).zip(&mut add.r[..3]) {
-                *slot = self.read_word(end.wrapping_add(4 * i))?;
-            }
+            self.read_words(end, &mut add.r[..3])?;
             self.add_to_vector(&mut add)?;
         }
         Ok(())

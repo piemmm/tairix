@@ -18,7 +18,7 @@ fn every_format_is_listed_once() {
 #[test]
 fn features_imply_what_they_build_on() {
     for format in Format::ALL {
-        let features = format.software_features();
+        let features = format.features();
         let implies = |feature, needed| {
             assert!(
                 !features.contains(feature) || features.contains(needed),
@@ -53,7 +53,7 @@ fn features_imply_what_they_build_on() {
 fn a_storage_format_names_one_format_and_one_module_format() {
     let mut named: Vec<ImageFormat> = Vec::new();
     for format in Format::ALL {
-        let stored = format.software_features().contains(FormatFeatures::STORAGE);
+        let stored = format.features().contains(FormatFeatures::STORAGE);
         assert_eq!(format.storage_format().is_some(), stored, "{format:?}");
         if let Some(module) = format.storage_format() {
             assert!(!named.contains(&module), "{module:?} names two formats");

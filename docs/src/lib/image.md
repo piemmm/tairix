@@ -864,9 +864,11 @@ state (`EncodeError`) rather than approximate it:
   and what each holds — with `SpriteModeWord::dpi_word` and `eig_word` to
   write one, `sprite_mask_stride` a new-format mask row's bytes,
   `sprite_direct_fields` a direct-colour type's field widths and pixel bytes,
-  `SpriteMaskDepth` the form and width of a sprite's mask, and
+  `SpriteMaskDepth` the form and width of a sprite's mask,
   `SpriteName::spelt_by` and `lowered` a name as a caller spells it and as
-  RISC OS stores it.
+  RISC OS stores it, `OS_UNITS_PER_INCH` the finest resolution an eigen
+  factor states, and `STANDARD_SPRITE_EIG` and `STANDARD_SPRITE_DPI` the
+  standard screen's, which a picture stating no resolution is taken at.
 - **OpenRaster** writes borrowed layer sources (`OraLayerSource`: a name, a
   `PictureSource`, an offset, an opacity and whether it shows), so an editor's
   layers are never copied whole to be written: each layer as its PNG, the stack

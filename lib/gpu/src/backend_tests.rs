@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use tairix_rt::sync::Mutex;
 
 use super::{Backend, NoPool, Prepared};
-use crate::binding::Bound;
+use crate::binding::{BindSetLayoutState, Bound};
 use crate::command::Op;
 use crate::device::Shared;
 use crate::fair::FairGuard;
@@ -53,6 +53,9 @@ impl Backend for Test {
     type Context = ();
     type Memory = Bytes;
     type Image = Paged;
+    type View = ();
+    type BufferView = ();
+    type Sampler = ();
     type Set = ();
     type Compute = ();
     type Render = ();
@@ -107,6 +110,7 @@ impl Backend for Test {
 
     fn image(
         &self,
+        _: &Arc<()>,
         _: &DeviceInfo,
         desc: &ImageDesc,
     ) -> Result<(Paged, MemoryRequirements), Error> {
@@ -120,11 +124,45 @@ impl Backend for Test {
         Ok((Paged, requirements))
     }
 
-    fn set(&self, _: &[Bound<Self>]) -> Result<((), u64), Error> {
+    fn place(&self, _: &Paged, memory: &Bytes, offset: u64, size: u64) -> Result<(), Error> {
+        let start = usize::try_from(offset).map_err(|_| Error::OutOfRange)?;
+        let len = usize::try_from(size).map_err(|_| Error::OutOfRange)?;
+        memory
+            .bytes
+            .lock()
+            .get_mut(start..start.saturating_add(len))
+            .ok_or(Error::OutOfRange)?
+            .fill(0);
+        Ok(())
+    }
+
+    fn view(&self, _: &Paged, _: &ImageDesc, _: &crate::ImageViewDesc) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn buffer_view(&self, _: &Bytes, _: u64, _: &crate::BufferViewDesc) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn sampler(&self, _: &Arc<()>, _: &crate::SamplerDesc) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn set(
+        &self,
+        _: &Arc<()>,
+        _: &BindSetLayoutState,
+        _: &[Bound<Self>],
+    ) -> Result<((), u64), Error> {
         Ok(((), 0))
     }
 
-    fn compute(&self, _: &DeviceInfo, _: &StagePlan<'_>) -> Result<Prepared<Self, ()>, Error> {
+    fn compute(
+        &self,
+        _: &Arc<()>,
+        _: &DeviceInfo,
+        _: &StagePlan<'_>,
+    ) -> Result<Prepared<Self, ()>, Error> {
         Ok(Prepared {
             form: (),
             need: (),
@@ -132,7 +170,12 @@ impl Backend for Test {
         })
     }
 
-    fn render(&self, _: &DeviceInfo, _: &RenderPlan<'_>) -> Result<Prepared<Self, ()>, Error> {
+    fn render(
+        &self,
+        _: &Arc<()>,
+        _: &DeviceInfo,
+        _: &RenderPlan<'_>,
+    ) -> Result<Prepared<Self, ()>, Error> {
         Ok(Prepared {
             form: (),
             need: (),
@@ -236,8 +279,7 @@ fn placements<B: Backend>(shared: &Shared<B>) -> [Option<Error>; 3] {
         .create_context(None, device)
         .expect("a context");
     let needs = shared
-        .image_form(&layered())
-        .map(|(_, needs)| needs)
+        .image_requirements(context, &layered())
         .expect("requirements");
     let room = needs.size.saturating_mul(4);
     let first = allocation(shared, context, (room, 0));
@@ -285,8 +327,7 @@ fn reaches<B: Backend>(shared: &Shared<B>) -> Vec<bool> {
         .create_context(None, device)
         .expect("a context");
     let needs = shared
-        .image_form(&layered())
-        .map(|(_, needs)| needs)
+        .image_requirements(context, &layered())
         .expect("requirements");
     let past = needs.size.next_multiple_of(needs.alignment);
     let memory = allocation(shared, context, (past + needs.size, 0));
@@ -298,8 +339,6 @@ fn reaches<B: Backend>(shared: &Shared<B>) -> Vec<bool> {
     let (rendered, aliasing, apart) = (image(0), image(0), image(past));
     let view = |image, level, layer| {
         shared
-            .model
-            .lock()
             .create_view(
                 context,
                 image,
@@ -322,13 +361,16 @@ fn reaches<B: Backend>(shared: &Shared<B>) -> Vec<bool> {
         &shared.info,
         &[crate::LayoutBinding {
             binding: 0,
-            kind: tairix_spirv::BindingKind::SampledImage(tairix_spirv::ImageShape {
-                dim: tairix_spirv::enumerant::Dim::DIM_2D,
-                arrayed: false,
-                multisampled: false,
-                component: tairix_spirv::Component::Float,
-                format: tairix_spirv::enumerant::ImageFormat::UNKNOWN,
-            }),
+            kind: crate::DescriptorType::SampledImage(
+                tairix_spirv::ImageShape {
+                    dim: tairix_spirv::enumerant::Dim::DIM_2D,
+                    arrayed: false,
+                    multisampled: false,
+                    component: tairix_spirv::Component::Float,
+                    format: tairix_spirv::enumerant::ImageFormat::UNKNOWN,
+                },
+                crate::SampleType::UnfilterableFloat,
+            ),
             count: 1,
             access: tairix_spirv::Access::READ,
             stages: tairix_spirv::Stages::FRAGMENT,

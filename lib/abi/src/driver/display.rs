@@ -973,10 +973,10 @@ pub trait Display {
     /// [`Self::output`] to match.
     ///
     /// The hosting loop calls it when one of the sources the driver handed it
-    /// fired, and after every request it serves where
-    /// [`Self::requests_take_wakes`], since a request that waited on the
-    /// device may have taken the wake a source raised; a call that finds
-    /// nothing to do changes nothing. Every source that fired is quiet
+    /// fired, and after every call that drove the display where
+    /// [`Self::requests_take_wakes`], since a call that waited on the device
+    /// may have taken the wake a source raised; a call that finds nothing to
+    /// do changes nothing. Every source that fired is quiet
     /// again on return, whatever the answer: a source that cannot be quieted
     /// is the driver's to stop raising, so a failing device cannot spin the
     /// loop. A queued present the output stops for latches here at once. The
@@ -990,11 +990,11 @@ pub trait Display {
         Ok(Serviced::default())
     }
 
-    /// Whether serving a request can wait on the device's interrupt and so
-    /// take a wake one of its event sources raised, which owes
-    /// [`Self::service_events`] a call after every request. The default is
-    /// `false`: a display whose requests never wait is serviced on its
-    /// sources' wakes alone.
+    /// Whether a call driving the display can wait on the device's interrupt
+    /// and so take a wake one of its event sources raised, which owes
+    /// [`Self::service_events`] a call after every such call: a request, a
+    /// lease's release, an expired present. The default is `false`: a display
+    /// whose calls never wait is serviced on its sources' wakes alone.
     fn requests_take_wakes(&self) -> bool {
         false
     }

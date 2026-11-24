@@ -1168,6 +1168,10 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn call_destroy(&self, _c: &CallerContext<'_>, _endpoint: u64) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn call_peer_port(
         &self,
         _c: &CallerContext<'_>,

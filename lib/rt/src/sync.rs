@@ -5,7 +5,9 @@
 //! `futex_wait` / `futex_wake` over a 32-bit word in the process's own memory —
 //! so an **uncontended** lock is a pair of atomic operations and never enters
 //! the kernel at all, while a thread that must genuinely wait gives the CPU up
-//! and is woken by the release. Nothing here spins.
+//! and is woken by the release. Nothing here spins, except on the host, whose
+//! trap refuses every futex call: there a contended lock retries at once and a
+//! wait returns as a spurious wake.
 //!
 //! # No poisoning
 //!

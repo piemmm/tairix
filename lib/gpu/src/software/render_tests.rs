@@ -1350,12 +1350,10 @@ fn a_pass_of_no_draws_clears_and_resolves() {
     }
 }
 
-#[test]
-fn a_target_no_output_writes_is_left_and_a_short_output_writes_zero_to_the_rest() {
-    let device = rendering();
-    let context = context(&device);
-    let extent = (8, 8);
-    let layout = bare(&context);
+/// Two pipelines of triangles into two targets of `Rgba8Unorm`, both
+/// writing the first alone: four channels of it, and red and green.
+fn first_target_writers(context: &Context) -> (RenderPipeline, RenderPipeline) {
+    let layout = bare(context);
     let targets = [plain(Format::Rgba8Unorm), plain(Format::Rgba8Unorm)];
     let shape = Shape {
         topology: Topology::Triangles,
@@ -1365,13 +1363,6 @@ fn a_target_no_output_writes_is_left_and_a_short_output_writes_zero_to_the_rest(
         rasterization: FILLED,
         restart: false,
     };
-    let whole_four = pipeline(
-        &context,
-        &layout,
-        (&passing(VEC4, ""), Some(&painting(""))),
-        &shape,
-    )
-    .expect("a pipeline writing four channels of the first target");
     let two_channels = painting("")
         .replace(
             "%v4 = OpTypeVector %float 4",
@@ -1379,13 +1370,26 @@ fn a_target_no_output_writes_is_left_and_a_short_output_writes_zero_to_the_rest(
         )
         .replace("%out_colour = OpVariable %out_v4 Output", "%out_colour = OpVariable %out_v2 Output")
         .replace("OpStore %out_colour %c", "%c2 = OpVectorShuffle %v2 %c %c 0 1\nOpStore %out_colour %c2");
-    let short = pipeline(
-        &context,
-        &layout,
-        (&passing(VEC4, ""), Some(&two_channels)),
-        &shape,
+    let make = |fragment: &str| {
+        pipeline(
+            context,
+            &layout,
+            (&passing(VEC4, ""), Some(fragment)),
+            &shape,
+        )
+    };
+    (
+        make(&painting("")).expect("a pipeline writing four channels of the first target"),
+        make(&two_channels).expect("a pipeline writing two channels of the first target"),
     )
-    .expect("a pipeline writing two channels of the first target");
+}
+
+#[test]
+fn a_target_no_output_writes_is_left_and_a_short_output_leaves_the_channels_it_does_not_write() {
+    let device = rendering();
+    let context = context(&device);
+    let extent = (8, 8);
+    let (whole_four, short) = first_target_writers(&context);
     let (_white, white) = floats(
         &context,
         &corners(&rectangle(extent, (0.0, 0.0, 8.0, 8.0), (0.5, [1.0; 4]))),
@@ -1445,7 +1449,11 @@ fn a_target_no_output_writes_is_left_and_a_short_output_writes_zero_to_the_rest(
         .expect("recorded");
     submit(&queue(&context), &commands).expect("drawn");
     for (at, texel) in read(&context, &first).chunks(4).enumerate() {
-        assert_eq!(texel, [128, 64, 0, 0], "the first target's pixel {at}");
+        assert_eq!(
+            texel,
+            [128, 64, 255, 255],
+            "the first target's pixel {at}: red and green drawn, blue and alpha kept"
+        );
     }
     for (at, texel) in read(&context, &second).chunks(4).enumerate() {
         assert_eq!(texel, [64, 128, 191, 255], "the second target's pixel {at}");
@@ -1498,7 +1506,7 @@ fn uniforms(
     let set_layout = context
         .create_bind_set_layout(&[crate::LayoutBinding {
             binding: 0,
-            kind: tairix_spirv::BindingKind::UniformBuffer,
+            kind: crate::DescriptorType::UniformBuffer,
             count,
             access: tairix_spirv::Access::READ,
             stages: tairix_spirv::Stages::FRAGMENT,

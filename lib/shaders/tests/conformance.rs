@@ -16,7 +16,7 @@ use tairix_display::ChannelOrder;
 use tairix_fuzzseed::Prng;
 use tairix_parallel::Serial;
 use tairix_raster::{blend_span, halved_reference, BlurScratch, Blurring, DitherRow, Pixel};
-use tairix_shaders::{compose, frost, groups};
+use tairix_shaders::{compose, frost, groups, indirect};
 
 use device::{gpu, picture, pixel, premultiplied, run, word, words, Gpu};
 
@@ -426,5 +426,148 @@ fn the_encode_pass_writes_each_display_order_as_the_display_does() {
             .flat_map(|word| word.to_le_bytes())
             .collect();
         assert_eq!(bytes, expected, "{order:?}");
+    }
+}
+
+/// The counts the check leaves in a slot, and its fault, for `counts` held
+/// to `most` with the slot's fault `fault` before: past the device's on any
+/// axis, every axis zeroed and the fault set; else both kept.
+fn checked(counts: [u32; 3], most: [u32; 3], fault: u32) -> ([u32; 3], u32) {
+    if counts.iter().zip(most).any(|(&count, most)| count > most) {
+        ([0; 3], 1)
+    } else {
+        (counts, fault)
+    }
+}
+
+#[test]
+fn the_indirect_counts_check_keeps_counts_within_the_device_s_and_zeroes_any_past_them() {
+    use indirect::counts;
+
+    let gpu = gpu();
+    let mut rng = device::rng(
+        "the_indirect_counts_check_keeps_counts_within_the_device_s_and_zeroes_any_past_them",
+    );
+    let slots = 6u32;
+    let most = [65535, 512, 64];
+    let near = |rng: &mut Prng, most: u32| match rng.below(4) {
+        0 => most,
+        1 => most.saturating_add(1),
+        2 => rng.next_u32(),
+        _ => rng.next_u32() % most.saturating_add(1),
+    };
+    let mut cases = vec![
+        ([65535, 512, 64], 0),
+        ([65536, 1, 1], 0),
+        ([1, 513, 1], 1),
+        ([0, 0, u32::MAX], 0),
+        ([0, 0, 0], 1),
+    ];
+    for _ in 0..24 {
+        let counts = [
+            near(&mut rng, most[0]),
+            near(&mut rng, most[1]),
+            near(&mut rng, most[2]),
+        ];
+        cases.push((counts, rng.next_u32() & 1));
+    }
+    for (counts, fault) in cases {
+        let slot = u32::try_from(rng.below(slots as usize)).expect("a slot");
+        let mut held: Vec<u32> = (0..slots * counts::SLOT_WORDS)
+            .map(|_| rng.next_u32())
+            .collect();
+        let mut faults: Vec<u32> = (0..slots).map(|_| rng.next_u32() & 1).collect();
+        let at = (slot * counts::SLOT_WORDS) as usize;
+        held[at..at + 3].copy_from_slice(&counts);
+        faults[slot as usize] = fault;
+        let ran = run(
+            &gpu,
+            counts::SPIRV,
+            &counts::Push { slot, most }.words(),
+            &[&held, &faults],
+            [1, 1, 1],
+        );
+        let (kept, marked) = checked(counts, most, fault);
+        let mut expected = held.clone();
+        expected[at..at + 3].copy_from_slice(&kept);
+        let mut expected_faults = faults.clone();
+        expected_faults[slot as usize] = marked;
+        assert_eq!(ran[0], expected, "counts {counts:?} in slot {slot}");
+        assert_eq!(ran[1], expected_faults, "counts {counts:?} in slot {slot}");
+    }
+}
+
+#[test]
+fn the_indirect_records_check_zeroes_each_record_naming_a_first_instance_and_marks_its_slot() {
+    use indirect::records;
+
+    let gpu = gpu();
+    let mut rng = device::rng(
+        "the_indirect_records_check_zeroes_each_record_naming_a_first_instance_and_marks_its_slot",
+    );
+    let slots = 4u32;
+    for case in 0..24u32 {
+        let indexed = case % 2 == 1;
+        let words = if indexed { 5 } else { 4 };
+        let count = u32::try_from(rng.below(6)).expect("small");
+        let first = u32::try_from(rng.below(8)).expect("small");
+        let slot = u32::try_from(rng.below(slots as usize)).expect("a slot");
+        let mut held: Vec<u32> = (0..first + count * words + 8)
+            .map(|_| rng.next_u32())
+            .collect();
+        // About half the records name no first instance.
+        for record in 0..count {
+            if rng.below(2) == 0 {
+                held[(first + record * words + words - 1) as usize] = 0;
+            }
+        }
+        let faults: Vec<u32> = (0..slots).map(|_| rng.next_u32() & 1).collect();
+        let ran = run(
+            &gpu,
+            records::SPIRV,
+            &records::Push {
+                slot,
+                first,
+                count,
+                indexed,
+            }
+            .words(),
+            &[&held, &faults],
+            [1, 1, 1],
+        );
+        let mut expected = held.clone();
+        let mut named = false;
+        for record in 0..count {
+            let start = (first + record * words) as usize;
+            let end = start + words as usize;
+            if expected[end - 1] != 0 {
+                expected[start..end].fill(0);
+                named = true;
+            }
+        }
+        let mut expected_faults = faults.clone();
+        if named {
+            expected_faults[slot as usize] = 1;
+        }
+        assert_eq!(
+            ran[0], expected,
+            "case {case}: {count} records from {first}"
+        );
+        assert_eq!(ran[1], expected_faults, "case {case} in slot {slot}");
+    }
+}
+
+#[test]
+fn every_pinned_pass_changes_what_its_sample_gives_it() {
+    let gpu = gpu();
+    for pinned in tairix_shaders::SET {
+        let sample = (pinned.sample)().expect("a sample");
+        let buffers: Vec<&[u32]> = sample.buffers.iter().map(Vec::as_slice).collect();
+        let ran = run(&gpu, pinned.spirv, &sample.push, &buffers, sample.groups);
+        assert_ne!(
+            ran, sample.buffers,
+            "{} leaves what its sample gives it as it was",
+            pinned.name
+        );
     }
 }

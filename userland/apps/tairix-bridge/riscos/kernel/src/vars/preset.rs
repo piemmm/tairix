@@ -192,7 +192,7 @@ impl Os<'_> {
         self.perform(X | os::WORD, &mut word)?;
         let room = block.wrapping_add(VALUE_ROOM).wrapping_sub(at);
         let mut convert = Regs::default();
-        convert.r[..5].copy_from_slice(&[u32::MAX, time, at, room, format_at]);
+        convert.r[..5].copy_from_slice(&[crate::territory::CURRENT, time, at, room, format_at]);
         self.perform(X | crate::territory::CONVERT_DATE_AND_TIME, &mut convert)?;
         Ok(convert.r[1].wrapping_sub(convert.r[0]))
     }

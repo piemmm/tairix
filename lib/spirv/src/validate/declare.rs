@@ -545,7 +545,13 @@ impl Validator<'_> {
         }
         self.variable_contents(class, pointee).map_err(at)?;
         if let Some(initializer) = self.initializer(instruction) {
-            let admitted = matches!(class, StorageClass::OUTPUT | StorageClass::PRIVATE);
+            // Workgroup memory starts zeroed, so it may say so and no more.
+            let null = self.defining(initializer).map_err(at)?.op() == Op::CONSTANT_NULL;
+            let admitted = match class {
+                StorageClass::OUTPUT | StorageClass::PRIVATE => true,
+                StorageClass::WORKGROUP => null,
+                _ => false,
+            };
             let what = self.def(initializer).map_err(at)?.what;
             if !admitted
                 || !matches!(what, What::Constant | What::SpecConstant)

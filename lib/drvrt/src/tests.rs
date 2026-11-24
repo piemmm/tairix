@@ -1616,12 +1616,12 @@ fn publishing_a_channel_settles_the_driver_once_it_is_in_the_tree() {
     let mut tree = recorded(7);
     assert_eq!(
         publish_channel(&mut tree, HwDeviceClass::Other, b"test,channel", 0x55, &[]),
-        Some(7)
+        Ok(7)
     );
     assert_eq!(tree.calls, ["emit", "settle"]);
     assert_eq!(tree.emitted, [0x55]);
 
-    let mut refused = recorded(-1);
+    let mut refused = recorded(-i64::from(Errno::PermissionDenied.as_i32()));
     assert_eq!(
         publish_channel(
             &mut refused,
@@ -1630,9 +1630,28 @@ fn publishing_a_channel_settles_the_driver_once_it_is_in_the_tree() {
             0x55,
             &[]
         ),
-        None
+        Err(Errno::PermissionDenied),
+        "the kernel's refusal, as it gave it"
     );
     assert_eq!(refused.calls, ["emit"], "nothing to settle for");
+}
+
+/// A bound channel let go is taken down, so a driver that goes on without
+/// serving it leaves nothing bound for a caller to wait on.
+#[test]
+fn a_bound_channel_let_go_is_taken_down() {
+    use tairix_abi::SyscallNumber;
+
+    tairix_abi_trap::seam::arm(0);
+    let channel = crate::channel::BoundChannel(0x5EAD_0010);
+    assert_eq!(channel.endpoint(), 0x5EAD_0010);
+    assert!(tairix_abi_trap::seam::calls().is_empty(), "held, it stays");
+    drop(channel);
+    let destroy = u64::from(SyscallNumber::CALL_DESTROY.as_u16());
+    assert_eq!(
+        tairix_abi_trap::seam::calls(),
+        [(destroy, [0x5EAD_0010, 0, 0, 0, 0, 0])]
+    );
 }
 
 const REGION_HANDLE: u64 = 9;

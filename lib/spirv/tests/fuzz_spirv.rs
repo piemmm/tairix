@@ -23,6 +23,9 @@
 //!    selections and loops, early returns, arithmetic, extended instructions
 //!    and the locals that carry values out of a construct — is admitted, and
 //!    the same program builds the same bytes.
+//! 9. Every specialization of an admitted module folds into a module the
+//!    validator admits, holding no specialization constant and specializing
+//!    to the same workgroup sizes, or is refused as too large.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from the
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -34,8 +37,8 @@ use tairix_spirv::enumerant::{
     ImageFormat, ImageOperands, MemoryModel, StorageClass,
 };
 use tairix_spirv::{
-    Admitted, Arg, BuildError, Builder, Disagreement, EncodeError, Encoder, Function, GlslStd450,
-    Id, Layout, Module, Op, SpecError, SpecValue, Specialized, Type, Version,
+    Admitted, Arg, BuildError, Builder, Disagreement, EncodeError, Encoder, FoldError, Function,
+    GlslStd450, Id, Layout, Module, Op, SpecError, SpecValue, Specialized, Type, Version,
 };
 
 /// Rounds per sweep. Miri interprets every operation, so it drives a handful.
@@ -509,6 +512,9 @@ fn check_validated(input: &[u8], module: Module) {
             admitted.specialize(values).map(sizes),
             "specialization is deterministic"
         );
+        if let Ok(specialized) = admitted.specialize(values) {
+            check_folded(&admitted, specialized, sizes);
+        }
     }
     for instruction in admitted.module().instructions() {
         let Some(id) = admitted.module().result(instruction) else {
@@ -550,6 +556,34 @@ fn check_validated(input: &[u8], module: Module) {
             );
         }
     }
+}
+
+/// Invariant 9: `specialized`, of `admitted`, folds into a module the
+/// validator admits, holding no specialization constant and specializing
+/// with no values to what `sizes` read of it.
+fn check_folded(
+    admitted: &Admitted,
+    specialized: Specialized,
+    sizes: impl Fn(Specialized) -> Vec<Option<[u32; 3]>>,
+) {
+    let folded = match admitted.fold(&specialized) {
+        Ok(folded) => folded,
+        Err(FoldError::TooLarge | FoldError::OutOfMemory) => return,
+        Err(refused) => panic!("an admitted module's specialization folds: {refused:?}"),
+    };
+    let left = folded.module().instructions().iter().any(|instruction| {
+        matches!(
+            instruction.op(),
+            Op::SPEC_CONSTANT
+                | Op::SPEC_CONSTANT_TRUE
+                | Op::SPEC_CONSTANT_FALSE
+                | Op::SPEC_CONSTANT_COMPOSITE
+                | Op::SPEC_CONSTANT_OP
+        )
+    });
+    assert!(!left, "a folded module holds no specialization constant");
+    let again = folded.specialize(&[]).expect("a folded module specializes");
+    assert_eq!(sizes(again), sizes(specialized), "its workgroup sizes stay");
 }
 
 fn run_round(rng: &mut Prng, corpus: &[Vec<u8>]) {

@@ -7,10 +7,12 @@
 //! palette's entry for the foreground, which `Font_SetPalette` fills with
 //! the colour numbers of the shades between its two colours.
 
+use tairix_colour::Rgb;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
-use tairix_riscos_kernel::swi::font::TRUE_COLOURS;
+use tairix_riscos_kernel::swi::font::{MOST_OFFSET, TRUE_COLOURS};
 use tairix_riscos_kernel::swi::{colour_trans, X};
 use tairix_riscos_vdu::render::{self, WHOLE};
+use tairix_vdu::palette::vidc1_channel;
 
 use crate::module::{error, raise, with, State};
 
@@ -45,9 +47,6 @@ impl Colours {
     };
 }
 
-/// The furthest anti-aliasing reaches from the foreground either way.
-pub(crate) const MOST_OFFSET: i32 = 14;
-
 /// Each offset's thresholds at start: where each anti-aliasing level steps
 /// up to the next colour. Offset 0's one threshold can be set.
 const THRESHOLDS: [&[u8]; 15] = [
@@ -76,8 +75,6 @@ const TABLE_MOST: usize = 17;
 const LOGICAL_MOST: u32 = 2;
 /// The foreground colours the pseudo palette has an entry for.
 const ENTRIES: usize = 16;
-/// A colour's channels' top four bits.
-const NIBBLES: u32 = 0xF0F0_F000;
 
 /// A deeper mode's pixels for a foreground colour, matched at the depth
 /// `log2_bpp`.
@@ -202,21 +199,26 @@ fn shade(from: u32, to: u32, step: u32, steps: u32) -> u32 {
     if step >= steps {
         return to;
     }
-    let [_, fr, fg, fb] = from.to_le_bytes();
-    let [_, tr, tg, tb] = to.to_le_bytes();
+    let (from, to) = (Rgb::from_riscos_word(from), Rgb::from_riscos_word(to));
     let channel = |a: u8, b: u8| {
         let difference = (i64::from(b) - i64::from(a)) << 16;
         let stride = difference.div_euclid(i64::from(steps));
         let moved = (i64::from(step) * stride).div_euclid(1 << 16);
         u8::try_from((i64::from(a) + moved).clamp(0, 255)).unwrap_or(u8::MAX)
     };
-    u32::from_le_bytes([0, channel(fr, tr), channel(fg, tg), channel(fb, tb)])
+    Rgb::new(
+        channel(from.r, to.r),
+        channel(from.g, to.g),
+        channel(from.b, to.b),
+    )
+    .riscos_word()
 }
 
 /// A colour as `Font_SetPalette` takes it without its magic word: each
 /// channel's top four bits repeated below them.
 const fn nibbled(colour: u32) -> u32 {
-    (colour & NIBBLES) | ((colour & NIBBLES) >> 4)
+    let Rgb { r, g, b } = Rgb::from_riscos_word(colour);
+    Rgb::new(vidc1_channel(r), vidc1_channel(g), vidc1_channel(b)).riscos_word()
 }
 
 /// `Font_CurrentFont`, or `Font_FutureFont` where `future`: the offset as
@@ -344,9 +346,7 @@ pub(crate) fn set_colour_table(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), F
     let log2_bpp = surface.map_or(0, |s| s.log2_bpp);
     let explicit = if regs.r[1] != 0 && surface.is_some_and(|s| s.direct) {
         let mut table = [0; LEVELS];
-        for (i, slot) in (0u32..).zip(table.iter_mut()) {
-            *slot = os.read_word(regs.r[1].wrapping_add(4 * i))?;
-        }
+        os.read_words(regs.r[1], &mut table)?;
         Some(Entry { log2_bpp, table })
     } else {
         None

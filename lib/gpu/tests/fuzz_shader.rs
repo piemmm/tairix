@@ -30,12 +30,13 @@ use std::vec::Vec;
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::Duration64;
 use tairix_fuzzseed::Prng;
+use tairix_gpu::DescriptorType;
 use tairix_gpu::{
     AllocationDesc, BindSetEntry, BufferDesc, BufferUsage, ComputePipelineDesc, ContextDesc,
     Device, Error, LayoutBinding, Loss, NoThreads, PushConstants, Resource, SoftwareDesc,
     Submission, DEFAULT_SUBGROUP_SIZE,
 };
-use tairix_spirv::{Access, Admitted, BindingKind, Module, Stages};
+use tairix_spirv::{Access, Admitted, Module, Stages};
 
 /// Rounds per sweep.
 const ROUNDS_PER_SWEEP: u32 = 40;
@@ -882,7 +883,7 @@ fn dispatch(device: &Device, admitted: Admitted, inputs: &Inputs) -> Result<Ran,
     let module = context.create_shader_module(admitted)?;
     let binding = |binding, access| LayoutBinding {
         binding,
-        kind: BindingKind::StorageBuffer,
+        kind: DescriptorType::StorageBuffer,
         count: 1,
         access,
         stages: Stages::COMPUTE,

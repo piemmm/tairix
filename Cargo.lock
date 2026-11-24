@@ -2259,7 +2259,11 @@ dependencies = [
  "tairix-gpu",
  "tairix-inline",
  "tairix-log",
+ "tairix-parallel",
  "tairix-rt",
+ "tairix-shaders",
+ "tairix-spirv",
+ "tairix-sync",
  "tairix-util",
  "tairix-virtio",
 ]
@@ -2736,6 +2740,7 @@ name = "tairix-drvrt"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-abi-trap",
  "tairix-caps",
  "tairix-log",
  "tairix-rt",
@@ -3116,6 +3121,8 @@ dependencies = [
  "tairix-parallel",
  "tairix-procinfo",
  "tairix-rt",
+ "tairix-shaders",
+ "tairix-spirv",
 ]
 
 [[package]]
@@ -4710,12 +4717,16 @@ dependencies = [
  "tairix-drawing",
  "tairix-fscopy",
  "tairix-fuzzseed",
+ "tairix-geometry",
+ "tairix-image",
  "tairix-riscos-arm",
  "tairix-riscos-basic",
+ "tairix-riscos-draw",
  "tairix-riscos-filing",
  "tairix-riscos-kernel",
  "tairix-riscos-vdu",
  "tairix-util",
+ "tairix-vdu",
 ]
 
 [[package]]
@@ -4747,6 +4758,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-bezier",
+ "tairix-colour",
  "tairix-crc32",
  "tairix-drawing",
  "tairix-font",
@@ -4763,6 +4775,7 @@ dependencies = [
  "tairix-riscos-kernel",
  "tairix-riscos-vdu",
  "tairix-util",
+ "tairix-vdu",
 ]
 
 [[package]]
@@ -9335,6 +9348,7 @@ dependencies = [
  "tairix-arch-x86_64",
  "tairix-itest-harness",
  "tairix-kernel",
+ "tairix-kernel-core",
  "tairix-log",
  "tairix-test-venus-check",
 ]

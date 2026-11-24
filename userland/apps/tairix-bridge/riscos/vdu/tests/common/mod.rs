@@ -123,10 +123,7 @@ pub fn select_full_palette(session: &mut Session) -> Result<(), Fail> {
 
 /// The mode the selector `words` describe.
 pub fn select(session: &mut Session, words: &[u32]) -> Result<(), Fail> {
-    let os = &mut session.kernel.os();
-    for (i, &word) in (0u32..).zip(words) {
-        os.write_word(SELECTOR_AT + 4 * i, word)?;
-    }
+    session.kernel.os().write_words(SELECTOR_AT, words)?;
     call(session, SCREEN_MODE, &[screen_mode::SELECT, SELECTOR_AT]).map(drop)
 }
 
@@ -288,10 +285,18 @@ pub fn once_routine(slot: u32, swi: u32, registers: [u32; 8]) -> Vec<u32> {
 
 /// `words` written from `at`.
 pub fn write_words(session: &mut Session, at: u32, words: &[u32]) {
-    let os = &mut session.kernel.os();
-    for (i, &word) in (0u32..).zip(words) {
-        os.write_word(at + 4 * i, word).expect("written");
-    }
+    session.kernel.os().write_words(at, words).expect("written");
+}
+
+/// The `count` words from `at`.
+pub fn read_words(session: &mut Session, at: u32, count: u32) -> Vec<u32> {
+    let mut words = vec![0; count as usize];
+    session
+        .kernel
+        .os()
+        .read_words(at, &mut words)
+        .expect("read");
+    words
 }
 
 /// A hook's handler: the routine whose address its slot holds called with

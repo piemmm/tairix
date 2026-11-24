@@ -4,18 +4,16 @@
 use std::sync::LazyLock;
 
 use tairix_riscos_filing::session::{modules_with, session, Session, Setup, SLOT_BYTES};
+use tairix_riscos_font::build::{call, write, BLOCK as BUFFER, TEXT};
 use tairix_riscos_kernel::module::Builtin;
-use tairix_riscos_kernel::os::{Fail, Regs};
+use tairix_riscos_kernel::os::Regs;
 use tairix_riscos_kernel::swi::{chunk, os, X};
+use tairix_vdu::mode::var::{X_EIG, Y_EIG};
 
 /// The modules: the filing system's, the VDU drivers' and the Font
 /// Manager's.
 static MODULES: LazyLock<Vec<&'static Builtin>> =
     LazyLock::new(|| modules_with(&[&tairix_riscos_vdu::MODULES, &tairix_riscos_font::MODULES]));
-
-/// Where a test writes text, and the buffer a call answers into.
-const TEXT: u32 = 0x9000;
-const BUFFER: u32 = 0xA000;
 
 /// A session with no font service.
 fn unserved() -> Session {
@@ -35,25 +33,10 @@ fn fonts() -> Session {
     s
 }
 
-/// Font Manager call `offset` with `regs`: its registers, or its error's
-/// number.
+/// Font Manager call `offset` with `low` its first registers: its
+/// registers, or its error's number.
 fn font(s: &mut Session, offset: u32, low: &[u32]) -> Result<Regs, u32> {
-    let mut regs = Regs::default();
-    regs.r[..low.len()].copy_from_slice(low);
-    let mut os = s.kernel.os();
-    match os.perform(X | (chunk::FONT + offset), &mut regs) {
-        Ok(()) => Ok(regs),
-        Err(Fail::Error(block)) => Err(os.read_word(block).expect("the error's number")),
-        Err(other) => panic!("{other:?}"),
-    }
-}
-
-fn write(s: &mut Session, at: u32, text: &[u8]) -> u32 {
-    let mut os = s.kernel.os();
-    os.write_bytes(at, text).expect("written");
-    os.write_byte(at + u32::try_from(text.len()).expect("short"), 0)
-        .expect("terminated");
-    at
+    call(&mut s.kernel.os(), offset, low)
 }
 
 fn read(s: &mut Session, at: u32) -> Vec<u8> {
@@ -74,8 +57,8 @@ fn mode_variable(s: &mut Session, variable: u32) -> u32 {
     regs.r[2]
 }
 
-const FIND_FONT: u32 = 0x01;
-const LOSE_FONT: u32 = 0x02;
+const FIND_FONT: u32 = tairix_riscos_kernel::swi::font::FIND_FONT - chunk::FONT;
+const LOSE_FONT: u32 = tairix_riscos_kernel::swi::font::LOSE_FONT - chunk::FONT;
 const READ_DEFN: u32 = 0x03;
 const CURRENT_FONT: u32 = 0x0B;
 const LIST_FONTS: u32 = 0x11;
@@ -88,9 +71,9 @@ fn a_rom_font_is_found_on_handle_1_its_master_on_2_at_the_mode_s_resolution() {
     let mut s = fonts();
     let start = font(&mut s, CURRENT_FONT, &[]).expect("current");
     assert_eq!(start.r[..4], [1, 0, 1, 14]);
-    let name = write(&mut s, TEXT, b"Homerton.Medium");
+    let name = write(&mut s.kernel.os(), TEXT, b"Homerton.Medium");
     let found = font(&mut s, FIND_FONT, &[0, name, 192, 192, 0, 0]).expect("found");
-    let (ex, ey) = (mode_variable(&mut s, 4), mode_variable(&mut s, 5));
+    let (ex, ey) = (mode_variable(&mut s, X_EIG), mode_variable(&mut s, Y_EIG));
     assert_eq!(found.r[0], 1);
     assert_eq!((found.r[4], found.r[5]), (180 >> ex, 180 >> ey));
     let defn = font(&mut s, READ_DEFN, &[1, BUFFER, 0]).expect("read");
@@ -107,13 +90,13 @@ fn a_rom_font_is_found_on_handle_1_its_master_on_2_at_the_mode_s_resolution() {
         lookup.r[2], 0x202,
         "in ROM, and a TAIRiX face, filled non-zero"
     );
-    let again = write(&mut s, TEXT, b"homerton.medium");
+    let again = write(&mut s.kernel.os(), TEXT, b"homerton.medium");
     let found = font(&mut s, FIND_FONT, &[0, again, 192, 192, 0, 0]).expect("again");
     assert_eq!(found.r[0], 1);
     font(&mut s, LOSE_FONT, &[1]).expect("lost");
     let use_count = font(&mut s, READ_DEFN, &[1, BUFFER, 0]).expect("read").r[7];
     assert_eq!(use_count, 1);
-    let missing = write(&mut s, TEXT, b"NoSuchFont");
+    let missing = write(&mut s.kernel.os(), TEXT, b"NoSuchFont");
     assert_eq!(
         font(&mut s, FIND_FONT, &[0, missing, 192, 192, 0, 0]),
         Err(0x20B)
@@ -128,7 +111,7 @@ fn a_rom_font_is_found_on_handle_1_its_master_on_2_at_the_mode_s_resolution() {
 #[test]
 fn a_rom_font_the_font_service_does_not_draw_has_no_data() {
     let mut s = unserved();
-    let name = write(&mut s, TEXT, b"Trinity.Medium");
+    let name = write(&mut s.kernel.os(), TEXT, b"Trinity.Medium");
     assert_eq!(
         font(&mut s, FIND_FONT, &[0, name, 192, 192, 0, 0]),
         Err(0x20B)

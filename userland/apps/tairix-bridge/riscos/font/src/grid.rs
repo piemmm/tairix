@@ -3,15 +3,17 @@
 //! factor, each glyph placed at the quarter of a pixel its pen is in and its
 //! outline drawn in 512ths of a pixel of its font's own resolution.
 
+use tairix_drawing::riscos::units::DRAW_UNITS_PER_OS_UNIT;
+
 use crate::outlines::PLACEMENTS;
 use crate::units;
 
 /// The largest eigen factor an axis is taken to have: past it a pixel
 /// would outgrow the arithmetic, and no mode has one.
-const MOST_EIG: u32 = 31;
+pub(crate) const MOST_EIG: u32 = 31;
 /// Draw's units an OS unit, and the parts of a pixel an outline is drawn
 /// in.
-pub(crate) const DRAW_UNITS: i64 = 256;
+pub(crate) const DRAW_UNITS: i64 = DRAW_UNITS_PER_OS_UNIT as i64;
 const PARTS: i64 = 512;
 /// The quarters of a pixel a glyph may be put at: the places a file holds
 /// a character at.

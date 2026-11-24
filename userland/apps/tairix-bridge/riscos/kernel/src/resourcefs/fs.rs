@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use super::{below_root, own, Entry, Object, NAME_MOST};
 use crate::error::Error;
-use crate::filing::fs::{self, attribute, file_info, kind};
+use crate::filing::fs::{self, attribute, file_info, kind, Info, Layout};
 use crate::filing::UNSUPPORTED;
 use crate::os::{len32, Fail, Os, Regs};
 
@@ -27,9 +27,6 @@ const ROOT_ATTRIBUTES: u32 = attribute::OWNER_READ | attribute::LOCKED | attribu
 /// The buffer FileSwitch keeps an open file in: the most it allows, the data
 /// being in memory already.
 const BUFFER: u32 = 1024;
-/// A listed entry's words before its name: its load and execution
-/// addresses, length, attributes and kind.
-const RECORD_WORDS: u32 = 5;
 
 /// A file or directory FileSwitch has open, as it was when opened.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -141,22 +138,35 @@ fn child_of(name: &[u8], prefix: usize) -> &[u8] {
     &rest[..end]
 }
 
+/// What `entry` says of the object of `kind` it names or implies.
+const fn described(entry: &Entry, kind: u32) -> Info {
+    Info {
+        kind,
+        load: entry.load,
+        exec: entry.exec,
+        length: entry.length,
+        attributes: entry.attributes,
+    }
+}
+
 /// The catalogue information `FSEntry_File` 5 gives in R0 to R5.
 fn give_info(regs: &mut Regs, found: Option<Object>, root: bool) {
-    let (kind, load, exec, length, attributes) = match found {
-        Some(Object::File(entry)) => (
-            kind::FILE,
-            entry.load,
-            entry.exec,
-            entry.length,
-            entry.attributes,
-        ),
-        Some(Object::Directory { .. }) if root => (kind::DIRECTORY, 0, 0, 0, ROOT_ATTRIBUTES),
-        Some(Object::Directory { load, exec }) => (kind::DIRECTORY, load, exec, 0, 0),
-        None => (kind::NOT_FOUND, 0, 0, 0, 0),
+    let info = match found {
+        Some(Object::File(entry)) => described(&entry, kind::FILE),
+        Some(Object::Directory { .. }) if root => Info {
+            kind: kind::DIRECTORY,
+            attributes: ROOT_ATTRIBUTES,
+            ..Info::default()
+        },
+        Some(Object::Directory { load, exec }) => Info {
+            kind: kind::DIRECTORY,
+            load,
+            exec,
+            ..Info::default()
+        },
+        None => Info::default(),
     };
-    regs.r[0] = kind;
-    regs.r[2..6].copy_from_slice(&[load, exec, length, attributes]);
+    info.answer(regs);
 }
 
 /// `FSEntry_Open`: a file or directory opened to be read, nothing found
@@ -257,8 +267,8 @@ pub(super) fn func(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     match regs.r[0] {
         fs::func::SET_DIRECTORY | fs::func::OPT | fs::func::SHUT_DOWN => Ok(()),
         fs::func::READ_DISC => os.write_bytes(regs.r[2], &[0, 0]),
-        fs::func::READ_NAMES => list(os, regs, false),
-        fs::func::READ_ENTRIES => list(os, regs, true),
+        fs::func::READ_NAMES => list(os, regs, Layout::Names),
+        fs::func::READ_ENTRIES => list(os, regs, Layout::Info),
         fs::func::RENAME | fs::func::ACCESS => Err(os.own_error(own, READ_ONLY, &[])),
         _ => Err(os.own_error(own, BAD_OPERATION, &[])),
     }
@@ -267,7 +277,7 @@ pub(super) fn func(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 /// `FSEntry_Func` 14 and 15: from the child at R4, up to R3 of the children
 /// of the directory at R1 into R2's R5 bytes, as names alone or each after
 /// its record; R3 how many, R4 the next child's place, or -1 for none read.
-fn list(os: &mut Os<'_>, regs: &mut Regs, records: bool) -> Result<(), Fail> {
+fn list(os: &mut Os<'_>, regs: &mut Regs, layout: Layout) -> Result<(), Fail> {
     let path = os.resource_path(regs.r[1])?;
     let children = os.resource_children(&path)?;
     let (buffer, wanted, offset, room) = (regs.r[2], regs.r[3], regs.r[4], regs.r[5]);
@@ -275,36 +285,17 @@ fn list(os: &mut Os<'_>, regs: &mut Regs, records: bool) -> Result<(), Fail> {
     let mut used: u32 = 0;
     let mut read: u32 = 0;
     for child in children.iter().skip(offset as usize).take(wanted as usize) {
-        let named = len32(child.name.len()) + 1;
-        let size = if records {
-            (4 * RECORD_WORDS + named).next_multiple_of(4)
-        } else {
-            named
-        };
+        let size = layout.size(&child.name);
         if used.saturating_add(size) > room {
             break;
         }
-        if records {
-            let entry = &child.entry;
-            let kind = if child.file {
-                kind::FILE
-            } else {
-                kind::DIRECTORY
-            };
-            for (n, word) in
-                (0..).zip([entry.load, entry.exec, entry.length, entry.attributes, kind])
-            {
-                os.write_word(at.wrapping_add(4 * n), word)?;
-            }
-            os.write_terminated(
-                at.wrapping_add(4 * RECORD_WORDS),
-                &child.name,
-                0,
-                child.name.len() + 1,
-            )?;
+        let kind = if child.file {
+            kind::FILE
         } else {
-            os.write_terminated(at, &child.name, 0, child.name.len() + 1)?;
-        }
+            kind::DIRECTORY
+        };
+        let info = described(&child.entry, kind);
+        os.write_listed(at, layout, &info, 0, &child.name)?;
         at = at.wrapping_add(size);
         used += size;
         read += 1;

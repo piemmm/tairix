@@ -15,7 +15,8 @@ use tairix_abi::fs::Filetype;
 use tairix_browse::media::{media_for_filetype, MediaType};
 use tairix_icon::IconKind;
 use tairix_image::{
-    encode_sprite_area, DecodeLimits, Picture, SpriteInput, SpriteMode, SpriteName, SpritePalette,
+    encode_sprite_area, sprite_type, DecodeLimits, Picture, SpriteInput, SpriteMode,
+    SpriteModeWord, SpriteName, SpritePalette, STANDARD_SPRITE_DPI,
 };
 use tairix_raster::{resample, Region, Rgba8Image};
 
@@ -27,15 +28,19 @@ const SPRITES: &str = "userland/apps/tairix-bridge/riscos/kernel/resources/Wimp/
 /// The sides of a file's large and small icons.
 const LARGE: u32 = 34;
 const SMALL: u32 = 18;
-/// Sixteen-bit colour at 90 dots an inch each way, with an alpha mask.
-const MODE: u32 = 1 << 31 | 5 << 27 | 90 << 14 | 90 << 1 | 1;
 /// What an icon master may be: its sides, and its pixels.
 const MASTER_SIDE: u32 = tairix_icon::MAX_ARTWORK_SIDE;
 const MASTER_PIXELS: u64 = MASTER_SIDE as u64 * MASTER_SIDE as u64;
 
 /// The file the tree draws, a sprite area.
 pub(super) fn draw(root: &Path) -> Result<Vec<u8>, String> {
-    let mode = SpriteMode::from_value(MODE)
+    // Sixteen-bit colour at the standard screen's resolution, with an alpha mask.
+    let word = SpriteModeWord::dpi_word(
+        sprite_type::DIRECT_15,
+        (STANDARD_SPRITE_DPI, STANDARD_SPRITE_DPI),
+        true,
+    );
+    let mode = SpriteMode::from_value(word)
         .ok_or("riscos-sprites: the mode is not one the encoder writes")?;
     let mut icons: Vec<(String, IconKind)> = (0..=0xFFF_u16)
         .filter_map(|raw| {

@@ -47,9 +47,7 @@ fn an_inverse_table_is_kept_until_the_palette_changes() {
         .collect();
     common::select_full_palette(&mut session).expect("a full 256-colour palette");
     let os = &mut session.kernel.os();
-    for (i, &colour) in (0u32..).zip(&palette) {
-        os.write_word(WORDS + 4 * i, colour).expect("written");
-    }
+    os.write_words(WORDS, &palette).expect("written");
     call(
         &mut session,
         tairix_riscos_kernel::swi::colour_trans::WRITE_PALETTE,

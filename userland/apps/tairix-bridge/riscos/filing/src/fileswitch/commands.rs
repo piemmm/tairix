@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use tairix_riscos_kernel::cmos::{FILESWITCH_OPTIONS, FILE_LANG};
 use tairix_riscos_kernel::error::{Error, BAD_COMMAND, BAD_NUMBER};
-use tairix_riscos_kernel::module::{Asked, Command, CommandKind, Help};
+use tairix_riscos_kernel::module::{Asked, Command};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::read_unsigned::{BYTE_SIZED, DECIMAL, TERMINATED};
 use tairix_riscos_kernel::swi::os::{
@@ -30,74 +30,36 @@ const BAD_OPTION: Error = Error {
     token: "BadOption",
 };
 
-/// A command of FileSwitch's.
-const fn command(
-    name: &'static str,
-    (min, max): (u8, u8),
-    help: &'static str,
-    syntax: &'static str,
-    run: tairix_riscos_kernel::module::Code,
-) -> Command {
-    Command {
-        name,
-        kind: CommandKind::Command,
-        min,
-        max,
-        translate: 0,
-        help: Help::Text(help),
-        syntax: Some(syntax),
-        run: Some(run),
-    }
-}
-
-/// A configuration keyword of FileSwitch's.
-const fn configure(
-    name: &'static str,
-    help: &'static str,
-    run: tairix_riscos_kernel::module::Code,
-) -> Command {
-    Command {
-        name,
-        kind: CommandKind::Configure,
-        min: 0,
-        max: 1,
-        translate: 0,
-        help: Help::Text(help),
-        syntax: None,
-        run: Some(run),
-    }
-}
-
 /// FileSwitch's commands, in its command table's order.
 pub(crate) static COMMANDS: [Command; 28] = [
-    command("Access", (1, 2), "*Access sets the attributes of the objects that match: L locks, W and R give the owner write and read access, and those after a / the public's.", "Syntax: *Access <object spec> [<attributes>]", access),
-    command("Back", (0, 0), "*Back swaps the current and previous directories.", "Syntax: *Back", back),
-    command("Cat", (0, 1), "*Cat lists the objects in a directory, the current one if none is given.", "Syntax: *Cat [<directory>]", cat),
-    command("CDir", (1, 2), "*CDir makes a directory, with room for the entries given where the filing system uses that.", "Syntax: *CDir <directory> [<size in entries>]", cdir),
-    configure("FileSystem", "*Configure FileSystem sets the filing system selected when the machine starts.", configure_file_system),
-    configure("Truncate", "*Configure Truncate sets whether a name too long for its filing system is cut short rather than refused.", configure_truncate),
-    command("Copy", (2, 255), "*Copy copies the objects that match to the destination given, as Copy$Options and the options given ask.", "Syntax: *Copy <source spec> <destination spec> [[~]<options>]", copy),
-    command("Count", (1, 255), "*Count adds up the sizes of the files that match, as Count$Options and the options given ask.", "Syntax: *Count <object spec> [[~]<options>]", count),
-    command("Dir", (0, 1), "*Dir makes a directory current, the user root directory if none is given.", "Syntax: *Dir [<directory>]", dir),
-    command("EnumDir", (2, 3), "*EnumDir writes the names in a directory that match the pattern, all of them if none is given, to a file.", "Syntax: *EnumDir <directory> <output file> [<pattern>]", enum_dir),
-    command("Ex", (0, 1), "*Ex lists the objects in a directory with their information.", "Syntax: *Ex [<directory>]", ex),
-    command("FileInfo", (1, 1), "*FileInfo gives the objects that match their full information.", "Syntax: *FileInfo <object spec>", file_info),
-    command("Info", (1, 1), "*Info gives the objects that match their information.", "Syntax: *Info <object spec>", info),
-    command("LCat", (0, 1), "*LCat lists the objects in a directory of the library, the library itself if none is given.", "Syntax: *LCat [<directory>]", lcat),
-    command("LEx", (0, 1), "*LEx lists the objects in a directory of the library with their information.", "Syntax: *LEx [<directory>]", lex),
-    command("Lib", (0, 1), "*Lib sets the library directory, the user root directory if none is given.", "Syntax: *Lib [<directory>]", lib),
-    command("NoDir", (0, 0), "*NoDir unsets the current directory.", "Syntax: *NoDir", no_dir),
-    command("NoLib", (0, 0), "*NoLib unsets the library directory.", "Syntax: *NoLib", no_lib),
-    command("NoURD", (0, 0), "*NoURD unsets the user root directory.", "Syntax: *NoURD", no_urd),
-    command("Rename", (2, 2), "*Rename gives an object a new name on the same filing system.", "Syntax: *Rename <object> <new name>", rename),
-    command("Run", (1, 255), "*Run runs a file found on Run$Path, as its type says, with the parameters given.", "Syntax: *Run <filename> [<parameters>]", run),
-    command("SetType", (2, 2), "*SetType gives a file a file type, by its name or its number.", "Syntax: *SetType <filename> <file type>", set_type),
-    command("Shut", (0, 0), "*Shut closes every open file on every filing system.", "Syntax: *Shut", shut),
-    command("ShutDown", (0, 0), "*ShutDown closes every open file and tells every filing system to shut down.", "Syntax: *ShutDown", shut_down),
-    command("Stamp", (1, 1), "*Stamp sets a file's date-stamp to now, keeping its type.", "Syntax: *Stamp <filename>", stamp),
-    command("Up", (0, 1), "*Up makes the current directory's parent current, or the one the levels given above it.", "Syntax: *Up [<levels>]", up),
-    command("URD", (0, 1), "*URD sets the user root directory, $ if none is given.", "Syntax: *URD [<directory>]", urd),
-    command("Wipe", (1, 255), "*Wipe deletes the objects that match, as Wipe$Options and the options given ask.", "Syntax: *Wipe <object spec> [[~]<options>]", wipe),
+    Command::new("Access", (1, 2), "*Access sets the attributes of the objects that match: L locks, W and R give the owner write and read access, and those after a / the public's.", Some("Syntax: *Access <object spec> [<attributes>]"), access),
+    Command::new("Back", (0, 0), "*Back swaps the current and previous directories.", Some("Syntax: *Back"), back),
+    Command::new("Cat", (0, 1), "*Cat lists the objects in a directory, the current one if none is given.", Some("Syntax: *Cat [<directory>]"), cat),
+    Command::new("CDir", (1, 2), "*CDir makes a directory, with room for the entries given where the filing system uses that.", Some("Syntax: *CDir <directory> [<size in entries>]"), cdir),
+    Command::configure("FileSystem", "*Configure FileSystem sets the filing system selected when the machine starts.", configure_file_system),
+    Command::configure("Truncate", "*Configure Truncate sets whether a name too long for its filing system is cut short rather than refused.", configure_truncate),
+    Command::new("Copy", (2, 255), "*Copy copies the objects that match to the destination given, as Copy$Options and the options given ask.", Some("Syntax: *Copy <source spec> <destination spec> [[~]<options>]"), copy),
+    Command::new("Count", (1, 255), "*Count adds up the sizes of the files that match, as Count$Options and the options given ask.", Some("Syntax: *Count <object spec> [[~]<options>]"), count),
+    Command::new("Dir", (0, 1), "*Dir makes a directory current, the user root directory if none is given.", Some("Syntax: *Dir [<directory>]"), dir),
+    Command::new("EnumDir", (2, 3), "*EnumDir writes the names in a directory that match the pattern, all of them if none is given, to a file.", Some("Syntax: *EnumDir <directory> <output file> [<pattern>]"), enum_dir),
+    Command::new("Ex", (0, 1), "*Ex lists the objects in a directory with their information.", Some("Syntax: *Ex [<directory>]"), ex),
+    Command::new("FileInfo", (1, 1), "*FileInfo gives the objects that match their full information.", Some("Syntax: *FileInfo <object spec>"), file_info),
+    Command::new("Info", (1, 1), "*Info gives the objects that match their information.", Some("Syntax: *Info <object spec>"), info),
+    Command::new("LCat", (0, 1), "*LCat lists the objects in a directory of the library, the library itself if none is given.", Some("Syntax: *LCat [<directory>]"), lcat),
+    Command::new("LEx", (0, 1), "*LEx lists the objects in a directory of the library with their information.", Some("Syntax: *LEx [<directory>]"), lex),
+    Command::new("Lib", (0, 1), "*Lib sets the library directory, the user root directory if none is given.", Some("Syntax: *Lib [<directory>]"), lib),
+    Command::new("NoDir", (0, 0), "*NoDir unsets the current directory.", Some("Syntax: *NoDir"), no_dir),
+    Command::new("NoLib", (0, 0), "*NoLib unsets the library directory.", Some("Syntax: *NoLib"), no_lib),
+    Command::new("NoURD", (0, 0), "*NoURD unsets the user root directory.", Some("Syntax: *NoURD"), no_urd),
+    Command::new("Rename", (2, 2), "*Rename gives an object a new name on the same filing system.", Some("Syntax: *Rename <object> <new name>"), rename),
+    Command::new("Run", (1, 255), "*Run runs a file found on Run$Path, as its type says, with the parameters given.", Some("Syntax: *Run <filename> [<parameters>]"), run),
+    Command::new("SetType", (2, 2), "*SetType gives a file a file type, by its name or its number.", Some("Syntax: *SetType <filename> <file type>"), set_type),
+    Command::new("Shut", (0, 0), "*Shut closes every open file on every filing system.", Some("Syntax: *Shut"), shut),
+    Command::new("ShutDown", (0, 0), "*ShutDown closes every open file and tells every filing system to shut down.", Some("Syntax: *ShutDown"), shut_down),
+    Command::new("Stamp", (1, 1), "*Stamp sets a file's date-stamp to now, keeping its type.", Some("Syntax: *Stamp <filename>"), stamp),
+    Command::new("Up", (0, 1), "*Up makes the current directory's parent current, or the one the levels given above it.", Some("Syntax: *Up [<levels>]"), up),
+    Command::new("URD", (0, 1), "*URD sets the user root directory, $ if none is given.", Some("Syntax: *URD [<directory>]"), urd),
+    Command::new("Wipe", (1, 255), "*Wipe deletes the objects that match, as Wipe$Options and the options given ask.", Some("Syntax: *Wipe <object spec> [[~]<options>]"), wipe),
 ];
 
 /// A command tail's words: where each begins.

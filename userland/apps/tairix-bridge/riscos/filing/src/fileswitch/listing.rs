@@ -14,7 +14,7 @@ use tairix_riscos_kernel::filing::{IS_A_FILE, NOT_FOUND, NO_DIRECTORY};
 use tairix_riscos_kernel::hex8;
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::names::{CONVERT_DATE_AND_TIME, CONVERT_STANDARD_DATE_AND_TIME};
-use tairix_riscos_kernel::swi::os::READ_MODE_VARIABLE;
+use tairix_riscos_kernel::swi::os::{CURRENT_MODE, READ_MODE_VARIABLE};
 
 use super::call::{
     self, attribute, Info, Named, Need, DIRECTORY, FILE as A_FILE, NOT_FOUND as NOTHING,
@@ -407,14 +407,10 @@ pub(crate) fn decimal(out: &mut Vec<u8>, value: u32) {
 /// An object's date-stamp as text: `Sys$DateFormat`'s, or to the
 /// centisecond for full information.
 fn date(os: &mut Os<'_>, info: &Info, full: bool) -> Result<Vec<u8>, Fail> {
-    let stamp = [
-        info.exec.to_le_bytes(),
-        [info.load.to_le_bytes()[0], 0, 0, 0],
-    ];
+    let stamp = info.stamp().to_le_bytes();
     let format_room = len32(FULL_DATE.len()).next_multiple_of(4);
     os.below_supervisor_stack(8 + format_room + DATE_ROOM, |os, frame| {
-        os.write_bytes(frame, &stamp[0])?;
-        os.write_bytes(frame + 4, &stamp[1])?;
+        os.write_bytes(frame, &stamp)?;
         os.write_bytes(frame + 8, FULL_DATE)?;
         let out = frame + 8 + format_room;
         let mut regs = Regs::default();
@@ -436,7 +432,7 @@ fn date(os: &mut Os<'_>, info: &Info, full: bool) -> Result<Vec<u8>, Fail> {
 /// cannot be read.
 fn screen_width(os: &mut Os<'_>) -> usize {
     let mut regs = Regs::default();
-    regs.r[0] = u32::MAX;
+    regs.r[0] = CURRENT_MODE;
     regs.r[1] = tairix_vdu::mode::var::SCR_R_COL;
     match os.perform(tairix_riscos_kernel::swi::X | READ_MODE_VARIABLE, &mut regs) {
         Ok(()) if regs.r[2] > 0 => regs.r[2] as usize,

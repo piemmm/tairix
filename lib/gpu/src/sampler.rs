@@ -41,8 +41,8 @@ pub enum BorderColor {
 
 pub use tairix_raster::CompareOp;
 
-/// The furthest a level-of-detail bias moves the level sampled.
-pub const MAX_LOD_BIAS: f32 = 16.0;
+/// The furthest any device's level-of-detail bias moves the level sampled.
+pub const MAX_LOD_BIAS: u32 = 16;
 
 /// How a sampler is made.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -94,7 +94,7 @@ impl SamplerDesc {
     };
 
     /// Refuse a sampler `device` does not make: a level-of-detail clamp
-    /// reversed, negative or not finite, a bias past [`MAX_LOD_BIAS`],
+    /// reversed, negative or not finite, a bias past the device's,
     /// anisotropy of none, past the device's or without linear filtering
     /// throughout, a feature the device does not state, or unnormalised
     /// coordinates outside their restrictions.
@@ -105,7 +105,7 @@ impl SamplerDesc {
         if !finite || self.lod_min < 0.0 || self.lod_min > self.lod_max {
             return Err(Error::OutOfRange);
         }
-        if self.lod_bias > MAX_LOD_BIAS || self.lod_bias < -MAX_LOD_BIAS {
+        if f64::from(self.lod_bias).abs() > f64::from(limits.max_sampler_lod_bias) {
             return Err(Error::OutOfRange);
         }
         if self.max_anisotropy == 0 || self.max_anisotropy > limits.max_sampler_anisotropy {

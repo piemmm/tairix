@@ -7,15 +7,16 @@
 
 use alloc::vec::Vec;
 
+use tairix_riscos_kernel::msgtrans::menus::{self, header, item};
 use tairix_riscos_kernel::os::len32;
 
 use crate::catalogue::Family;
 
-/// A menu's header and each item's size.
-pub(crate) const HEADER: usize = 28;
-pub(crate) const ITEM: usize = 24;
-/// The title field's size.
-const TITLE: usize = 12;
+/// A menu's header and each item's size, and the room a title's text has,
+/// as a buffer is indexed.
+const HEADER: usize = header::LEN as usize;
+const ITEM: usize = item::LEN as usize;
+const TITLE_ROOM: usize = header::TITLE_ROOM as usize;
 /// The colours: the title's foreground and background, the work area's.
 const COLOURS: [u8; 4] = [7, 2, 7, 0];
 /// Every item's height and the gap between items.
@@ -25,24 +26,6 @@ const GAP: u32 = 0;
 const ICON_FLAGS: u32 = 0x0700_0101;
 /// What no submenu or validation string is.
 pub(crate) const NONE: u32 = u32::MAX;
-/// An item's flags.
-pub(crate) mod flag {
-    pub(crate) const TICKED: u32 = 1;
-    pub(crate) const LAST: u32 = 1 << 7;
-    pub(crate) const INDIRECTED_TITLE: u32 = 1 << 8;
-}
-/// An item's fields.
-pub(crate) mod field {
-    pub(crate) const FLAGS: usize = 0;
-    pub(crate) const SUBMENU: usize = 4;
-    pub(crate) const ICON_FLAGS: usize = 8;
-    pub(crate) const TEXT: usize = 12;
-}
-/// The icon flag that makes an item's text indirected.
-pub(crate) const INDIRECTED: u32 = 1 << 8;
-/// A width's fixed part and each character's.
-const WIDTH_BASE: u32 = 12;
-const WIDTH_PER_CHARACTER: u32 = 16;
 /// How many characters of a title its width leaves out.
 const TITLE_SLACK: usize = 2;
 
@@ -131,7 +114,7 @@ fn menus<'a>(families: &[Family<'a>], labels: Labels<'a>, options: Options) -> V
 /// An item's tick, as its flags have it.
 const fn ticked_flag(ticked: bool) -> u32 {
     if ticked {
-        flag::TICKED
+        item::TICKED
     } else {
         0
     }
@@ -144,7 +127,7 @@ pub(crate) fn sizes(families: &[Family<'_>], labels: Labels<'_>, options: Option
     let data = menus
         .iter()
         .map(|m| {
-            let title = if m.title.len() > TITLE {
+            let title = if m.title.len() > TITLE_ROOM {
                 m.title.len() + 1
             } else {
                 0
@@ -186,46 +169,47 @@ pub(crate) fn build(
         address(data_at, offset)
     };
     for (m, &start) in menus.iter().zip(&starts) {
-        let indirected_title = m.title.len() > TITLE;
+        let indirected_title = m.title.len() > TITLE_ROOM;
         let title_text = indirected_title.then(|| text_at(m.title));
-        let header = &mut menu[start..start + HEADER];
+        let head = &mut menu[start..start + HEADER];
         if let Some(pointer) = title_text {
-            put(header, 0, pointer);
-            put(header, 4, 0);
-            put(header, 8, 0);
+            put(head, header::TITLE, pointer);
+            put(head, header::TITLE + 4, 0);
+            put(head, header::TITLE + 8, 0);
         } else {
             let shown = m.title.len();
-            header[..shown].copy_from_slice(m.title);
-            if shown < TITLE {
-                header[shown] = options.terminator;
+            head[..shown].copy_from_slice(m.title);
+            if shown < TITLE_ROOM {
+                head[shown] = options.terminator;
             }
         }
-        header[TITLE..TITLE + 4].copy_from_slice(&COLOURS);
-        put(header, 16, width(m));
-        put(header, 20, HEIGHT);
-        put(header, 24, GAP);
+        let colours = header::COLOURS as usize;
+        head[colours..colours + COLOURS.len()].copy_from_slice(&COLOURS);
+        put(head, header::WIDTH, width(m));
+        put(head, header::HEIGHT, HEIGHT);
+        put(head, header::GAP, GAP);
         let count = m.items.len();
         for (i, &(text, submenu, ticked)) in m.items.iter().enumerate() {
             let mut flags = ticked;
             if i + 1 == count {
-                flags |= flag::LAST;
+                flags |= item::LAST;
             }
             if i == 0 && indirected_title {
-                flags |= flag::INDIRECTED_TITLE;
+                flags |= item::INDIRECTED_TITLE;
             }
             let pointer = text_at(text);
-            let item = start + HEADER + ITEM * i;
-            let item = &mut menu[item..item + ITEM];
-            put(item, field::FLAGS, flags);
+            let entry = start + HEADER + ITEM * i;
+            let entry = &mut menu[entry..entry + ITEM];
+            put(entry, item::FLAGS, flags);
             put(
-                item,
-                field::SUBMENU,
+                entry,
+                item::SUBMENU,
                 submenu.map_or(NONE, |s| address(menu_at, starts[s])),
             );
-            put(item, field::ICON_FLAGS, ICON_FLAGS);
-            put(item, field::TEXT, pointer);
-            put(item, field::TEXT + 4, NONE);
-            put(item, field::TEXT + 8, len32(text.len() + 1));
+            put(entry, item::ICON_FLAGS, ICON_FLAGS);
+            put(entry, item::TEXT, pointer);
+            put(entry, item::VALIDATION, NONE);
+            put(entry, item::BUFFER_SIZE, len32(text.len() + 1));
         }
     }
     data
@@ -241,11 +225,12 @@ fn width(menu: &Menu<'_>) -> u32 {
         .chain([menu.title.len().saturating_sub(TITLE_SLACK)])
         .max()
         .unwrap_or(0);
-    WIDTH_BASE + WIDTH_PER_CHARACTER * len32(longest)
+    menus::width(len32(longest))
 }
 
-fn put(bytes: &mut [u8], at: usize, value: u32) {
-    bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+/// The word at field `at` of a menu's block set to `value`.
+fn put(bytes: &mut [u8], at: u32, value: u32) {
+    crate::put_word(bytes, at as usize, value);
 }
 
 #[cfg(test)]

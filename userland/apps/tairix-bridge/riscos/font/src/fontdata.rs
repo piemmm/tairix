@@ -37,7 +37,7 @@ const ENCODING_MOST: u32 = 1 << 20;
 const REDIRECTS_MOST: usize = 4;
 /// What a ROM font's metrics file's flags say of its face: no y offsets, and
 /// the miscellaneous measures there.
-const FACE_FLAGS: u8 = 1 << 2 | 1 << 3;
+const FACE_FLAGS: u8 = metrics::flag::NO_Y_OFFSETS | metrics::flag::MORE;
 /// The 256ths of an em a face's underline sits below its baseline and is
 /// thick, which the font service does not give.
 const FACE_UNDERLINE: (i32, i32) = (-26, 13);

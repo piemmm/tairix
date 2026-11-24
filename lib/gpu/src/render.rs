@@ -15,7 +15,7 @@ use crate::format::{Aspects, Format, FormatFeatures};
 use crate::host::owned;
 use crate::info::{DeviceInfo, Features};
 use crate::model::{
-    shared_bytes, ContextKey, ContextState, Model, PipelineLayoutKey, Pipelines, RenderPipelineKey,
+    shared_bytes, ContextKey, ContextState, Model, PipelineLayoutKey, Planned, RenderPipelineKey,
     ShaderModuleKey,
 };
 use crate::pipeline::{plan_stage, PipelineState, Released, StagePlan};
@@ -242,12 +242,25 @@ pub struct RenderPipelineDesc<'a> {
     pub logic_op: Option<LogicOp>,
 }
 
+/// A vertex buffer of a render pipeline, as a draw binding it is checked
+/// against and read through.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct BufferForm {
+    /// The bytes from one element to the next.
+    pub(crate) stride: u32,
+    /// What steps it.
+    pub(crate) step: VertexStep,
+    /// The bytes its binding's offset into its memory is a whole number of:
+    /// the widest of its attributes' alignments.
+    pub(crate) alignment: u32,
+}
+
 /// A render pipeline's fixed-function state, as its description gave it:
 /// what a draw is checked against and runs through.
 #[derive(Debug)]
 pub(crate) struct FixedFunction {
-    /// Each vertex buffer's stride and step.
-    pub(crate) buffers: Vec<(u32, VertexStep)>,
+    /// Each vertex buffer, in order.
+    pub(crate) buffers: Vec<BufferForm>,
     pub(crate) topology: Topology,
     pub(crate) restart: bool,
     pub(crate) rasterization: Rasterization,
@@ -261,7 +274,15 @@ impl FixedFunction {
     fn of(state: &FixedState<'_>) -> Result<Self, Error> {
         let buffers = tairix_util::fallible::collected(
             state.vertex_buffers.len(),
-            state.vertex_buffers.iter().map(|b| (b.stride, b.step)),
+            state.vertex_buffers.iter().map(|buffer| BufferForm {
+                stride: buffer.stride,
+                step: buffer.step,
+                alignment: buffer
+                    .attributes
+                    .iter()
+                    .map(|attribute| attribute.format.attribute_alignment())
+                    .fold(1, u32::max),
+            }),
         )
         .ok_or(Error::OutOfMemory)?;
         let targets =
@@ -491,10 +512,10 @@ impl<'a> RenderRequest<'a> {
     }
 }
 
-/// A render pipeline's checked stages and what the model found of them:
-/// what a backend makes its programs from.
+/// A render pipeline's checked stages and state and what the model found of
+/// them: what a backend makes its programs from.
 pub(crate) struct RenderPlan<'m> {
-    pub(crate) vertex_buffers: &'m [VertexBuffer<'m>],
+    pub(crate) state: FixedState<'m>,
     pub(crate) vertex: StagePlan<'m>,
     pub(crate) fragment: Option<StagePlan<'m>>,
     /// The channels, red at bit 0, the fragment stage writes of each target
@@ -513,12 +534,18 @@ impl Context {
     /// [`Error::Foreign`] for a module or layout of another context,
     /// [`Error::EntryPoint`] for a name no entry point of its stage has,
     /// [`Error::Disagreement`] for a layout that does not provide what a stage
-    /// uses, [`Error::Specialization`] for values a module refuses,
+    /// uses, [`Error::Sampling`] for a sampling the layout's sample and
+    /// sampler types do not take, [`Error::Specialization`] for values a
+    /// module refuses,
     /// [`Error::Interface`] for a vertex input no attribute provides or
     /// provides as another component type, a fragment input no vertex output
-    /// provides, or a fragment output with no target or of another component
-    /// type, [`Error::Unsupported`] for a feature or format feature the device
-    /// has not stated, [`Error::Samples`] for a sample count other than one or
+    /// provides, a fragment output with no target or of another component
+    /// type, a blend or alpha-to-coverage reading a channel no output writes,
+    /// or a blend reading a second colour beside another target,
+    /// [`Error::Misaligned`] for an attribute's offset or its buffer's stride
+    /// off its alignment, [`Error::Unsupported`] for a feature or format
+    /// feature the device has not stated, [`Error::Samples`] for a sample
+    /// count other than one or
     /// four, [`Error::Aspect`] for depth or stencil tests of a format without
     /// the aspect, [`Error::Shape`] for a value that is not finite, a write
     /// mask past its channels, or a line narrower than a pixel,
@@ -561,7 +588,7 @@ impl<B: Backend> Shared<B> {
     ) -> Result<RenderPipelineKey, Error> {
         let info = &self.info;
         check_fixed(info, &request.state)?;
-        let (vertex_module, fragment_module, layout) = self.modules_and_layout(
+        let (device, vertex_module, fragment_module, layout) = self.modules_and_layout(
             context,
             (
                 request.vertex.module,
@@ -591,7 +618,7 @@ impl<B: Backend> Shared<B> {
             fragment.as_ref().map(|stage| stage.entry),
         )?;
         let plan = RenderPlan {
-            vertex_buffers: request.state.vertex_buffers,
+            state: request.state,
             vertex,
             fragment,
             channels,
@@ -599,7 +626,7 @@ impl<B: Backend> Shared<B> {
         };
         #[cfg(test)]
         crate::fair::held::note_making();
-        let prepared = self.backend.render(info, &plan)?;
+        let prepared = self.backend.render(&device, info, &plan)?;
         drop(plan);
         let fixed = FixedFunction::of(&request.state)?;
         let held = [
@@ -618,7 +645,8 @@ impl<B: Backend> Shared<B> {
 }
 
 /// Refuse vertex buffers and attributes the device has not stated, or past
-/// its limits, or two attributes feeding one location.
+/// its limits, two attributes feeding one location, or an attribute whose
+/// offset or buffer's stride is not a whole number of its alignment.
 fn check_vertex_input(info: &DeviceInfo, state: &FixedState<'_>) -> Result<(), Error> {
     let limits = &info.limits;
     let stated = |format: Format, wanted: FormatFeatures| info.formats.get(format).contains(wanted);
@@ -640,6 +668,12 @@ fn check_vertex_input(info: &DeviceInfo, state: &FixedState<'_>) -> Result<(), E
             }
             if !stated(attribute.format, FormatFeatures::VERTEX_INPUT) {
                 return Err(Error::Unsupported);
+            }
+            let alignment = attribute.format.attribute_alignment();
+            if !buffer.stride.is_multiple_of(alignment)
+                || !attribute.offset.is_multiple_of(alignment)
+            {
+                return Err(Error::Misaligned);
             }
             if attribute.location >= limits.max_vertex_input_attributes {
                 return Err(Error::OutOfRange);
@@ -803,17 +837,63 @@ fn written_channels(
         };
         *written |= bits;
     }
-    // Only the first target's blend may read the second colour, and only
-    // where the stage writes one.
-    for (index, target) in state.targets.iter().enumerate() {
-        let second = target
-            .blend
-            .is_some_and(|blend| blend.reads_second_source());
-        if second && (index != 0 || second_channels == 0) {
+    // A blend reading the second colour is the pipeline's one target's, as a
+    // device may blend no more targets so. A channel no output writes holds no
+    // value a blend or the coverage may read.
+    for ((index, target), written) in state.targets.iter().enumerate().zip(channels) {
+        let Some(blend) = &target.blend else {
+            continue;
+        };
+        if blend.reads_second_source() && (index != 0 || state.targets.len() > 1) {
+            return Err(Error::Interface);
+        }
+        let (read, second_read) = blend_reads(*blend, written & target.write_mask.bits());
+        if read & !written != 0 || second_read & !second_channels != 0 {
             return Err(Error::Interface);
         }
     }
+    if state.multisample.alpha_to_coverage && channels[0] & ALPHA_CHANNEL == 0 {
+        return Err(Error::Interface);
+    }
     Ok((channels, second_channels))
+}
+
+/// Alpha's bit among a target's channels.
+const ALPHA_CHANNEL: u8 = 1 << 3;
+
+/// The channels, red at bit 0, of the fragment's colour and of its second
+/// colour `blend`'s factors read to write the channels `writes`: none for a
+/// lesser or greater of two, which reads no factor.
+fn blend_reads(blend: Blend, writes: u8) -> (u8, u8) {
+    let mut reads = (0u8, 0u8);
+    for channel in 0..4u8 {
+        let bit = 1u8 << channel;
+        if writes & bit == 0 {
+            continue;
+        }
+        let alpha = bit == ALPHA_CHANNEL;
+        let (factors, op) = if alpha {
+            ([blend.source_alpha, blend.destination_alpha], blend.alpha)
+        } else {
+            ([blend.source_color, blend.destination_color], blend.color)
+        };
+        if matches!(op, BlendOp::Min | BlendOp::Max) {
+            continue;
+        }
+        for factor in factors {
+            let (first, second) = match factor {
+                BlendFactor::SourceColor | BlendFactor::OneMinusSourceColor => (bit, 0),
+                BlendFactor::SourceAlpha | BlendFactor::OneMinusSourceAlpha => (ALPHA_CHANNEL, 0),
+                BlendFactor::SourceAlphaSaturate if !alpha => (ALPHA_CHANNEL, 0),
+                BlendFactor::Source1Color | BlendFactor::OneMinusSource1Color => (0, bit),
+                BlendFactor::Source1Alpha | BlendFactor::OneMinusSource1Alpha => (0, ALPHA_CHANNEL),
+                _ => (0, 0),
+            };
+            reads.0 |= first;
+            reads.1 |= second;
+        }
+    }
+    reads
 }
 
 /// Each stage's interface matched with its neighbours': every vertex input
@@ -849,6 +929,9 @@ fn check_interface(
         return Err(Error::TooLarge);
     }
     let Some(entry) = fragment else {
+        if state.multisample.alpha_to_coverage {
+            return Err(Error::Interface);
+        }
         return Ok(([0; MAX_PASS_ATTACHMENTS], 0));
     };
     if components(entry.inputs()) > limits.max_fragment_input_components {
@@ -872,7 +955,7 @@ fn check_interface(
 /// The context's render pipelines.
 fn renders<B: Backend>(
     context: &mut ContextState<B>,
-) -> &mut Pipelines<RenderPipelineKey, Arc<RenderPipelineState<B>>> {
+) -> &mut Planned<RenderPipelineKey, Arc<RenderPipelineState<B>>> {
     &mut context.render_pipelines
 }
 

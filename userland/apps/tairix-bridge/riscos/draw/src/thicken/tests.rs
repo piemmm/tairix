@@ -5,7 +5,9 @@ use alloc::vec::Vec;
 use super::*;
 use crate::dash::{Dasher, Pattern};
 use crate::flatten::Threshold;
-use crate::stage::testkit::{feed, parse, Collect, Memory};
+use crate::module::error_of;
+use crate::process::flag::{FLATTEN, REFLATTEN};
+use crate::stage::testkit::{alike, feed, parse, Collect, Memory};
 use crate::stage::Flattener;
 
 #[path = "recorded.rs"]
@@ -13,8 +15,6 @@ mod recorded;
 
 const BLOCK: u32 = 0x1_0000;
 const DASH: u32 = 0x2_0000;
-const FLATTEN: u32 = 1 << 28;
-const REFLATTEN: u32 = 1 << 30;
 
 /// What our stages make of a recorded case: the elements, and where it
 /// stopped, if it did.
@@ -54,29 +54,18 @@ fn thickened(case: &recorded::Case) -> (Vec<Element>, Result<(), Stop>) {
 
 fn refusal_number(stop: Stop) -> Option<u32> {
     match stop {
-        Stop::Refused(Refusal::BadCapJoin) => Some(0x989),
-        Stop::Refused(Refusal::NeedsFlattening) => Some(0x988),
+        Stop::Refused(refusal @ (Refusal::BadCapJoin | Refusal::NeedsFlattening)) => {
+            Some(error_of(refusal).number)
+        }
         _ => None,
     }
 }
 
-/// Whether two paths have the same elements, each point near: within
-/// `SLACK`, and a further 1/20000th of its distance from the origin, which
-/// a long mitre's tip strays by.
-fn alike(ours: &[Element], genuine: &[Element]) -> bool {
-    let near = |a: i32, b: i32| (a - b).abs() <= SLACK + b.abs() / 20000;
-    ours.len() == genuine.len()
-        && ours.iter().zip(genuine).all(|(a, b)| {
-            a.code() == b.code()
-                && a.points()
-                    .iter()
-                    .zip(b.points())
-                    .all(|(p, q)| match (p, q) {
-                        (Some(p), Some(q)) => near(p.x, q.x) && near(p.y, q.y),
-                        (None, None) => true,
-                        _ => false,
-                    })
-        })
+/// Whether a coordinate is near the genuine one: within `SLACK`, and a
+/// further 1/20000th of its distance from the origin, which a long mitre's
+/// tip strays by.
+fn near(ours: i32, genuine: i32) -> bool {
+    (ours - genuine).abs() <= SLACK + genuine.abs() / 20000
 }
 
 /// Mitres on lines 2^20 units wide, where RISC OS's limit test overflows,
@@ -121,11 +110,12 @@ fn compare(case: &recorded::Case) -> Outcome {
     };
     if ours == genuine {
         Outcome::Exact
-    } else if alike(&ours, &genuine)
+    } else if alike(&ours, &genuine, near)
         || (OVERFLOWED.contains(&case.name)
             && alike(
                 &outside_the_join(&ours_parts),
                 &outside_the_join(&genuine_parts),
+                near,
             ))
     {
         Outcome::Near
@@ -171,7 +161,7 @@ fn the_overflowed_mitres_still_join_otherwise_so_the_difference_is_still_needed(
             .find(|case| case.name == *name)
             .expect("listed");
         let (ours, _) = thickened(case);
-        assert!(!alike(&ours, &parse(case.made)), "{name}");
+        assert!(!alike(&ours, &parse(case.made), near), "{name}");
     }
 }
 
@@ -205,4 +195,27 @@ fn the_block_is_read_only_when_a_cap_or_join_needs_it() {
         Err(Stop::Fail(tairix_riscos_kernel::os::Fail::Error(BLOCK)))
     );
     assert_eq!(out.elements.len(), 7, "the hexagon went before the join");
+}
+
+#[test]
+fn a_block_reads_back_as_it_was_written() {
+    let style = Style {
+        join: JOIN_BEVEL,
+        end_cap: CAP_TRIANGLE,
+        start_cap: CAP_ROUND,
+        mitre: 0xA_0000,
+        end_triangle: Triangle {
+            width: 0x100,
+            length: 0x200,
+        },
+        start_triangle: Triangle {
+            width: 0x40,
+            length: 0x80,
+        },
+    };
+    assert_eq!(
+        style.words(),
+        [0x0001_0302, 0xA_0000, 0x0200_0100, 0x0080_0040]
+    );
+    assert_eq!(Style::of(style.words()), style);
 }

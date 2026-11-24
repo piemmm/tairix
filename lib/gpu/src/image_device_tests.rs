@@ -76,6 +76,62 @@ fn read(allocation: &crate::Allocation, len: usize) -> Vec<u8> {
 }
 
 #[test]
+fn an_image_reads_zero_however_its_memory_was_written_before_it_was_placed() {
+    let (device, _) = device();
+    let context = context(&device);
+    let shape = desc(Format::Rgba8Unorm, 4, 4, 1);
+    let needs = context.image_requirements(&shape).expect("requirements");
+    let allocation = memory(&context, needs.size);
+    let filled = vec![0xa5; usize::try_from(needs.size).expect("small")];
+    allocation.write(0, &filled).expect("host-visible");
+    let image = context
+        .create_image(&allocation, 0, &shape)
+        .expect("an image");
+    let held = memory(&context, 64);
+    let out = over(&context, &held, 0, 64);
+    run(&context, |commands| {
+        commands
+            .copy_image_to_buffer(&image, &out, &[region(shape.extent, 16, 4, 1)])
+            .expect("recorded");
+    })
+    .expect("ran");
+    assert_eq!(read(&held, 64), [0; 64]);
+}
+
+#[test]
+fn a_refused_image_leaves_the_memory_it_would_lie_over_as_it_was() {
+    let (device, _) = device();
+    let shape = desc(Format::Rgba8Unorm, 4, 4, 1);
+    let place = |context: &Context| {
+        let needs = context.image_requirements(&shape).expect("requirements");
+        let allocation = memory(context, needs.size);
+        let filled = vec![0xa5; usize::try_from(needs.size).expect("small")];
+        allocation.write(0, &filled).expect("host-visible");
+        let image = context.create_image(&allocation, 0, &shape);
+        (allocation, filled, image)
+    };
+    let total = {
+        let probe = context(&device);
+        let (_allocation, _filled, image) = place(&probe);
+        assert!(image.is_ok(), "an image");
+        probe.memory_used().total()
+    };
+    // Room for everything but a byte of what the image keeps.
+    let tight = device
+        .create_context(&crate::ContextDesc {
+            memory_limit: Some(total - 1),
+        })
+        .expect("a context");
+    let (allocation, filled, image) = place(&tight);
+    assert_eq!(image.err(), Some(Error::OverLimit));
+    assert_eq!(
+        read(&allocation, filled.len()),
+        filled,
+        "nothing was zeroed"
+    );
+}
+
+#[test]
 fn texels_copied_into_an_image_come_back_out_as_they_went_in() {
     let (device, _) = device();
     let context = context(&device);
@@ -580,6 +636,46 @@ fn an_image_or_view_of_another_context_is_refused_and_a_released_one_is_stale() 
 }
 
 #[test]
+fn a_view_is_of_a_format_offering_a_use_its_image_was_made_for() {
+    let (device, _) = device();
+    let context = context(&device);
+    let view = |format| ImageViewDesc {
+        format,
+        dimension: ViewDimension::D2,
+        range: ImageRange {
+            aspects: Aspects::COLOR,
+            base_level: 0,
+            levels: 1,
+            base_layer: 0,
+            layers: 1,
+        },
+    };
+    let stored = ImageDesc {
+        usage: ImageUsage::STORAGE,
+        ..desc(Format::Rgba8Unorm, 4, 4, 1)
+    };
+    let (_stored_memory, stored_image) = image(&context, &stored);
+    assert_eq!(
+        context
+            .create_image_view(&stored_image, &view(Format::Rgba8UnormSrgb))
+            .err(),
+        Some(Error::Unsupported),
+        "no sRGB texel is stored"
+    );
+    context
+        .create_image_view(&stored_image, &view(Format::Rgba8Unorm))
+        .expect("stored as itself");
+    let sampled = ImageDesc {
+        usage: ImageUsage::STORAGE.with(ImageUsage::SAMPLED),
+        ..stored
+    };
+    let (_sampled_memory, sampled_image) = image(&context, &sampled);
+    context
+        .create_image_view(&sampled_image, &view(Format::Rgba8UnormSrgb))
+        .expect("sampled as its twin");
+}
+
+#[test]
 fn a_storage_image_past_what_an_invocation_addresses_is_refused() {
     let (device, _) = device();
     let context = context(&device);
@@ -606,10 +702,11 @@ fn a_storage_image_past_what_an_invocation_addresses_is_refused() {
 }
 
 #[test]
-fn what_an_image_needs_is_answered_without_the_devices_lock() {
+fn what_an_image_needs_is_asked_of_its_contexts_device_with_the_lock_let_go() {
+    use crate::fair::held::{makings_under, takings};
     let (device, _) = device();
     let context = context(&device);
-    let before = crate::fair::held::takings();
+    let (taken, under) = (takings(), makings_under());
     let needs = context
         .image_requirements(&desc(Format::Rgba8Unorm, 64, 64, 1))
         .expect("requirements");
@@ -620,5 +717,6 @@ fn what_an_image_needs_is_answered_without_the_devices_lock() {
             .err(),
         Some(Error::Empty)
     );
-    assert_eq!(crate::fair::held::takings(), before);
+    assert_eq!(takings(), taken + 2, "each looks its context up once");
+    assert_eq!(makings_under(), under, "and asks with the lock let go");
 }

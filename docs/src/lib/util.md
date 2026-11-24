@@ -195,6 +195,11 @@ hidden character it needs is `lib/visible`'s (`docs/src/lib/visible.md`).
   width (`Unsigned`), so a resampler's rate ratio, a density in lowest terms
   and a seeded sweep's stride reduce by one definition. A signed value
   passes its magnitude: its divisor has no one sign.
+* `endian` — `le_u16`, `le_u32` and `le_i32` read a little-endian field at
+  an offset, `None` where the slice ends before it, so each format of that
+  byte order names its own refusal with no copy of the read. Consumers:
+  `lib/image`'s decoders, `lib/drawing`'s Draw format, and TAIRiX Bridge's
+  Draw and Font Manager modules.
 * `banner` — the `==> name <==` banner `head` and `tail` set before each of
   several sources: `Banners` writes a blank line before every banner but the
   first, names standard input as GNU does, and shows a file's name as the

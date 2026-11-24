@@ -4,8 +4,9 @@ use crate::device::as_software;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::DescriptorType;
 use tairix_spirv::assemble::admit;
-use tairix_spirv::{Access, BindingKind, Disagreement, SpecValue, Stages};
+use tairix_spirv::{Access, Disagreement, SpecValue, Stages};
 
 use crate::device_tests::{context, device, memory, over, queue, submit};
 use crate::{
@@ -17,7 +18,7 @@ use crate::{
 pub(crate) const fn storage(binding: u32) -> LayoutBinding {
     LayoutBinding {
         binding,
-        kind: BindingKind::StorageBuffer,
+        kind: DescriptorType::StorageBuffer,
         count: 1,
         access: Access::READ.with(Access::WRITE),
         stages: Stages::COMPUTE,

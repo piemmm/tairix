@@ -11,10 +11,10 @@ use tairix_abi::gpu::{
     desk_endpoint_for, GPU_CHANNEL_ENDPOINTS, GPU_MAX_REPLY, GPU_MAX_REQUEST, GPU_NODE_COMPATIBLE,
 };
 use tairix_abi::hwtree::{HwDeviceClass, HwResource, HwResourceKind};
-use tairix_abi::{CapabilityId, DriverError, HwProperty, MmioMapper};
+use tairix_abi::{CapabilityId, DriverError, Errno, HwProperty, MmioMapper};
 use tairix_display::RtDeviceMemory;
 use tairix_drvrt::exit::{end, error, step, DriverExit};
-use tairix_drvrt::serve::{log_event, publish_channel, DeviceChannel};
+use tairix_drvrt::serve::{log_event, publish_channel, BoundChannel, DeviceChannel};
 use tairix_drvrt::{Recorder, RtDriverHost, RtGrantSyscalls};
 use tairix_gpu::{Device, RuntimeThreads, MAX_SERVE_WORKERS};
 use tairix_inline::ArrayVec;
@@ -241,8 +241,23 @@ fn record_host_visible(host: &Host) -> Option<u64> {
     Some(region.length())
 }
 
-/// Record that the device's GPU is not served, and why.
-fn unserved(why: &'static str, reason: DriverError) {
+/// Why a device's GPU is not served.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Unserved {
+    /// The device takes no Venus work, as its bring-up recorded.
+    NoVenus,
+    /// Serving it was refused, as recorded.
+    Refused {
+        /// The step that was refused.
+        why: &'static str,
+        /// The refusal.
+        reason: DriverError,
+    },
+}
+
+/// Record that the device's GPU is not served, and why, answering the
+/// refusal.
+fn unserved(why: &'static str, reason: DriverError) -> Unserved {
     log_event(
         Level::Warn,
         GPU_UNSERVED,
@@ -258,31 +273,43 @@ fn unserved(why: &'static str, reason: DriverError) {
             },
         ],
     );
+    Unserved::Refused { why, reason }
 }
 
 /// Serve the device's Venus host as a GPU on its node's channel from a
 /// thread of its own, answering the port the display loop must wake on for
-/// the GPU's orders; [`None`] where the device takes no Venus work or the
-/// GPU could not be served, its reason recorded.
-pub fn serve_gpu<'h, T: Transport>(gpu: &mut Engine<'h, T>, host: &'h Host) -> Option<u64> {
+/// the GPU's orders.
+///
+/// # Errors
+///
+/// Why the GPU is not served, recorded.
+pub fn serve_gpu<'h, T: Transport>(
+    gpu: &mut Engine<'h, T>,
+    host: &'h Host,
+) -> Result<u64, Unserved> {
     start_gpu(gpu, host, serve_on)
 }
 
 /// Bind the device's node's channel and, on a thread of its own, make its
 /// Venus host a GPU and hand `then` the GPU, or why the host would not be
-/// one, with the channel's endpoint, answering the port the display loop
-/// must wake on for the GPU's orders; [`None`] where the device takes no
-/// Venus work or the thread could not be started, its reason recorded.
+/// one, with the channel, answering the port the display loop must wake on
+/// for the GPU's orders. The channel is taken down wherever it goes unserved.
+///
+/// # Errors
+///
+/// Why the GPU is not served, recorded: the kernel refuses the channel to a
+/// node a platform's DMA translation unit does not translate, and the driver
+/// then drives the display alone.
 pub fn start_gpu<'h, T: Transport>(
     gpu: &mut Engine<'h, T>,
     host: &'h Host,
-    then: impl FnOnce(Result<Device, DriverError>, u64) + Send + 'static,
-) -> Option<u64> {
-    gpu.venus()?;
-    let Some(region) = host_visible_region(host) else {
-        unserved("no host-visible region", DriverError::NotFound);
-        return None;
-    };
+    then: impl FnOnce(Result<Device, DriverError>, BoundChannel) + Send + 'static,
+) -> Result<u64, Unserved> {
+    if gpu.venus().is_none() {
+        return Err(Unserved::NoVenus);
+    }
+    let region = host_visible_region(host)
+        .ok_or_else(|| unserved("no host-visible region", DriverError::NotFound))?;
     let channel = DeviceChannel {
         block: GPU_CHANNEL_ENDPOINTS,
         gate: CapabilityId::GPU,
@@ -290,62 +317,64 @@ pub fn start_gpu<'h, T: Transport>(
         max_reply: GPU_MAX_REPLY,
         per_sender: GPU_CALL_DEPTH,
     };
-    let Some(endpoint) = channel.bind() else {
-        unserved("channel unbound", DriverError::Busy);
-        return None;
-    };
-    let Ok(origin) = tairix_rt::self_origin() else {
-        unserved("no identity", DriverError::NotFound);
-        return None;
-    };
+    let refused_by = |why| move |errno| unserved(why, DriverError::from_errno(errno));
+    let channel = channel.bind().map_err(refused_by("channel unbound"))?;
+    let endpoint = channel.endpoint();
+    let origin = tairix_rt::self_origin().map_err(|raw| {
+        unserved(
+            "no identity",
+            DriverError::from_errno(Errno::from_syscall(raw)),
+        )
+    })?;
     let port = desk_endpoint_for(origin.pid());
-    if tairix_rt::port_bind(port, 1, DESK_ROUSE_DEPTH) != 0 {
-        unserved("desk port unbound", DriverError::Busy);
-        return None;
-    }
-    let refused = |why: &'static str, reason: DriverError| -> Option<u64> {
-        unserved(why, reason);
+    Errno::syscall_result(tairix_rt::port_bind(port, 1, DESK_ROUSE_DEPTH))
+        .map_err(refused_by("desk port unbound"))?;
+    let refused = |why: &'static str, reason: DriverError| {
         // Nothing will rouse the loop, so the port and its queue go back.
         let _ = tairix_rt::port_unbind(port);
-        None
+        unserved(why, reason)
     };
     // The channel's server is this process: no other may rouse its loop.
     if let Err(errno) = tairix_rt::port_admit(port, endpoint) {
-        return refused("desk port open", DriverError::from_errno(errno));
+        return Err(refused("desk port open", DriverError::from_errno(errno)));
     }
-    let venus = match gpu.serve_venus(region, host, port) {
-        Ok(venus) => venus,
-        Err(reason) => return refused("desk", reason),
-    };
+    let venus = gpu
+        .serve_venus(region, host, port)
+        .map_err(|reason| refused("desk", reason))?;
     let started = tairix_rt::thread::Thread::spawn(move || {
-        then(venus.device(&RuntimeThreads), endpoint);
+        then(venus.device(&RuntimeThreads), channel);
     });
     if let Err(errno) = started {
-        return refused("no thread", DriverError::from_errno(errno));
+        return Err(refused("no thread", DriverError::from_errno(errno)));
     }
-    Some(port)
+    Ok(port)
 }
 
 /// Publish the GPU's channel and serve it there.
-fn serve_on(made: Result<Device, DriverError>, endpoint: u64) {
+fn serve_on(made: Result<Device, DriverError>, channel: BoundChannel) {
+    let endpoint = channel.endpoint();
     let device = match made {
         Ok(device) => device,
-        Err(refused) => return unserved("host", refused),
+        Err(refused) => {
+            unserved("host", refused);
+            return;
+        }
     };
-    if publish_channel(
+    if let Err(errno) = publish_channel(
         HwDeviceClass::Accelerator,
         GPU_NODE_COMPATIBLE,
         endpoint,
         &[],
-    )
-    .is_none()
-    {
-        return unserved("channel unpublished", DriverError::PermissionDenied);
+    ) {
+        unserved("channel unpublished", DriverError::from_errno(errno));
+        return;
     }
     log_event(Level::Info, GPU_SERVED, "display: the GPU is served", &[]);
     // Every worker spends a request waiting on the host, so the most the
     // runtime allows serve at once.
     let why = tairix_gpu::serve(&device, endpoint, &RuntimeThreads, MAX_SERVE_WORKERS);
+    // Nothing serves it any more, so nobody may wait on it.
+    drop(channel);
     log_event(
         Level::Error,
         GPU_ENDED,

@@ -33,7 +33,8 @@ use tairix_riscos_filing::session::{
     command, modules_with, session, Session, Setup, DISC, SLOT_BYTES,
 };
 use tairix_riscos_font::build::{
-    bitmap_file, old_bitmaps, Character, Element, Font, Pixels, Point,
+    bitmap_file, old_bitmaps, Character, Element, Font, Pixels, Point, SESSION_MODULES, SET_PATH,
+    SWIS,
 };
 use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::module::Builtin;
@@ -48,18 +49,10 @@ const CALLS: usize = 160;
 /// The application space salted with blocks hostile calls read.
 const SALTED: u32 = 0x8000;
 const BLOCK: u32 = 512;
-/// The SWIs the Font Manager has.
-const SWIS: usize = 42;
 /// The error a font the path does not hold is refused with.
 const FONT_NOT_FOUND: u32 = 0x20B;
 
-static MODULES: LazyLock<Vec<&'static Builtin>> = LazyLock::new(|| {
-    modules_with(&[
-        &tairix_riscos_vdu::MODULES,
-        &tairix_riscos_draw::MODULES,
-        &tairix_riscos_font::MODULES,
-    ])
-});
+static MODULES: LazyLock<Vec<&'static Builtin>> = LazyLock::new(|| modules_with(&SESSION_MODULES));
 
 /// The fonts a run's library holds outlines for, named for what each is.
 const FONTS: [&str; 4] = ["Boxes", "Curves", "Parts", "Strokes"];
@@ -386,11 +379,7 @@ fn boot(rng: &mut Prng) -> (Session, KernelMemory, Vec<u32>, u32) {
     let kernel = KernelMemory::of(&mut s);
     opens_filing_messages(&mut s);
     let held = rma_used(&mut s);
-    command(
-        &mut s.kernel.os(),
-        "Set Font$Path HostFS:$.Lib.,Resources:$.Fonts.",
-    )
-    .expect("Font$Path");
+    command(&mut s.kernel.os(), SET_PATH).expect("Font$Path");
     let mut handles = Vec::new();
     for _ in 0..6 {
         let name = identifier(rng);

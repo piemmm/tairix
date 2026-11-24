@@ -8,7 +8,7 @@
 use tairix_image::{
     sprite_area as block, SpriteModeWord, SpriteName, SPRITE_HEADER_LEN, SPRITE_PALETTE_ENTRY_LEN,
 };
-use tairix_riscos_kernel::os::{len32, Entry, Fail, Os, Regs};
+use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::{screen_mode, SCREEN_MODE};
 use tairix_riscos_kernel::swi::X;
 use tairix_vdu::mode::var;
@@ -21,7 +21,7 @@ use super::header::Sprite;
 use super::output::shown_as_screen;
 use super::paint;
 use super::NO_MEMORY;
-use crate::palette::{kind, reason as palette_reason, PALETTE_V};
+use crate::palette::{kind, set_through};
 use crate::select::{Selector, SELECTOR_BYTES};
 use crate::state;
 
@@ -146,23 +146,9 @@ fn select_like(os: &mut Os<'_>, sprite: &Sprite, regs: &mut Regs) -> Result<(), 
 fn adopt_palette(os: &mut Os<'_>, sprite: &Sprite) -> Result<(), Fail> {
     for entry in 0..sprite.named_entries(os)? {
         let at = sprite.address(SPRITE_HEADER_LEN + entry * SPRITE_PALETTE_ENTRY_LEN);
-        let (first, second) = (os.read_word(at)?, os.read_word(at.wrapping_add(4))?);
-        let mut set = Regs::new([
-            entry,
-            kind::NORMAL,
-            first,
-            second,
-            palette_reason::SET,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ]);
-        os.call_vector(PALETTE_V, &mut set, Entry::Supervisor)?;
+        let mut pair = [0; 2];
+        os.read_words(at, &mut pair)?;
+        set_through(os, entry, kind::NORMAL, pair)?;
     }
     Ok(())
 }

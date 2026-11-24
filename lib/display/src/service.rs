@@ -26,21 +26,20 @@ use tairix_abi::display_ipc::{DisplayEvent, DISPLAY_ENDPOINT, DISPLAY_MAX_REQUES
 use tairix_abi::driver::display::{Display, OutputMode, RefreshRate};
 use tairix_abi::driver::{sole_framebuffer, DeviceWake};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
+use tairix_abi::seat::DisplayLease;
 use tairix_abi::{CapabilityId, Errno, ProcId, WaitSetOp, WaitSourceKind};
 use tairix_caps::CapabilitySet;
 use tairix_drvrt::exit::{end, error, step, DriverExit};
 use tairix_drvrt::{GrantSyscalls, RtDriverHost};
-use tairix_log::{EventId, Field, FieldValue, Level};
+use tairix_log::{EventId, Field, FieldValue, Level, Sink};
 use tairix_rt::changenotice::ChangeNotice;
 use tairix_rt::room::RoomMember;
 use tairix_rt::{ClockDelay, LogSink};
 
-use crate::events::{
-    EVENTS_FAILED, FIRST_PRESENT, FIRST_PRESENT_MESSAGE, LATCH_OVERDUE, LATCH_UNDELIVERED,
-    OUTPUT_MOVED, OUTPUT_UNANNOUNCED,
-};
+use crate::events::{OUTPUT_MOVED, OUTPUT_UNANNOUNCED};
 use crate::rt::RtBufferMemory;
-use crate::server::{Delivery, DisplayServer, Latch, PeerFacts, DISPLAY_REPLY_MAX};
+use crate::server::{Delivery, DisplayServer, PeerFacts, DISPLAY_REPLY_MAX};
+use crate::serving::{Rendezvous, Serving, Woke};
 use crate::{Framebuffer, FramebufferConfig};
 
 /// Calls one caller may hold at the endpoint. A fail-closed memory bound: a
@@ -112,7 +111,7 @@ pub fn serve(display: &mut dyn Display, wakes: &[DeviceWake]) -> i32 {
     // Announced once the rendezvous is bound, which is the authority, and
     // before the first request is served: a client of an earlier instance
     // converges onto this one.
-    let mut output = Announced::resume(crate::server::output_mode(display));
+    let output = Announced::resume(crate::server::output_mode(display));
 
     let Ok(grantor) = tairix_rt::self_origin().map(|origin| origin.proc_id()) else {
         return end(
@@ -122,102 +121,80 @@ pub fn serve(display: &mut dyn Display, wakes: &[DeviceWake]) -> i32 {
             )],
         );
     };
-    let mut server = DisplayServer::new(ClockDelay);
+    let mut serving = Serving::new(DisplayServer::new(ClockDelay), RtRendezvous { output });
     let mut peer = RtPeerFacts;
     let mut delivery = RtDelivery { grantor };
-    let mut request = [0u8; DISPLAY_MAX_REQUEST];
-    let mut reply = [0u8; DISPLAY_REPLY_MAX];
     let mut token = 0u64;
-    let mut first_present_logged = false;
     let mut room = RoomMember::new(wait_set, ROOM_TOKEN);
     loop {
-        report_undelivered(&mut server);
+        serving.report_undelivered();
         // A port whose room cannot be watched has its latch posted again on
         // the retry instead.
-        if !room.keep_on(server.room_port()) {
-            server.room_unwatched();
+        if !room.keep_on(serving.server.room_port()) {
+            serving.server.room_unwatched();
         }
         // A queued present bounds the wait, its latch or its deadline, and so
         // does the retry of a latch the kernel had no memory for.
-        let timeout = server.deadline_ns().map_or(u64::MAX, |deadline| {
+        let timeout = serving.server.deadline_ns().map_or(u64::MAX, |deadline| {
             deadline.saturating_sub(tairix_rt::clock_get())
         });
-        match tairix_rt::waitset_wait(wait_set, timeout, &mut token) {
-            0 => {}
-            ret if Errno::from_syscall(ret) == Errno::TimedOut => {
-                note_latch(server.expire(display, &mut delivery));
-                continue;
-            }
+        let woke = match tairix_rt::waitset_wait(wait_set, timeout, &mut token) {
+            0 => match token {
+                ROOM_TOKEN => Woke::Room,
+                LEASE_TOKEN => Woke::Lease,
+                EVENT_TOKEN => Woke::Events,
+                _ => Woke::Request,
+            },
+            ret if Errno::from_syscall(ret) == Errno::TimedOut => Woke::Due,
             _ => {
                 return end(
                     DriverExit::ServeFailed,
                     &[step("display: the serve wait set faulted")],
                 );
             }
-        }
-        if token == ROOM_TOKEN {
-            server.redeliver(&mut delivery);
-            continue;
-        }
-        if token == LEASE_TOKEN {
-            if let Some(lease) = read_lease() {
-                server.lease_moved(display, lease);
-            }
-            continue;
-        }
-        if token == EVENT_TOKEN {
-            service_events(display, &mut server, &mut delivery, &mut output);
-            continue;
-        }
-        let mut ticket = 0u64;
-        // Non-blocking: the park point is the wait-set, and the call the wake
-        // reported may have been cancelled by its poster's exit.
-        let Ok(len) = tairix_rt::call_recv_nonblock(DISPLAY_ENDPOINT, &mut request, &mut ticket)
-        else {
-            continue;
         };
-        let n = server.serve(
-            display,
-            &mut peer,
-            &mut delivery,
-            ticket,
-            &request[..len],
-            &mut reply,
-        );
-        let _ = tairix_rt::call_reply(DISPLAY_ENDPOINT, ticket, &reply[..n]);
-        if !first_present_logged && server.has_presented() {
-            first_present_logged = true;
-            record(Level::Info, FIRST_PRESENT, FIRST_PRESENT_MESSAGE, &[]);
-        }
-        // A request that waited on the device may have taken the wake one of
-        // its event sources raised.
-        if display.requests_take_wakes() {
-            service_events(display, &mut server, &mut delivery, &mut output);
-        }
+        serving.on(display, &mut peer, &mut delivery, woke);
     }
 }
 
-/// Hand what woke the display's event sources to `server`, and announce an
-/// output that moved.
-fn service_events(
-    display: &mut dyn Display,
-    server: &mut DisplayServer<ClockDelay>,
-    delivery: &mut RtDelivery,
-    output: &mut Announced,
-) {
-    match display.service_events() {
-        Ok(serviced) => note_latch(server.serviced(serviced, delivery)),
-        Err(err) => record(
-            Level::Warn,
-            EVENTS_FAILED,
-            "display: its event sources could not be read",
-            &[Field {
-                key: "error",
-                value: FieldValue::SignedInt(i64::from(err.as_i32())),
-            }],
-        ),
+/// The kernel's side of the serve loop.
+struct RtRendezvous {
+    output: Announced,
+}
+
+impl Sink for RtRendezvous {
+    fn write_event(&self, event: &tairix_log::Event<'_>) {
+        LogSink.write_event(event);
     }
-    output.follow(crate::server::output_mode(display));
+}
+
+impl Rendezvous for RtRendezvous {
+    fn take_request(&mut self, request: &mut [u8]) -> Option<(usize, u64)> {
+        let mut ticket = 0u64;
+        let len = tairix_rt::call_recv_nonblock(DISPLAY_ENDPOINT, request, &mut ticket).ok()?;
+        Some((len, ticket))
+    }
+
+    fn reply(&mut self, ticket: u64, reply: &[u8]) {
+        let _ = tairix_rt::call_reply(DISPLAY_ENDPOINT, ticket, reply);
+    }
+
+    /// The boot seat's lease as the kernel publishes it, or `None` for a read
+    /// the kernel refused or a payload that does not decode — which leaves the
+    /// configuration to the next edge rather than acting on a guess.
+    fn lease(&mut self) -> Option<DisplayLease> {
+        let mut buf = [0u8; NOTICE_PAYLOAD_MAX];
+        let read =
+            usize::try_from(tairix_rt::notice_read(NoticeTopic::DisplayLease, &mut buf)).ok()?;
+        match Notice::decode(NoticeTopic::DisplayLease, buf.get(..read)?) {
+            Ok(Notice::DisplayLease(lease)) => Some(lease),
+            _ => None,
+        }
+    }
+
+    fn follow(&mut self, output: Option<OutputMode>) {
+        self.output.follow(output);
+    }
 }
 
 /// Bind the display endpoint and the wait set the service parks on: the
@@ -358,18 +335,6 @@ fn record(level: Level, id: EventId, message: &str, fields: &[Field<'_>]) {
     );
 }
 
-/// The boot seat's lease as the kernel publishes it, or `None` for a read
-/// the kernel refused or a payload that does not decode — which leaves the
-/// configuration to the next edge rather than acting on a guess.
-fn read_lease() -> Option<tairix_abi::seat::DisplayLease> {
-    let mut buf = [0u8; NOTICE_PAYLOAD_MAX];
-    let read = usize::try_from(tairix_rt::notice_read(NoticeTopic::DisplayLease, &mut buf)).ok()?;
-    match Notice::decode(NoticeTopic::DisplayLease, buf.get(..read)?) {
-        Ok(Notice::DisplayLease(lease)) => Some(lease),
-        _ => None,
-    }
-}
-
 /// The kernel's `call_peer_seat` and `call_peer_origin` on the served
 /// endpoint: every authority fact is about the in-flight caller of this
 /// service, never a claim its request carried.
@@ -417,41 +382,4 @@ impl Delivery for RtDelivery {
     fn post(&mut self, port: u64, event: &DisplayEvent) -> Result<(), Errno> {
         tairix_rt::ipc_send(port, &event.to_le_bytes())
     }
-}
-
-/// Record a queued present released at its deadline, unlatched. A latch
-/// given up on is recorded by its running total instead.
-fn note_latch(latch: Latch) {
-    match latch {
-        Latch::Overdue => record(
-            Level::Warn,
-            LATCH_OVERDUE,
-            "display: a queued present never latched; its presenter is released",
-            &[],
-        ),
-        Latch::Idle | Latch::Posted | Latch::Owed | Latch::Gone | Latch::Undelivered(_) => {}
-    }
-}
-
-/// Record how many latches presenters' ports refused for good, once the
-/// count has doubled since it was last recorded.
-fn report_undelivered(server: &mut DisplayServer<ClockDelay>) {
-    let Some((total, refusal)) = server.undelivered_to_report() else {
-        return;
-    };
-    record(
-        Level::Warn,
-        LATCH_UNDELIVERED,
-        "display: latches presenters' ports refused were given up on",
-        &[
-            Field {
-                key: "total",
-                value: FieldValue::UnsignedInt(total),
-            },
-            Field {
-                key: "error",
-                value: FieldValue::SignedInt(i64::from(refusal.as_i32())),
-            },
-        ],
-    );
 }

@@ -470,17 +470,16 @@ pub(crate) static BASE0: [&[u32]; BASE0_GLYPHS] = [
     &[0x1E6B],
 ];
 
-/// A ROM encoding: its name, its alphabet, and the base glyph each code
-/// shows, [`NONE`] for a code it leaves undefined.
+/// A ROM encoding: its alphabet's number, which names it as International
+/// names the alphabet, and the base glyph each code shows, [`NONE`] for a
+/// code it leaves undefined.
 pub(crate) struct RomEncoding {
-    pub(crate) name: &'static str,
     pub(crate) alphabet: u32,
     pub(crate) glyphs: [u16; 256],
 }
 
 pub(crate) static ROM_ENCODINGS: [RomEncoding; 14] = [
     RomEncoding {
-        name: "Latin1",
         alphabet: 101,
         glyphs: [
             92, 94, 126, 253, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
@@ -501,7 +500,6 @@ pub(crate) static ROM_ENCODINGS: [RomEncoding; 14] = [
         ],
     },
     RomEncoding {
-        name: "Latin2",
         alphabet: 102,
         glyphs: [
             92, 94, NONE, 253, 247, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
@@ -522,7 +520,6 @@ pub(crate) static ROM_ENCODINGS: [RomEncoding; 14] = [
         ],
     },
     RomEncoding {
-        name: "Latin3",
         alphabet: 103,
         glyphs: [
             NONE, 94, 126, 221, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
@@ -543,7 +540,6 @@ pub(crate) static ROM_ENCODINGS: [RomEncoding; 14] = [
         ],
     },
     RomEncoding {
-        name: "Latin4",
         alphabet: 104,
         glyphs: [
             92, 94, 126, 253, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
@@ -564,7 +560,6 @@ pub(crate) static ROM_ENCODINGS: [RomEncoding; 14] = [
         ],
     },
     RomEncoding {
-        name: "Latin5",
         alphabet: 109,
         glyphs: [
             NONE, NONE, 94, NONE, 126, NONE, 123, NONE, 92, 93, NONE, NONE, NONE, NONE, NONE, NONE,
@@ -585,7 +580,6 @@ pub(crate) static ROM_ENCODINGS: [RomEncoding; 14] = [
         ],
     },
     RomEncoding {
-        name: "Latin6",
         alphabet: 113,
         glyphs: [
             64, NONE, 94, 91, 126, 127, NONE, 242, 92, 93, 124, 210, 253, NONE, NONE, NONE, NONE,
@@ -606,7 +600,6 @@ pub(crate) static ROM_ENCODINGS: [RomEncoding; 14] = [
         ],
     },
     RomEncoding {
-        name: "Latin7",
         alphabet: 114,
         glyphs: [
             92, 94, 126, 253, 93, 242, 247, 124, 127, 91, 64, NONE, NONE, NONE, NONE, NONE, NONE,
@@ -627,7 +620,6 @@ pub(crate) static ROM_ENCODINGS: [RomEncoding; 14] = [
         ],
     },
     RomEncoding {
-        name: "Latin8",
         alphabet: 115,
         glyphs: [
             92, 94, 126, 253, 93, 64, 96, 91, 210, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
@@ -648,7 +640,6 @@ pub(crate) static ROM_ENCODINGS: [RomEncoding; 14] = [
         ],
     },
     RomEncoding {
-        name: "Latin9",
         alphabet: 112,
         glyphs: [
             64, NONE, 94, 91, 126, 127, NONE, NONE, 92, NONE, NONE, 210, 253, NONE, NONE, NONE,
@@ -669,7 +660,6 @@ pub(crate) static ROM_ENCODINGS: [RomEncoding; 14] = [
         ],
     },
     RomEncoding {
-        name: "Latin10",
         alphabet: 116,
         glyphs: [
             64, 94, 91, 253, 247, 123, 127, 93, 242, 125, 210, NONE, NONE, NONE, NONE, NONE, NONE,
@@ -690,7 +680,6 @@ pub(crate) static ROM_ENCODINGS: [RomEncoding; 14] = [
         ],
     },
     RomEncoding {
-        name: "Greek",
         alphabet: 107,
         glyphs: [
             NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
@@ -712,7 +701,6 @@ pub(crate) static ROM_ENCODINGS: [RomEncoding; 14] = [
         ],
     },
     RomEncoding {
-        name: "Cyrillic",
         alphabet: 105,
         glyphs: [
             NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
@@ -735,7 +723,6 @@ pub(crate) static ROM_ENCODINGS: [RomEncoding; 14] = [
         ],
     },
     RomEncoding {
-        name: "Hebrew",
         alphabet: 108,
         glyphs: [
             NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE, NONE,
@@ -757,7 +744,6 @@ pub(crate) static ROM_ENCODINGS: [RomEncoding; 14] = [
         ],
     },
     RomEncoding {
-        name: "Welsh",
         alphabet: 110,
         glyphs: [
             NONE, NONE, 94, 91, 126, NONE, NONE, NONE, 92, NONE, NONE, 210, 253, NONE, NONE, NONE,

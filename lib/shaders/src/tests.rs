@@ -5,35 +5,45 @@ use alloc::vec::Vec;
 
 use tairix_spirv::{Access, BindingKind, Module, Stage, WorkgroupSize};
 
-use crate::{chrome, compose, frost, paint, GROUP, SET};
+use crate::{chrome, compose, frost, indirect, paint, GROUP, SET};
 
 const READ: Access = Access::READ;
 const WRITE: Access = Access::WRITE;
 const BOTH: Access = Access::READ.with(Access::WRITE);
 
-/// A module's name, its push words, and each binding it reads, writes or
-/// both.
-type Stated = (&'static str, usize, &'static [(u32, Access)]);
+/// A module's name, its workgroup, its push words, and each binding it
+/// reads, writes or both.
+type Stated = (&'static str, [u32; 3], usize, &'static [(u32, Access)]);
+
+/// A pass over a picture's pixels or cells.
+const GRID: [u32; 3] = [GROUP, GROUP, 1];
+
+/// A check of a command's few words.
+const ONCE: [u32; 3] = [1, 1, 1];
 
 /// What each module's pass states.
-const STATED: [Stated; 17] = [
+const STATED: [Stated; 19] = [
     (
         "frost_reduce",
+        GRID,
         frost::reduce::WORDS,
         &[(frost::reduce::PIXELS, READ), (frost::reduce::CELLS, WRITE)],
     ),
     (
         "frost_blur",
+        GRID,
         frost::blur::WORDS,
         &[(frost::blur::SOURCE, READ), (frost::blur::TARGET, WRITE)],
     ),
     (
         "frost_spread",
+        GRID,
         frost::spread::WORDS,
         &[(frost::spread::CELLS, READ), (frost::spread::PIXELS, WRITE)],
     ),
     (
         "frost_mix",
+        GRID,
         frost::mix::WORDS,
         &[
             (frost::mix::PIXELS, BOTH),
@@ -43,11 +53,13 @@ const STATED: [Stated; 17] = [
     ),
     (
         "over",
+        GRID,
         compose::over::WORDS,
         &[(compose::over::TARGET, BOTH), (compose::over::SOURCE, READ)],
     ),
     (
         "copy",
+        GRID,
         compose::copy::WORDS,
         &[
             (compose::copy::TARGET, WRITE),
@@ -56,11 +68,13 @@ const STATED: [Stated; 17] = [
     ),
     (
         "fill",
+        GRID,
         compose::fill::WORDS,
         &[(compose::fill::TARGET, WRITE)],
     ),
     (
         "encode",
+        GRID,
         compose::encode::WORDS,
         &[
             (compose::encode::TARGET, WRITE),
@@ -69,6 +83,7 @@ const STATED: [Stated; 17] = [
     ),
     (
         "resample",
+        GRID,
         compose::resample::WORDS,
         &[
             (compose::resample::TARGET, WRITE),
@@ -78,6 +93,7 @@ const STATED: [Stated; 17] = [
     ),
     (
         "body",
+        GRID,
         chrome::WORDS,
         &[
             (chrome::TARGET, BOTH),
@@ -88,18 +104,21 @@ const STATED: [Stated; 17] = [
     ),
     (
         "shadow",
+        GRID,
         chrome::shadow::WORDS,
         &[(chrome::TARGET, BOTH), (chrome::shadow::TABLES, READ)],
     ),
-    ("plate", paint::plate::WORDS, &[(paint::TARGET, BOTH)]),
+    ("plate", GRID, paint::plate::WORDS, &[(paint::TARGET, BOTH)]),
     (
         "wash",
+        GRID,
         paint::wash::WORDS,
         &[(paint::TARGET, BOTH), (paint::wash::PLANES, READ)],
     ),
-    ("ring", paint::ring::WORDS, &[(paint::TARGET, BOTH)]),
+    ("ring", GRID, paint::ring::WORDS, &[(paint::TARGET, BOTH)]),
     (
         "coverage",
+        GRID,
         paint::coverage::WORDS,
         &[
             (paint::coverage::PLANE, WRITE),
@@ -108,13 +127,33 @@ const STATED: [Stated; 17] = [
     ),
     (
         "mask",
+        GRID,
         paint::mask::WORDS,
         &[(paint::TARGET, BOTH), (paint::mask::PLANE, READ)],
     ),
     (
         "picture",
+        GRID,
         paint::picture::WORDS,
         &[(paint::TARGET, BOTH), (paint::picture::SOURCE, READ)],
+    ),
+    (
+        "indirect_counts",
+        ONCE,
+        indirect::counts::WORDS,
+        &[
+            (indirect::counts::COUNTS, BOTH),
+            (indirect::counts::FAULTS, BOTH),
+        ],
+    ),
+    (
+        "indirect_records",
+        ONCE,
+        indirect::records::WORDS,
+        &[
+            (indirect::records::RECORDS, BOTH),
+            (indirect::records::FAULTS, BOTH),
+        ],
     ),
 ];
 
@@ -126,16 +165,16 @@ fn every_committed_module_needs_what_its_pass_states() {
         let entry = admitted
             .entry_point("main", Stage::Compute)
             .unwrap_or_else(|| panic!("{} has no compute main", pinned.name));
+        let (_, workgroup, words, bindings) = STATED
+            .iter()
+            .find(|(name, _, _, _)| *name == pinned.name)
+            .unwrap_or_else(|| panic!("{} states nothing", pinned.name));
         assert_eq!(
             entry.workgroup(),
-            Some(WorkgroupSize::Fixed([GROUP, GROUP, 1])),
+            Some(WorkgroupSize::Fixed(*workgroup)),
             "{}",
             pinned.name
         );
-        let (_, words, bindings) = STATED
-            .iter()
-            .find(|(name, _, _)| *name == pinned.name)
-            .unwrap_or_else(|| panic!("{} states nothing", pinned.name));
         assert_eq!(
             entry.push_constants(),
             Some(u32::try_from(words * 4).expect("small")),

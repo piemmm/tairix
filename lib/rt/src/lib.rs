@@ -523,6 +523,7 @@ const NUM_PORT_BIND: u64 = SyscallNumber::PORT_BIND.as_u16() as u64;
 /// `port_admit` syscall number (as above).
 const NUM_PORT_ADMIT: u64 = SyscallNumber::PORT_ADMIT.as_u16() as u64;
 const NUM_PORT_UNBIND: u64 = SyscallNumber::PORT_UNBIND.as_u16() as u64;
+const NUM_CALL_DESTROY: u64 = SyscallNumber::CALL_DESTROY.as_u16() as u64;
 const NUM_WAITSET_CLOSE: u64 = SyscallNumber::WAITSET_CLOSE.as_u16() as u64;
 /// `ipc_recv` syscall number (as above).
 const NUM_IPC_RECV: u64 = SyscallNumber::IPC_RECV.as_u16() as u64;
@@ -3863,6 +3864,27 @@ pub fn port_unbind(port: u64) -> Result<(), Errno> {
     #[allow(clippy::cast_possible_wrap)]
     // The kernel guarantees the status encoding (0, else -errno).
     let ret = unsafe { raw_syscall(NUM_PORT_UNBIND, [port, 0, 0, 0, 0, 0]) } as i64;
+    if ret < 0 {
+        return Err(Errno::from_syscall(ret));
+    }
+    Ok(())
+}
+
+/// Take down a call endpoint this process bound
+/// (`SyscallNumber::CALL_DESTROY`): the grants naming it are revoked, each
+/// call it holds fails, and its server's next receive answers
+/// [`Errno::NotFound`].
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] for an id nothing is bound to, and
+/// [`Errno::PermissionDenied`] for an endpoint another process owns.
+pub fn call_destroy(endpoint: u64) -> Result<(), Errno> {
+    // SAFETY: `raw_syscall` is always safe to invoke; the argument is a plain
+    // scalar the kernel validates, and no user memory is named.
+    #[allow(clippy::cast_possible_wrap)]
+    // The kernel guarantees the status encoding (0, else -errno).
+    let ret = unsafe { raw_syscall(NUM_CALL_DESTROY, [endpoint, 0, 0, 0, 0, 0]) } as i64;
     if ret < 0 {
         return Err(Errno::from_syscall(ret));
     }
@@ -10907,6 +10929,11 @@ mod tests {
         assert_eq!(waitset_close(3), Err(Errno::NotFound));
         seam::arm(refusal(Errno::PermissionDenied));
         assert_eq!(port_unbind(3), Err(Errno::PermissionDenied));
+        let (number, args) = capture(0, || assert_eq!(call_destroy(0x5EAD_0009), Ok(())));
+        assert_eq!(number, NUM_CALL_DESTROY);
+        assert_eq!(args, [0x5EAD_0009, 0, 0, 0, 0, 0]);
+        seam::arm(refusal(Errno::NotFound));
+        assert_eq!(call_destroy(4), Err(Errno::NotFound));
     }
 
     #[test]

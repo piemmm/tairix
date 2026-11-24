@@ -10,6 +10,7 @@
 use alloc::vec::Vec;
 
 use tairix_fsmeta::preset::acorn;
+use tairix_riscos_kernel::filing::fs::kind;
 
 /// The most bytes one read or write carries.
 pub const DATA_MOST: u32 = 64 * 1024;
@@ -30,14 +31,14 @@ pub const NAME_MOST: usize = acorn::LEAF_MAX;
 /// What an object is, crossing the relay as the number `FSEntry_File` 5
 /// gives it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(u8)]
+#[repr(u32)]
 pub enum Kind {
     /// Nothing is there.
-    Nothing = 0,
+    Nothing = kind::NOT_FOUND,
     /// A file.
-    File = 1,
+    File = kind::FILE,
     /// A directory.
-    Directory = 2,
+    Directory = kind::DIRECTORY,
 }
 
 impl Kind {
@@ -47,11 +48,11 @@ impl Kind {
         self as u32
     }
 
-    const fn from_byte(byte: u8) -> Option<Self> {
-        match byte {
-            0 => Some(Self::Nothing),
-            1 => Some(Self::File),
-            2 => Some(Self::Directory),
+    fn from_byte(byte: u8) -> Option<Self> {
+        match u32::from(byte) {
+            kind::NOT_FOUND => Some(Self::Nothing),
+            kind::FILE => Some(Self::File),
+            kind::DIRECTORY => Some(Self::Directory),
             _ => None,
         }
     }

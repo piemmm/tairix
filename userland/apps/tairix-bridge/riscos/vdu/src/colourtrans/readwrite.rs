@@ -9,11 +9,12 @@ use tairix_colour::Rgb;
 use tairix_image::SPRITE_HEADER_LEN;
 use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::os::{len32, Entry, Fail, Os, Regs};
+use tairix_riscos_kernel::swi::colour_trans::{CURRENT, SPRITE_POINTER};
 use tairix_riscos_kernel::swi::os::SPRITE_OP;
 use tairix_riscos_kernel::swi::X;
 
+use super::own;
 use super::palettes::{self, Holding};
-use super::{own, CURRENT};
 use crate::palette::{kind, reason, PALETTE_V};
 use crate::sprite::{Naming, Sprite};
 
@@ -54,7 +55,7 @@ pub(super) const NO_PALETTE: Error = Error {
 /// `ColourTrans_ReadPalette`: the palette R0 and R1 name written to R2's
 /// buffer of R3 bytes, R2 and R3 left past it; R2 nought for its size in R3.
 pub(super) fn read_palette(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    let by_pointer = regs.r[4] & super::SPRITE_POINTER != 0;
+    let by_pointer = regs.r[4] & SPRITE_POINTER != 0;
     let pairs = named_pairs(os, regs.r[0], regs.r[1], by_pointer)?;
     let flashing = regs.r[4] & flag::FLASHING != 0;
     let words = if flashing { 2 } else { 1 };
@@ -149,7 +150,7 @@ pub(super) fn write_palette(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail
         let count = len32(with_palette(os, holding)?.colours());
         return write_current(os, count, regs.r[2], flashing);
     }
-    let by_pointer = regs.r[4] & super::SPRITE_POINTER != 0;
+    let by_pointer = regs.r[4] & SPRITE_POINTER != 0;
     let sprite = palettes::sprite_of(os, regs.r[0], regs.r[1], by_pointer)?;
     let holding = palettes::holding_of(os, sprite.mode)?;
     let count = with_palette(os, holding)?.colours();

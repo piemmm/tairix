@@ -10,7 +10,9 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use tairix_spirv::enumerant::{Dim, ImageFormat};
-use tairix_spirv::{BindingKind, Component, ImageShape};
+use tairix_spirv::{Component, ImageShape};
+
+use crate::{DescriptorType, SampleType};
 
 use super::image::{dispatch, filled, texels, view, Bound};
 use crate::device_tests::{context, device, memory, over};
@@ -404,26 +406,32 @@ fn an_access_past_every_kind_of_resource_reads_zero_and_writes_nothing() {
         &context,
         &module(),
         &[
-            Bound(BindingKind::StorageBuffer, alloc::vec![range(DATA, 32)]),
-            Bound(BindingKind::UniformBuffer, alloc::vec![range(UNIFORM, 32)]),
+            Bound(DescriptorType::StorageBuffer, alloc::vec![range(DATA, 32)]),
             Bound(
-                BindingKind::StorageTexelBuffer(texel_buffer(ImageFormat::R32UI)),
+                DescriptorType::UniformBuffer,
+                alloc::vec![range(UNIFORM, 32)],
+            ),
+            Bound(
+                DescriptorType::StorageTexelBuffer(texel_buffer(ImageFormat::R32UI)),
                 alloc::vec![Resource::TexelBuffer(&storage_texels)],
             ),
             Bound(
-                BindingKind::UniformTexelBuffer(texel_buffer(ImageFormat::UNKNOWN)),
+                DescriptorType::UniformTexelBuffer(texel_buffer(ImageFormat::UNKNOWN)),
                 alloc::vec![Resource::TexelBuffer(&uniform_texels)],
             ),
             Bound(
-                BindingKind::StorageImage(uint_shape(Dim::DIM_2D, false, ImageFormat::R32UI)),
+                DescriptorType::StorageImage(uint_shape(Dim::DIM_2D, false, ImageFormat::R32UI)),
                 alloc::vec![Resource::Image(&images.level_view)],
             ),
             Bound(
-                BindingKind::StorageImage(uint_shape(Dim::DIM_2D, true, ImageFormat::R32UI)),
+                DescriptorType::StorageImage(uint_shape(Dim::DIM_2D, true, ImageFormat::R32UI)),
                 alloc::vec![Resource::Image(&images.layer_view)],
             ),
             Bound(
-                BindingKind::SampledImage(uint_shape(Dim::DIM_2D, false, ImageFormat::UNKNOWN)),
+                DescriptorType::SampledImage(
+                    uint_shape(Dim::DIM_2D, false, ImageFormat::UNKNOWN),
+                    SampleType::Uint,
+                ),
                 alloc::vec![Resource::Image(&images.sampled_view)],
             ),
         ],

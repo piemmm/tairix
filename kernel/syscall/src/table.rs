@@ -3389,6 +3389,15 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Take down the caller's call endpoint `endpoint` (`call_destroy`).
+    ///
+    /// The implementation refuses an endpoint another process owns, so a
+    /// process takes down only its own. The default implementation fails
+    /// closed with [`Errno::NotImplemented`].
+    fn call_destroy(&self, _caller: &CallerContext<'_>, _endpoint: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Whether the in-service caller of `ticket` on `endpoint` owns `port`
     /// (`call_peer_port`).
     ///
@@ -4954,6 +4963,7 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
             SyscallNumber::HW_NODE_KEY_SOURCE => self.handlers.hw_node_key_source(caller),
             SyscallNumber::WAITSET_CLOSE => self.handlers.waitset_close(caller, args.0[0]),
             SyscallNumber::PORT_UNBIND => self.handlers.port_unbind(caller, args.0[0]),
+            SyscallNumber::CALL_DESTROY => self.handlers.call_destroy(caller, args.0[0]),
             SyscallNumber::CALL_PEER_PORT => {
                 // args[0] is the endpoint id; args[1] the in-service ticket;
                 // args[2] the port whose owner is compared with its peer.
@@ -7074,6 +7084,11 @@ mod tests {
 
         fn port_unbind(&self, _c: &CallerContext<'_>, _endpoint: u64) -> SyscallResult {
             self.record("port_unbind");
+            Ok(0)
+        }
+
+        fn call_destroy(&self, _c: &CallerContext<'_>, _endpoint: u64) -> SyscallResult {
+            self.record("call_destroy");
             Ok(0)
         }
 

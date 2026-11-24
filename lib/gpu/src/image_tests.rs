@@ -4,6 +4,7 @@ use tairix_spirv::Component;
 use super::{
     level_extent, BufferImageCopy, ClearValue, Extent3d, ImageCopy, ImageDesc, ImageDimension,
     ImageRange, ImageSubresource, ImageUsage, ImageViewDesc, Origin3d, ViewDimension,
+    MAX_BYTES_PER_ROW,
 };
 use crate::format::{Aspects, Format};
 use crate::Error;
@@ -219,6 +220,85 @@ fn a_buffer_copy_spans_its_rows_and_layers() {
 }
 
 #[test]
+fn a_buffer_copy_s_row_pitch_fits_a_signed_word() {
+    let image = square(16, 2);
+    let row = Extent3d {
+        width: 4,
+        height: 1,
+        depth: 1,
+    };
+    let widest = MAX_BYTES_PER_ROW - 3;
+    assert_eq!(copy(row, widest, 1).check(&image).map(drop), Ok(()));
+    assert_eq!(copy(row, widest + 4, 1).check(&image), Err(Error::TooLarge));
+}
+
+#[test]
+fn a_depth_or_stencil_copy_starts_on_a_word_and_a_colour_one_on_a_texel() {
+    let region = Extent3d {
+        width: 4,
+        height: 4,
+        depth: 1,
+    };
+    let planes = ImageDesc {
+        format: Format::Depth32FloatStencil8,
+        array_layers: 1,
+        ..square(4, 1)
+    };
+    let at = |aspect, buffer_offset, bytes_per_row| BufferImageCopy {
+        buffer_offset,
+        image: ImageSubresource {
+            aspect,
+            layers: 1,
+            ..copy(region, bytes_per_row, 4).image
+        },
+        ..copy(region, bytes_per_row, 4)
+    };
+    assert_eq!(at(Aspects::STENCIL, 4, 4).check(&planes).map(drop), Ok(()));
+    assert_eq!(
+        at(Aspects::STENCIL, 1, 4).check(&planes),
+        Err(Error::Misaligned),
+        "a stencil byte, but not a word"
+    );
+    assert_eq!(
+        at(Aspects::DEPTH, 6, 16).check(&planes),
+        Err(Error::Misaligned)
+    );
+    let bytes = ImageDesc {
+        format: Format::R8Uint,
+        ..square(4, 1)
+    };
+    assert_eq!(at(Aspects::COLOR, 1, 4).check(&bytes).map(drop), Ok(()));
+}
+
+#[test]
+fn a_view_is_of_an_image_made_for_a_use_a_view_serves() {
+    let copied = ImageDesc {
+        usage: ImageUsage::TRANSFER_SRC.with(ImageUsage::TRANSFER_DST),
+        ..square(16, 1)
+    };
+    assert_eq!(
+        view(ViewDimension::D2, 0, 1).check(&copied),
+        Err(Error::Usage)
+    );
+    for usage in [
+        ImageUsage::SAMPLED,
+        ImageUsage::STORAGE,
+        ImageUsage::COLOR_ATTACHMENT,
+        ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+    ] {
+        let seen = ImageDesc {
+            usage,
+            ..square(16, 1)
+        };
+        assert_eq!(
+            view(ViewDimension::D2, 0, 1).check(&seen),
+            Ok(()),
+            "{usage:?}"
+        );
+    }
+}
+
+#[test]
 fn a_copy_between_images_moves_one_plane_between_equal_layers() {
     let image = square(16, 2);
     let part = ImageSubresource {
@@ -247,6 +327,92 @@ fn a_copy_between_images_moves_one_plane_between_equal_layers() {
         ..region
     };
     assert_eq!(uneven.check(&image, &image), Err(Error::Shape));
+}
+
+#[test]
+fn a_copy_between_images_of_different_kinds_is_between_a_rectangle_and_a_volume() {
+    let of = |dimension, extent| ImageDesc {
+        dimension,
+        extent,
+        array_layers: 1,
+        ..square(16, 1)
+    };
+    let row = of(
+        ImageDimension::D1,
+        Extent3d {
+            width: 16,
+            height: 1,
+            depth: 1,
+        },
+    );
+    let rectangle = of(ImageDimension::D2, square(16, 1).extent);
+    let volume = of(
+        ImageDimension::D3,
+        Extent3d {
+            width: 16,
+            height: 16,
+            depth: 4,
+        },
+    );
+    let part = ImageSubresource {
+        aspect: Aspects::COLOR,
+        level: 0,
+        base_layer: 0,
+        layers: 1,
+    };
+    let along = ImageCopy {
+        src: part,
+        src_origin: Origin3d::default(),
+        dst: part,
+        dst_origin: Origin3d::default(),
+        extent: Extent3d {
+            width: 16,
+            height: 1,
+            depth: 1,
+        },
+    };
+    assert_eq!(along.check(&rectangle, &volume), Ok(()));
+    assert_eq!(along.check(&volume, &rectangle), Ok(()));
+    assert_eq!(along.check(&row, &row), Ok(()));
+    for (src, dst) in [(&row, &rectangle), (&rectangle, &row), (&row, &volume)] {
+        assert_eq!(along.check(src, dst), Err(Error::Shape));
+    }
+}
+
+#[test]
+fn a_clear_value_is_held_as_its_format_holds_it() {
+    assert_eq!(
+        ClearValue::Uint([300, 7, 0, 0]).held(Format::R8Uint),
+        ClearValue::Uint([44, 7, 0, 0])
+    );
+    assert_eq!(
+        ClearValue::Sint([200, -129, 5, -1]).held(Format::Rgba8Sint),
+        ClearValue::Sint([-56, 127, 5, -1]),
+        "the low bits read as signed"
+    );
+    assert_eq!(
+        ClearValue::Uint([1025, 3, 2, 7]).held(Format::Rgb10A2Uint),
+        ClearValue::Uint([1, 3, 2, 3]),
+        "each packed channel its own width"
+    );
+    assert_eq!(
+        ClearValue::Sint([70_000, -40_000, 0, 0]).held(Format::Rg16Sint),
+        ClearValue::Sint([4464, 25536, 0, 0])
+    );
+    for (value, format) in [
+        (ClearValue::Uint([u32::MAX; 4]), Format::Rgba32Uint),
+        (ClearValue::Sint([i32::MIN; 4]), Format::Rgba32Sint),
+        (ClearValue::Float([2.0, -1.0, 0.5, 9.0]), Format::Rgba8Unorm),
+        (
+            ClearValue::DepthStencil {
+                depth: 0.5,
+                stencil: 9,
+            },
+            Format::Depth32FloatStencil8,
+        ),
+    ] {
+        assert_eq!(value.held(format), value, "{format:?} holds it whole");
+    }
 }
 
 #[test]

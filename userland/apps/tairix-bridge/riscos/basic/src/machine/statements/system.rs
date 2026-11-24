@@ -410,9 +410,7 @@ impl Machine<'_, '_> {
             base += header.length;
         }
         let mut regs = [0; 14];
-        for (i, slot) in (0..).zip(regs[..8].iter_mut()) {
-            *slot = self.os.read_word(ws::RESIDENT.at() + 4 * i)?;
-        }
+        self.os.read_words(ws::RESIDENT.at(), &mut regs[..8])?;
         regs[8] = ws::ARGP;
         regs[9] = list;
         regs[10] = count;

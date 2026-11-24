@@ -8,7 +8,9 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use tairix_spirv::enumerant::{Dim, ImageFormat};
-use tairix_spirv::{BindingKind, Component, ImageShape};
+use tairix_spirv::{Component, ImageShape};
+
+use crate::{DescriptorType, SampleType, SamplerType};
 
 use super::f;
 use super::image::{
@@ -80,7 +82,10 @@ fn a_fetch_reads_the_texel_its_offset_moves_it_to() {
         &body,
         1,
     );
-    let kind = BindingKind::SampledImage(shape(Component::Float, ImageFormat::UNKNOWN, false));
+    let kind = DescriptorType::SampledImage(
+        shape(Component::Float, ImageFormat::UNKNOWN, false),
+        SampleType::UnfilterableFloat,
+    );
     let out = dispatch(
         &context,
         &text,
@@ -121,8 +126,11 @@ fn a_projective_coordinate_divides_by_the_component_past_its_view_s_axes() {
         &body,
         1,
     );
-    let kind =
-        BindingKind::CombinedImageSampler(shape(Component::Float, ImageFormat::UNKNOWN, false));
+    let kind = DescriptorType::CombinedImageSampler(
+        shape(Component::Float, ImageFormat::UNKNOWN, false),
+        SampleType::UnfilterableFloat,
+        SamplerType::NonFiltering,
+    );
     let out = dispatch(
         &context,
         &text,
@@ -183,8 +191,11 @@ fn a_border_fills_only_the_channels_the_format_holds() {
         &body,
         1,
     );
-    let kind =
-        BindingKind::CombinedImageSampler(shape(Component::Float, ImageFormat::UNKNOWN, false));
+    let kind = DescriptorType::CombinedImageSampler(
+        shape(Component::Float, ImageFormat::UNKNOWN, false),
+        SampleType::UnfilterableFloat,
+        SamplerType::NonFiltering,
+    );
     let out = dispatch(
         &context,
         &text,
@@ -246,8 +257,11 @@ fn a_stencil_view_s_border_reads_as_integers() {
         &body,
         1,
     );
-    let kind =
-        BindingKind::CombinedImageSampler(shape(Component::Uint, ImageFormat::UNKNOWN, false));
+    let kind = DescriptorType::CombinedImageSampler(
+        shape(Component::Uint, ImageFormat::UNKNOWN, false),
+        SampleType::Uint,
+        SamplerType::Integer,
+    );
     let out = dispatch(
         &context,
         &text,
@@ -318,8 +332,11 @@ fn references(format: Format) -> Vec<u32> {
         &body,
         1,
     );
-    let kind =
-        BindingKind::CombinedImageSampler(shape(Component::Float, ImageFormat::UNKNOWN, false));
+    let kind = DescriptorType::CombinedImageSampler(
+        shape(Component::Float, ImageFormat::UNKNOWN, false),
+        SampleType::UnfilterableDepth,
+        SamplerType::NonFilteringComparison,
+    );
     dispatch(
         &context,
         &text,
@@ -407,10 +424,14 @@ fn a_cube_s_level_of_detail_follows_its_gradients_across_the_face() {
         &body,
         1,
     );
-    let kind = BindingKind::CombinedImageSampler(ImageShape {
-        dim: Dim::CUBE,
-        ..shape(Component::Float, ImageFormat::UNKNOWN, false)
-    });
+    let kind = DescriptorType::CombinedImageSampler(
+        ImageShape {
+            dim: Dim::CUBE,
+            ..shape(Component::Float, ImageFormat::UNKNOWN, false)
+        },
+        SampleType::UnfilterableFloat,
+        SamplerType::NonFiltering,
+    );
     let out = dispatch(
         &context,
         &text,
@@ -475,10 +496,14 @@ fn a_nearest_cube_sample_on_a_face_s_edge_reads_that_face() {
         &body,
         1,
     );
-    let kind = BindingKind::CombinedImageSampler(ImageShape {
-        dim: Dim::CUBE,
-        ..shape(Component::Float, ImageFormat::UNKNOWN, false)
-    });
+    let kind = DescriptorType::CombinedImageSampler(
+        ImageShape {
+            dim: Dim::CUBE,
+            ..shape(Component::Float, ImageFormat::UNKNOWN, false)
+        },
+        SampleType::UnfilterableFloat,
+        SamplerType::NonFiltering,
+    );
     let out = dispatch(
         &context,
         &text,
@@ -538,8 +563,11 @@ fn a_filter_weighing_an_infinite_texel_by_nothing_makes_the_one_quiet_nan() {
         &body,
         1,
     );
-    let kind =
-        BindingKind::CombinedImageSampler(shape(Component::Float, ImageFormat::UNKNOWN, false));
+    let kind = DescriptorType::CombinedImageSampler(
+        shape(Component::Float, ImageFormat::UNKNOWN, false),
+        SampleType::Float,
+        SamplerType::Filtering,
+    );
     let out = dispatch(
         &context,
         &text,

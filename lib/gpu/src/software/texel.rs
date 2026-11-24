@@ -173,7 +173,7 @@ pub(crate) fn decode(format: Format, plane: Plane, raw: [u32; 4], srgb: &Srgb) -
             }
         }
         _ => {
-            let bits = channel_bits(encoding);
+            let bits = encoding.channel_bits();
             let channels = format.channels();
             for index in 0..channels {
                 let alpha = index == 3;
@@ -218,7 +218,7 @@ pub(crate) fn encode(format: Format, plane: Plane, value: [u32; 4], srgb: &Srgb)
         }
         (Encoding::Rgb9E5Float, _) => raw[0] = to_shared_exponent(value),
         _ => {
-            let bits = channel_bits(encoding);
+            let bits = encoding.channel_bits();
             let mut value = value;
             if format.reversed() {
                 value.swap(0, 2);
@@ -236,25 +236,6 @@ pub(crate) fn encode(format: Format, plane: Plane, value: [u32; 4], srgb: &Srgb)
         }
     }
     raw
-}
-
-/// The bits of each channel of an encoding packed channel by channel.
-const fn channel_bits(encoding: Encoding) -> u32 {
-    match encoding {
-        Encoding::Unorm8
-        | Encoding::Snorm8
-        | Encoding::Uint8
-        | Encoding::Sint8
-        | Encoding::Srgb8
-        | Encoding::Stencil8 => 8,
-        Encoding::Unorm16
-        | Encoding::Snorm16
-        | Encoding::Uint16
-        | Encoding::Sint16
-        | Encoding::Float16
-        | Encoding::Depth16 => 16,
-        _ => 32,
-    }
 }
 
 /// `stored / max`, `max` at most 65535: exact in single precision but for

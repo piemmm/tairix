@@ -901,9 +901,7 @@ impl Machine<'_, '_> {
             a.get(3).copied().unwrap_or(-1).cast_unsigned(),
             u32::MAX,
         ];
-        for (i, &w) in (0..).zip(&words) {
-            self.os.write_word(block + 4 * i, w)?;
-        }
+        self.os.write_words(block, &words)?;
         let mut regs = Regs::default();
         regs.r[..2].copy_from_slice(&[screen_mode::SELECT, block]);
         self.os.perform(X | swi::SCREEN_MODE, &mut regs)?;

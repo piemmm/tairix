@@ -53,6 +53,7 @@ fn info(queues: u32) -> DeviceInfo {
             ..crate::software::limits(1 << 20)
         },
         capabilities: ArrayVec::new(),
+        spirv_version: tairix_spirv::Version::NEWEST,
         features: Features::NONE,
         formats: FormatTable::from_fn(|_| crate::FormatFeatures::NONE),
     }
@@ -475,57 +476,83 @@ fn a_released_timeline_stays_while_queued_work_holds_it() {
     assert_eq!(model.timeline_value(context, timeline), Err(Error::Stale));
 }
 
+/// What makes a valid description refused, and the change making it so.
+type Refused = (&'static str, fn(&mut DeviceInfo));
+
 #[test]
 fn a_description_no_context_could_be_served_by_is_refused() {
     let valid = || {
         let model = model(1, 1);
         model.info().clone()
     };
-    let mut missing_heap = valid();
-    if let Some(kind) = missing_heap.memory_types.as_mut_slice().first_mut() {
-        kind.heap = 4;
-    }
-    let mut no_queues = valid();
-    if let Some(family) = no_queues.queue_families.as_mut_slice().first_mut() {
-        family.queues = 0;
-    }
-    let mut crowded = valid();
-    if let Some(family) = crowded.queue_families.as_mut_slice().first_mut() {
-        family.queues = crate::MAX_QUEUES_PER_FAMILY + 1;
-    }
-    let mut odd_alignment = valid();
-    odd_alignment.limits.buffer_alignment = 24;
-    let mut no_deadline = valid();
-    no_deadline.limits.max_job_time = Duration64::ZERO;
-    // Render limits past what a pass or a pipeline can record.
-    let mut targets = valid();
-    targets.limits.max_color_attachments =
-        u32::try_from(crate::MAX_PASS_ATTACHMENTS).expect("small") + 1;
-    let mut buffers = valid();
-    buffers.limits.max_vertex_input_bindings =
-        u32::try_from(crate::MAX_DRAW_VERTEX_BUFFERS).expect("small") + 1;
-    let mut attributes = valid();
-    attributes.limits.max_vertex_input_attributes = crate::MAX_VERTEX_ATTRIBUTES + 1;
-    let mut bounds = valid();
-    bounds.limits.viewport_bounds_range = [1, -1];
-    let mut no_records = valid();
-    no_records.limits.max_draw_indirect_count = 0;
-    for info in [
-        missing_heap,
-        no_queues,
-        crowded,
-        odd_alignment,
-        no_deadline,
-        targets,
-        buffers,
-        attributes,
-        bounds,
-        no_records,
-    ] {
-        assert!(matches!(
-            Model::new(info, &[1], NoPool),
-            Err(Error::Malformed)
-        ));
+    let refused: [Refused; 15] = [
+        ("a memory type in no heap", |info| {
+            if let Some(kind) = info.memory_types.as_mut_slice().first_mut() {
+                kind.heap = 4;
+            }
+        }),
+        ("a family of no queues", |info| {
+            if let Some(family) = info.queue_families.as_mut_slice().first_mut() {
+                family.queues = 0;
+            }
+        }),
+        ("a family of more queues than one holds", |info| {
+            if let Some(family) = info.queue_families.as_mut_slice().first_mut() {
+                family.queues = crate::MAX_QUEUES_PER_FAMILY + 1;
+            }
+        }),
+        ("a buffer alignment of no power of two", |info| {
+            info.limits.buffer_alignment = 24;
+        }),
+        ("no time a job may run", |info| {
+            info.limits.max_job_time = Duration64::ZERO;
+        }),
+        ("more colour targets than a pass records", |info| {
+            info.limits.max_color_attachments =
+                u32::try_from(crate::MAX_PASS_ATTACHMENTS).expect("small") + 1;
+        }),
+        ("more vertex buffers than a draw binds", |info| {
+            info.limits.max_vertex_input_bindings =
+                u32::try_from(crate::MAX_DRAW_VERTEX_BUFFERS).expect("small") + 1;
+        }),
+        ("more vertex attributes than a pipeline records", |info| {
+            info.limits.max_vertex_input_attributes = crate::MAX_VERTEX_ATTRIBUTES + 1;
+        }),
+        ("viewport bounds the wrong way round", |info| {
+            info.limits.viewport_bounds_range = [1, -1];
+        }),
+        ("no indirect draw records", |info| {
+            info.limits.max_draw_indirect_count = 0;
+        }),
+        ("a storage size alignment of no power of two", |info| {
+            info.limits.storage_buffer_size_alignment = 3;
+        }),
+        ("SPIR-V past the newest version", |info| {
+            info.spirv_version = tairix_spirv::Version { major: 2, minor: 0 };
+        }),
+        ("SPIR-V before the oldest version", |info| {
+            info.spirv_version = tairix_spirv::Version { major: 1, minor: 2 };
+        }),
+        ("a sampler bias past any device's", |info| {
+            info.limits.max_sampler_lod_bias = crate::MAX_LOD_BIAS + 1;
+        }),
+        ("a use a format's encoding cannot mean", |info| {
+            info.formats = crate::FormatTable::from_fn(|format| {
+                if format == crate::Format::Rgba8UnormSrgb {
+                    crate::FormatFeatures::STORAGE
+                } else {
+                    format.features()
+                }
+            });
+        }),
+    ];
+    for (what, change) in refused {
+        let mut info = valid();
+        change(&mut info);
+        assert!(
+            matches!(Model::new(info, &[1], NoPool), Err(Error::Malformed)),
+            "{what}"
+        );
     }
     assert!(matches!(
         Model::new(valid(), &[], NoPool),

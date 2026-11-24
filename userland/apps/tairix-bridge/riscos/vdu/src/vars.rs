@@ -6,6 +6,7 @@
 use tairix_riscos_arm::psr;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
 use tairix_riscos_kernel::output::workspace;
+use tairix_riscos_kernel::swi::os::CURRENT_MODE;
 use tairix_vdu::mode::vdu_var;
 
 use crate::mode::{var, Format};
@@ -136,7 +137,7 @@ pub(crate) fn mode_variables<const N: usize>(
     mode: u32,
     numbers: [u32; N],
 ) -> Result<[Option<u32>; N], Fail> {
-    if mode == u32::MAX {
+    if mode == CURRENT_MODE {
         return with(os, |vdu, _| Ok(numbers.map(|number| vdu.mode_var(number))));
     }
     if mode & 1 != 0 && mode >= 0x100 && mode >> 27 != 0 {

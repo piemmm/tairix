@@ -9,10 +9,11 @@ use alloc::vec::Vec;
 
 use tairix_colour::Rgb;
 use tairix_riscos_kernel::os::{len32, Entry, Fail, Os, Regs};
+use tairix_riscos_kernel::swi::colour_trans::{CURRENT, SPRITE_POINTER};
 
 use super::matching::{default_256_match, Look};
 use super::palettes::{self, Against};
-use super::{current, loadings, screen_calibration, State, CURRENT};
+use super::{current, loadings, screen_calibration, State};
 use crate::colour::gcol_of_number;
 use crate::inverse::GUARD;
 
@@ -164,7 +165,7 @@ fn palette_colours(against: &Against) -> Option<Vec<Rgb>> {
 
 /// A sprite's colours: its palette's, or without one its mode's default.
 fn sprite_colours(os: &mut Os<'_>, r0: u32, r1: u32, flags: u32) -> Result<Against, Fail> {
-    let sprite = palettes::sprite_of(os, r0, r1, flags & super::SPRITE_POINTER != 0)?;
+    let sprite = palettes::sprite_of(os, r0, r1, flags & SPRITE_POINTER != 0)?;
     let pairs = palettes::sprite_pairs(os, &sprite)?;
     if pairs.is_empty() {
         return palettes::named(os, sprite.mode, 0);

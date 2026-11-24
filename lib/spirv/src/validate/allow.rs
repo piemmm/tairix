@@ -48,9 +48,6 @@ pub(crate) const EXTENSIONS: [&str; 3] = [
     "SPV_KHR_terminate_invocation",
 ];
 
-/// The oldest version admitted: the Vulkan 1.1 baseline.
-pub(crate) const OLDEST: Version = Version { major: 1, minor: 3 };
-
 /// The version several rules change at.
 pub(crate) const V1_4: Version = Version { major: 1, minor: 4 };
 

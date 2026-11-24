@@ -27,8 +27,6 @@ use crate::swi::X;
 
 /// `OS_Pointer` 1: the pointing device's type set.
 const SET_POINTER_TYPE: u32 = 1;
-/// The unit the font cache's size counts in, whatever the page size.
-const FONT_UNIT: u32 = 4096;
 /// "Bad configure option".
 const BAD_OPTION: Error = Error {
     number: SYNTAX,
@@ -168,7 +166,7 @@ pub(crate) const KEYWORDS: [Keyword; 34] = [
     ),
     keyword(
         "FontSize",
-        Kind::Size(Field::new(cmos::FONT_SIZE, 0, 8), FONT_UNIT),
+        Kind::Size(Field::new(cmos::FONT_SIZE, 0, 8), cmos::FONT_SIZE_UNIT),
     ),
     keyword("Ignore", Kind::Special(Special::Ignore)),
     keyword("Language", Kind::Number(Field::new(cmos::LANGUAGE, 0, 8))),

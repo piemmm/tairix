@@ -2,16 +2,18 @@
 //! scale between millipoints and OS units, the `FontMax` values and the cache
 //! the guest sees, each as RISC OS 5.30 keeps it.
 
+use tairix_drawing::riscos::units::MILLIPOINTS_PER_OS_UNIT;
 use tairix_riscos_kernel::cmos;
 use tairix_riscos_kernel::memory::Create;
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
 use tairix_riscos_kernel::swi::{os as kos, X};
+use tairix_vdu::mode::var::{X_EIG, Y_EIG};
 
-use crate::grid::Grid;
+use crate::grid::{Grid, MOST_EIG};
 use crate::module::with;
 
 /// The scale both ways at start: millipoints an OS unit.
-const SCALE: i32 = 400;
+const SCALE: i32 = MILLIPOINTS_PER_OS_UNIT.cast_signed();
 /// `Font_CacheAddr`'s version: RISC OS 5.30's Font Manager's, in
 /// hundredths.
 const VERSION: u32 = 380;
@@ -28,8 +30,6 @@ pub(crate) const FONT_MAX_STORED: [u8; 6] = [0, 16, 12, 24, 0, 0];
 const CACHE_AREA: u32 = 4;
 const CACHE_TITLE: &[u8] = b"Font cache";
 const CACHE_MOST: u32 = 255 * FONT_MAX_UNIT;
-/// The unit `*Configure FontSize` counts in.
-const FONT_SIZE_UNIT: u32 = 4096;
 
 /// What the Font Manager is set to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,7 +67,7 @@ pub(crate) fn make_cache_area(os: &mut Os<'_>) -> Result<(), Fail> {
     let caller = os.layout().kernel_bits();
     os.create_kernel_area(&Create {
         number: Some(CACHE_AREA),
-        size: u32::from(units) * FONT_SIZE_UNIT,
+        size: u32::from(units) * cmos::FONT_SIZE_UNIT,
         base: None,
         flags: 0,
         max: Some(CACHE_MOST),
@@ -137,10 +137,6 @@ pub(crate) fn convert_to_points(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), 
     Ok(())
 }
 
-/// The mode variables of the eigen factors.
-const EIGEN_X: u32 = 4;
-const EIGEN_Y: u32 = 5;
-
 /// The screen's grid at the scale set and the current mode's eigen
 /// factors; none where the scale gives it no pixels.
 pub(crate) fn grid(os: &mut Os<'_>) -> Result<Option<Grid>, Fail> {
@@ -150,19 +146,19 @@ pub(crate) fn grid(os: &mut Os<'_>) -> Result<Option<Grid>, Fail> {
 
 /// The current mode's eigen factors, across and up.
 pub(crate) fn eigen_x(os: &mut Os<'_>) -> Result<u32, Fail> {
-    eigen(os, EIGEN_X)
+    eigen(os, X_EIG)
 }
 
 pub(crate) fn eigen_y(os: &mut Os<'_>) -> Result<u32, Fail> {
-    eigen(os, EIGEN_Y)
+    eigen(os, Y_EIG)
 }
 
 /// The current mode's eigen factor `variable`.
 fn eigen(os: &mut Os<'_>, variable: u32) -> Result<u32, Fail> {
     let mut read = Regs::default();
-    read.r[..2].copy_from_slice(&[u32::MAX, variable]);
+    read.r[..2].copy_from_slice(&[kos::CURRENT_MODE, variable]);
     os.perform(X | kos::READ_MODE_VARIABLE, &mut read)?;
-    Ok(read.r[2].min(31))
+    Ok(read.r[2].min(MOST_EIG))
 }
 
 /// `millipoints` in OS units at `scale`, floored to a pixel of `eigen`.

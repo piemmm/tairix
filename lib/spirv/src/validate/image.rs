@@ -1,12 +1,39 @@
 //! Images: sampling, fetching, gathering, reading, writing and querying,
 //! each against the image type it reaches; the image operands each takes;
-//! and each texel access charged to the image's variable.
+//! each texel access charged to the image's variable; and each image sampled
+//! through a sampler recorded with the sampler's variable and how.
 
+use super::binding::SampleForms;
 use super::body::{Access, Args, Body, Needs, Root, Typing};
 use super::types::{Image, Scalar, Ty};
-use super::{Rule, Validator, What};
+use super::{push, Rule, Validator, What};
 use crate::enumerant::{Capability, Dim, ImageFormat, ImageOperands};
 use crate::{Id, Op, Value};
+
+/// What a sampling's image operands make of it.
+fn operand_forms(mask: ImageOperands) -> SampleForms {
+    let has = |bit: ImageOperands| mask.0 & bit.0 != 0;
+    let mut forms = SampleForms::NONE;
+    if has(ImageOperands::BIAS) {
+        forms = forms.with(SampleForms::BIAS);
+    }
+    if has(ImageOperands::CONST_OFFSET)
+        || has(ImageOperands::OFFSET)
+        || has(ImageOperands::CONST_OFFSETS)
+    {
+        forms = forms.with(SampleForms::OFFSET);
+    }
+    forms
+}
+
+/// A depth-reference sampling compares; any other reads.
+const fn reading(dref: bool) -> SampleForms {
+    if dref {
+        SampleForms::COMPARE
+    } else {
+        SampleForms::READ
+    }
+}
 
 /// Which kind of image instruction image operands are read for.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -46,7 +73,11 @@ impl Validator<'_> {
                 if !matches!(self.ty(self.arg_type(args, 1)?).ty, Ty::Sampler) {
                     return Err(args.wrong(1));
                 }
+                let sampler = self.root(self.arg_id(args, 1)?).ok_or(Rule::OpaqueUse)?;
                 self.keep_root(args, root);
+                if let Some(result) = args.result {
+                    self.set_sampler(result, sampler.slot);
+                }
                 Ok(())
             }
             Typing::Image => {
@@ -88,7 +119,7 @@ impl Validator<'_> {
                     self.float32(args, 2)?;
                     next = 3;
                 }
-                self.image_operands(
+                let mask = self.image_operands(
                     args,
                     next,
                     &image,
@@ -97,6 +128,14 @@ impl Validator<'_> {
                     },
                     r,
                 )?;
+                let mut forms = operand_forms(mask).with(reading(form.dref));
+                if !form.explicit {
+                    forms = forms.with(SampleForms::IMPLICIT);
+                }
+                if form.proj {
+                    forms = forms.with(SampleForms::PROJECTIVE);
+                }
+                self.sampling(body, args, forms)?;
                 self.texel_access(body, root, Access::READ)
             }
             Typing::Fetch => {
@@ -125,7 +164,11 @@ impl Validator<'_> {
                         return Err(args.wrong(2));
                     }
                 }
-                self.image_operands(args, 3, &image, Use::Gather, r)?;
+                let mask = self.image_operands(args, 3, &image, Use::Gather, r)?;
+                let forms = operand_forms(mask)
+                    .with(reading(dref))
+                    .with(SampleForms::GATHER);
+                self.sampling(body, args, forms)?;
                 self.texel_access(body, root, Access::READ)
             }
             Typing::ImageRead => {
@@ -207,6 +250,7 @@ impl Validator<'_> {
             Typing::QueryLod => {
                 body.facts.needs = body.facts.needs.with(Needs::FRAGMENT);
                 let (image, _) = self.sampled_operand(args, 0)?;
+                self.sampling(body, args, SampleForms::IMPLICIT)?;
                 if !matches!(
                     image.dim,
                     Dim::DIM_1D | Dim::DIM_2D | Dim::DIM_3D | Dim::CUBE
@@ -277,6 +321,20 @@ impl Validator<'_> {
         }
     }
 
+    /// Record that operand 0, a sampled image, is sampled in `forms`: its
+    /// image's and its sampler's variables, by slot.
+    fn sampling(
+        &self,
+        body: &mut Body<'_>,
+        args: &Args<'_>,
+        forms: SampleForms,
+    ) -> Result<(), Rule> {
+        let id = self.arg_id(args, 0)?;
+        let image = self.root(id).ok_or(Rule::OpaqueUse)?;
+        let sampler = self.sampler(id).ok_or(Rule::OpaqueUse)?;
+        push(&mut body.facts.samplings, (image.slot, sampler, forms)).map_err(|r| r.rule)
+    }
+
     /// A texel read or write charged to the image's variable, refused where
     /// its decorations forbid it.
     fn texel_access(
@@ -344,7 +402,7 @@ impl Validator<'_> {
         image: &Image,
         used: Use,
         texel: u32,
-    ) -> Result<(), Rule> {
+    ) -> Result<ImageOperands, Rule> {
         let refused = Rule::ImageOperands;
         let mask = match args.operands.get(from).map(|o| self.m.value(o)) {
             None => ImageOperands::NONE,
@@ -420,7 +478,7 @@ impl Validator<'_> {
         if mask.0 & !known != 0 || n != args.len() {
             return Err(refused);
         }
-        Ok(())
+        Ok(mask)
     }
 
     /// The offset operands at operand `n`, at most one of them, each where

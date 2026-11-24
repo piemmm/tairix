@@ -18,11 +18,17 @@ test-support = []
 [dependencies]
 # The kernel: guest memory, SWIs, the module seam, MessageTrans and CMOS.
 tairix-riscos-kernel = { path = "../kernel", version = "=0.0.0" }
-# RISC OS's font families and the TAIRiX faces they map to.
+# RISC OS's font families and the TAIRiX faces they map to, the Draw file
+# format a switched paint writes, and RISC OS's units.
 tairix-drawing = { path = "../../../../../lib/drawing", version = "=0.0.0" }
-# Unsigned decimal, which *FontList writes resolutions in, and the float
-# rounding a face's metrics are made with.
+# Unsigned decimal, which *FontList writes resolutions in, the float
+# rounding a face's metrics are made with, the little-endian reads a font
+# file is taken apart by, and the divisor a bitmap's scale is reduced by.
 tairix-util = { path = "../../../../../lib/util", version = "=0.0.0" }
+# The RISC OS colour word an RGB colour is packed in.
+tairix-colour = { path = "../../../../../lib/colour", version = "=0.0.0" }
+# The mode variables a mode's eigen factors are read by.
+tairix-vdu = { path = "../../../../../lib/vdu", version = "=0.0.0" }
 # The font service's requests, which the ROM fonts' glyphs are asked with.
 tairix-abi = { path = "../../../../../lib/abi", version = "=0.0.0" }
 # The service's outline replies read as owned outlines, and as paths.

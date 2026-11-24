@@ -13,7 +13,7 @@
 //! The descriptors and the data are guest memory, read bounded on every use;
 //! a file larger than `FILE_MOST` is refused.
 
-mod menus;
+pub mod menus;
 pub(crate) mod scan;
 
 use alloc::vec::Vec;
@@ -1018,9 +1018,7 @@ impl Os<'_> {
             claimed
         };
         let words = [0, held, data, name, 0, block, 0, 0];
-        for (n, word) in (0..).zip(words) {
-            self.write_word(descriptor + 4 * n, word)?;
-        }
+        self.write_words(descriptor, &words)?;
         self.write_word(block.wrapping_add(MAGIC), FAST)?;
         self.write_word(block.wrapping_add(FLAGS), flags | flag::PROXY)?;
         self.write_word(block.wrapping_add(DATA), descriptor)?;
@@ -1147,9 +1145,7 @@ const SQUASH_HEADER: u32 = 20;
 fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let workspace = os.rma_claim(WORKSPACE)?;
     os.write_word(regs.r[12], workspace)?;
-    for offset in (0..BUFFERS_AT).step_by(4) {
-        os.write_word(workspace + offset, 0)?;
-    }
+    os.write_words(workspace, &[0; (BUFFERS_AT / 4) as usize])?;
     os.write_bytes(workspace + OWN_NAME_AT, OWN_NAME)?;
     os.write_bytes(workspace + GLOBAL_NAME_AT, GLOBAL_NAME)?;
     os.world.message_trans = State::new();
