@@ -139,6 +139,11 @@ pub fn rma_free(session: &mut Session) -> u32 {
 /// ends soon, while one asked for endless work is stopped.
 pub const HOSTILE_CALL_WORDS: u32 = 4;
 
+/// The colour modules, which keep the tables and messages calls leave them
+/// until they die: a run that reaches them re-initialises them all before
+/// judging what was given back.
+pub const COLOUR_MODULES: [&str; 3] = ["ColourTrans", "InverseTable", "BlendTable"];
+
 /// The RMA's bytes in use: grown as claims need, it keeps what it grew by.
 pub fn rma_used(session: &mut Session) -> u32 {
     let free = rma_free(session);

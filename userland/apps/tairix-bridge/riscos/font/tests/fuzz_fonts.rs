@@ -13,7 +13,8 @@
 //!   after a few of its words among them;
 //! * every error block a call returns can be read back;
 //! * the drivers still answer a mode variable afterwards;
-//! * the module, re-initialised after a run, holds none of the RMA it took.
+//! * the Font Manager and the colour modules its calls reach, re-initialised
+//!   after a run, hold none of the RMA they took.
 //!
 //! Inputs are drawn from a per-run-seeded `Prng`; the smoke sweep runs on a
 //! plain `cargo test` and `cargo xtask fuzz` extends it to a wall-clock
@@ -25,7 +26,7 @@ mod common;
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use common::{answers, rma_used, select_depth, KernelMemory, HOSTILE_CALL_WORDS};
+use common::{answers, rma_used, select_depth, KernelMemory, COLOUR_MODULES, HOSTILE_CALL_WORDS};
 use tairix_fscopy::fixture::Tree;
 use tairix_fuzzseed::Prng;
 use tairix_riscos_filing::session::{
@@ -38,6 +39,8 @@ use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::module::Builtin;
 use tairix_riscos_kernel::os::{Fail, Regs};
 use tairix_riscos_kernel::swi::chunk::FONT;
+use tairix_riscos_kernel::swi::os::file::READ_INFO;
+use tairix_riscos_kernel::swi::os::FILE as OS_FILE;
 use tairix_riscos_kernel::swi::{font, X};
 
 const SMOKE_RUNS: u64 = 3;
@@ -47,6 +50,8 @@ const SALTED: u32 = 0x8000;
 const BLOCK: u32 = 512;
 /// The SWIs the Font Manager has.
 const SWIS: usize = 42;
+/// The error a font the path does not hold is refused with.
+const FONT_NOT_FOUND: u32 = 0x20B;
 
 static MODULES: LazyLock<Vec<&'static Builtin>> = LazyLock::new(|| {
     modules_with(&[
@@ -379,6 +384,7 @@ fn boot(rng: &mut Prng) -> (Session, KernelMemory, Vec<u32>, u32) {
         disc: Some(&tree),
     });
     let kernel = KernelMemory::of(&mut s);
+    opens_filing_messages(&mut s);
     let held = rma_used(&mut s);
     command(
         &mut s.kernel.os(),
@@ -418,6 +424,24 @@ fn boot(rng: &mut Prng) -> (Session, KernelMemory, Vec<u32>, u32) {
             .write_bytes(base, &fill[..fill.len().min(BLOCK as usize)]);
     }
     (s, kernel, handles, held)
+}
+
+/// FileSwitch and HostFS, which a font's files are probed through, keep the
+/// Messages file their first error opens for as long as they run, as RISC
+/// OS's do: each refuses a name before the RMA is judged, so a run is held
+/// to what the Font Manager and the colour modules take.
+fn opens_filing_messages(s: &mut Session) {
+    let at = APPLICATION + SALTED;
+    for name in [&b"Absent:Font\0"[..], b"HostFS::Absent.$\0"] {
+        s.kernel.os().write_bytes(at, name).expect("written");
+        let mut info = Regs::new([READ_INFO, at, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let refused = s.kernel.os().perform(X | OS_FILE, &mut info);
+        assert!(
+            matches!(refused, Err(Fail::Error(_))),
+            "{} refused",
+            String::from_utf8_lossy(name)
+        );
+    }
 }
 
 /// What a refused call said.
@@ -553,10 +577,72 @@ fn hostile_fonts_and_calls_leave_the_drivers_answering() {
             assert!(answers(&mut s), "OS_ReadModeVariable after step {step}");
         }
         s.allow_words(None);
-        if let Err(failed) = command(&mut s.kernel.os(), "RMReInit FontManager") {
-            panic!("reinitialised: {}", refusal(&mut s, failed));
+        for module in ["FontManager"].into_iter().chain(COLOUR_MODULES) {
+            reinitialise(&mut s, module);
         }
-        assert_eq!(rma_used(&mut s), held, "all it took given back");
+        assert_eq!(rma_used(&mut s), held, "all they took given back");
         runs += 1;
     }
+}
+
+fn reinitialise(s: &mut Session, module: &str) {
+    if let Err(failed) = command(&mut s.kernel.os(), &format!("RMReInit {module}")) {
+        panic!("{module} reinitialised: {}", refusal(s, failed));
+    }
+}
+
+/// A path whose elements FileSwitch and HostFS refuse holds no font, and
+/// leaves only the Messages files their refusals open: why a run's RMA is
+/// judged with those already open.
+#[test]
+fn a_path_the_filing_modules_refuse_holds_no_font_and_keeps_no_rma() {
+    let (mut s, _, _, held) = boot(&mut Prng::new(1));
+    command(
+        &mut s.kernel.os(),
+        "Set Font$Path Absent:,HostFS::Absent.$.",
+    )
+    .expect("Font$Path");
+    let at = APPLICATION + SALTED;
+    s.kernel.os().write_bytes(at, b"Absent\0").expect("written");
+    let mut find = Regs::new([0, at, 192, 192, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let refused = match s.kernel.os().perform(X | font::FIND_FONT, &mut find) {
+        Err(Fail::Error(block)) => s.kernel.os().read_word(block).expect("its number"),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(refused, FONT_NOT_FOUND);
+    for module in ["FontManager"].into_iter().chain(COLOUR_MODULES) {
+        reinitialise(&mut s, module);
+    }
+    assert_eq!(rma_used(&mut s), held);
+}
+
+/// A paint whose RGB colours ColourTrans refuses leaves ColourTrans the
+/// messages it raised the refusal from, which it keeps for later calls: why a
+/// run's end re-initialises the colour modules too.
+#[test]
+fn a_paint_whose_colours_colourtrans_refuses_leaves_its_messages_with_colourtrans() {
+    let (mut s, _, _, held) = boot(&mut Prng::new(1));
+    select_depth(&mut s, 3).expect("256 colours");
+    let at = APPLICATION + SALTED;
+    let text = b"Whole\0\x13\0\0\0\xFF\xFF\xFF\x7FA\0";
+    s.kernel.os().write_bytes(at, text).expect("written");
+    let mut find = Regs::new([0, at, 192, 192, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    perform(&mut s, font::FIND_FONT, &mut find, "found");
+    let mut palette = Regs::new([find.r[0], 0, 1, 6, 0xFFFF_FF00, 0, 0, 0, 0, 0, 0, 0, 0]);
+    perform(&mut s, font::SET_PALETTE, &mut palette, "coloured");
+    let string = at + 6;
+    let mut paint = Regs::new([
+        find.r[0], string, 0x100, 100_000, 160_000, 0, 0, 0, 0, 0, 0, 0, 0,
+    ]);
+    let refused = match s.kernel.os().perform(X | font::PAINT, &mut paint) {
+        Err(Fail::Error(block)) => s.kernel.os().read_word(block).expect("its number"),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(refused, 0x206, "an offset past the Font Manager's range");
+    reinitialise(&mut s, "FontManager");
+    assert!(rma_used(&mut s) > held, "the messages are ColourTrans's");
+    for module in COLOUR_MODULES {
+        reinitialise(&mut s, module);
+    }
+    assert_eq!(rma_used(&mut s), held);
 }

@@ -20,7 +20,7 @@
 
 mod common;
 
-use common::{answers, command, drivers, rma_used, select_depth, KernelMemory};
+use common::{answers, command, drivers, rma_used, select_depth, KernelMemory, COLOUR_MODULES};
 use tairix_fuzzseed::Prng;
 use tairix_riscos_filing::session::Session;
 use tairix_riscos_kernel::memory::layout::APPLICATION;
@@ -177,7 +177,7 @@ fn hostile_colour_calls_leave_the_drivers_answering() {
                 "OS_ReadModeVariable after step {step}"
             );
         }
-        for module in ["ColourTrans", "InverseTable", "BlendTable"] {
+        for module in COLOUR_MODULES {
             command(&mut session, &format!("RMReInit {module}")).expect("reinitialised");
         }
         assert_eq!(rma_used(&mut session), held, "all they took given back");

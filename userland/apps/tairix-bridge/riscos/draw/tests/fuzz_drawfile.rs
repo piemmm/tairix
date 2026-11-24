@@ -22,7 +22,9 @@ mod common;
 
 use std::sync::LazyLock;
 
-use common::{answers, command, drivers_with, rma_used, select_depth, HOSTILE_CALL_WORDS};
+use common::{
+    answers, command, drivers_with, rma_used, select_depth, COLOUR_MODULES, HOSTILE_CALL_WORDS,
+};
 use tairix_drawing::riscos::format::{
     CLOSE, CLOSE_WITH_GAP, FONT_TABLE, GROUP, JPEG, LINE, MOVE, OPTIONS, PATH, SPRITE, TAGGED,
     TEXT, TEXT_AREA, TEXT_COLUMN, TRANSFORMED_SPRITE, TRANSFORMED_TEXT,
@@ -348,13 +350,7 @@ fn hostile_draw_files_leave_the_drivers_answering() {
             );
         }
         session.allow_words(None);
-        for module in [
-            "DrawFile",
-            "Draw",
-            "ColourTrans",
-            "InverseTable",
-            "BlendTable",
-        ] {
+        for module in ["DrawFile", "Draw"].into_iter().chain(COLOUR_MODULES) {
             command(&mut session, &format!("RMReInit {module}")).expect("reinitialised");
         }
         assert_eq!(rma_used(&mut session), held, "all they took given back");
