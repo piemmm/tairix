@@ -1,8 +1,8 @@
 //! Archives laid out for tests, once for every test that needs one: the
-//! least archive of each format the archive driver writes, the DEFLATE, gzip
-//! and bzip2 streams archives are packed in, and an archive written back by
-//! the driver's own writer. The driver's tests pack their members with
-//! these, its fuzz harness takes its bases from them, and the disk-image
+//! least archive of each format the archive driver writes, the DEFLATE, gzip,
+//! bzip2 and Squash streams archives are packed in, and an archive written
+//! back by the driver's own writer. The driver's tests pack their members
+//! with these, its fuzz harness takes its bases from them, and the disk-image
 //! vertical plants archives written from them.
 
 #![no_std]
@@ -21,6 +21,7 @@ use tairix_abi::driver::filesystem::{FilesystemWrite as _, WriteRefusal};
 use tairix_abi::DriverError;
 use tairix_compress::bzip2::{self, BlockIndex};
 use tairix_compress::deflate::{Deflate, Flush};
+use tairix_compress::squash::{self, Clearing, FileHeader};
 use tairix_compress::Output;
 use tairix_dfs::catalogue::{Catalogue, CATALOGUE_LEN};
 use tairix_dfs::image::Layout;
@@ -60,14 +61,21 @@ pub enum Format {
     Ssd,
     /// An Acorn DFS disc image, double-sided.
     Dsd,
+    /// A RISC OS Squash file.
+    Squash,
 }
 
 /// The sectors each side of a [`seed`] DFS disc counts: forty tracks.
 pub const DFS_SEED_SECTORS: u16 = 400;
 
-/// The least archive of `format`: a zip of no member, a DFS disc of no file;
-/// for every other format, one stored member [`SEED`] holding [`SEED`], as a
-/// tar, Spark or `ArcFS` archive is only told from other data by a member.
+/// The load address of a RISC OS file typed as Data, its stamp's top byte
+/// zero.
+const DATA_LOAD: u32 = 0xFFFF_FD00;
+
+/// The least archive of `format`: a zip of no member, a DFS disc of no file,
+/// a Squash file of [`SEED`] typed as Data; for every other format, one
+/// stored member [`SEED`] holding [`SEED`], as a tar, Spark or `ArcFS`
+/// archive is only told from other data by a member.
 ///
 /// # Errors
 ///
@@ -86,6 +94,7 @@ pub fn seed(format: Format) -> Result<Vec<u8>, DriverError> {
         Format::ArcFs => arcfs(),
         Format::Ssd => dfs(Layout::Single),
         Format::Dsd => dfs(Layout::Double),
+        Format::Squash => squash(SEED, DATA_LOAD, 0)?,
     })
 }
 
@@ -130,7 +139,7 @@ fn spark() -> Vec<u8> {
     record.extend_from_slice(&[0x21, 0x58, 0, 0]);
     record.extend_from_slice(&tairix_crc16::checksum(SEED).to_le_bytes());
     record.extend_from_slice(&4u32.to_le_bytes());
-    record.extend_from_slice(&0xFFFF_FD00u32.to_le_bytes());
+    record.extend_from_slice(&DATA_LOAD.to_le_bytes());
     record.extend_from_slice(&0u32.to_le_bytes());
     record.extend_from_slice(&3u32.to_le_bytes());
     record.extend_from_slice(SEED);
@@ -221,6 +230,32 @@ pub fn bzip2(data: &[u8], level: u8) -> Result<Vec<u8>, DriverError> {
         .map_err(refused)?;
     encoder.finish(&mut out, &mut Unindexed).map_err(refused)?;
     Ok(out.0)
+}
+
+/// `data` as a Squash file whose header records `load` and `exec`, its
+/// stream the one the Squash module writes of a file given it whole.
+///
+/// # Errors
+///
+/// [`DriverError::LengthOutOfRange`] for data longer than a Squash file
+/// records; [`DriverError::DeviceFault`] for the encoder's refusal.
+pub fn squash(data: &[u8], load: u32, exec: u32) -> Result<Vec<u8>, DriverError> {
+    let length = u32::try_from(data.len()).map_err(|_| DriverError::LengthOutOfRange)?;
+    let room =
+        usize::try_from(squash::max_output(length)).map_err(|_| DriverError::LengthOutOfRange)?;
+    let refused = |_| DriverError::DeviceFault;
+    let mut work = vec![0u8; squash::COMPRESS_WORK];
+    squash::start_compression(&mut work, Clearing::AtOnce).map_err(refused)?;
+    let mut file = FileHeader { length, load, exec }.to_bytes().to_vec();
+    let header = file.len();
+    file.resize(header + room, 0);
+    let progress = squash::compress(&mut work, data, false, &mut file[header..], &mut |_| {})
+        .map_err(refused)?;
+    if progress.status != squash::Status::Done {
+        return Err(DriverError::DeviceFault);
+    }
+    file.truncate(header + progress.produced);
+    Ok(file)
 }
 
 /// The archive `attachment` holds, served by the archive driver as an
@@ -348,6 +383,24 @@ mod tests {
         let root = fs.root();
         let side = fs.lookup(root, b"Drive 2").unwrap();
         assert!(fs.lookup(side, b"$.ADDED").is_ok());
+    }
+
+    /// A Squash seed is its one file, which the driver writes back squashed.
+    #[test]
+    fn a_squash_seed_is_its_one_file_and_is_written_back() {
+        let seed = seed(Format::Squash).unwrap();
+        assert_eq!(names(&seed, b"seed,fca"), [SEED.to_vec()]);
+        let archive = written(&seed, b"seed,fca", |fs| {
+            let file = fs.lookup(fs.root(), SEED)?;
+            fs.write_at(file, 0, b"written").map(drop)
+        })
+        .unwrap();
+        let header = FileHeader::parse(&archive).unwrap();
+        assert_eq!(header.load >> 8, DATA_LOAD >> 8, "still Data");
+        assert_eq!(
+            archive,
+            squash(b"written", header.load, header.exec).unwrap()
+        );
     }
 
     #[test]

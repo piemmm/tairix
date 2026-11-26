@@ -2314,7 +2314,8 @@ const fn records_owners(fstype: VolumeFsType) -> bool {
         | VolumeFsType::Spark
         | VolumeFsType::ArcFs
         | VolumeFsType::Rar
-        | VolumeFsType::Dfs => false,
+        | VolumeFsType::Dfs
+        | VolumeFsType::Squash => false,
     }
 }
 

@@ -75,11 +75,14 @@ pub enum VolumeFsType {
     /// An Acorn DFS disc image, single or double sided: its catalogues'
     /// files, served as an archive's members are.
     Dfs = 14,
+    /// A RISC OS Squash file: one file compressed, with its RISC OS type and
+    /// date.
+    Squash = 15,
 }
 
 impl VolumeFsType {
     /// Every filesystem type, in wire order.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::ARXFS,
         Self::Ext4,
         Self::Fat32,
@@ -95,6 +98,7 @@ impl VolumeFsType {
         Self::ArcFs,
         Self::Rar,
         Self::Dfs,
+        Self::Squash,
     ];
 
     /// The wire byte for this filesystem type.
@@ -125,6 +129,7 @@ impl VolumeFsType {
             12 => Ok(Self::ArcFs),
             13 => Ok(Self::Rar),
             14 => Ok(Self::Dfs),
+            15 => Ok(Self::Squash),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -148,7 +153,8 @@ impl VolumeFsType {
             | Self::Spark
             | Self::ArcFs
             | Self::Rar
-            | Self::Dfs => true,
+            | Self::Dfs
+            | Self::Squash => true,
         }
     }
 
@@ -175,7 +181,8 @@ impl VolumeFsType {
             | Self::Spark
             | Self::ArcFs
             | Self::Rar
-            | Self::Dfs => false,
+            | Self::Dfs
+            | Self::Squash => false,
         }
     }
 
@@ -199,6 +206,7 @@ impl VolumeFsType {
             Self::ArcFs => b"tairix,volume-arcfs",
             Self::Rar => b"tairix,volume-rar",
             Self::Dfs => b"tairix,volume-dfs",
+            Self::Squash => b"tairix,volume-squash",
         }
     }
 }
@@ -295,11 +303,13 @@ pub enum FormatName {
     Rar = 19,
     /// An Acorn DFS disc image.
     Dfs = 20,
+    /// One file in a RISC OS Squash file.
+    Squash = 21,
 }
 
 impl FormatName {
     /// Every name, in wire order.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Arxfs,
         Self::Ext2,
         Self::Ext3,
@@ -320,6 +330,7 @@ impl FormatName {
         Self::ArcFs,
         Self::Rar,
         Self::Dfs,
+        Self::Squash,
     ];
 
     /// The format a user and `mount` call `name`, as [`as_str`](Self::as_str)
@@ -353,6 +364,7 @@ impl FormatName {
             Self::ArcFs => "arcfs",
             Self::Rar => "rar",
             Self::Dfs => "dfs",
+            Self::Squash => "squash",
         }
     }
 
@@ -376,6 +388,7 @@ impl FormatName {
             Self::ArcFs => VolumeFsType::ArcFs,
             Self::Rar => VolumeFsType::Rar,
             Self::Dfs => VolumeFsType::Dfs,
+            Self::Squash => VolumeFsType::Squash,
             Self::Smb3 => return None,
         })
     }
@@ -413,6 +426,7 @@ impl FormatName {
             18 => Self::ArcFs,
             19 => Self::Rar,
             20 => Self::Dfs,
+            21 => Self::Squash,
             _ => return Err(Errno::OutOfRange),
         })
     }
@@ -1620,8 +1634,9 @@ mod tests {
         assert_eq!(FormatName::Affs.family(), Some(VolumeFsType::Affs));
         assert_eq!(FormatName::TarGzip.family(), Some(VolumeFsType::Gzip));
         assert_eq!(FormatName::Dfs.family(), Some(VolumeFsType::Dfs));
+        assert_eq!(FormatName::Squash.family(), Some(VolumeFsType::Squash));
         assert_eq!(FormatName::from_u8(0), Err(Errno::OutOfRange));
-        assert_eq!(FormatName::from_u8(21), Err(Errno::OutOfRange));
+        assert_eq!(FormatName::from_u8(22), Err(Errno::OutOfRange));
     }
 
     #[test]
@@ -1650,7 +1665,7 @@ mod tests {
             assert_eq!(usize::from(fstype.as_u8()), at);
             assert_eq!(VolumeFsType::from_u8(fstype.as_u8()), Ok(fstype));
         }
-        assert_eq!(VolumeFsType::from_u8(15), Err(Errno::OutOfRange));
+        assert_eq!(VolumeFsType::from_u8(16), Err(Errno::OutOfRange));
         assert_eq!(VolumeFsType::from_u8(u8::MAX), Err(Errno::OutOfRange));
         let archives: alloc::vec::Vec<VolumeFsType> = VolumeFsType::ALL
             .into_iter()
@@ -1667,6 +1682,7 @@ mod tests {
                 VolumeFsType::ArcFs,
                 VolumeFsType::Rar,
                 VolumeFsType::Dfs,
+                VolumeFsType::Squash,
             ]
         );
     }

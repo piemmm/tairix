@@ -16,7 +16,8 @@ underflow or NaNs, so a unit with rules of its own builds them on it.
 | `Parts` | A finite operand, `sig × 2^(exp − 63)`, its integer bit explicit, so an unnormal is an operand like any other. `Parts::of` reads a double-extended value, a denormal as the unnormal it equals. |
 | `Exact` | A result before rounding, `sig × 2^(exp − 126)`: a 64-bit significand, 63 guard bits below it, a carry bit above, and a sticky bit for anything lower. |
 | `add`, `multiply`, `divide`, `square_root` | The exact result of two `Parts`, or one. A sum is normalized as its larger operand is and a product with an unnormal factor stays unnormal, as the 8087's unnormal arithmetic leaves them. |
-| `remainder` | IEEE 754's remainder of two normalized, nonzero `Parts`: exact, at most half the divisor. |
+| `fused` | `a × b + c` of three normalized, nonzero `Parts`, exact enough to round correctly at any precision; `None` where they cancel to exactly zero. |
+| `remainder` | IEEE 754's remainder of two normalized, nonzero `Parts`: exact, at most half the divisor, with the low 64 bits of the quotient it was taken with, as `remquo` needs them. |
 | `Exact::rounded` | The significand rounded to a `Rounding`: a `Mode` and the bits kept, 24, 53 or 64 for the three formats. It answers whether rounding carried and whether the result is inexact. |
 | `to_integer` | A value rounded to an integer in a `Mode`, `None` past `u64`. |
 
@@ -60,17 +61,26 @@ rounded unless the true value lies within 2^-120 of a rounding boundary.
 
 | Function | Domain | Exact where |
 |---|---|---|
-| `sin`, `cos`, `tan` | finite, below 2^63 in magnitude: reduced by the nearest multiple of π/2 through 256 bits of 2/π, however close | — |
+| `sin`, `cos`, `tan` | finite, below 2^1024 in magnitude, binary64's whole range: reduced by the nearest multiple of π/2 through a 384-bit window of 1280 bits of 2/π, however close | — |
 | `atan2`, `asin`, `acos` | finite; at most one in magnitude for the arcs | — |
 | `exp`, `exp2m1` | finite: past every exponent's reach, the power of two there, or 2^x − 1 just above −1 | — |
 | `ln`, `log10` | positive, finite | `log10` of 10^1 to 10^27 |
 | `y_log2_x`, `y_log2_1p_x` | `x > 0`; `x > −1` | — |
-| `pow` | positive finite `x` other than one, finite nonzero `y` | an integer power that fits 64 bits |
+| `pow` | positive finite `x` other than one, finite nonzero `y` | wherever the power is: every `y` is m/2^k, so where x's 2^k-th root is exact and its mth power fits 64 bits |
 | `quarter_pis` | π × n/4 | — |
 
 Beside its leading term — sin, tan, atan, asin and cos of an argument below
 2^-58, and e^x of one below 2^-120 — a value is answered on the side it lies,
 so a directed rounding falls the right way.
+
+`Ieee` gives IEEE 754's recommended functions (clause 9.2) on the interchange
+formats over them: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `log`,
+`log10`, `exp` and `pow`. Each value is rounded once in the chosen mode; the
+special cases and their exceptions are the standard's: an infinity's sine
+and a logarithm of a negative number invalid, a zero's logarithm a division
+by zero, `atan2` of signed zeros and infinities a multiple of π/4, `pow` one
+wherever `y` is a zero or `x` is one, a quiet NaN among them. Inexact is
+raised only where the result is.
 
 ## Decimal conversion
 
@@ -159,10 +169,15 @@ A unit keeps only the rules that are its own.
   bracketing their radicands, and the root itself to the digit-by-digit
   method's.
 - **The elementary functions.** Points worked to 160 digits, the exact
-  powers of ten and integer powers, square roots and the nearest integer at
-  every place, tiny arguments rounding to their side, exponentials past every
-  exponent, and a sweep across each function's range held to a double-double
-  reference.
+  powers of ten and integer powers and the powers of exact roots, square
+  roots and the nearest integer at every place, tiny arguments rounding to
+  their side, exponentials past every exponent, and a sweep across each
+  function's range held to a double-double reference. Operands out to
+  binary64's largest, the one closest to a multiple of π/2 among them, are
+  held to an exact reduction and series worked to 2600 bits.
+- **IEEE 754's functions.** Each special case and the exceptions it raises,
+  exact powers raising nothing, overflow and underflow, single precision,
+  the default NaN, and each rounding mode taking the neighbour on its side.
 - **Decimal.**
   - 3 000 random doubles, subnormals among them, are written to a random
     number of digits in every mode. Each is held to the host's exact

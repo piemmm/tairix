@@ -28,6 +28,7 @@ pub(crate) const NO_GREY_SCALED: Error = Error {
 pub(crate) static SPRITE_EXTEND: Builtin = Builtin {
     title: "SpriteExtend",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: Some(Swis {
         chunk: jpeg::CHUNK,

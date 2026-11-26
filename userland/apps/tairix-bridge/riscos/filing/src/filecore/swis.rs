@@ -146,7 +146,7 @@ fn create(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
             bits,
         },
         private_word: regs.r[2],
-        floppies: regs.r[3].to_le_bytes()[0].min(FIRST_HARD_DISC),
+        floppies: regs.byte(3).min(FIRST_HARD_DISC),
         hard_discs: regs.r[3].to_le_bytes()[1].min(DRIVES - FIRST_HARD_DISC),
         default_drive: regs.r[3].to_le_bytes()[2] & (DRIVES - 1),
     };

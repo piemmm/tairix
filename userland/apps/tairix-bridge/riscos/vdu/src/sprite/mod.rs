@@ -26,7 +26,7 @@ pub(crate) mod utils;
 mod verify;
 
 use tairix_riscos_kernel::error::Error;
-use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
+use tairix_riscos_kernel::os::{len32, quietly, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::sprite_op;
 
 use crate::canvas::Block;
@@ -206,13 +206,11 @@ pub(crate) fn vdu_23_27(os: &mut Os<'_>, action: u8, number: u8) -> Result<(), F
     spelt[..name.as_bytes().len()].copy_from_slice(name.as_bytes());
     let at = os.scratch_text(&spelt)?;
     let mut regs = Regs::new([operation, 0, at, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-    match os.perform(
+    let operated = os.perform(
         tairix_riscos_kernel::swi::X | tairix_riscos_kernel::swi::os::SPRITE_OP,
         &mut regs,
-    ) {
-        Ok(()) | Err(Fail::Error(_)) => Ok(()),
-        Err(unwind) => Err(unwind),
-    }
+    );
+    quietly(operated).map_err(Fail::from)
 }
 
 /// `PLOT` &E8 to &EF: the system area's selected sprite at the graphics
@@ -220,10 +218,7 @@ pub(crate) fn vdu_23_27(os: &mut Os<'_>, action: u8, number: u8) -> Result<(), F
 /// plots it, in the background colour or inverting what is there. Nothing
 /// where none is selected. An error goes nowhere, as `VDU 23,27`'s does.
 pub(crate) fn plot_selected(os: &mut Os<'_>, ink: Ink) -> Result<(), Fail> {
-    match plot_selected_sprite(os, ink) {
-        Ok(()) | Err(Fail::Error(_)) => Ok(()),
-        Err(unwind) => Err(unwind),
-    }
+    quietly(plot_selected_sprite(os, ink)).map_err(Fail::from)
 }
 
 fn plot_selected_sprite(os: &mut Os<'_>, ink: Ink) -> Result<(), Fail> {
@@ -276,7 +271,7 @@ pub(crate) fn kernel(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         // R1 is the character, not an area.
         reason::PAINT_CHARACTER => {
             let at = paint::at(os, regs.r[3], regs.r[4])?;
-            paint::paint_character(os, regs.r[1].to_le_bytes()[0], at, regs.r[6])
+            paint::paint_character(os, regs.byte(1), at, regs.r[6])
         }
         // The reasons naming a sprite in R2, which the kernel looks up before
         // it knows whether it has the reason.

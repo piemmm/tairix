@@ -9,10 +9,12 @@
 //! timed calls then run once each, never a burst.
 
 use tairix_collections::OrderedMap;
+use tairix_fsmeta::preset::acorn::CENTIS_LIMIT;
 use tairix_riscos_arm::psr;
 use tairix_riscos_arm::reg::Reg;
 
 use crate::error::Error;
+use crate::events::number::INTERVAL as INTERVAL_EVENT;
 use crate::input::Continuation;
 use crate::memory::layout::HIGH_ZERO_PAGE;
 use crate::memory::Bits;
@@ -20,19 +22,15 @@ use crate::os::{Entry, Fail, Os, Regs, Target, Unwind, Wait};
 use crate::vectors;
 use crate::zeropage;
 
-/// The interval timer's width: five bytes.
-pub(crate) const FIVE_BYTES: u64 = 1 << 40;
-/// Centiseconds in a day, and from 1900, five-byte time's base, to 1970,
-/// Unix time's.
+/// The interval timer's width: five bytes, as every RISC OS time's.
+pub(crate) const FIVE_BYTES: u64 = CENTIS_LIMIT;
+/// Centiseconds in a day.
 pub(crate) const CENTISECONDS_PER_DAY: u64 = 8_640_000;
-pub(crate) const UNIX_EPOCH: u64 = 25_567 * CENTISECONDS_PER_DAY;
 /// The delay a timed call is refused from, as genuine RISC OS 5 refuses it.
 const LONGEST_DELAY: u32 = 0xFFFF_FC00;
 /// A timed call's system heap node: room for its code, its R12, its period,
 /// when it is due and a link.
 const NODE: u32 = 20;
-/// The event the interval timer raises when it passes zero.
-const INTERVAL_EVENT: u32 = 5;
 /// The most centiseconds of `TickerV` a late interrupt makes up: a host
 /// that fell behind by up to a second still delivers each one, and one held
 /// up longer drops the rest rather than replaying them in a burst.

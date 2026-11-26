@@ -401,7 +401,7 @@ pub(crate) fn lookup_font(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> 
 /// where the identifier has none.
 pub(crate) fn find_field(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let text = read_identifier(os, regs.r[1])?;
-    let wanted = regs.r[2].to_le_bytes()[0];
+    let wanted = regs.byte(2);
     match identifier::find(&text, wanted) {
         Some(field) if u32::from(wanted) == regs.r[2] => {
             regs.r[1] = regs.r[1].wrapping_add(len32(field.at));

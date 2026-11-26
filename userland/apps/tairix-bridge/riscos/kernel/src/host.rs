@@ -5,14 +5,13 @@
 
 use alloc::vec::Vec;
 
-use tairix_riscos_arm::a32;
-use tairix_riscos_arm::cond::Condition;
 use tairix_riscos_arm::cpu::Exception;
-use tairix_riscos_arm::instruction::{CallOp, Index, Instruction, Offset, Op, TransferOp};
+use tairix_riscos_arm::instruction::{CallOp, Op};
 use tairix_riscos_arm::reg::Reg;
 
 use crate::env::HANDLERS;
 use crate::memory::{Memory, MemoryError};
+use crate::module::{instruction, jump_through};
 use crate::os::{Os, Unwind};
 use crate::vectors::COUNT as VECTORS;
 use crate::zeropage;
@@ -99,6 +98,13 @@ const BUILTIN_BASE: u32 = VDU_BASE + crate::output::VDU_ROUTINES;
 
 /// The FIQ vector's slot in [`EXCEPTIONS`].
 pub(crate) const FIQ: u32 = 7;
+/// The undefined instruction vector's slot in [`EXCEPTIONS`].
+pub(crate) const UNDEFINED: u32 = 1;
+const _: () = assert!(matches!(EXCEPTIONS[FIQ as usize], Some(Exception::Fiq)));
+const _: () = assert!(matches!(
+    EXCEPTIONS[UNDEFINED as usize],
+    Some(Exception::Undefined)
+));
 
 impl Routine {
     /// The routine a host page's `UDF #number` is: the kernel installs no
@@ -150,8 +156,20 @@ impl Routine {
 
 impl Os<'_> {
     /// Performs a kernel routine the processor reached on the host pages,
-    /// entered as its address is.
+    /// entered as its address is: acting for code in the processor's mode,
+    /// its aborts reported at its own address.
     pub(crate) fn routine(&mut self, routine: Routine) -> Result<(), Unwind> {
+        let cpu = self.world.processor.cpu();
+        let (user, at) = (!cpu.mode().privileged(), cpu.pc().wrapping_sub(4));
+        let user_outer = core::mem::replace(&mut self.world.user_caller, user);
+        let at_outer = core::mem::replace(&mut self.world.swi_at, at);
+        let result = self.routine_entered(routine);
+        self.world.user_caller = user_outer;
+        self.world.swi_at = at_outer;
+        result
+    }
+
+    fn routine_entered(&mut self, routine: Routine) -> Result<(), Unwind> {
         match routine {
             Routine::Return | Routine::PassOn | Routine::Claimed => {
                 self.undefined_here();
@@ -187,64 +205,40 @@ impl Os<'_> {
     }
 }
 
-/// A host page's `UDF #number`, from the processor's encoder.
+/// A host page's `UDF #number`.
 fn udf(number: u32) -> Result<u32, MemoryError> {
-    a32::encode(&Instruction {
-        cond: Condition::Al,
-        op: Op::Call {
-            op: CallOp::Udf,
-            value: number,
-        },
+    instruction(Op::Call {
+        op: CallOp::Udf,
+        value: number,
     })
-    .map_err(|_| MemoryError::HostFull)
-}
-
-/// `LDR PC, [PC, #offset]`, the offset added when `up` and taken away when
-/// not.
-fn load_pc(up: bool, offset: u16) -> Result<u32, MemoryError> {
-    a32::encode(&Instruction {
-        cond: Condition::Al,
-        op: Op::Transfer {
-            op: TransferOp::Ldr,
-            rt: Reg::PC,
-            rn: Reg::PC,
-            up,
-            offset: Offset::Immediate(offset),
-            index: Index::Offset,
-        },
-    })
-    .map_err(|_| MemoryError::HostFull)
 }
 
 /// A code variable's code, which works wherever it is copied to: its write
 /// entry and then its read, each `LDR PC, [PC, #0]` loading the address it
 /// jumps to from the words after them.
 pub(crate) fn variable_code(write: u32, read: u32) -> Result<[u32; 4], MemoryError> {
-    let entry = load_pc(true, 0)?;
+    let entry = jump_through(8)?;
     Ok([entry, entry, write, read])
 }
 
 /// `LDR PC, [PC, #-4]`: a jump to the address in the word after it, which
 /// works wherever the two words are copied to.
 pub(crate) fn jump() -> Result<u32, MemoryError> {
-    load_pc(false, 4)
+    jump_through(4)
 }
 
-/// The processor vector at `slot` in zero page, loading its entry from the
-/// processor vector table.
-fn vector(slot: u32) -> Result<u32, MemoryError> {
-    let table = zeropage::PROCESSOR_VECTOR_TABLE;
-    let offset = table + 4 * slot - (zeropage::VECTORS + 4 * slot + 8);
-    load_pc(
-        true,
-        u16::try_from(offset).map_err(|_| MemoryError::HostFull)?,
-    )
+/// A processor vector in zero page: it loads its entry from the processor
+/// vector table's word at the same slot, which lies the same way on from
+/// every vector.
+fn vector() -> Result<u32, MemoryError> {
+    let ahead = zeropage::PROCESSOR_VECTOR_TABLE - zeropage::VECTORS;
+    jump_through(i32::try_from(ahead).map_err(|_| MemoryError::HostFull)?)
 }
 
 /// Puts the kernel's processor vector back at `slot`, as when FIQ returns
 /// to the kernel and the vector its owner wrote is no longer wanted.
 pub(crate) fn restore_vector(memory: &mut Memory, slot: u32) -> Result<(), MemoryError> {
-    let word = vector(slot)?;
+    let word = vector()?;
     let zero = memory.zero_page()[0];
     let page = memory.frame_words_mut(zero).ok_or(MemoryError::NoMemory)?;
     page[slot as usize] = word;
@@ -267,9 +261,7 @@ pub(crate) fn install(memory: &mut Memory, builtin_entries: u32) -> Result<u32, 
     let zero = memory.zero_page()[0];
     let table = zeropage::PROCESSOR_VECTOR_TABLE;
     let mut words = [0; EXCEPTIONS.len() * 2];
-    for (slot, word) in (0..).zip(words.iter_mut().take(EXCEPTIONS.len())) {
-        *word = vector(slot)?;
-    }
+    words[..EXCEPTIONS.len()].fill(vector()?);
     for (slot, word) in (0..).zip(words.iter_mut().skip(EXCEPTIONS.len())) {
         *word = base + 4 * Routine::Exception(slot).number();
     }

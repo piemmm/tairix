@@ -623,8 +623,8 @@ mod tests {
     #[test]
     fn a_mount_takes_a_util_linux_type_list() {
         use VolumeFsType::{
-            Adfs, Affs, ArcFs, Bzip2, Dfs, Ext4, Fat32, Gzip, Iso9660, Rar, Spark, Tar, Udf, Zip,
-            ARXFS,
+            Adfs, Affs, ArcFs, Bzip2, Dfs, Ext4, Fat32, Gzip, Iso9660, Rar, Spark, Squash, Tar,
+            Udf, Zip, ARXFS,
         };
         assert_eq!(expects("udf,iso9660"), VolumeFsTypes::of([Udf, Iso9660]));
         // Every type a disk image or an archive holds but UDF.
@@ -632,10 +632,11 @@ mod tests {
             expects("noudf"),
             VolumeFsTypes::of([
                 ARXFS, Ext4, Fat32, Iso9660, Adfs, Affs, Zip, Tar, Gzip, Bzip2, Spark, ArcFs, Rar,
-                Dfs,
+                Dfs, Squash,
             ])
         );
         assert_eq!(expects("dfs"), only(Dfs));
+        assert_eq!(expects("squash"), only(Squash));
         assert_eq!(
             expects("tar.gz,gzip"),
             only(Gzip),

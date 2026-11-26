@@ -4,6 +4,7 @@
 //! reports movement rather than a place, and read through `MouseV` relative
 //! to the graphics origin of the moment, as the PRM's pointer chapter has it.
 
+use crate::events::number::MOUSE as MOUSE_EVENT;
 use crate::os::{Fail, Os, Regs, Unwind};
 
 /// `OS_Word` 21's reasons the mouse answers: its bounds, its multipliers, and
@@ -43,8 +44,6 @@ impl Packet {
         }
     }
 }
-/// The mouse event.
-const MOUSE_EVENT: u32 = 10;
 /// A box no position can leave: the most a packet's 16-bit coordinates hold.
 const UNBOUNDED: Bounds = Bounds {
     left: i16::MIN as i32,
@@ -147,7 +146,11 @@ impl Os<'_> {
             buttons,
             time,
         };
-        self.world.input.buffer_mouse_packet(packet.to_bytes());
+        // A packet a claimant of InsV refuses is lost, as a full buffer
+        // loses one.
+        if let Err(Fail::Unwind(unwind)) = self.buffer_mouse_packet(packet.to_bytes()) {
+            return Err(unwind);
+        }
         let (ox, oy) = self.mouse_origin();
         let mut event = Regs::new([
             MOUSE_EVENT,
@@ -181,9 +184,8 @@ impl Os<'_> {
     /// `MouseV`'s default: the next buffered button change, or where the
     /// mouse is now, either kept within the box as it is now: R0 and R1 its
     /// position from the graphics origin, R2 the buttons, R3 the time.
-    #[expect(clippy::unnecessary_wraps, reason = "a vector default's signature")]
     pub(crate) fn default_mouse(&mut self, regs: &mut Regs) -> Result<(), Fail> {
-        let (x, y, buttons, time) = if let Some(packet) = self.world.input.take_mouse_packet() {
+        let (x, y, buttons, time) = if let Some(packet) = self.take_mouse_packet()? {
             (packet.x, packet.y, packet.buttons, packet.time)
         } else {
             let mouse = &self.world.input.mouse;

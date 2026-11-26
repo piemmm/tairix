@@ -29,6 +29,7 @@ const CURRENT: &[u8] = b"@";
 pub static OBEY: Builtin = Builtin {
     title: "Obey",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: None,
     services: None,

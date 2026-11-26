@@ -76,6 +76,48 @@ pub mod pdriver {
     pub const DECLARE_FONT: u32 = 0x8_0155;
 }
 
+/// The Territory Manager's SWIs other modules call.
+pub mod territory {
+    use super::chunk::TERRITORY;
+
+    /// `Territory_Number`.
+    pub const NUMBER: u32 = TERRITORY;
+    /// `Territory_NumberToName`.
+    pub const NUMBER_TO_NAME: u32 = TERRITORY + 0x03;
+    /// `Territory_Exists`.
+    pub const EXISTS: u32 = TERRITORY + 0x04;
+    /// `Territory_ReadCurrentTimeZone`.
+    pub const READ_CURRENT_TIME_ZONE: u32 = TERRITORY + 0x08;
+    /// `Territory_ConvertDateAndTime`.
+    pub const CONVERT_DATE_AND_TIME: u32 = TERRITORY + 0x0B;
+    /// `Territory_ConvertStandardDateAndTime`.
+    pub const CONVERT_STANDARD_DATE_AND_TIME: u32 = TERRITORY + 0x0C;
+    /// `Territory_ConvertStandardDate`.
+    pub const CONVERT_STANDARD_DATE: u32 = TERRITORY + 0x0D;
+    /// `Territory_ConvertStandardTime`.
+    pub const CONVERT_STANDARD_TIME: u32 = TERRITORY + 0x0E;
+    /// `Territory_ConvertTimeToOrdinals`.
+    pub const TIME_TO_ORDINALS: u32 = TERRITORY + 0x0F;
+    /// `Territory_ConvertTimeStringToOrdinals`.
+    pub const STRING_TO_ORDINALS: u32 = TERRITORY + 0x10;
+    /// `Territory_ConvertOrdinalsToTime`.
+    pub const ORDINALS_TO_TIME: u32 = TERRITORY + 0x11;
+    /// `Territory_CharacterPropertyTable`.
+    pub const CHARACTER_PROPERTY_TABLE: u32 = TERRITORY + 0x16;
+    /// `Territory_LowerCaseTable`.
+    pub const LOWER_CASE_TABLE: u32 = TERRITORY + 0x17;
+    /// `Territory_UpperCaseTable`.
+    pub const UPPER_CASE_TABLE: u32 = TERRITORY + 0x18;
+    /// `Territory_Collate`.
+    pub const COLLATE: u32 = TERRITORY + 0x1D;
+    /// `Territory_ReadSymbols`.
+    pub const READ_SYMBOLS: u32 = TERRITORY + 0x1E;
+    /// `Territory_NameToNumber`.
+    pub const NAME_TO_NUMBER: u32 = TERRITORY + 0x20;
+    /// `Territory_TransformString`.
+    pub const TRANSFORM_STRING: u32 = TERRITORY + 0x21;
+}
+
 /// The SWI chunks of the modules the kernel builds in.
 pub mod chunk {
     /// `MessageTrans`.
@@ -106,6 +148,138 @@ pub mod chunk {
     pub const SCREEN_MODES: u32 = 0x4_87C0;
     /// SpriteExtend's JPEG SWIs.
     pub const SPRITE_EXTEND: u32 = 0x4_9980;
+    /// `SharedCLibrary`'s.
+    pub const SHARED_C_LIBRARY: u32 = 0x8_0680;
+    /// `FPEmulator`.
+    pub const FP_EMULATOR: u32 = 0x4_0480;
+    /// `VFPSupport`.
+    pub const VFP_SUPPORT: u32 = 0x5_8EC0;
+    /// `Squash`.
+    pub const SQUASH: u32 = 0x4_2700;
+    /// `MimeMap`.
+    pub const MIME_MAP: u32 = 0x5_0B00;
+    /// The buffer manager's.
+    pub const BUFFER: u32 = 0x4_2940;
+    /// `DeviceFS`.
+    pub const DEVICE_FS: u32 = 0x4_2740;
+}
+
+/// The buffer manager's SWIs.
+pub mod buffer {
+    use super::chunk::BUFFER;
+
+    /// `Buffer_Create`.
+    pub const CREATE: u32 = BUFFER;
+    /// `Buffer_Remove`.
+    pub const REMOVE: u32 = BUFFER + 0x01;
+    /// `Buffer_Register`.
+    pub const REGISTER: u32 = BUFFER + 0x02;
+    /// `Buffer_Deregister`.
+    pub const DEREGISTER: u32 = BUFFER + 0x03;
+    /// `Buffer_ModifyFlags`.
+    pub const MODIFY_FLAGS: u32 = BUFFER + 0x04;
+    /// `Buffer_LinkDevice`.
+    pub const LINK_DEVICE: u32 = BUFFER + 0x05;
+    /// `Buffer_UnlinkDevice`.
+    pub const UNLINK_DEVICE: u32 = BUFFER + 0x06;
+    /// `Buffer_GetInfo`.
+    pub const GET_INFO: u32 = BUFFER + 0x07;
+    /// `Buffer_Threshold`.
+    pub const THRESHOLD: u32 = BUFFER + 0x08;
+    /// `Buffer_InternalInfo`.
+    pub const INTERNAL_INFO: u32 = BUFFER + 0x09;
+}
+
+/// DeviceFS's SWIs.
+pub mod device_fs {
+    use super::chunk::DEVICE_FS;
+
+    /// `DeviceFS_Register`.
+    pub const REGISTER: u32 = DEVICE_FS;
+    /// `DeviceFS_Deregister`.
+    pub const DEREGISTER: u32 = DEVICE_FS + 0x01;
+    /// `DeviceFS_RegisterObjects`.
+    pub const REGISTER_OBJECTS: u32 = DEVICE_FS + 0x02;
+    /// `DeviceFS_DeregisterObjects`.
+    pub const DEREGISTER_OBJECTS: u32 = DEVICE_FS + 0x03;
+    /// `DeviceFS_CallDevice`.
+    pub const CALL_DEVICE: u32 = DEVICE_FS + 0x04;
+    /// `DeviceFS_Threshold`.
+    pub const THRESHOLD: u32 = DEVICE_FS + 0x05;
+    /// `DeviceFS_ReceivedCharacter`.
+    pub const RECEIVED_CHARACTER: u32 = DEVICE_FS + 0x06;
+    /// `DeviceFS_TransmitCharacter`.
+    pub const TRANSMIT_CHARACTER: u32 = DEVICE_FS + 0x07;
+}
+
+/// MimeMap's SWI.
+pub mod mime_map {
+    /// `MimeMap_Translate`.
+    pub const TRANSLATE: u32 = super::chunk::MIME_MAP;
+}
+
+/// Squash's SWIs.
+pub mod squash {
+    use super::chunk::SQUASH;
+
+    /// `Squash_Compress`.
+    pub const COMPRESS: u32 = SQUASH;
+    /// `Squash_Decompress`.
+    pub const DECOMPRESS: u32 = SQUASH + 0x01;
+}
+
+/// VFPSupport's SWIs.
+pub mod vfp_support {
+    use super::chunk::VFP_SUPPORT;
+
+    /// `VFPSupport_CheckContext`.
+    pub const CHECK_CONTEXT: u32 = VFP_SUPPORT;
+    /// `VFPSupport_CreateContext`.
+    pub const CREATE_CONTEXT: u32 = VFP_SUPPORT + 0x01;
+    /// `VFPSupport_DestroyContext`.
+    pub const DESTROY_CONTEXT: u32 = VFP_SUPPORT + 0x02;
+    /// `VFPSupport_ChangeContext`.
+    pub const CHANGE_CONTEXT: u32 = VFP_SUPPORT + 0x03;
+    /// `VFPSupport_ExamineContext`.
+    pub const EXAMINE_CONTEXT: u32 = VFP_SUPPORT + 0x04;
+    /// `VFPSupport_FastAPI`.
+    pub const FAST_API: u32 = VFP_SUPPORT + 0x05;
+    /// `VFPSupport_ActiveContext`.
+    pub const ACTIVE_CONTEXT: u32 = VFP_SUPPORT + 0x06;
+    /// `VFPSupport_Version`.
+    pub const VERSION: u32 = VFP_SUPPORT + 0x07;
+    /// `VFPSupport_Features`.
+    pub const FEATURES: u32 = VFP_SUPPORT + 0x08;
+    /// `VFPSupport_ExceptionDump`.
+    pub const EXCEPTION_DUMP: u32 = VFP_SUPPORT + 0x09;
+    /// `VFPSupport_ElementaryFunctions`.
+    pub const ELEMENTARY_FUNCTIONS: u32 = VFP_SUPPORT + 0x0A;
+}
+
+/// FPEmulator's SWIs.
+pub mod fp_emulator {
+    use super::chunk::FP_EMULATOR;
+
+    /// `FPEmulator_Version`.
+    pub const VERSION: u32 = FP_EMULATOR;
+    /// `FPEmulator_DeactivateContext`.
+    pub const DEACTIVATE_CONTEXT: u32 = FP_EMULATOR + 0x01;
+    /// `FPEmulator_ActivateContext`.
+    pub const ACTIVATE_CONTEXT: u32 = FP_EMULATOR + 0x02;
+    /// `FPEmulator_ChangeContext`.
+    pub const CHANGE_CONTEXT: u32 = FP_EMULATOR + 0x03;
+    /// `FPEmulator_ContextLength`.
+    pub const CONTEXT_LENGTH: u32 = FP_EMULATOR + 0x04;
+    /// `FPEmulator_InitContext`.
+    pub const INIT_CONTEXT: u32 = FP_EMULATOR + 0x05;
+    /// `FPEmulator_ExceptionDump`.
+    pub const EXCEPTION_DUMP: u32 = FP_EMULATOR + 0x06;
+    /// `FPEmulator_Abort`.
+    pub const ABORT: u32 = FP_EMULATOR + 0x07;
+    /// `FPEmulator_LoadContext`.
+    pub const LOAD_CONTEXT: u32 = FP_EMULATOR + 0x08;
+    /// `FPEmulator_SaveContext`.
+    pub const SAVE_CONTEXT: u32 = FP_EMULATOR + 0x09;
 }
 
 /// The Font Manager's SWIs other modules call, the flags and control codes
@@ -430,6 +604,25 @@ pub mod os {
     pub const READ_POINT: u32 = 0x32;
     /// `OS_UpCall`.
     pub const UPCALL: u32 = 0x33;
+
+    /// `OS_UpCall`'s reasons, R0.
+    pub mod upcall {
+        /// A task would sleep until the poll word R1 is not nought; R0 is
+        /// nought on return where a task switcher took it.
+        pub const SLEEP: u32 = 6;
+        /// The poll word R1 is no longer slept on: its stream closed.
+        pub const SLEEP_NO_MORE: u32 = 7;
+        /// The buffer R1's free space has fallen below its threshold.
+        pub const BUFFER_FILLING: u32 = 8;
+        /// The buffer R1's free space has risen to its threshold again.
+        pub const BUFFER_EMPTYING: u32 = 9;
+        /// A device stream was opened.
+        pub const STREAM_CREATED: u32 = 10;
+        /// A device stream was closed.
+        pub const STREAM_CLOSED: u32 = 11;
+        /// A new application is about to start.
+        pub const NEW_APPLICATION: u32 = 256;
+    }
     /// `OS_CallAVector`.
     pub const CALL_A_VECTOR: u32 = 0x34;
     /// `OS_ReadModeVariable`.
@@ -571,13 +764,19 @@ pub mod os {
 
     /// `OS_ChangeEnvironment`'s handlers.
     pub mod environment {
-        pub use crate::env::{ERROR, ESCAPE, EXIT, UPCALL};
+        pub use crate::env::{
+            ADDRESS_EXCEPTION, CALLBACK, CURRENT_ACTIVE_OBJECT, DATA_ABORT, ERROR, ESCAPE, EVENT,
+            EXIT, MEMORY_LIMIT, PREFETCH_ABORT, UNDEFINED, UPCALL,
+        };
     }
 
     /// `OS_Exit`'s word beside a return code.
     pub mod exit {
         pub use crate::env::ABEX;
     }
+
+    /// The bytes of the command line `OS_GetEnv` points at.
+    pub use crate::env::COMMAND_LINE;
 
     /// `OS_ReadVarVal`'s and `OS_SetVarVal`'s types, in R4.
     pub mod var_type {
@@ -674,6 +873,10 @@ pub mod os {
 
         /// The stream status word [`STATUS`] reads.
         pub mod status {
+            /// Interactive: prompting for its input is fitting.
+            pub const INTERACTIVE: u32 = 0x08;
+            /// Unbuffered, its filing system's `FSEntry_GBPB` serving it.
+            pub const DIRECT_GBPB: u32 = 0x10;
             /// Opened to be read.
             pub const READ: u32 = 0x40;
             /// Opened to be written.
@@ -695,6 +898,8 @@ pub mod os {
         pub const WRITE: u32 = 2;
         /// Bytes read from a file from the offset given.
         pub const READ_AT: u32 = 3;
+        /// Bytes read from a file at its pointer.
+        pub const READ: u32 = 4;
         /// The names in a directory that match a pattern.
         pub const READ_NAMES: u32 = 9;
         /// The objects in a directory that match a pattern, each with its
@@ -906,13 +1111,15 @@ impl Os<'_> {
     }
 
     /// Performs SWI `number` where RISC OS ignores its error: whether it
-    /// succeeded. Only an unwind comes back.
-    pub(crate) fn perform_quietly(&mut self, number: u32, regs: &mut Regs) -> Result<bool, Unwind> {
-        match self.perform(number, regs) {
-            Ok(()) => Ok(true),
-            Err(Fail::Error(_)) => Ok(false),
-            Err(Fail::Unwind(unwind)) => Err(unwind),
-        }
+    /// succeeded.
+    ///
+    /// # Errors
+    ///
+    /// Only an unwind.
+    pub fn perform_quietly(&mut self, number: u32, regs: &mut Regs) -> Result<bool, Unwind> {
+        let outcome = self.perform(number, regs);
+        let succeeded = outcome.is_ok();
+        crate::os::quietly(outcome).map(|()| succeeded)
     }
 
     /// Hands a SWI's results to its caller: R0 to R9 and the flags it set,
@@ -961,15 +1168,19 @@ impl Os<'_> {
     }
 
     /// Performs SWI `number`, any `OS_CallASWI` already resolved, however it
-    /// was issued. An error block that cannot be one is replaced, but for
-    /// `XOS_GenerateError`'s, which is its caller's own to give.
+    /// was issued, with a privileged mode's rights as a SWI is. An error
+    /// block that cannot be one is replaced, but for `XOS_GenerateError`'s,
+    /// which is its caller's own to give.
     fn perform_resolved(&mut self, number: u32, regs: &mut Regs) -> Result<(), Fail> {
-        match self.run_handler(number, regs) {
+        let user_outer = core::mem::replace(&mut self.world.user_caller, false);
+        let result = match self.run_handler(number, regs) {
             Err(Fail::Error(block)) if number != X | os::GENERATE_ERROR => {
                 Err(self.checked_error(number, block))
             }
             result => result,
-        }
+        };
+        self.world.user_caller = user_outer;
+        result
     }
 
     /// SWI `number`'s handler run.

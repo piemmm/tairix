@@ -321,19 +321,35 @@ fn rom_modules_list_the_built_ins_and_nothing_past_them() {
     assert_eq!(string(&mut s, first.r[3]), b"UtilityModule");
     assert_eq!(first.r[5], 0x55, "a main ROM module's chunk is not given");
     assert_eq!(first.r[6], 0x0005_3000);
-    let roms = rom_count(&mut s);
-    for place in 1..roms {
-        let rom = module(&mut s, [20, place, u32::MAX, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-            .expect("a built-in");
-        assert_eq!(rom.r[1], place + 1, "each in turn");
+    // Each answer names the next: the main ROM's, then the expansion card's,
+    // numbered from one again, R5 its chunk number.
+    let roms: Vec<super::RomModule> = s.kernel.os().world.modules.roms.clone();
+    let mut next = (first.r[1], first.r[2]);
+    for rom in &roms[1..] {
+        let card = rom.row >= INVENTORY.len();
+        let found = module(
+            &mut s,
+            [20, next.0, next.1, 0, 0, 0x55, 0, 0, 0, 0, 0, 0, 0],
+        )
+        .expect("a built-in");
+        assert_eq!(
+            string(&mut s, found.r[3]),
+            rom.builtin.title.as_bytes(),
+            "each in turn"
+        );
+        assert_eq!(found.r[2], if card { 0 } else { u32::MAX });
+        assert_eq!(found.r[5], if card { found.r[1] } else { 0x55 });
+        next = (found.r[1], found.r[2]);
     }
+    assert_eq!(next.1, 0, "the card's last");
     assert_eq!(
-        module(&mut s, [19, roms, u32::MAX, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        module(&mut s, [19, next.0, next.1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
         Err(0x108)
     );
     assert_eq!(
-        module(&mut s, [19, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
-        Err(0x108)
+        module(&mut s, [19, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        Err(0x108),
+        "no second card"
     );
     let end = module(&mut s, [21, u32::MAX, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).expect("the end");
     assert_eq!(s.read(end.r[2] - 4, 5), [0, 0, 0, 0, b'\r']);
@@ -604,13 +620,13 @@ fn a_header_running_past_the_top_of_memory_aborts_its_reading() {
 #[test]
 fn a_squeezed_module_is_expanded_as_it_starts() {
     let mut s = session();
-    let plain = Guest::new("Squash").with_entries();
+    let plain = Guest::new("Squeezed").with_entries();
     let squeezed = super::squeeze::tests::squeeze(&plain.bytes);
     s.write(IMAGE, &squeezed);
     let size = len32(squeezed.len());
     module(&mut s, [11, IMAGE, size, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).expect("expanded and linked");
     assert_eq!(s.peek(SEEN + 12), 1);
-    let code = named(&mut s, 18, b"Squash").expect("found").r[3];
+    let code = named(&mut s, 18, b"Squeezed").expect("found").r[3];
     assert_eq!(
         s.read(code, plain.bytes.len()),
         plain.bytes,
@@ -1070,18 +1086,25 @@ fn rom_modules_lists_the_built_ins_and_unplug_stops_them() {
     let text = s.output();
     let mut expected =
         alloc::string::String::from("No. Position    Module name             Version Status\n\r");
-    for (n, title) in rom_titles(&mut s).into_iter().enumerate() {
-        let row = super::inventory::INVENTORY
+    // Each section numbered from one: the main ROM, then the card.
+    let mut numbers = [0; 2];
+    for title in rom_titles(&mut s) {
+        let (row, card) = INVENTORY
             .iter()
-            .find(|rom| rom.title == title)
-            .expect("in the inventory");
+            .map(|rom| (rom, false))
+            .chain(super::inventory::EXTENSION.iter().map(|rom| (rom, true)))
+            .find(|(rom, _)| rom.title == title)
+            .expect("listed");
+        let number = &mut numbers[usize::from(card)];
+        *number += 1;
+        let place = if card { "Podule 0" } else { "System ROM" };
         let version = alloc::format!("{}.{:02}", row.version / 100, row.version % 100);
         let _ = write!(
             expected,
-            "{:3} System ROM  {title:<24}{version:<8}Active\n\r",
-            n + 1
+            "{number:3} {place:<12}{title:<24}{version:<8}Active\n\r"
         );
     }
+    assert_eq!(numbers[1], 2, "VFPSupport and CallASWI on the card");
     assert_eq!(alloc::string::String::from_utf8_lossy(&text), expected);
     super::commands::unplug(&mut s.kernel.os(), &mut Regs::default()).expect("listed");
     assert_eq!(s.output(), b"No module is unplugged\n\r");
@@ -1299,6 +1322,30 @@ fn unplugging_a_rom_module_kills_every_copy_of_it() {
         "no copy left"
     );
     line(&mut s, &alloc::format!("RMInsert {title}"));
+}
+
+#[test]
+fn a_built_in_copied_into_the_rma_is_still_that_built_in() {
+    let mut s = session();
+    let line = |s: &mut Session, text: &str| {
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(b'\r');
+        s.write(NAME, &bytes);
+        let (regs, _) = s.user_swi(X | 0x05, [NAME, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        !regs.flag(psr::V)
+    };
+    assert!(line(&mut s, "RMFaster VFPSupport"), "copied");
+    let copy = named(&mut s, 18, b"VFPSupport").expect("held").r[3];
+    let os = s.kernel.os();
+    assert!(
+        !os.world.modules.roms.iter().any(|rom| rom.image == copy),
+        "in the RMA: {copy:#x}"
+    );
+    let builtin = &crate::vfpsupport::VFP_SUPPORT;
+    let undefined = os.routine_of(builtin, 0).expect("its routines");
+    assert!(os.holds_code_of(builtin, undefined), "the copy's own");
+    assert!(line(&mut s, "RMKill VFPSupport"), "killed as itself");
+    assert!(line(&mut s, "RMReInit VFPSupport"), "the ROM's back");
 }
 
 #[test]

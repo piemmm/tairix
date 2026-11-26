@@ -150,16 +150,18 @@ pub(crate) fn open(
     };
     let mut file = resolved.clone();
     file.path.truncate(end);
-    let handle = open::next_handle(os)?;
-    let Some(opened) = call::open_for_update(os, &file, handle)? else {
-        return Err(super::name::named_error(
-            os,
-            tairix_riscos_kernel::filing::NOT_FOUND,
-            &file.path,
-        ));
-    };
-    let buffer = opened.buffer;
-    let handle = open::record(os, file, opened, status::WRITE, handle)?;
+    let (handle, buffer) = open::holding(os, |os, handle| {
+        let Some(opened) = call::open_for_update(os, &file, handle, call::OWN_UPDATE)? else {
+            return Err(super::name::named_error(
+                os,
+                tairix_riscos_kernel::filing::NOT_FOUND,
+                &file.path,
+            ));
+        };
+        let buffer = opened.buffer;
+        let handle = open::record(os, file, opened, status::WRITE, handle)?;
+        Ok((handle, buffer))
+    })?;
     let mut regs = Regs::default();
     regs.r[1] = handle;
     regs.r[2] = buffer;

@@ -315,7 +315,8 @@ mod tests {
             | VolumeFsType::Spark
             | VolumeFsType::ArcFs
             | VolumeFsType::Rar
-            | VolumeFsType::Dfs => None,
+            | VolumeFsType::Dfs
+            | VolumeFsType::Squash => None,
         }
     }
 

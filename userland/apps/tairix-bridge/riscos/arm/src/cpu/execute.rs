@@ -561,6 +561,17 @@ impl Cpu {
             } if cp == 15 && matches!(op, CoRegisterOp::Mcr | CoRegisterOp::Mrc) => {
                 self.system(op == CoRegisterOp::Mcr, [opc1, crn, crm, opc2], rt)
             }
+            Op::FpaDyadic { .. }
+            | Op::FpaMonadic { .. }
+            | Op::FpaRegister { .. }
+            | Op::FpaCompare { .. }
+            | Op::FpaTransfer { .. }
+            | Op::FpaMultiple { .. }
+                if !self.fpa_active =>
+            {
+                self.undefined();
+                Flow::Next
+            }
             Op::FpaDyadic {
                 op,
                 precision,

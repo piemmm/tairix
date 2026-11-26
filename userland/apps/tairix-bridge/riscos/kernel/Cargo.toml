@@ -14,6 +14,10 @@ workspace = true
 [dependencies]
 # The processor whose MMU the address space is built on.
 tairix-riscos-arm = { path = "../arm", version = "=0.0.0" }
+# The IEEE formats and elementary functions VFPSupport's functions compute.
+tairix-softfloat = { path = "../../../../../lib/softfloat", version = "=0.0.0" }
+# Squash's stream, coded a call at a time as the module codes it.
+tairix-compress = { path = "../../../../../lib/compress", version = "=0.0.0" }
 # The area table and the address reservations, whose growth can refuse.
 tairix-collections = { path = "../../../../../lib/collections", version = "=0.0.0" }
 # An area's title, held inline.

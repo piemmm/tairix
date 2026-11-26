@@ -5,15 +5,18 @@
 //! Where the standard leaves a choice to the implementation, [`Policy`] makes
 //! it: when an underflow is tiny, and whether a NaN result carries an
 //! operand's payload. The operations are those ARM's floating-point units
-//! perform; a NaN is chosen from the operands in their argument order.
+//! perform, and the standard's recommended elementary functions; a NaN is
+//! chosen from the operands in their argument order.
 
 use core::cmp::Ordering;
 
 use crate::binary::{Binary, Class, Unpacked};
-use crate::exact::{self, Exact, Parts, POINT};
+use crate::exact::{self, Exact, Parts};
 use crate::extended::INTEGER;
 use crate::flags::Flags;
 use crate::mode::{Mode, Rounding};
+
+mod elementary;
 
 /// When a nonzero result is judged tiny for underflow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -265,13 +268,15 @@ impl Ieee {
                 else {
                     return self.invalid();
                 };
-                let product = Product::of(left.normalized(), right.normalized());
+                let (left, right) = (left.normalized(), right.normalized());
                 match summand {
-                    Unpacked::Finite { parts, .. } => match product.plus(parts.normalized()) {
-                        Some(sum) => self.round(sum),
-                        None => Outcome::exact(format.zero(self.zero_sign())),
-                    },
-                    _ => self.round(product.exact()),
+                    Unpacked::Finite { parts, .. } => {
+                        match exact::fused(left, right, parts.normalized()) {
+                            Some(sum) => self.round(sum),
+                            None => Outcome::exact(format.zero(self.zero_sign())),
+                        }
+                    }
+                    _ => self.round(exact::multiply(left, right)),
                 }
             }
         }
@@ -289,7 +294,7 @@ impl Ieee {
                 Outcome::exact(a)
             }
             (Unpacked::Finite { parts: left, .. }, Unpacked::Finite { parts: right, .. }) => {
-                let rest = exact::remainder(left.normalized(), right.normalized());
+                let rest = exact::remainder(left.normalized(), right.normalized()).rest;
                 if rest.is_zero() {
                     return Outcome::exact(format.zero(left.negative));
                 }
@@ -415,8 +420,10 @@ impl Ieee {
         (Some(order(left).cmp(&order(right))), Flags::NONE)
     }
 
-    /// `x`, exact and nonzero, rounded to the format.
-    pub(crate) fn round(self, x: Exact) -> Outcome {
+    /// `x`, exact and nonzero, rounded to the format, and the exceptions
+    /// that raised.
+    #[must_use]
+    pub fn round(self, x: Exact) -> Outcome {
         let format = self.format;
         let x = x.normalized(true);
         let rounding = Rounding::of(format, self.mode);
@@ -555,189 +562,3 @@ fn order(u: Unpacked) -> (i8, i32, u64) {
         }
     }
 }
-
-/// An exact product of two normalized values: `sig × 2^(exp − 127)`, its
-/// top bit at 127 or 126.
-#[derive(Clone, Copy, Debug)]
-struct Product {
-    negative: bool,
-    exp: i32,
-    sig: u128,
-}
-
-impl Product {
-    fn of(a: Parts, b: Parts) -> Self {
-        Self {
-            negative: a.negative != b.negative,
-            exp: a.exp + b.exp + 1,
-            sig: u128::from(a.sig) * u128::from(b.sig),
-        }
-    }
-
-    /// The product as an exact result.
-    fn exact(self) -> Exact {
-        Exact {
-            negative: self.negative,
-            exp: self.exp - 1,
-            sig: self.sig,
-            sticky: false,
-        }
-        .normalized(false)
-    }
-
-    /// The product plus `c`, normalized, exactly enough to round correctly at
-    /// any precision: `None` where they cancel to exactly zero.
-    fn plus(self, c: Parts) -> Option<Exact> {
-        // Each at the top of a 256-bit window: bit 254 the place whose
-        // exponent each `exp` names, bit 255 free for a carry.
-        let product = Wide::of(self.sig).shl(127);
-        let addend = Wide::of(u128::from(c.sig)).shl(191);
-        let (big, small, exp) = if self.exp >= c.exp {
-            (
-                (self.negative, product),
-                (c.negative, addend, self.exp - c.exp),
-                self.exp,
-            )
-        } else {
-            (
-                (c.negative, addend),
-                (self.negative, product, c.exp - self.exp),
-                c.exp,
-            )
-        };
-        let (small_negative, small_bits, gap) = small;
-        let (small_bits, sticky) = small_bits.shr_sticky(u32::try_from(gap).unwrap_or(u32::MAX));
-        let (big_negative, big_bits) = big;
-        let (negative, bits, sticky) = if big_negative == small_negative {
-            (big_negative, big_bits.add(small_bits), sticky)
-        } else {
-            match big_bits.cmp(small_bits) {
-                Ordering::Greater if sticky => (big_negative, big_bits.sub(small_bits).dec(), true),
-                Ordering::Greater => (big_negative, big_bits.sub(small_bits), false),
-                Ordering::Less => (small_negative, small_bits.sub(big_bits), sticky),
-                Ordering::Equal if sticky => (small_negative, Wide::ZERO, true),
-                Ordering::Equal => return None,
-            }
-        };
-        Some(bits.exact(negative, exp, sticky))
-    }
-}
-
-/// A 256-bit unsigned integer, high half first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Wide {
-    high: u128,
-    low: u128,
-}
-
-impl Wide {
-    const ZERO: Self = Self { high: 0, low: 0 };
-
-    const fn of(low: u128) -> Self {
-        Self { high: 0, low }
-    }
-
-    fn shl(self, n: u32) -> Self {
-        match n {
-            0 => self,
-            1..=127 => Self {
-                high: self.high << n | self.low >> (128 - n),
-                low: self.low << n,
-            },
-            128..=255 => Self {
-                high: self.low << (n - 128),
-                low: 0,
-            },
-            _ => Self::ZERO,
-        }
-    }
-
-    /// Shifted right `n` places, and whether anything nonzero fell off.
-    fn shr_sticky(self, n: u32) -> (Self, bool) {
-        match n {
-            0 => (self, false),
-            1..=127 => (
-                Self {
-                    high: self.high >> n,
-                    low: self.low >> n | self.high << (128 - n),
-                },
-                self.low & ((1 << n) - 1) != 0,
-            ),
-            128 => (Self::of(self.high), self.low != 0),
-            129..=255 => (
-                Self::of(self.high >> (n - 128)),
-                self.low != 0 || self.high & ((1 << (n - 128)) - 1) != 0,
-            ),
-            _ => (Self::ZERO, self != Self::ZERO),
-        }
-    }
-
-    fn add(self, other: Self) -> Self {
-        let (low, carry) = self.low.overflowing_add(other.low);
-        Self {
-            high: self.high + other.high + u128::from(carry),
-            low,
-        }
-    }
-
-    /// `self − other`, `other` no larger.
-    fn sub(self, other: Self) -> Self {
-        let (low, borrow) = self.low.overflowing_sub(other.low);
-        Self {
-            high: self.high - other.high - u128::from(borrow),
-            low,
-        }
-    }
-
-    /// One less, from a nonzero value.
-    fn dec(self) -> Self {
-        self.sub(Self::of(1))
-    }
-
-    fn cmp(self, other: Self) -> Ordering {
-        self.high.cmp(&other.high).then(self.low.cmp(&other.low))
-    }
-
-    fn leading_zeros(self) -> u32 {
-        if self.high == 0 {
-            128 + self.low.leading_zeros()
-        } else {
-            self.high.leading_zeros()
-        }
-    }
-
-    /// The value `self × 2^(exp − 254)`, `sticky` below it, as an exact
-    /// result, normalized.
-    fn exact(self, negative: bool, exp: i32, sticky: bool) -> Exact {
-        if self == Self::ZERO {
-            // Only a sticky remnant: below every bit the window holds.
-            return Exact {
-                negative,
-                exp: exp - 256,
-                sig: 0,
-                sticky,
-            };
-        }
-        // Brought to bit 254, the window's integer place; a carry into 255
-        // is brought down by the exact result's own normalizing.
-        let zeros = self.leading_zeros();
-        let (bits, sticky, exp) = if zeros == 0 {
-            let (bits, lost) = self.shr_sticky(1);
-            (bits, sticky || lost, exp + 1)
-        } else {
-            let up = zeros - 1;
-            (self.shl(up), sticky, exp - i32::try_from(up).unwrap_or(0))
-        };
-        // Bits 254..128 are the result's 127 bits with bit 126 its integer
-        // place.
-        Exact {
-            negative,
-            exp,
-            sig: bits.high,
-            sticky: sticky || bits.low != 0,
-        }
-        .normalized(false)
-    }
-}
-
-const _: () = assert!(POINT == 126);

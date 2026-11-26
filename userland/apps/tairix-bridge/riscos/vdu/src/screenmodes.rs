@@ -143,6 +143,7 @@ const FEATURE_FLAGS: u32 = 1;
 pub static SCREEN_MODES: Builtin = Builtin {
     title: "ScreenModes",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: Some(Swis {
         chunk: CHUNK,

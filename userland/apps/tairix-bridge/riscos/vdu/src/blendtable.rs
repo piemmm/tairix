@@ -49,6 +49,7 @@ pub(crate) const WHOLE: u32 = 256;
 pub(crate) static BLEND_TABLE: Builtin = Builtin {
     title: "BlendTable",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: Some(Swis {
         chunk: chunk::BLEND_TABLE,

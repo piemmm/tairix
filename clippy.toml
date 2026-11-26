@@ -31,8 +31,11 @@ doc-valid-idents = [
     "RISC",
     # RISC OS's string translation, `OS_GSTrans`, named as the PRMs name it.
     "GSTrans",
-    # RISC OS's floating-point emulator module, by its module name.
+    # RISC OS's floating-point modules, by their module names, and the one
+    # that brings OS_CallASWI to older systems.
     "FPEmulator",
+    "VFPSupport",
+    "CallASWI",
     # ARM's floating-point architecture versions, as ARM names them.
     "VFPv2",
     "VFPv4",
@@ -53,6 +56,11 @@ doc-valid-idents = [
     "SpriteUtils",
     "ColourTrans",
     "DrawFile",
+    "MimeMap",
+    "BufferManager",
+    "DeviceFS",
+    "SystemDevices",
+    "PipeFS",
     "AltGr",
     "RiscPC",
     "RPCEmu",

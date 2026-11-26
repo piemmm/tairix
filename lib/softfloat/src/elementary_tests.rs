@@ -391,8 +391,75 @@ fn a_power_of_ten_s_logarithm_and_an_integer_power_that_fits_are_exact() {
         assert!(!got.sticky, "{x:?}^{y:?}");
         assert_eq!(nearest(got), nearest(Exact::of(want)), "{x:?}^{y:?}");
     }
-    // 3^41 needs 65 bits, so it is computed and rounded.
-    assert!(pow(at(1, 3 << 62), at(5, 41 << 58)).sticky);
+    // 3^41 needs 65 bits: exact, and rounded to 64 a tie, to even.
+    let got = pow(at(1, 3 << 62), at(5, 41 << 58));
+    assert!(!got.sticky, "3^41 exact");
+    assert_eq!(
+        nearest(got),
+        nearest(Exact::of(at(64, 18_236_498_188_585_393_202)))
+    );
+}
+
+#[test]
+fn a_root_s_power_that_fits_is_exact_and_a_root_that_is_not_is_rounded() {
+    for (x, y, want) in [
+        (parts(4.0), parts(0.5), parts(2.0)),
+        (parts(9.0), parts(1.5), parts(27.0)),
+        (parts(0.25), parts(-1.5), parts(8.0)),
+        (parts(65536.0), parts(0.0625), parts(2.0)),
+        (parts(1.0 / 64.0), parts(-0.5), parts(8.0)),
+    ] {
+        let got = pow(x, y);
+        assert!(!got.sticky, "{x:?}^{y:?}");
+        assert_eq!(nearest(got), nearest(Exact::of(want)), "{x:?}^{y:?}");
+    }
+    assert!(pow(parts(2.0), parts(0.5)).sticky, "√2 is irrational");
+    assert!(
+        pow(parts(8.0), parts(0.5)).sticky,
+        "an odd power of two has no square root"
+    );
+    assert!(
+        pow(parts(12.0), parts(0.5)).sticky,
+        "nor has twelve's odd part"
+    );
+}
+
+/// sin, cos and tan at operands past 2^63, from an exact reduction and series
+/// to 2600 bits, correctly rounded to 64: every word of the reduction's
+/// window comes into play, and the last operand lies within 2^-61 of a
+/// multiple of π/2.
+#[test]
+fn far_operands_reduce_by_their_nearest_multiple_with_nothing_lost() {
+    for (x, sin_want, cos_want, tan_want) in [
+        (
+            1e22,
+            (true, -1, 0xDA29_D5BB_5F9C_B87D),
+            (false, -1, 0x85F1_6778_0E47_9C9A),
+            (true, 0, 0xD07B_CE0D_B592_BBA5),
+        ),
+        (
+            2f64.powi(1023),
+            (false, -1, 0x9029_2465_EDBA_FF2D),
+            (true, -1, 0xD38C_F936_1195_F50B),
+            (true, -1, 0xAE73_5A60_6815_1A9E),
+        ),
+        (
+            f64::MAX,
+            (false, -8, 0xA297_E4C5_9A74_B5B1),
+            (true, -1, 0xFFFF_3176_7D5B_A9E0),
+            (true, -8, 0xA298_67F3_94A4_1DC7),
+        ),
+        (
+            5.319_372_648_326_541e255,
+            (false, 0, 0x8000_0000_0000_0000),
+            (true, -61, 0x8A57_3973_5D11_77A3),
+            (true, 60, 0xECDD_4D3C_BAB1_AD1D),
+        ),
+    ] {
+        assert_eq!(nearest(sin(parts(x))), sin_want, "sin {x:e}");
+        assert_eq!(nearest(cos(parts(x))), cos_want, "cos {x:e}");
+        assert_eq!(nearest(tan(parts(x))), tan_want, "tan {x:e}");
+    }
 }
 
 #[test]

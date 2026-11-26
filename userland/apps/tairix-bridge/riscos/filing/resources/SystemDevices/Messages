@@ -1,0 +1,3 @@
+# SystemDevices's messages, in TAIRiX Bridge's own words.
+BadOperation:%0 cannot do that
+UnknownPrinter:There is no printer type '%0'

@@ -676,6 +676,34 @@ fn an_undefined_instruction_enters_the_undefined_vector() {
 }
 
 #[test]
+fn an_fpa_instruction_with_no_floating_point_context_is_undefined() {
+    let mut ram = Ram::new();
+    ram.program(
+        &BIT32,
+        0x8000,
+        &[
+            (0xEE00_8189, "MVFD    F0,#1"),
+            (0xEE00_8189, "MVFD    F0,#1"),
+        ],
+    );
+    let mut cpu = processor(&BIT32, Mode::User, 0x8000);
+    cpu.set_fpa_active(false);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(
+        (cpu.mode(), cpu.pc(), cpu.reg(Reg::LR)),
+        (Mode::Undefined, 0xFFFF_0004, 0x8004)
+    );
+    assert_eq!(fpa_words(&cpu, 0), [0; 3], "nothing executed");
+    let mut cpu = processor(&BIT32, Mode::User, 0x8004);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(
+        (cpu.mode(), fpa_words(&cpu, 0)),
+        (Mode::User, [0x3FFF, 0x8000_0000, 0]),
+        "executed with one"
+    );
+}
+
+#[test]
 fn a_udf_on_a_host_page_calls_the_host() {
     let mut ram = Ram::new();
     ram.host.push(0x9000);

@@ -105,6 +105,7 @@ static RESOURCES: [Resource; ENCODINGS.len() + 1] = {
 pub(crate) static ROM_FONTS: Builtin = Builtin {
     title: "ROMFonts",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: None,
     services: None,

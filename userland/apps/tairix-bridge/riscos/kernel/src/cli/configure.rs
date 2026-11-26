@@ -675,10 +675,8 @@ impl Os<'_> {
                 }
                 let mut regs = Regs::default();
                 regs.r[0] = reason;
-                match os.call_keyword(item, key, &mut regs) {
-                    Ok(()) | Err(Fail::Error(_)) => Ok(None),
-                    Err(unwind) => Err(unwind),
-                }
+                crate::os::quietly(os.call_keyword(item, key, &mut regs))?;
+                Ok(None)
             })?;
         }
         Ok(())

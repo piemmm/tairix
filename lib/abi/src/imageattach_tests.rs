@@ -163,7 +163,7 @@ fn an_attach_frame_out_of_shape_is_refused() {
             |b| b[3] |= 0x01 | 0x04,
             Errno::OutOfRange,
         ),
-        ("unknown filesystem", |b| b[21] |= 0x80, Errno::OutOfRange),
+        ("unknown filesystem", |b| b[22] |= 0x01, Errno::OutOfRange),
         (
             "a claim naming no filesystem",
             |b| b[20..24].fill(0),

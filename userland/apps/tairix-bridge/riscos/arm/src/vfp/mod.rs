@@ -64,6 +64,29 @@ pub mod fpexc {
     pub const EN: u32 = 1 << 30;
 }
 
+/// What CPACR grants coprocessors 10 and 11, VFP and Advanced SIMD's: the
+/// modes whose instructions of theirs execute.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Access {
+    /// None: every one of their instructions is undefined.
+    Denied,
+    /// The privileged modes.
+    Privileged,
+    /// Every mode.
+    Full,
+}
+
+impl Access {
+    /// CPACR's two-bit field for each of the coprocessors.
+    pub(crate) const fn field(self) -> u32 {
+        match self {
+            Self::Denied => 0b00,
+            Self::Privileged => 0b01,
+            Self::Full => 0b11,
+        }
+    }
+}
+
 /// A system register `VMRS` and `VMSR` reach, by its number.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum System {

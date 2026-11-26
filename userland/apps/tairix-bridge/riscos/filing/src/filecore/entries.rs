@@ -12,6 +12,7 @@ use tairix_fsmeta::preset::acorn;
 use tairix_riscos_kernel::filing::filetype::DATA;
 use tairix_riscos_kernel::filing::fs::{
     args, attribute, file, file_info, func, kind, open as reasons, opt, Info, Layout,
+    Listed as Catalogued,
 };
 use tairix_riscos_kernel::filing::UNSUPPORTED;
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
@@ -342,7 +343,7 @@ fn restamp(
 ) -> Result<(), Fail> {
     let (named, drive) = resolve(os, workspace, client, regs.r[1])?;
     let (load, exec) = (regs.r[2], regs.r[3]);
-    let attributes = regs.r[5].to_le_bytes()[0];
+    let attributes = regs.byte(5);
     with_volume(os, workspace, drive, |volume, _| {
         let Some(Found::Entry {
             parent,
@@ -838,7 +839,7 @@ pub(super) fn func(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         }
         func::WRITE_BOOT_OPTION => {
             let (_, drive) = resolve(os, workspace, &client, regs.r[1])?;
-            let option = regs.r[2].to_le_bytes()[0];
+            let option = regs.byte(2);
             with_volume(os, workspace, drive, |volume, _| {
                 volume.set_boot_option(option)
             })
@@ -949,7 +950,7 @@ fn opt(os: &mut Os<'_>, workspace: u32, regs: &Regs) -> Result<(), Fail> {
         return Ok(());
     }
     let drive = names::drive_of(os, workspace, None)?;
-    let option = regs.r[2].to_le_bytes()[0];
+    let option = regs.byte(2);
     with_volume(os, workspace, drive, |volume, _| {
         volume.set_boot_option(option)
     })
@@ -1128,19 +1129,12 @@ fn list(
     let Some((entries, count)) = entries else {
         return Err(fail(os, Some(client), code::NOT_FOUND));
     };
-    let mut used: u32 = 0;
-    let mut read: u32 = 0;
-    for object in &entries {
-        let name = object.name();
-        let size = layout.size(name);
-        if used.saturating_add(size) > room {
-            break;
-        }
-        let at = buffer.wrapping_add(used);
-        os.write_listed(at, layout, &info_of(object), object.indaddr, name)?;
-        used += size;
-        read += 1;
-    }
+    let listed = entries.iter().map(|object| Catalogued {
+        name: object.name(),
+        info: info_of(object),
+        internal: object.indaddr,
+    });
+    let read = os.write_entries(buffer, room, layout, listed)?;
     regs.r[3] = read;
     regs.r[4] = if offset + read >= count {
         u32::MAX

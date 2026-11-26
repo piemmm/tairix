@@ -22,7 +22,9 @@
 extern crate alloc;
 
 mod amb;
+pub mod buffers;
 pub mod byte;
+mod callaswi;
 mod callbacks;
 mod cli;
 pub use cli::table::parameters as command_parameters;
@@ -35,11 +37,13 @@ pub mod corpus;
 mod dictionary;
 mod dynamic;
 mod env;
-pub use env::{hex, hex8, Hex};
+pub use env::{hex, hex8, ExceptionKind, Hex, Registers};
 pub mod error;
 mod events;
 mod extension;
 pub mod filing;
+mod fpemulator;
+pub use fpemulator::FRESH_FPSR;
 pub mod heap;
 mod host;
 mod info;
@@ -49,6 +53,7 @@ pub use international::{character as alphabet_character, ALPHABETS, UTF8 as UTF8
 mod intkey;
 mod keyboard;
 mod kheap;
+pub mod listing;
 pub mod memory;
 pub mod module;
 pub mod mouse;
@@ -60,6 +65,7 @@ pub mod release;
 pub mod resourcefs;
 mod resources;
 pub mod service;
+mod squash;
 pub mod swi;
 mod system;
 mod territory;
@@ -67,6 +73,7 @@ mod text;
 mod traps;
 mod vars;
 pub mod vectors;
+mod vfpsupport;
 pub mod word;
 mod zeropage;
 

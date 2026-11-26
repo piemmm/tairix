@@ -1,0 +1,4 @@
+# PipeFS's messages, in TAIRiX Bridge's own words.
+NoTaskWindow:A pipe can only be waited on in a task window
+PipeOpen:The pipe is open
+BadOperation:Pipes cannot do that

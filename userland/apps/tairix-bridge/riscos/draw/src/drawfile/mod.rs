@@ -57,6 +57,7 @@ const RENDER_ARGUMENTS: &[u8] = b"file/A,a,b,c,d,e,f,bbox/S,suppress/S,flatness/
 pub(crate) static DRAW_FILE: Builtin = Builtin {
     title: "DrawFile",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: Some(Swis {
         chunk: chunk::DRAW_FILE,

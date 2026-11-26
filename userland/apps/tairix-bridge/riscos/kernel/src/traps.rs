@@ -17,12 +17,12 @@ use core::ops::Range;
 
 use tairix_riscos_arm::bus::{Abort, Bus, Fetch, Width};
 use tairix_riscos_arm::cpu::{Exception, State};
-use tairix_riscos_arm::mmu::{self, Rights, PAGE_SIZE};
+use tairix_riscos_arm::mmu::{self, to_page_end, Rights};
 use tairix_riscos_arm::psr::{self, Mode};
 use tairix_riscos_arm::reg::Reg;
 
 use crate::env::{DATA_ABORT, PREFETCH_ABORT, UNDEFINED};
-use crate::error::Error;
+use crate::error::{exception, Error};
 use crate::host::{Routine, EXCEPTIONS};
 use crate::memory::layout::HIGH_ZERO_PAGE;
 use crate::memory::{rights_bits, Bits, Memory};
@@ -32,12 +32,14 @@ use crate::zeropage;
 
 /// "Branch through zero".
 const BRANCH_THROUGH_ZERO: Error = Error {
-    number: 0x8000_0005,
+    number: exception::BRANCH_THROUGH_ZERO,
     token: "BranchThroughZero",
 };
 
 /// The processor vectors a program may claim: all but FIQ's.
 const CLAIMABLE: u32 = 7;
+/// `OS_ClaimProcessorVector`'s R0 bit claiming the vector, not releasing it.
+pub(crate) const CLAIM: u32 = 1 << 8;
 /// An abort trap's reasons.
 const STORE: u32 = 0;
 const LOAD: u32 = 1;
@@ -84,8 +86,7 @@ struct ReplayBus<'a> {
 
 /// An access's parts either side of a page boundary: at most two.
 fn parts(address: u32, length: u32) -> [(u32, u32); 2] {
-    let to_boundary = PAGE_SIZE - address % PAGE_SIZE;
-    let first = length.min(to_boundary);
+    let first = length.min(to_page_end(address));
     [
         (address, first),
         (address.wrapping_add(first), length - first),
@@ -237,7 +238,7 @@ impl Os<'_> {
         }
         let entry = Self::vector_entry(vector);
         let current = self.read_word(entry)?;
-        if regs.r[0] & (1 << 8) != 0 {
+        if regs.r[0] & CLAIM != 0 {
             self.write_word(entry, regs.r[1])?;
             regs.r[1] = current;
         } else {

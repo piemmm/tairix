@@ -4,12 +4,13 @@ The single shared **compression codec** for TAIRiX (`AGENTS.md` §6, §16.4 —
 compression is a curated shared-library class). It holds the first-party
 `RLZ1` LZ77 codec TAIRiX's own storage uses, and the foreign codecs other
 software needs, each in both directions: RFC 1951 DEFLATE / RFC 1950 zlib,
-bzip2, and the ARC family's methods; and RFC 1952 gzip's member framing, read
-over DEFLATE with its trailer's CRC-32 and length checked. PNG's `IDAT` stream
-(`lib/image`) is read with DEFLATE and SSH's `zlib@openssh.com`
-(`plans/SSH.md`) written with it; the archive driver
+bzip2, the ARC family's methods and RISC OS's Squash; and RFC 1952 gzip's
+member framing, read over DEFLATE with its trailer's CRC-32 and length
+checked. PNG's `IDAT` stream (`lib/image`) is read with DEFLATE and SSH's
+`zlib@openssh.com` (`plans/SSH.md`) written with it; the archive driver
 (`drivers/filesystem/archive`) reads and writes gzip, bzip2, zip, Spark and
-ArcFS members with all three.
+ArcFS members and Squash files with them, and TAIRiX Bridge's Squash module
+answers RISC OS programs with Squash.
 
 - `compress(src, dst) -> Result<usize, Error>` — a single greedy LZ77 pass
   over a small hash table of recent 4-byte sequences. Writes into a
@@ -87,7 +88,7 @@ back-reference may reach into (~34 KiB), and an encoder additionally carries
 the match finder (~220 KiB). Heap-own one; that is why there is no one-shot
 *encode* function to put one on a stack by accident.
 
-## Archive formats: `bzip2` and `arc`
+## Archive formats: `bzip2`, `arc` and `squash`
 
 - `bzip2::Decoder` / `bzip2::Encoder` — the bzip2 stream, levels 1 to 9.
   Every block's CRC and the stream's combined CRC are checked. The decoder
@@ -99,12 +100,20 @@ the match finder (~220 KiB). Heap-own one; that is why there is no one-shot
   packing, squeezing, ARC 4's hashed 12-bit crunching (methods 5 to 7), and
   the compress-style dynamic LZW of 9 to 16 bits. `arc::Encoder` writes the
   dynamic LZW, with a dictionary `encoder_work` sizes to its input.
+- `squash::compress` / `squash::decompress` — RISC OS Squash's stream as its
+  module's two calls make it, byte for byte, both of its compressors among
+  them, a call's whole state kept in the caller's workspace and checked as
+  it is read back; each place a reader can resume from is told to the
+  caller. `squash::FileHeader` is a Squash file's `SQSH` header.
 
-Both stream through the crate-root `Input` (a byte at a time) and `Output`
-traits, over workspace the caller places. That workspace is large: a bzip2
-block decodes through four bytes a symbol (3.6 MB at level 9) and encodes
-through twenty (18 MB), and an ARC table is up to 256 KiB to decode and
-1 MiB to encode. None of it belongs on a stack.
+The ARC family's dynamic LZW and Squash share one coder, `compress`'s LZW,
+told the two rules in which they differ. The bzip2 and ARC codecs stream
+through the crate-root `Input` (a byte at a time) and `Output` traits, and
+Squash over slices; all of them work in workspace the caller places. That
+workspace is large: a bzip2 block decodes through four bytes a symbol
+(3.6 MB at level 9) and encodes through twenty (18 MB), an ARC table is up to
+255 KiB to decode and 447 KiB to encode, and Squash takes the 17 KiB and
+31 KiB its module asks for. None of it belongs on a stack.
 
 Every module keeps the crate's zero-`unsafe`, no-panic, fail-closed
 discipline and allocates nothing of its own; see their rustdoc for the full

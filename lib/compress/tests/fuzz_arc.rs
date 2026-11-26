@@ -14,8 +14,8 @@
 //! `TAIRIX_FUZZ_BUDGET_SECS` extends the loop to a wall-clock budget.
 
 use tairix_compress::arc::{
-    encoder_work, Decoder, Encoder, Hash, Method, DECODER_STACK, DECODER_TABLE, ENCODER_WORK,
-    LZW_MAX_BITS, LZW_MIN_BITS,
+    encoder_work, Decoder, Encoder, Hash, Method, DECODER_STACK, DECODER_TABLE, LZW_MAX_BITS,
+    LZW_MIN_BITS,
 };
 use tairix_compress::{Input, Output};
 use tairix_fuzzseed::Prng;
@@ -116,11 +116,11 @@ fn fuzz_arc() {
             + u8::try_from(rng.below(usize::from(LZW_MAX_BITS - LZW_MIN_BITS + 1))).unwrap();
         // A dictionary as large as the codes allow, or sized to some input.
         let work = if rng.below(2) == 0 {
-            ENCODER_WORK
+            encoder_work(bits, u64::MAX)
         } else {
-            encoder_work(u64::try_from(rng.at_most(MAX_INPUT)).unwrap())
+            encoder_work(bits, u64::try_from(rng.at_most(MAX_INPUT)).unwrap())
         };
-        let mut encoder = Encoder::new(vec![0u32; work], bits).expect("an encoder");
+        let mut encoder = Encoder::new(vec![0u8; work], bits).expect("an encoder");
         let mut out = Gathered(Vec::new());
         let mut rest = &plain[..];
         while !rest.is_empty() {

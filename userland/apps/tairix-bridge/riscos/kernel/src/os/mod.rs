@@ -17,9 +17,11 @@ mod processor;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use tairix_fsmeta::preset::acorn::RISC_OS_EPOCH_TO_UNIX_SECS;
 use tairix_riscos_arm::cpu::State;
 use tairix_riscos_arm::psr;
 
+pub use access::Reach;
 pub use call::{Ended, Entry, Returned, Target, Transfer, Unwind, Wait};
 pub(crate) use processor::Processor;
 
@@ -106,6 +108,9 @@ pub enum Ending {
 
 /// 00:00:00 UTC on 1 January 2000 as [`Host::real_time`] reads it.
 pub const MILLENNIUM: u64 = 36_524 * crate::clock::CENTISECONDS_PER_DAY;
+/// 00:00:00 UTC on 1 January 1970, Unix time's start, as
+/// [`Host::real_time`] reads it.
+pub const UNIX_EPOCH: u64 = RISC_OS_EPOCH_TO_UNIX_SECS.unsigned_abs() * 100;
 
 /// What the kernel asks of the session hosting it. The kernel is a pure
 /// function of the bytes it is given, its input and these readings, so a
@@ -202,6 +207,19 @@ impl From<Unwind> for Fail {
     }
 }
 
+/// What came of something whose refusal changes nothing: only control
+/// leaving goes on.
+///
+/// # Errors
+///
+/// The unwind `outcome` met.
+pub fn quietly(outcome: Result<(), Fail>) -> Result<(), Unwind> {
+    match outcome {
+        Err(Fail::Unwind(unwind)) => Err(unwind),
+        Ok(()) | Err(Fail::Error(_)) => Ok(()),
+    }
+}
+
 /// Why a run returned to the session.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Outcome {
@@ -275,13 +293,23 @@ pub struct World {
     pub(crate) routines: u32,
     /// Guest calls in progress, each nested inside the Rust that made it.
     pub(crate) depth: u32,
+    /// Built-in routines in progress that the host's own Rust called, each
+    /// nested inside the Rust that called it.
+    pub(crate) routines_nested: u32,
+    /// The registers a built-in routine asked to leave with, and the depth
+    /// of the call it asked in.
+    pub(crate) leaving: Option<(u32, crate::env::Registers)>,
     /// SWIs the kernel's own Rust is performing within the program's: an
     /// input wait inside one cannot have the program's SWI performed again,
     /// which has run past its start.
     pub(crate) kernel_calls: u32,
-    /// The address of the `SWI` being performed, where an access it makes
-    /// that aborts is reported.
+    /// The address of the `SWI` being performed, or of the host routine
+    /// running, where an access it makes that aborts is reported.
     pub(crate) swi_at: u32,
+    /// Whether the host routine running was called from user mode, so that
+    /// what it reaches for its caller it reaches with user mode's rights: a
+    /// SWI's work is privileged however it was called.
+    pub(crate) user_caller: bool,
     /// The OS SWI being performed.
     pub(crate) performing: u32,
     /// The outermost SWI from guest code being performed.
@@ -346,6 +374,9 @@ pub struct World {
     pub(crate) translating: bool,
     pub(crate) territory: crate::territory::Manager,
     pub(crate) international: crate::international::State,
+    pub(crate) fp_emulator: crate::fpemulator::State,
+    pub(crate) vfp_support: crate::vfpsupport::State,
+    pub(crate) buffers: crate::buffers::State,
     pub(crate) intkey: crate::intkey::State,
     pub(crate) country: crate::byte::Country,
     pub(crate) keyboard: crate::keyboard::Keyboard,
@@ -431,8 +462,11 @@ impl Kernel {
             host,
             routines,
             depth: 0,
+            routines_nested: 0,
+            leaving: None,
             kernel_calls: 0,
             swi_at: 0,
+            user_caller: false,
             performing: 0,
             frame: None,
             transfer: None,
@@ -483,6 +517,9 @@ impl Kernel {
             translating: false,
             territory: crate::territory::Manager::new(),
             international: crate::international::State::new(),
+            fp_emulator: crate::fpemulator::State::new(),
+            vfp_support: crate::vfpsupport::State::new(),
+            buffers: crate::buffers::State::new(),
             intkey: crate::intkey::State::new(),
             country: crate::byte::Country::new(),
             keyboard: crate::keyboard::Keyboard::new(),
@@ -495,9 +532,7 @@ impl Kernel {
             extensions: crate::extension::Extensions::new(),
         };
         let mut kernel = Self { memory, world };
-        kernel.world.modules.roms = installed.roms;
-        kernel.world.modules.entries = installed.entries;
-        kernel.world.modules.empty = installed.empty;
+        kernel.world.modules.install(installed)?;
         kernel.boot()?;
         Ok(kernel)
     }

@@ -1,10 +1,10 @@
 # `tairix-drv-fs-archive` — archive filesystem driver
 
 Serves an archive file's members as a volume: zip, tar (plain, gzip'd or
-bzip2'd), a lone gzip or bzip2 stream, Spark and plain ARC, and ArcFS read
-and written; RAR 1.5 to 7 read. Each member's RISC OS load, exec and
-attribute words travel as its `acorn.*` attributes wherever the format has a
-place for them.
+bzip2'd), a lone gzip or bzip2 stream, Spark and plain ARC, ArcFS, an Acorn
+DFS disc image and a RISC OS Squash file read and written; RAR 1.5 to 7 read.
+Each member's RISC OS load, exec and attribute words travel as its `acorn.*`
+attributes wherever the format has a place for them.
 
 Stability: `experimental`.
 
@@ -38,6 +38,8 @@ while the file's name still names it.
   members of one path, or anything past a tar's end marker.
 - A commit that fails stops the archive being written; every flush after it
   answers why.
+- A Squash file holds one file of at most 4 GiB less a byte, and no name or
+  attributes: its file can be rewritten, typed and dated, nothing more.
 - RAR 7's compression is decoded as RARLAB documents it; no archive written
   with it has been found to test against.
 

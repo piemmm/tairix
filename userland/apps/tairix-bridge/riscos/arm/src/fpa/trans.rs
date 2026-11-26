@@ -67,20 +67,6 @@ fn beyond_one(x: Number) -> bool {
     (x.exponent, x.mantissa) > (BIAS, UNITS)
 }
 
-/// Whether a finite nonzero `x` is an integer, and if so whether it is odd.
-fn parity(x: Number) -> Option<bool> {
-    let point = BIAS + 63;
-    if x.exponent > point {
-        return Some(false);
-    }
-    let fraction_bits = u32::try_from(point - x.exponent).ok()?;
-    if fraction_bits >= 64 {
-        return None;
-    }
-    let fraction = x.mantissa & ((1u64 << fraction_bits) - 1);
-    (fraction == 0).then_some(x.mantissa >> fraction_bits & 1 != 0)
-}
-
 fn signed(x: Exact, negative: bool) -> Value {
     Value::Exact(Exact { negative, ..x })
 }
@@ -219,7 +205,11 @@ impl Unit {
         }
         let negative_exponent = b.negative();
         // An infinite exponent is no integer.
-        let parity = if b.infinite() { None } else { parity(y) };
+        let parity = if b.infinite() {
+            None
+        } else {
+            y.parts().parity()
+        };
         let multiplied = parity.is_some() && y.exponent < MULTIPLIED_POWERS;
         if a.infinite() {
             if a.negative() && parity.is_none() {

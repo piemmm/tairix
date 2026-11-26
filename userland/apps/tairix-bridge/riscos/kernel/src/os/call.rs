@@ -22,10 +22,10 @@ const SLICE: u64 = 1 << 20;
 /// is some sixty-five thousand steps.
 const STEP: u64 = 16;
 
-/// The most guest calls in progress at once. A call past it is refused as
-/// the supervisor stack overflowing, which is how RISC OS meets a nest too
-/// deep; it bounds the host's own stack, so it is a containment bound, not a
-/// capacity.
+/// The most calls in progress at once: guest code's, and built-in routines'
+/// the host's own Rust called. A call past it is refused as the supervisor
+/// stack overflowing, which is how RISC OS meets a nest too deep; it bounds
+/// the host's own stack, so it is a containment bound, not a capacity.
 pub const MAX_DEPTH: u32 = 48;
 
 /// The supervisor bank's index in [`State::banked`].
@@ -223,13 +223,24 @@ impl Os<'_> {
         regs: &mut Regs,
     ) -> Result<(), crate::os::Fail> {
         if let Some(code) = self.builtin_routine_at(address) {
-            return code(self, regs);
+            if self.nest_full() {
+                return Err(crate::os::Fail::Unwind(self.overflowed()));
+            }
+            self.world.routines_nested += 1;
+            let done = code(self, regs);
+            self.world.routines_nested -= 1;
+            return done;
         }
         self.call(Target { address, bits }, regs, entry)?;
         if regs.flags & psr::V != 0 {
             return Err(crate::os::Fail::Error(regs.r[0]));
         }
         Ok(())
+    }
+
+    /// Whether [`MAX_DEPTH`] calls are in progress already.
+    fn nest_full(&self) -> bool {
+        self.world.depth + self.world.routines_nested >= MAX_DEPTH
     }
 
     /// The supervisor bank's stack pointer, which the next call enters with.
@@ -318,7 +329,7 @@ impl Os<'_> {
         back: Routine,
         stack: Option<&mut u32>,
     ) -> Result<Returned, Unwind> {
-        if self.world.depth >= MAX_DEPTH {
+        if self.nest_full() {
             return Err(self.overflowed());
         }
         let saved_bits = self.world.processor.bits();

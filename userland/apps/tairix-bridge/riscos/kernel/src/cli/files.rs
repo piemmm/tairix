@@ -3,20 +3,19 @@
 //! text or as bytes, built from typed lines, and taking the input or a copy
 //! of the output.
 //!
-//! How `*Type` and `*List` show a byte and how `*Dump` lays out a line are
-//! pure machines, fed a byte or a line at a time, so that what they print is
-//! tested apart from the files they read.
+//! How `*Dump` lays out a line is a pure machine, fed a line at a time, as
+//! [`crate::listing`] is for `*Type` and `*List`, so that what each prints is
+//! tested apart from the files it reads.
 
 use alloc::vec::Vec;
 
-use crate::convert::Decimal;
 use tairix_obey::gstrans::Flags;
 use tairix_riscos_arm::psr;
 
 use crate::byte::var;
-use crate::cmos;
 use crate::error::{Error, BAD_ADDRESS, SYNTAX};
 use crate::input::ACKNOWLEDGE_ESCAPE;
+use crate::listing::{line_number, newline, Listing, Progress, RAW_TOP, SEVEN_BIT, TAB_SPACES};
 use crate::os::{len32, Fail, Os, Regs};
 use crate::swi::os::file::{CREATE, CREATE_TYPED, DELETE, LOAD, MAKE_ERROR, READ_WITH_TYPE, SAVE};
 use crate::swi::os::find::{INPUT, OUTPUT, UPDATE};
@@ -25,18 +24,6 @@ use crate::swi::{os, X};
 /// The `OS_Byte` variables holding the `*Exec` and `*Spool` files.
 const EXEC_HANDLE: u32 = var::EXEC_HANDLE as u32;
 const SPOOL_HANDLE: u32 = var::SPOOL_HANDLE as u32;
-
-/// `DumpFormat`'s bits, the low five of its CMOS byte: bit 7 taken off a
-/// byte first, top-bit bytes shown as they are, an unshowable byte as `<n>`,
-/// and that number in hexadecimal — or without `<n>`, as a `.`.
-const SEVEN_BIT: u8 = 1 << 3;
-const RAW_TOP: u8 = 1 << 2;
-const ANGLED: u8 = 1 << 1;
-const HEXADECIMAL: u8 = 1 << 0;
-/// The bits the listings read, and the one that expands tabs as
-/// `-TabExpand` does.
-const LISTING_BITS: u8 = 0x0F;
-const TAB_SPACES: u8 = 1 << 4;
 
 /// A file `*Load` has no way to load: its type has no `@LoadType`.
 const NO_LOAD_TYPE: Error = Error {
@@ -62,126 +49,6 @@ const BAD_SAVE: Error = Error {
     number: SYNTAX,
     token: "SaveParameterCount",
 };
-
-/// How `*Type`, `*List` and `*Print` show a file's bytes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct Listing {
-    /// `DumpFormat`'s bits for a filtered listing; none for `*Print`, which
-    /// writes each byte as it is.
-    filter: Option<u8>,
-    numbered: bool,
-    /// A tab is eight spaces.
-    tabs: bool,
-}
-
-/// How far a listing has got.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub(crate) struct Progress {
-    lines: u32,
-    /// The character last shown, a line's end included, or zero after the
-    /// second half of a CR LF or LF CR pair.
-    last: u8,
-    within_line: bool,
-}
-
-impl Listing {
-    /// What `byte` adds to the listing.
-    pub(crate) fn feed(self, at: &mut Progress, byte: u8, out: &mut Vec<u8>) {
-        if !at.within_line {
-            at.within_line = true;
-            if self.numbered {
-                at.lines += 1;
-                line_number(at.lines, out);
-            }
-        }
-        let Some(format) = self.filter else {
-            out.push(byte);
-            return;
-        };
-        if byte == b'\r' || byte == b'\n' {
-            if byte == at.last {
-                newline(out);
-                at.within_line = false;
-            } else if at.last == b'\r' || at.last == b'\n' {
-                // A pair's second half: what follows stays on the line that
-                // its first half began, numbered already.
-                at.last = 0;
-            } else {
-                at.last = byte;
-                newline(out);
-                at.within_line = false;
-            }
-            return;
-        }
-        if byte == b'\t' && self.tabs {
-            out.extend_from_slice(b"        ");
-            return;
-        }
-        at.last = byte;
-        if byte == b'"' || byte == b'<' {
-            out.push(byte);
-        } else {
-            shown(format, byte, out);
-        }
-    }
-
-    /// What the end of the file adds: a filtered listing ends a line it
-    /// is part way through.
-    pub(crate) fn end(self, at: Progress, out: &mut Vec<u8>) {
-        if self.filter.is_some() && at.within_line {
-            newline(out);
-        }
-    }
-}
-
-/// `byte` as RISC OS's GSTrans would read it back, in `format`.
-fn shown(format: u8, byte: u8, out: &mut Vec<u8>) {
-    let byte = if format & SEVEN_BIT != 0 {
-        byte & 0x7F
-    } else {
-        byte
-    };
-    let printable = (0x20..=0x7E).contains(&byte);
-    let raw_top = format & RAW_TOP != 0 && byte >= 0x80;
-    if (printable && !matches!(byte, b'|' | b'"' | b'<')) || raw_top {
-        out.push(byte);
-    } else if format & ANGLED != 0 {
-        out.push(b'<');
-        if format & HEXADECIMAL != 0 {
-            out.push(b'&');
-            out.extend_from_slice(&tairix_util::hex::upper_digits(byte));
-        } else {
-            out.extend_from_slice(Decimal::of(i32::from(byte)).as_bytes());
-        }
-        out.push(b'>');
-    } else if format & HEXADECIMAL != 0 {
-        out.push(if printable { byte } else { b'.' });
-    } else {
-        if byte >= 0x80 {
-            out.extend_from_slice(b"|!");
-        }
-        match byte & 0x7F {
-            0x7F => out.extend_from_slice(b"|?"),
-            c @ (b'"' | b'|') => out.extend_from_slice(&[b'|', c]),
-            c @ 0..=0x1F => out.extend_from_slice(&[b'|', c + b'@']),
-            c => out.push(c),
-        }
-    }
-}
-
-fn newline(out: &mut Vec<u8>) {
-    out.extend_from_slice(b"\n\r");
-}
-
-/// A line number as `*List` and `*Build` write it: right-aligned in four
-/// columns, then a space.
-fn line_number(line: u32, out: &mut Vec<u8>) {
-    let digits = Decimal::of(line.cast_signed());
-    let digits = digits.as_bytes();
-    out.resize(out.len() + 4usize.saturating_sub(digits.len()), b' ');
-    out.extend_from_slice(digits);
-    out.push(b' ');
-}
 
 /// How `*Dump` lays out a line.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -362,11 +229,6 @@ impl Os<'_> {
         result.and(closed)
     }
 
-    /// The `DumpFormat` CMOS configures.
-    fn dump_format(&mut self) -> Result<u8, Fail> {
-        self.read_cmos(cmos::PRINT_SOUND)
-    }
-
     /// `*Type`, `*List` and `*Print`: the file the tail names shown as
     /// `listing` says, `-TabExpand` read where more than the name is given.
     fn list_file(&mut self, regs: &Regs, mut listing: Listing) -> Result<(), Fail> {
@@ -406,9 +268,9 @@ impl Os<'_> {
     fn filtered(&mut self, numbered: bool) -> Result<Listing, Fail> {
         let format = self.dump_format()?;
         Ok(Listing {
-            filter: Some(format & LISTING_BITS),
             numbered,
             tabs: format & TAB_SPACES != 0,
+            ..Listing::filtered(format)
         })
     }
 
@@ -669,12 +531,7 @@ pub(crate) fn list(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 
 /// `*Print`.
 pub(crate) fn print(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    let raw = Listing {
-        filter: None,
-        numbered: false,
-        tabs: false,
-    };
-    os.list_file(regs, raw)
+    os.list_file(regs, Listing::RAW)
 }
 
 /// `*Build`.

@@ -554,6 +554,154 @@ fn an_error_handler_s_buffer_is_written_no_further_than_256_bytes() {
     assert_eq!(s.read(buffer + 8 + 247, 1), [0], "the text cut to fit");
 }
 
+/// A built-in whose routines answer in R0 whether their caller may read the
+/// word at R0, and write it, reaching it as they reach what a caller hands
+/// them; in the inventory's row for Draw, which another crate provides.
+static PEEKS: crate::module::Builtin = crate::module::Builtin {
+    title: "Draw",
+    help_name: None,
+    help_suffix: None,
+    bridge: false,
+    swis: None,
+    services: None,
+    commands: &[],
+    init: None,
+    finalise: None,
+    start: None,
+    routines: &[peeks, writes],
+    vectors: &[],
+    resources: &[],
+    code: None,
+};
+
+static PEEKING: [&crate::module::Builtin; 1] = [&PEEKS];
+
+#[expect(clippy::unnecessary_wraps, reason = "a module routine's signature")]
+fn peeks(os: &mut super::Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
+    regs.r[0] = u32::from(os.as_caller().peek_word(regs.r[0]).is_some());
+    Ok(())
+}
+
+fn writes(os: &mut super::Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
+    os.as_caller().write_word(regs.r[0], 0)?;
+    regs.r[0] = 1;
+    Ok(())
+}
+
+#[test]
+fn a_routine_reads_what_its_caller_hands_it_with_its_caller_s_rights() {
+    let mut s = crate::testkit::boot_with(&RISC_OS_5, tairix_tz::Zone::UTC, 0, &PEEKING);
+    s.application(Bits::Bit32, crate::testkit::SLOT_BYTES);
+    let mut os = s.kernel.os();
+    let stack_word = os.supervisor_stack() - 4;
+    let entry = os.routine_of(&PEEKS, 0).expect("active");
+    assert_eq!(os.as_caller().peek_word(DATA + 1), None, "out of alignment");
+    let back = CODE + 12;
+    for privileged in [false, true] {
+        let enter = if privileged {
+            asm::swi(crate::swi::os::ENTER_OS)
+        } else {
+            asm::mov_reg(0, 0)
+        };
+        s.poke(
+            CODE,
+            &[
+                enter,
+                asm::adr(14, CODE + 4, back),
+                asm::mov_reg(15, 1),
+                asm::b(back, back),
+            ],
+        );
+        for (address, answer) in [(DATA, 1), (stack_word, u32::from(privileged))] {
+            s.enter(Bits::Bit32, CODE, registers(&[address, entry]));
+            s.run(100);
+            assert_eq!(
+                s.kernel.os().current_registers()[0],
+                answer,
+                "{address:#x}, privileged: {privileged}"
+            );
+        }
+    }
+    let writer = s.kernel.os().routine_of(&PEEKS, 1).expect("active");
+    let zero = crate::memory::layout::HIGH_ZERO_PAGE + 0x100;
+    s.poke(
+        CODE,
+        &[
+            asm::mov_reg(0, 0),
+            asm::adr(14, CODE + 4, back),
+            asm::mov_reg(15, 1),
+            asm::b(back, back),
+        ],
+    );
+    s.enter(Bits::Bit32, CODE, registers(&[zero, writer]));
+    s.run(100);
+    let abort = s.kernel.os().world.last_abort;
+    assert_eq!(
+        (abort.address, abort.pc),
+        (zero, writer),
+        "aborted at the user-mode caller's write, at the routine"
+    );
+}
+
+#[test]
+fn an_fpa_register_round_trips_in_extended_form_as_stfe_and_ldfe_move_it() {
+    let mut s = session();
+    let mut os = s.kernel.os();
+    let one = [0x3FFF, 0x8000_0000, 0];
+    os.set_fpa_extended(4, one).expect("loaded");
+    assert_eq!(os.fpa_extended(4), Ok(one));
+    assert_eq!(os.fpa_double(4), Ok(1.0_f64.to_bits()), "as a double, 1");
+    os.set_fpa_double(5, (-0.5_f64).to_bits());
+    assert_eq!(
+        os.fpa_extended(5),
+        Ok([0x8000_3FFE, 0x8000_0000, 0]),
+        "the sign in the top bit"
+    );
+}
+
+#[test]
+fn position_finds_the_first_byte_that_ends_within_reach_page_by_page() {
+    let mut s = session();
+    let page = tairix_riscos_arm::mmu::PAGE_SIZE;
+    let start = DATA + page - 3;
+    s.write(start, b"abc,de");
+    let mut os = s.kernel.os();
+    assert_eq!(
+        os.position(start, 16, |b| b == b','),
+        Ok(Some(3)),
+        "across a page"
+    );
+    assert_eq!(
+        os.position(start, 3, |b| b == b','),
+        Ok(None),
+        "not within reach"
+    );
+    assert_eq!(os.position(start, 0, |_| true), Ok(None));
+}
+
+#[test]
+fn an_error_handler_is_entered_with_the_failing_swi_s_registers_but_r0() {
+    let mut s = session();
+    let handler = CODE + 0x40;
+    s.poke(handler, &[asm::b(handler, handler)]);
+    s.user_swi(
+        X | CHANGE_ENVIRONMENT,
+        registers(&[6, handler, 0x1212_1212, DATA + 0x200]),
+    );
+    s.poke(DATA + 0x800, &[0x1234]);
+    s.write(DATA + 0x804, b"e\0");
+    let mut given = [0; 13];
+    for (n, slot) in (0..).zip(given.iter_mut()) {
+        *slot = 0x100 + n;
+    }
+    given[0] = DATA + 0x800;
+    s.start_swi(0x2B, given);
+    assert_eq!(s.kernel.state().pc, handler, "the handler entered");
+    let regs = s.regs();
+    assert_eq!(regs.r[0], 0x1212_1212, "its workspace");
+    assert_eq!(regs.r[1..], given[1..], "the rest as at the SWI");
+}
+
 #[test]
 fn an_error_reaching_the_error_handler_ends_redirection_and_closes_its_file() {
     let mut s = session();
@@ -696,6 +844,89 @@ fn bytes_cross_a_page_at_every_alignment_and_leave_their_neighbours_alone() {
 }
 
 #[test]
+fn a_routine_acting_for_a_user_mode_caller_reaches_memory_with_its_rights() {
+    let mut s = session();
+    let zero = crate::memory::layout::HIGH_ZERO_PAGE + 0x100;
+    let mut os = s.kernel.os();
+    let stack = os.memory.layout().stacks.supervisor.start;
+    os.world.user_caller = true;
+    assert!(
+        os.as_caller().read_word(zero).is_ok(),
+        "user mode reads zero page"
+    );
+    assert!(
+        os.as_caller().write_word(zero, 1).is_err(),
+        "but may not write it"
+    );
+    assert_eq!(os.world.last_abort.address, zero, "aborting there");
+    assert!(
+        os.as_caller().read_word(stack).is_err(),
+        "nor reach a stack"
+    );
+    assert_eq!(os.as_caller().peek_word(stack), None);
+    assert!(
+        os.as_caller().write_word(DATA, 7).is_ok(),
+        "its own memory it writes"
+    );
+    assert!(
+        os.write_word(zero, 1).is_ok(),
+        "the kernel's own reach is privileged"
+    );
+    os.world.user_caller = false;
+    assert!(
+        os.as_caller().write_word(zero, 0).is_ok(),
+        "as a privileged caller's is"
+    );
+}
+
+#[test]
+fn words_cross_a_page_at_every_alignment_and_stop_at_the_first_page_refused() {
+    let mut s = session();
+    let boundary = DATA + tairix_riscos_arm::mmu::PAGE_SIZE;
+    let words = [
+        0x0302_0100,
+        0x0706_0504,
+        0x0B0A_0908,
+        0x0F0E_0D0C,
+        0x1312_1110,
+        0x1716_1514,
+    ];
+    for start in boundary - 12..boundary + 4 {
+        s.write(boundary - 24, &[0xEE; 56]);
+        let mut os = s.kernel.os();
+        os.write_words(start, &words).expect("written");
+        let mut back = [0; 6];
+        os.read_words(start, &mut back).expect("read");
+        assert_eq!(back, words, "{start:#x}");
+        let first = usize::try_from(start - (boundary - 24)).expect("near");
+        let laid: alloc::vec::Vec<u8> = (0..56)
+            .map(|n| {
+                if (first..first + 24).contains(&n) {
+                    u8::try_from(n - first).expect("a byte")
+                } else {
+                    0xEE
+                }
+            })
+            .collect();
+        assert_eq!(
+            s.read(boundary - 24, 56),
+            laid,
+            "{start:#x}: little-endian, alone"
+        );
+    }
+    let end = APPLICATION + crate::testkit::SLOT_BYTES;
+    let mut os = s.kernel.os();
+    assert!(os.write_words(end - 8, &words).is_err());
+    assert_eq!(os.world.last_abort.address, end, "at the first page past");
+    let mut back = [0; 2];
+    os.read_words(end - 8, &mut back)
+        .expect("the words before it");
+    assert_eq!(back, [words[0], words[1]], "written up to the page refused");
+    assert!(os.read_words(end - 8, &mut [0; 3]).is_err());
+    assert_eq!(os.world.last_abort.address, end);
+}
+
+#[test]
 fn a_string_is_read_across_pages_to_its_end_or_the_byte_after_the_most() {
     let mut s = session();
     let boundary = DATA + tairix_riscos_arm::mmu::PAGE_SIZE;
@@ -724,4 +955,49 @@ fn a_string_is_read_across_pages_to_its_end_or_the_byte_after_the_most() {
     let mut os = s.kernel.os();
     assert!(os.read_until(end - 2, 100, zero).is_err());
     assert_eq!(os.world.last_abort.address, end, "at the first page past");
+}
+
+/// A built-in whose one routine calls itself through its entry, each call
+/// counted in R0; in the inventory's row for Draw, which another crate
+/// provides.
+static NESTS: crate::module::Builtin = crate::module::Builtin {
+    title: "Draw",
+    help_name: None,
+    help_suffix: None,
+    bridge: false,
+    swis: None,
+    services: None,
+    commands: &[],
+    init: None,
+    finalise: None,
+    start: None,
+    routines: &[nests],
+    vectors: &[],
+    resources: &[],
+    code: None,
+};
+
+static NESTING: [&crate::module::Builtin; 1] = [&NESTS];
+
+fn nests(os: &mut super::Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
+    regs.r[0] += 1;
+    let entry = os.routine_of(&NESTS, 0).expect("active");
+    os.call_routine(entry, Bits::Bit32, super::Entry::Supervisor, regs)
+}
+
+#[test]
+fn a_routine_the_host_calls_into_itself_meets_the_nesting_bound() {
+    let mut s = crate::testkit::boot_with(&RISC_OS_5, tairix_tz::Zone::UTC, 0, &NESTING);
+    s.application(Bits::Bit32, crate::testkit::SLOT_BYTES);
+    let mut os = s.kernel.os();
+    let entry = os.routine_of(&NESTS, 0).expect("active");
+    let mut regs = Regs::default();
+    let called = os.call_routine(entry, Bits::Bit32, super::Entry::Supervisor, &mut regs);
+    assert!(matches!(called, Err(Fail::Unwind(_))), "{called:?}");
+    assert_eq!(
+        regs.r[0],
+        super::call::MAX_DEPTH,
+        "each call within the bound made"
+    );
+    assert_eq!(os.world.routines_nested, 0, "every call it made over");
 }

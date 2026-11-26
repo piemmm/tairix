@@ -15,10 +15,11 @@ use tairix_riscos_arm::psr;
 use super::calendar::{self, Field, Ordinals, Piece, Pieces};
 use super::collate;
 use super::{BAD_TIME, CONVERT_DATE_AND_TIME, DEREGISTER, ENTRIES, REGISTER, UK as NUMBER};
-use crate::clock::{FIVE_BYTES, UNIX_EPOCH};
+use crate::clock::FIVE_BYTES;
 use crate::error::Error;
 use crate::module::{Builtin, Code, Resource, Services};
 use crate::msgtrans::{Own, BUFFER_OVERFLOW, ENUMERATE_TOKENS, LOOKUP};
+use crate::os::UNIX_EPOCH;
 use crate::os::{len32, Fail, Os, Regs, Unwind, World};
 use crate::swi::X;
 
@@ -174,6 +175,7 @@ const ROUTINES: [Code; ENTRIES] = [
 pub(crate) static UK: Builtin = Builtin {
     title: "UK",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: None,
     services: Some(Services {

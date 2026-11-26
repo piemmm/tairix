@@ -7,10 +7,10 @@ use alloc::vec::Vec;
 
 use tairix_fsmeta::preset::acorn;
 use tairix_riscos_kernel::filing::fs::{
-    args, file, file_info, func, open as reasons, Info, Layout,
+    args, file, file_info, func, open as reasons, Info, Layout, Listed,
 };
 use tairix_riscos_kernel::filing::{NOT_OPEN, UNSUPPORTED};
-use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
+use tairix_riscos_kernel::os::{len32, quietly, Fail, Os, Regs};
 
 use super::cache::{Name, BLOCK};
 use super::protocol::{
@@ -189,17 +189,15 @@ pub(super) fn open(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 /// `failure`, the server's `handle` on the file it was opening let go first;
 /// an unwind while letting it go goes on in its place.
 fn abandon(os: &mut Os<'_>, place: Place, handle: u32, failure: Fail) -> Fail {
-    match done(
+    let closed = done(
         os,
         place,
         &Request::Close {
             handle,
             stamp: None,
         },
-    ) {
-        Err(Fail::Unwind(unwind)) => Fail::Unwind(unwind),
-        Ok(()) | Err(Fail::Error(_)) => failure,
-    }
+    );
+    quietly(closed).map_or_else(Fail::from, |()| failure)
 }
 
 /// `FSEntry_GetBytes`: R3 bytes of the file on R1 from R4 into R2, those
@@ -587,18 +585,12 @@ fn list(os: &mut Os<'_>, regs: &mut Regs, layout: Layout) -> Result<(), Fail> {
     let Reply::Entries { next, entries } = must(os, named.place, &request)? else {
         return Err(fail(os, FAILED));
     };
-    let mut used: u32 = 0;
-    let mut read: u32 = 0;
-    for (name, object) in &entries {
-        let size = layout.size(name);
-        if used.saturating_add(size) > room {
-            break;
-        }
-        let at = buffer.wrapping_add(used);
-        os.write_listed(at, layout, &info_of(object), 0, name)?;
-        used += size;
-        read += 1;
-    }
+    let listed = entries.iter().map(|(name, object)| Listed {
+        name,
+        info: info_of(object),
+        internal: 0,
+    });
+    let read = os.write_entries(buffer, room, layout, listed)?;
     regs.r[3] = read;
     regs.r[4] = if read as usize == entries.len() {
         next

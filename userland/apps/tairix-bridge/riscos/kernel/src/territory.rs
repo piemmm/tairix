@@ -26,33 +26,19 @@ use crate::swi::{os, X};
 use calendar::Ordinals;
 
 pub(crate) use crate::swi::chunk::TERRITORY as CHUNK;
-/// `Territory_Register`, `Territory_Deregister` and
-/// `Territory_NumberToName`.
+pub(crate) use crate::swi::territory::{
+    CONVERT_DATE_AND_TIME, CONVERT_STANDARD_DATE_AND_TIME, NAME_TO_NUMBER, NUMBER_TO_NAME,
+    ORDINALS_TO_TIME, READ_SYMBOLS, STRING_TO_ORDINALS, TIME_TO_ORDINALS, UPPER_CASE_TABLE,
+};
+/// `Territory_Register` and `Territory_Deregister`.
 pub(crate) const REGISTER: u32 = CHUNK + 1;
 pub(crate) const DEREGISTER: u32 = CHUNK + 2;
-const NUMBER_TO_NAME: u32 = CHUNK + 3;
 /// `Territory_ReadTimeZones`.
 pub(crate) const READ_TIME_ZONES: u32 = CHUNK + 0x0A;
-/// `Territory_ConvertDateAndTime`.
-pub const CONVERT_DATE_AND_TIME: u32 = CHUNK + 0x0B;
-/// `Territory_ConvertStandardDateAndTime`.
-pub const CONVERT_STANDARD_DATE_AND_TIME: u32 = CHUNK + 0x0C;
-/// `Territory_ConvertTimeToOrdinals`.
-pub const TIME_TO_ORDINALS: u32 = CHUNK + 0x0F;
-/// `Territory_ConvertTimeStringToOrdinals`.
-pub const STRING_TO_ORDINALS: u32 = CHUNK + 0x10;
-/// `Territory_ConvertOrdinalsToTime`.
-pub const ORDINALS_TO_TIME: u32 = CHUNK + 0x11;
 /// `Territory_Alphabet`.
 pub(crate) const ALPHABET: u32 = CHUNK + 0x12;
-/// `Territory_UpperCaseTable`.
-pub const UPPER_CASE_TABLE: u32 = CHUNK + 0x18;
-/// `Territory_ReadSymbols`.
-pub const READ_SYMBOLS: u32 = CHUNK + 0x1E;
 /// `Territory_ReadCalendarInformation`.
 pub(crate) const READ_CALENDAR_INFORMATION: u32 = CHUNK + 0x1F;
-/// `Territory_NameToNumber`.
-pub(crate) const NAME_TO_NUMBER: u32 = CHUNK + 0x20;
 /// `Territory_ConvertTextToString`, which does nothing.
 const CONVERT_TEXT_TO_STRING: u32 = CHUNK + 0x35;
 /// `Territory_DaylightRules`' offset in the chunk.
@@ -78,7 +64,7 @@ mod entry {
     pub(super) const READ_TIME_ZONES: usize = of(super::READ_TIME_ZONES);
     pub(super) const ALPHABET: usize = of(super::ALPHABET);
     pub(super) const SELECT_KEYBOARD_HANDLER: usize = of(CHUNK + 0x14);
-    pub(super) const COLLATE: usize = of(CHUNK + 0x1D);
+    pub(super) const COLLATE: usize = of(crate::swi::territory::COLLATE);
     pub(super) const DAYLIGHT_RULES: usize = of(CHUNK + super::DAYLIGHT_RULES);
 }
 
@@ -211,6 +197,7 @@ const NAMES: [&str; 57] = [
 pub(crate) static TERRITORY_MANAGER: Builtin = Builtin {
     title: "TerritoryManager",
     help_name: Some("Territories"),
+    help_suffix: None,
     bridge: false,
     swis: Some(Swis {
         chunk: CHUNK,
@@ -495,10 +482,7 @@ impl Os<'_> {
         // Setting the territory up is the Manager's work, not the caller's:
         // its failing never undoes, or fails, a registration that stands.
         if number == self.world.territory.current {
-            match self.territory_selected() {
-                Ok(()) | Err(Fail::Error(_)) => {}
-                Err(unwind) => return Err(unwind),
-            }
+            crate::os::quietly(self.territory_selected())?;
         }
         Ok(())
     }

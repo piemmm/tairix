@@ -27,6 +27,22 @@ pub const NOT_FOR_UPDATE: Error = Error {
     number: 0xC1,
     token: "NotOpenForUpdate",
 };
+/// A read from a stream its filing system opened without read access.
+pub(crate) const NOT_FOR_READING: Error = Error {
+    number: 0x413,
+    token: "NotOpenForReading",
+};
+/// "Unable to open '%0'": a filing system answered an open with no handle.
+pub(crate) const CANT_OPEN: Error = Error {
+    number: 0xD6,
+    token: "CantOpen",
+};
+/// "%0 must be given a file name": an empty name to a filing system that
+/// takes none.
+pub(crate) const NEEDS_NAME: Error = Error {
+    number: 0xCC,
+    token: "NeedsFileName",
+};
 /// "Too many open files".
 pub(crate) const TOO_MANY_OPEN: Error = Error {
     number: 0xC0,
@@ -84,4 +100,18 @@ pub(crate) fn bad_name(os: &mut Os<'_>) -> Fail {
 /// "Filing system or path `prefix`: not present".
 pub(crate) fn no_prefix(os: &mut Os<'_>, prefix: &[u8]) -> Fail {
     fail(os, NO_PREFIX, &[prefix])
+}
+
+/// An empty name refused by the filing system numbered `number`, named
+/// with its colon.
+pub(crate) fn needs_name(os: &mut Os<'_>, number: u8) -> Fail {
+    let name = super::with(os, |state| {
+        let mut named = state.system(number).map(|system| system.name.clone())?;
+        tairix_util::fallible::push(&mut named, b':').then_some(named)
+    });
+    match name {
+        Ok(Some(name)) => fail(os, NEEDS_NAME, &[&name]),
+        Ok(None) => os.no_memory(),
+        Err(fail) => fail,
+    }
 }

@@ -83,8 +83,6 @@ pub const UNSUPPORTED: Error = Error {
 /// The longest name an error quotes.
 const NAME_MOST: usize = 255;
 
-/// `UpCall_NewApplication`.
-const NEW_APPLICATION_UPCALL: u32 = 256;
 /// The handlers a new application may find left in application space.
 const CODE_HANDLERS: [u32; 12] = [
     env::UNDEFINED,
@@ -235,7 +233,7 @@ impl Os<'_> {
     pub fn start_new_application(&mut self, regs: &mut Regs) -> Result<(), Fail> {
         let (tail, object, name) = (regs.r[1], regs.r[2], regs.r[3]);
         let mut upcall = Regs::default();
-        upcall.r[0] = NEW_APPLICATION_UPCALL;
+        upcall.r[0] = crate::swi::os::upcall::NEW_APPLICATION;
         upcall.r[2] = object;
         self.perform(X | os::UPCALL, &mut upcall)?;
         if upcall.r[0] == 0 {

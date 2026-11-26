@@ -30,12 +30,16 @@ mod version;
 use alloc::vec::Vec;
 
 use tairix_collections::{Key, OrderedMap, SlotKey, SlotMap};
+use tairix_riscos_arm::a32;
+use tairix_riscos_arm::cond::Condition;
+use tairix_riscos_arm::instruction::{BranchOp, Index, Instruction, Offset, Op, TransferOp};
+use tairix_riscos_arm::reg::Reg;
 
-use crate::memory::Bits;
+use crate::memory::{Bits, MemoryError};
 use crate::os::{Fail, Os, Regs, Unwind};
 
 pub(crate) use header::{Field, Header};
-pub(crate) use image::EntryKind;
+pub(crate) use image::BuiltinEntry;
 pub(crate) use rom::{arranged, entry_count, install, RomModule};
 pub(crate) use swis::ChunkNames;
 
@@ -60,6 +64,9 @@ pub struct Builtin {
     /// The name its help string gives where its title is too long to line
     /// up the help strings at the sixteenth column.
     pub help_name: Option<&'static str>,
+    /// What its help string adds after the date, as FPEmulator's names the
+    /// emulator it is.
+    pub help_suffix: Option<&'static str>,
     /// Whether no guest module may take its place: without it the guest would
     /// have no way to reach the desktop.
     pub bridge: bool,
@@ -95,6 +102,68 @@ pub struct Builtin {
 /// offset from the code's start, each entry two words after the last. The
 /// words are relative to the image, so a copy of it works as the original.
 pub type Emit = fn(i32) -> Result<Vec<u32>, crate::memory::MemoryError>;
+
+/// `op`, unconditional, as the word code the kernel lays down holds it.
+///
+/// # Errors
+///
+/// `HostFull` where `op` has no A32 encoding.
+pub fn instruction(op: Op) -> Result<u32, crate::memory::MemoryError> {
+    a32::encode(&Instruction {
+        cond: Condition::Al,
+        op,
+    })
+    .map_err(|_| crate::memory::MemoryError::HostFull)
+}
+
+/// `LDR PC, [PC, #ahead − 8]`: a jump through the word `ahead` bytes on
+/// from it, which works wherever the two are copied to.
+///
+/// # Errors
+///
+/// `HostFull` where the word lies beyond the load's reach.
+pub fn jump_through(ahead: i32) -> Result<u32, crate::memory::MemoryError> {
+    let offset = ahead - 8;
+    instruction(Op::Transfer {
+        op: TransferOp::Ldr,
+        rt: Reg::PC,
+        rn: Reg::PC,
+        up: offset >= 0,
+        offset: Offset::Immediate(
+            u16::try_from(offset.unsigned_abs())
+                .map_err(|_| crate::memory::MemoryError::HostFull)?,
+        ),
+        index: Index::Offset,
+    })
+}
+
+/// A branch from word `from` of a built-in's guest code to its routine
+/// `index`'s entry, the first entry `first` bytes from the code's start, as
+/// an [`Emit`] gives it.
+///
+/// # Errors
+///
+/// `HostFull` where the entry lies beyond a branch's reach.
+pub fn routine_branch(
+    from: usize,
+    first: i32,
+    index: usize,
+) -> Result<u32, crate::memory::MemoryError> {
+    let full = crate::memory::MemoryError::HostFull;
+    let target = index
+        .checked_mul(8)
+        .and_then(|offset| i32::try_from(offset).ok())
+        .and_then(|offset| first.checked_add(offset))
+        .ok_or(full)?;
+    let from = from
+        .checked_mul(4)
+        .and_then(|offset| i32::try_from(offset).ok())
+        .ok_or(full)?;
+    instruction(Op::Branch {
+        op: BranchOp::B,
+        offset: target - (from + 8),
+    })
+}
 
 /// A vector whose default a built-in module is.
 #[derive(Debug)]
@@ -307,11 +376,42 @@ pub(crate) struct Shape {
     pub(crate) header: Header,
     /// The profile its entries run in.
     pub(crate) bits: Bits,
-    /// The ROM module it was started from, by its place among the
-    /// session's built-ins.
-    pub(crate) rom: Option<usize>,
+    pub(crate) origin: Origin,
     /// R11 for its first incarnation's initialisation.
     pub(crate) hardware: u32,
+}
+
+/// A built-in's Rust by its address, which names it.
+fn address_of(builtin: &'static Builtin) -> usize {
+    core::ptr::from_ref(builtin).addr()
+}
+
+/// Where a module's image came from: the guest, or a built-in's image, by
+/// its place among the session's built-ins — the ROM's own, or a copy of
+/// it in the RMA, as `*RMFaster` makes one, which runs the same Rust.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Origin {
+    Guest,
+    Rom(usize),
+    Copy(usize),
+}
+
+impl Origin {
+    /// The built-in whose Rust the module runs.
+    pub(crate) const fn builtin(self) -> Option<usize> {
+        match self {
+            Self::Rom(place) | Self::Copy(place) => Some(place),
+            Self::Guest => None,
+        }
+    }
+
+    /// The ROM module whose own image it is, which nothing frees.
+    pub(crate) const fn rom(self) -> Option<usize> {
+        match self {
+            Self::Rom(place) => Some(place),
+            Self::Guest | Self::Copy(_) => None,
+        }
+    }
 }
 
 /// A module of the chain.
@@ -356,10 +456,14 @@ pub(crate) struct Modules {
     chunks: OrderedMap<u32, Vec<ModuleKey>>,
     /// The kernel owns FIQ, as it does at reset.
     pub(crate) kernel_has_fiq: bool,
-    /// The session's built-ins, in the ROM's order.
+    /// The session's built-ins, in the ROM's order, which is their images'.
     pub(crate) roms: Vec<RomModule>,
+    /// Each built-in's place, by its Rust's address, in that order.
+    places: Vec<(usize, usize)>,
+    /// The module running each built-in, by its place.
+    running: Vec<Option<ModuleKey>>,
     /// What each built-in entry's host routine enters, by its number.
-    pub(crate) entries: Vec<(usize, EntryKind)>,
+    pub(crate) entries: Vec<BuiltinEntry>,
     /// The word after the ROM chain, which holds the kernel's empty
     /// environment string.
     pub(crate) empty: u32,
@@ -382,9 +486,51 @@ impl Modules {
             chunks: OrderedMap::new(),
             kernel_has_fiq: true,
             roms: Vec::new(),
+            places: Vec::new(),
+            running: Vec::new(),
             entries: Vec::new(),
             empty: 0,
         }
+    }
+
+    /// The ROM chain `installed` laid in the host pages taken as the
+    /// session's built-ins, none of them running yet.
+    pub(crate) fn install(&mut self, installed: rom::Installed) -> Result<(), MemoryError> {
+        let mut places = Vec::new();
+        places.try_reserve_exact(installed.roms.len())?;
+        places.extend(
+            installed
+                .roms
+                .iter()
+                .enumerate()
+                .map(|(place, rom)| (address_of(rom.builtin), place)),
+        );
+        places.sort_unstable();
+        let mut running = Vec::new();
+        running.try_reserve_exact(installed.roms.len())?;
+        running.resize(installed.roms.len(), None);
+        self.places = places;
+        self.running = running;
+        self.roms = installed.roms;
+        self.entries = installed.entries;
+        self.empty = installed.empty;
+        Ok(())
+    }
+
+    /// `builtin`'s place among the session's built-ins.
+    fn place_of_builtin(&self, builtin: &'static Builtin) -> Option<usize> {
+        let address = address_of(builtin);
+        let at = self
+            .places
+            .binary_search_by_key(&address, |&(a, _)| a)
+            .ok()?;
+        Some(self.places[at].1)
+    }
+
+    /// The module running the built-in at `place`, in the chain or being
+    /// initialised.
+    fn running(&self, place: usize) -> Option<&Module> {
+        self.all.get((*self.running.get(place)?)?)
     }
 
     /// The module `key` names, if it is still held.
@@ -399,11 +545,6 @@ impl Modules {
     /// The chain, in order.
     pub(crate) fn chain(&self) -> &[ModuleKey] {
         &self.chain
-    }
-
-    /// Every module held, in the chain or still being initialised.
-    fn held(&self) -> impl Iterator<Item = &Module> {
-        self.all.values()
     }
 
     /// The `index`th module of the chain.
@@ -425,13 +566,22 @@ impl Modules {
     /// Holds a module of `shape`, with no incarnation and not yet in the
     /// chain.
     fn hold(&mut self, shape: Shape) -> Option<ModuleKey> {
-        self.all
+        let key = self
+            .all
             .try_insert(Module {
                 shape,
                 incarnations: Vec::new(),
                 services: None,
             })
-            .ok()
+            .ok()?;
+        if let Some(slot) = shape
+            .origin
+            .builtin()
+            .and_then(|place| self.running.get_mut(place))
+        {
+            *slot = Some(key);
+        }
+        Some(key)
     }
 
     /// Room for one more incarnation of `key` in its list, so that one
@@ -501,7 +651,18 @@ impl Modules {
     /// Takes `key` out of the chain and lets go of it.
     fn drop_module(&mut self, key: ModuleKey) -> Option<Module> {
         self.chain.retain(|&k| k != key);
-        self.all.remove(key)
+        let module = self.all.remove(key)?;
+        if let Some(place) = module.shape.origin.builtin() {
+            if self.running.get(place) == Some(&Some(key)) {
+                let other = self
+                    .all
+                    .iter()
+                    .find(|(_, other)| other.shape.origin.builtin() == Some(place))
+                    .map(|(other, _)| other);
+                self.running[place] = other;
+            }
+        }
+        Some(module)
     }
 
     /// Registers `key` for `chunk`, ahead of any module registered for it.
@@ -578,42 +739,34 @@ impl Os<'_> {
     /// of its image.
     fn builtin_active(&self, builtin: &'static Builtin) -> Option<(u32, usize)> {
         let modules = &self.world.modules;
-        let place = modules
-            .roms
-            .iter()
-            .position(|rom| core::ptr::eq(rom.builtin, builtin))?;
-        let code = modules
-            .held()
-            .find(|module| module.shape.rom == Some(place))?
-            .shape
-            .code;
-        Some((code, place))
+        let place = modules.place_of_builtin(builtin)?;
+        Some((modules.running(place)?.shape.code, place))
     }
 
-    /// The Rust of the built-in routine whose entry is at `address`, where the
-    /// entry is still the jump its image laid there: a call to it needs no
-    /// trip through the processor.
+    /// The Rust of the built-in routine whose entry is at `address` in a ROM
+    /// module's own image, where the module runs and the entry is still the
+    /// jump its image laid there: a call to it needs no trip through the
+    /// processor. A copy's routines take the trip, to the same Rust.
     pub(crate) fn builtin_routine_at(&mut self, address: u32) -> Option<Code> {
         let jump = crate::host::jump().ok()?;
-        let (place, index) = {
+        let (place, rom, index) = {
             let modules = &self.world.modules;
-            modules.held().find_map(|module| {
-                let place = module.shape.rom?;
-                let rom = modules.roms.get(place)?;
-                let offset = address.checked_sub(module.shape.code.wrapping_add(rom.routines))?;
-                let index = (offset % 8 == 0).then_some((offset / 8) as usize)?;
-                (index < rom.builtin.routines.len()).then_some((place, index))
-            })?
+            let place = modules
+                .roms
+                .partition_point(|rom| rom.image <= address)
+                .checked_sub(1)?;
+            let rom = *modules.roms.get(place)?;
+            if modules.running(place)?.shape.origin != Origin::Rom(place) {
+                return None;
+            }
+            let offset = address.checked_sub(rom.image.wrapping_add(rom.routines))?;
+            let index = (offset % 8 == 0).then_some((offset / 8) as usize)?;
+            (index < rom.builtin.routines.len()).then_some((place, rom, index))?
         };
-        let number = self
-            .world
-            .modules
-            .entries
-            .iter()
-            .position(|&entry| entry == (place, EntryKind::Routine(index)))?;
+        let number = u32::try_from(rom.first_routine + index).ok()?;
         let routine = self
             .world
-            .routine_address(crate::host::Routine::Builtin(u32::try_from(number).ok()?));
+            .routine_address(crate::host::Routine::Builtin(number));
         let laid = self.peek_word(address) == Some(jump)
             && self.peek_word(address.wrapping_add(4)) == Some(routine);
         laid.then(|| self.world.modules.roms[place].builtin.routines[index])
@@ -635,6 +788,19 @@ impl Os<'_> {
             .ok()
             .filter(|&i| (i as usize) < builtin.routines.len())?;
         Some(code.wrapping_add(offset).wrapping_add(8 * index))
+    }
+
+    /// Whether `address` lies in `builtin`'s active module: its header, its
+    /// routines' entries or its guest code.
+    #[must_use]
+    pub fn holds_code_of(&self, builtin: &'static Builtin, address: u32) -> bool {
+        self.builtin_active(builtin).is_some_and(|(code, place)| {
+            self.world
+                .modules
+                .roms
+                .get(place)
+                .is_some_and(|rom| address.wrapping_sub(code) < rom.size.saturating_sub(4))
+        })
     }
 
     /// The address of `builtin`'s guest code in its active module; none

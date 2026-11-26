@@ -1,0 +1,44 @@
+# SharedCLibrary's messages, in TAIRiX Bridge's own words.
+NoMemory:The workspace is too small for the C library
+UnknownChunk:The C library has no such chunk
+StaticSize:A chunk's static data is not the size the C library's is
+SwiRange:SWI value out of range for module %0
+NotThirtyTwo:Application is not 32-bit compatible
+NoApcsA:The C library no longer supports APCS-A
+OutOfDate:The program needs a newer C library
+UncaughtTrap:An uncaught trap, %0, at %1; its registers are at %2
+DivideByZero:Divide by zero
+StackOverflow:The stack could not be extended
+NoMain:The program has no main program
+Errno0:No error has been recorded
+EDOM:EDOM - an argument outside the function's domain
+ERANGE:ERANGE - a result outside the range its type holds
+ESIGNUM:ESIGNUM - no such signal
+EILSEQ:EILSEQ - not a valid multibyte character
+EOVERFLOW:EOVERFLOW - a value too large for its type
+EFBIG:EFBIG - the file would be too large
+ErrnoUnknown:An error the C library does not know
+FreeFailed:*** The run time system cannot carry on: free was given a block the heap does not hold
+FreeOverwritten:*** The run time system cannot carry on: free was given a block whose header has been overwritten
+HeapOverwritten:*** The run time system cannot carry on: the heap has been overwritten
+Postmortem:Stack backtrace
+BadAddress:(at address %0)
+LibraryFrame:%0 in the shared C library
+NamedFrame:%0 in function %1
+UnnamedFrame:%0 in an unnamed function
+Argument:  Argument %0: %1 %2
+StackOverwritten:The stack has been overwritten
+SignalAbort:The program has ended abnormally (abort() was called)
+SignalIllegal:An illegal instruction (a call to something not a function, or overwritten code)
+SignalAddress:An illegal address (perhaps far outside an array)
+SignalInterrupt:The user interrupted the program, which has ended
+SignalTerminate:The program was asked to end
+SignalUnknown:Signal %0, which has no default action
+AssertFailed:*** Assertion failed: %0, file %1, line %2
+AssertFailedIn:*** Assertion failed: %0, function %1, file %2, line %3
+ReadFail:A checked read outside the program's memory
+WriteFail:A checked write outside the program's memory
+MissingQuote:The command line has a double quote that is not closed
+BadRedirection:The command line asks for an I/O redirection the C library cannot make
+RedirectionFailed:%0 could not be opened for I/O redirection
+NoArgumentsRoom:There is no room for the program's arguments

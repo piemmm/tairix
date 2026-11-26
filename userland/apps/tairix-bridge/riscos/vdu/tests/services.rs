@@ -16,10 +16,12 @@ use tairix_riscos_kernel::swi::colour_trans as ct;
 /// What the spy was offered: each service's R1 to R5.
 struct Seen(Vec<[u32; 5]>);
 
-/// The spy, in the inventory's Squash's row, which no crate provides yet.
+/// The spy, in the inventory's row for Draw, whose crate is built on the
+/// drivers, so a session of the drivers' modules leaves it free.
 static SPY: Builtin = Builtin {
-    title: "Squash",
+    title: "Draw",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: None,
     services: Some(Services {

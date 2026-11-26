@@ -111,11 +111,17 @@ fn hex(text: &[u8]) -> Option<u32> {
     })
 }
 
-/// `OS_FSControl` 31: the type R1 names in R2: a type name, ignoring case,
-/// else up to three hex digits; "Unknown file type", R2 zero, for neither.
+/// The type `name` names: a type name, ignoring case, else up to three hex
+/// digits.
+pub(crate) fn type_named(os: &mut Os<'_>, name: &[u8]) -> Result<Option<u32>, Fail> {
+    Ok(named_type(os, name)?.or_else(|| hex(name)))
+}
+
+/// `OS_FSControl` 31: the type R1 names in R2, as [`type_named`] reads it;
+/// "Unknown file type", R2 zero, for none.
 pub(crate) fn type_number(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let name = super::name::read(os, regs.r[1])?;
-    let Some(kind) = named_type(os, &name)?.or_else(|| hex(&name)) else {
+    let Some(kind) = type_named(os, &name)? else {
         regs.r[2] = 0;
         return Err(error::fail(os, UNKNOWN_TYPE, &[&name]));
     };

@@ -210,6 +210,13 @@ impl Cp15 {
         (self.access >> (2 * (cp & 15))) & 3
     }
 
+    /// CPACR's fields for coprocessors 10 and 11 both made `field`, where
+    /// the processor has them.
+    pub(crate) const fn set_simdfp_access(&mut self, field: u32) {
+        let field = field & 3;
+        self.access = (field << 20 | field << 22) & self.access_mask;
+    }
+
     /// Records a data abort at `address`.
     pub(crate) fn data_fault(&mut self, fault: Fault, address: u32, write: bool) {
         self.data_status = self.status(fault)

@@ -839,7 +839,19 @@ fn matched(os: &mut Os<'_>, resolved: &mut Resolved) -> Result<(), Fail> {
 /// `parsed`, which has no path variable, resolved.
 fn resolved(os: &mut Os<'_>, parsed: &Parsed) -> Result<Resolved, Fail> {
     let (calls, directories) = chosen(os, &parsed.prefix)?;
-    if parsed.path.is_empty() || !passes(&parsed.path) {
+    if parsed.path.is_empty() {
+        if !calls.has(info::NULL_NAMES) {
+            return Err(error::needs_name(os, calls.number));
+        }
+        let special = rooting(calls.has(info::SPECIAL_FIELDS), parsed.special.as_deref());
+        return Ok(Resolved {
+            calls,
+            path: Vec::new(),
+            special: special.map(<[u8]>::to_vec),
+            inside: None,
+        });
+    }
+    if !passes(&parsed.path) {
         return Err(error::bad_name(os));
     }
     let mut context = Context {

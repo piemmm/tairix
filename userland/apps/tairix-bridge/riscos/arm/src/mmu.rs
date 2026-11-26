@@ -33,6 +33,12 @@ use crate::bus::{Abort, Bus, Fetch, Width};
 pub const PAGE_SIZE: u32 = 1 << PAGE_BITS;
 /// The bits of an address within its page.
 pub const PAGE_BITS: u32 = 12;
+
+/// The bytes from `address` to the end of its page.
+#[must_use]
+pub const fn to_page_end(address: u32) -> u32 {
+    PAGE_SIZE - address % PAGE_SIZE
+}
 /// Bytes in a granule, the unit the watch reports.
 pub const GRANULE_SIZE: u32 = 1 << GRANULE_BITS;
 const GRANULE_BITS: u32 = 8;

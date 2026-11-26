@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use super::header::{Field, Header, TITLE_MOST};
 use super::lifecycle::rma_request;
 use super::name::{self, Given};
-use super::{Missing, ModuleKey, Place, Shape};
+use super::{Missing, ModuleKey, Origin, Place, Shape};
 use crate::error::Error;
 use crate::filing::filetype;
 use crate::filing::fs::{kind, stamp};
@@ -320,7 +320,7 @@ impl Os<'_> {
                 .world
                 .modules
                 .get(key)
-                .is_some_and(|m| m.shape.rom.is_some() || m.shape.header.invincible());
+                .is_some_and(|m| m.shape.origin.rom().is_some() || m.shape.header.invincible());
             let passed_over = stays
                 || match self.kill_and_free(key) {
                     Ok(()) => false,
@@ -349,9 +349,17 @@ impl Os<'_> {
     }
 
     /// `OS_Module` 11: a copy in the RMA of the module at R1, R2 bytes,
-    /// linked last.
+    /// linked last; a whole copy of a ROM module's image still that
+    /// built-in.
     fn module_copy_area(&mut self, code: u32, size: u32) -> Result<(), Fail> {
         let (header, bits) = self.checked_header(code, size)?;
+        let origin = self
+            .world
+            .modules
+            .roms
+            .iter()
+            .position(|rom| rom.image == code && size >= rom.size.saturating_sub(4))
+            .map_or(Origin::Guest, Origin::Copy);
         self.admissible(code, &header)?;
         let block = self.rma_claim(size)?;
         let words = size.div_ceil(4).max(1);
@@ -363,7 +371,7 @@ impl Os<'_> {
             code: block,
             header,
             bits,
-            rom: None,
+            origin,
             hardware: 0,
         };
         let empty = self.world.modules.empty;
@@ -381,7 +389,7 @@ impl Os<'_> {
                 code,
                 header,
                 bits,
-                rom: None,
+                origin: Origin::Guest,
                 hardware: 0,
             };
             Ok((shape, place))
@@ -623,7 +631,7 @@ impl Os<'_> {
             code,
             header,
             bits,
-            rom: None,
+            origin: Origin::Guest,
             hardware,
         };
         self.link_and_init(shape, Place::End, env).map(|_| ())

@@ -883,6 +883,7 @@ impl MediaType {
                 | Self::ArchiveSpark
                 | Self::RiscOsArchive
                 | Self::ArcFs
+                | Self::RiscOsSquash
                 | Self::AcornDfsDisc
         ) || ancestry(self).any(|media| media == Self::RawDiskImage)
     }
@@ -1285,9 +1286,9 @@ pub fn folder_sample<'n>(
 }
 
 /// Every [`MediaType`], in registry order: the spelling round-trip
-/// ([`from_media_str`](MediaType::from_media_str)) and the order New ▸ offers
-/// its documents in.
-pub(crate) const ALL: &[MediaType] = &[
+/// ([`from_media_str`](MediaType::from_media_str)), the order New ▸ offers
+/// its documents in, and the order the registry is listed in.
+pub const ALL: &[MediaType] = &[
     MediaType::InodeDirectory,
     MediaType::TairixApp,
     MediaType::TairixService,
@@ -1676,12 +1677,18 @@ pub fn media_for_name(name: &str) -> Option<MediaType> {
     if let Some(media) = ending.filetype.and_then(media_for_filetype) {
         return Some(media);
     }
-    let ext = ending.extension?;
+    media_for_extension(ending.extension?)
+}
+
+/// The media type `extension`, spelt without its dot, names, matched without
+/// regard to ASCII case: `None` for one the registry does not know.
+#[must_use]
+pub fn media_for_extension(extension: &str) -> Option<MediaType> {
     EXTENSION_TABLE
         .iter()
         .find(|(_, exts)| {
             exts.iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(ext))
+                .any(|candidate| candidate.eq_ignore_ascii_case(extension))
         })
         .map(|(media, _)| *media)
 }

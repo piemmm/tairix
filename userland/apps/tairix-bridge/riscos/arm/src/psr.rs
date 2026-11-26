@@ -37,6 +37,14 @@ pub const M: u32 = 0b1_1111;
 /// The four condition flags.
 pub const NZCV: u32 = N | Z | C | V;
 
+/// The IT state `psr` holds: the condition and mask of the block in
+/// progress, zero outside one.
+#[must_use]
+pub const fn itstate(psr: u32) -> u8 {
+    let bits = ((psr >> 25) & 3) | (((psr >> 10) & 0x3F) << 2);
+    bits.to_le_bytes()[0]
+}
+
 /// R15's PSR bits in a 26-bit mode: the flags, I, F and the mode.
 pub const R15_PSR: u32 = NZCV | R15_I | R15_F | R15_MODE;
 /// R15's program counter bits in a 26-bit mode.

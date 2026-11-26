@@ -118,13 +118,15 @@ impl Format {
             VolumeFsType::Dfs => return dfs::read(regions, name),
             VolumeFsType::Gzip => Compression::Gzip,
             VolumeFsType::Bzip2 => Compression::Bzip2,
+            VolumeFsType::Squash => Compression::Squash,
             _ => return Err(DriverError::Unsupported),
         };
-        // Whether the stream holds a tar is answered here, by decoding it,
-        // never by the kernel's probe.
         let packing = Packing::of(compression, regions)?;
         let mut stream = Stream::new(compression)?;
-        if tar::holds_tar(&mut stream, regions, name)? {
+        // Whether the stream holds a tar is answered here, by decoding it,
+        // never by the kernel's probe; a Squash file holds one RISC OS file,
+        // whatever it is.
+        if compression != Compression::Squash && tar::holds_tar(&mut stream, regions, name)? {
             tar::read(regions, Some((packing, stream)))
         } else {
             lone::read(regions, packing, stream, name)
@@ -165,7 +167,8 @@ impl Format {
     /// what eighteen bits count in a DFS entry.
     pub(crate) const fn largest_member(&self) -> u64 {
         match self {
-            Self::Zip(_) | Self::Tar(_) | Self::Lone(_) | Self::Rar(_) => u64::MAX,
+            Self::Zip(_) | Self::Tar(_) | Self::Rar(_) => u64::MAX,
+            Self::Lone(lone) => lone.largest_member(),
             Self::Spark(_) => u32::MAX as u64,
             Self::ArcFs(_) => i32::MAX as u64,
             Self::Dfs(_) => tairix_dfs::catalogue::MAX_FIELD as u64,
@@ -194,7 +197,7 @@ impl Format {
                 accessed: Some(EVERY_INSTANT),
             },
             Self::Lone(lone) => MemberTimes {
-                modified: lone.modified_field(),
+                modified: lone.modified_field(meta),
                 accessed: None,
             },
             Self::Spark(_) => MemberTimes {
@@ -221,7 +224,10 @@ impl Format {
 
     /// Whether a member's RISC OS fields are kept.
     pub(crate) const fn keeps_attributes(&self) -> bool {
-        self.holds_tree()
+        match self {
+            Self::Lone(lone) => lone.keeps_attributes(),
+            _ => self.holds_tree(),
+        }
     }
 
     /// The RISC OS attribute bits a member's record holds: a tar's records
@@ -284,6 +290,7 @@ impl Format {
     ) -> Result<(), DriverError> {
         match self {
             Self::Dfs(_) => dfs::Dfs::keeps_object(tree, id, object),
+            Self::Lone(lone) => lone.keeps_object(object),
             _ => Ok(()),
         }
     }

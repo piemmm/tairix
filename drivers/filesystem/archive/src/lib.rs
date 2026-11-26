@@ -65,6 +65,7 @@ pub const BIND_KEYS: &[DriverBindKey] = &[
     tairix_fsserve::bind_key(VolumeFsType::ArcFs),
     tairix_fsserve::bind_key(VolumeFsType::Rar),
     tairix_fsserve::bind_key(VolumeFsType::Dfs),
+    tairix_fsserve::bind_key(VolumeFsType::Squash),
 ];
 
 /// Archives, served.

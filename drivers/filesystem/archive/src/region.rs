@@ -260,6 +260,35 @@ impl Input {
     pub(crate) fn consume(&mut self, n: usize) {
         self.start = (self.start + n).min(self.stop);
     }
+
+    /// As [`Self::fill`], at least `least` bytes held where the range has
+    /// them: for a codec that takes its input only in whole units.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal to read.
+    pub(crate) fn fill_to<A: VolumeAccess>(
+        &mut self,
+        regions: &Regions<A>,
+        least: usize,
+    ) -> Result<&[u8], DriverError> {
+        let held = self.stop - self.start;
+        if held > 0 && held < least && self.next < self.end {
+            self.buf.copy_within(self.start..self.stop, 0);
+            let want = usize::try_from(self.end - self.next)
+                .map_or(INPUT_LEN - held, |left| left.min(INPUT_LEN - held));
+            regions.read_archive(self.next, &mut self.buf[held..held + want])?;
+            self.next += want as u64;
+            self.start = 0;
+            self.stop = held + want;
+        }
+        self.fill(regions)
+    }
+
+    /// The bytes of the range not yet consumed.
+    pub(crate) fn left(&self) -> u64 {
+        self.end - self.position()
+    }
 }
 
 /// An input as a codec's, a byte at a time, holding a refusal met reading

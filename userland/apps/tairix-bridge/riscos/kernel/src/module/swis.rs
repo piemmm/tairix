@@ -43,8 +43,9 @@ impl Os<'_> {
         regs.r[11] = offset;
         regs.r[12] = private;
         let swis = shape
-            .rom
-            .and_then(|rom| self.world.modules.builtin(rom))
+            .origin
+            .builtin()
+            .and_then(|place| self.world.modules.builtin(place))
             .and_then(|builtin| builtin.swis.as_ref());
         if let Some(swis) = swis {
             return Some((swis.handler)(self, offset, regs));

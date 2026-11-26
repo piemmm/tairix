@@ -8,7 +8,8 @@
 
 use tairix_abi::time::{civil_from_days, days_from_civil};
 
-use crate::clock::{CENTISECONDS_PER_DAY, FIVE_BYTES, UNIX_EPOCH};
+use crate::clock::{CENTISECONDS_PER_DAY, FIVE_BYTES};
+use crate::os::UNIX_EPOCH;
 
 /// Centiseconds in a second, a minute and an hour.
 pub(crate) const PER_SECOND: u64 = 100;

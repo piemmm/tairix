@@ -7,10 +7,10 @@
 use alloc::vec::Vec;
 
 use super::header::Field;
-use super::image::{self, EntryKind};
+use super::image::{self, BuiltinEntry};
 use super::inventory::{rom_of, Rom, EXTENSION, INVENTORY};
 use super::reasons::NO_MORE_MODULES;
-use super::{name, utility, Builtin, ModuleKey, Place, Shape};
+use super::{name, utility, Builtin, ModuleKey, Origin, Place, Shape};
 use crate::memory::{Memory, MemoryError};
 use crate::os::{BootError, Fail, Os, Regs};
 
@@ -30,10 +30,12 @@ pub(crate) struct RomModule {
     pub(crate) routines: u32,
     /// Where its guest code begins in its image.
     pub(crate) code: u32,
+    /// The number of its first routine's entry, the rest following in order.
+    pub(crate) first_routine: usize,
 }
 
 /// The kernel's own built-in modules.
-const KERNEL: [&Builtin; 8] = [
+const KERNEL: [&Builtin; 13] = [
     &utility::UTILITY,
     &crate::resourcefs::RESOURCE_FS,
     &crate::territory::TERRITORY_MANAGER,
@@ -42,6 +44,11 @@ const KERNEL: [&Builtin; 8] = [
     &crate::territory::uk::UK,
     &crate::international::INTERNATIONAL,
     &crate::intkey::INTERNATIONAL_KEYBOARD,
+    &crate::fpemulator::FP_EMULATOR,
+    &crate::vfpsupport::VFP_SUPPORT,
+    &crate::callaswi::CALL_A_SWI,
+    &crate::squash::SQUASH,
+    &crate::buffers::BUFFER_MANAGER,
 ];
 
 /// The first chunk an unplug bit is kept for.
@@ -144,7 +151,7 @@ pub(crate) struct Installed {
     /// The ROM modules.
     pub(crate) roms: Vec<RomModule>,
     /// What each built-in entry's routine enters.
-    pub(crate) entries: Vec<(usize, EntryKind)>,
+    pub(crate) entries: Vec<BuiltinEntry>,
     /// The word after the chain, which holds the empty environment string.
     pub(crate) empty: u32,
 }
@@ -176,6 +183,7 @@ pub(crate) fn install(
             size,
             routines: placed.routines,
             code: placed.code,
+            first_routine: placed.first_routine,
         });
     }
     Ok(Installed {
@@ -219,7 +227,7 @@ impl Os<'_> {
             code: rom.image,
             header,
             bits,
-            rom: Some(place),
+            origin: Origin::Rom(place),
             hardware: 0,
         };
         let empty = self.world.modules.empty;
@@ -300,7 +308,7 @@ impl Os<'_> {
             .chain()
             .iter()
             .filter_map(|&key| self.world.modules.get(key))
-            .find(|module| module.shape.rom == Some(place));
+            .find(|module| module.shape.origin.rom() == Some(place));
         Ok(match module {
             None => 0,
             Some(module) if active.wrapping_sub(module.shape.code) < module.shape.header.size() => {
@@ -312,7 +320,9 @@ impl Os<'_> {
 
     /// `OS_Module` 19 and 20: the ROM module R1 places into R2's section,
     /// its version in R6 too for 20. The main ROM goes on into the
-    /// extension's section 0, as RISC OS 5 goes on into an expansion card's.
+    /// extension's section 0, as RISC OS 5 goes on into an expansion card's,
+    /// whose modules R5 gives the chunk number of, from one in the card's
+    /// order, as genuine RISC OS 5 numbers the first.
     pub(crate) fn rom_modules(&mut self, regs: &mut Regs, with_version: bool) -> Result<(), Fail> {
         let roms = &self.world.modules.roms;
         let main = roms
@@ -339,6 +349,9 @@ impl Os<'_> {
         regs.r[2] = section;
         regs.r[3] = rom.image.wrapping_add(title);
         regs.r[4] = status;
+        if section == EXTENSION_SECTION {
+            regs.r[5] = regs.r[1];
+        }
         if with_version {
             regs.r[6] = rom_of(rom.row).map_or(0, Rom::bcd);
         }

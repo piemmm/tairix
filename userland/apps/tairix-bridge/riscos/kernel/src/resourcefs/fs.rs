@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use super::{below_root, own, Entry, Object, NAME_MOST};
 use crate::error::Error;
-use crate::filing::fs::{self, attribute, file_info, kind, Info, Layout};
+use crate::filing::fs::{self, attribute, file_info, kind, Info, Layout, Listed};
 use crate::filing::UNSUPPORTED;
 use crate::os::{len32, Fail, Os, Regs};
 
@@ -280,27 +280,22 @@ pub(super) fn func(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 fn list(os: &mut Os<'_>, regs: &mut Regs, layout: Layout) -> Result<(), Fail> {
     let path = os.resource_path(regs.r[1])?;
     let children = os.resource_children(&path)?;
-    let (buffer, wanted, offset, room) = (regs.r[2], regs.r[3], regs.r[4], regs.r[5]);
-    let mut at = buffer;
-    let mut used: u32 = 0;
-    let mut read: u32 = 0;
-    for child in children.iter().skip(offset as usize).take(wanted as usize) {
-        let size = layout.size(&child.name);
-        if used.saturating_add(size) > room {
-            break;
-        }
-        let kind = if child.file {
-            kind::FILE
-        } else {
-            kind::DIRECTORY
-        };
-        let info = described(&child.entry, kind);
-        os.write_listed(at, layout, &info, 0, &child.name)?;
-        at = at.wrapping_add(size);
-        used += size;
-        read += 1;
-    }
-    regs.r[3] = read;
-    regs.r[4] = if read == 0 { u32::MAX } else { offset + read };
-    Ok(())
+    let (wanted, offset) = (regs.r[3], regs.r[4]);
+    let entries = children
+        .iter()
+        .skip(offset as usize)
+        .take(wanted as usize)
+        .map(|child| {
+            let kind = if child.file {
+                kind::FILE
+            } else {
+                kind::DIRECTORY
+            };
+            Listed {
+                name: &child.name,
+                info: described(&child.entry, kind),
+                internal: 0,
+            }
+        });
+    os.answer_entries(regs, layout, entries)
 }

@@ -1,6 +1,6 @@
 [package]
 name = "tairix-riscos-filing"
-description = "TAIRiX Bridge's filing: FileSwitch, the filing systems it calls through their entry points, HostFS, RamFS on FileCore and Choices. no_std, forbids unsafe."
+description = "TAIRiX Bridge's filing: FileSwitch, the filing systems it calls through their entry points (HostFS, RamFS on FileCore, DeviceFS with SystemDevices' devices, PipeFS), MimeMap and Choices. no_std, forbids unsafe."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -54,6 +54,9 @@ test-support = ["dep:tairix-tz", "tairix-fscopy/test-support"]
 tairix-riscos-filing = { path = ".", features = ["test-support"] }
 # The seeded generator the fuzz harness draws from.
 tairix-fuzzseed = { path = "../../../../../tests/fuzzseed", version = "=0.0.0" }
+# BBC BASIC, which runs the device tests' programs as RISC OS 5 runs the
+# probes they were recorded with, drivers assembled by its assembler.
+tairix-riscos-basic = { path = "../basic", version = "=0.0.0" }
 # The in-memory tree HostFS's tests serve.
 tairix-fscopy = { path = "../../../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }
 # A zone for the sessions the corpus is replayed on, which no filing scenario

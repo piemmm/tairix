@@ -126,6 +126,7 @@ const MESSAGES_FILE: OwnFile = OwnFile::named(b"Resources:$.Resources.Fonts.Mess
 pub(crate) static FONT_MANAGER: Builtin = Builtin {
     title: "FontManager",
     help_name: Some("Font Manager"),
+    help_suffix: None,
     bridge: false,
     swis: Some(Swis {
         chunk: chunk::FONT,

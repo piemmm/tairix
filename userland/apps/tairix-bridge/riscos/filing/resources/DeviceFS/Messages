@@ -1,0 +1,4 @@
+# DeviceFS's messages, in TAIRiX Bridge's own words.
+BadOperation:Devices cannot do that
+DeviceNotFound:No device has that name
+BlockDevices:Only character devices can be registered

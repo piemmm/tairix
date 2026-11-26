@@ -136,39 +136,56 @@ impl Unit {
         outcome.bits
     }
 
+    /// `operation`, one of `lib/softfloat`'s on `a`, under the unit's
+    /// controls.
+    pub fn monadic(
+        &mut self,
+        format: Binary,
+        a: u64,
+        operation: impl FnOnce(Ieee, u64) -> Outcome,
+    ) -> u64 {
+        let a = self.input(format, a);
+        let outcome = operation(self.ieee(format), a);
+        self.take(outcome)
+    }
+
+    /// `operation`, one of `lib/softfloat`'s on `a` and `b`, under the unit's
+    /// controls.
+    pub fn dyadic(
+        &mut self,
+        format: Binary,
+        a: u64,
+        b: u64,
+        operation: impl FnOnce(Ieee, u64, u64) -> Outcome,
+    ) -> u64 {
+        let (a, b) = (self.input(format, a), self.input(format, b));
+        let outcome = operation(self.ieee(format), a, b);
+        self.take(outcome)
+    }
+
     /// `a + b`.
     pub fn add(&mut self, format: Binary, a: u64, b: u64) -> u64 {
-        let (a, b) = (self.input(format, a), self.input(format, b));
-        let outcome = self.ieee(format).add(a, b);
-        self.take(outcome)
+        self.dyadic(format, a, b, Ieee::add)
     }
 
     /// `a − b`.
     pub fn sub(&mut self, format: Binary, a: u64, b: u64) -> u64 {
-        let (a, b) = (self.input(format, a), self.input(format, b));
-        let outcome = self.ieee(format).sub(a, b);
-        self.take(outcome)
+        self.dyadic(format, a, b, Ieee::sub)
     }
 
     /// `a × b`.
     pub fn mul(&mut self, format: Binary, a: u64, b: u64) -> u64 {
-        let (a, b) = (self.input(format, a), self.input(format, b));
-        let outcome = self.ieee(format).mul(a, b);
-        self.take(outcome)
+        self.dyadic(format, a, b, Ieee::mul)
     }
 
     /// `a ÷ b`.
     pub fn div(&mut self, format: Binary, a: u64, b: u64) -> u64 {
-        let (a, b) = (self.input(format, a), self.input(format, b));
-        let outcome = self.ieee(format).div(a, b);
-        self.take(outcome)
+        self.dyadic(format, a, b, Ieee::div)
     }
 
     /// `√a`.
     pub fn sqrt(&mut self, format: Binary, a: u64) -> u64 {
-        let a = self.input(format, a);
-        let outcome = self.ieee(format).sqrt(a);
-        self.take(outcome)
+        self.monadic(format, a, Ieee::sqrt)
     }
 
     /// `addend + a × b`, rounded once.

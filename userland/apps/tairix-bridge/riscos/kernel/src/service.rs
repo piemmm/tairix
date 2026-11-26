@@ -60,6 +60,18 @@ pub const TERRITORY_MANAGER_LOADED: u32 = 0x64;
 pub const VALIDATE_ADDRESS: u32 = 0x6D;
 /// `Service_CloseFile`: an object and everything beneath it to be closed.
 pub const CLOSE_FILE: u32 = 0x68;
+/// `Service_BufferStarting`: the buffer manager is there to register with.
+pub const BUFFER_STARTING: u32 = 0x6F;
+/// `Service_DeviceFSStarting`: DeviceFS is there to register devices with.
+pub const DEVICE_FS_STARTING: u32 = 0x70;
+/// `Service_DeviceFSDying`: DeviceFS is going, its streams already closed.
+pub const DEVICE_FS_DYING: u32 = 0x71;
+/// `Service_DeviceDead`: a device, R3 its name, or with R3 zero a whole
+/// driver, R2 its handle, killed.
+pub const DEVICE_DEAD: u32 = 0x79;
+/// `Service_DeviceFSCloseRequest`: a stream, R2 its file handle, blocking
+/// another's opening; zero R1 if it has been closed.
+pub const DEVICE_FS_CLOSE_REQUEST: u32 = 0x81;
 /// `Service_SwitchingOutputToSprite`: output switched to or from a sprite,
 /// R2 to R5 the call's R0 to R3.
 pub const SWITCHING_OUTPUT_TO_SPRITE: u32 = 0x72;

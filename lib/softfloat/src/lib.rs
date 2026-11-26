@@ -38,7 +38,7 @@ pub mod packed;
 
 pub use binary::{fpa_words, from_fpa_words, Binary, Class, Unpacked};
 pub use decimal::{Beyond, Decimal};
-pub use exact::{Exact, Parts, RoundedSig};
+pub use exact::{Exact, Parts, Remainder, RoundedSig};
 pub use extended::Extended;
 pub use flags::Flags;
 pub use ieee::{Ieee, Integral, Nans, Outcome, Policy, Tininess};

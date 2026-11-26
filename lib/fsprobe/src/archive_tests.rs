@@ -13,7 +13,7 @@ use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
 
 use super::{
-    arc_entry_holds, arcfs_header, bzip2_level, rar5_vint, rar_version, recognise,
+    arc_entry_holds, arcfs_header, bzip2_level, rar5_vint, rar_version, recognise, squash_header,
     tar_header_holds, tar_number, RarVersion, ZipEnd, ARCFS_HEADER_LEN, ARCFS_MAGIC,
     RAR4_SIGNATURE, RAR5_SIGNATURE, TAR_BLOCK,
 };
@@ -324,6 +324,26 @@ fn a_bzip2_stream_says_its_block_size() {
     let mut stream = b"BZh91AY&SY".to_vec();
     stream.resize(40, 0);
     assert_eq!(recognised(&stream), Some(VolumeFsType::Bzip2));
+}
+
+#[test]
+fn a_squash_file_is_its_header_then_its_stream_s() {
+    let header = tairix_compress::squash::FileHeader {
+        length: 1,
+        load: 0xFFFF_FD3A,
+        exec: 0x1234_5678,
+    };
+    let mut file = header.to_bytes().to_vec();
+    file.extend_from_slice(&[0x1F, 0x9D, 0x8C, b'x', 0]);
+    assert_eq!(squash_header(&file), Some(header));
+    assert_eq!(recognised(&file), Some(VolumeFsType::Squash));
+    // A header without its stream's, or with another's, is no Squash file.
+    for at in 20..23 {
+        let mut other = file.clone();
+        other[at] ^= 0x40;
+        assert_eq!(squash_header(&other), None);
+    }
+    assert_eq!(squash_header(&file[..22]), None);
 }
 
 #[test]

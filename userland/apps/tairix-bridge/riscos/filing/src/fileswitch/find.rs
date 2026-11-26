@@ -12,7 +12,7 @@
 use tairix_riscos_kernel::filing::filetype::DATA;
 use tairix_riscos_kernel::filing::fs::{self, file_info};
 use tairix_riscos_kernel::filing::{BAD_FIND, IS_A_DIRECTORY, NOT_FOUND};
-use tairix_riscos_kernel::os::{Fail, Os, Regs};
+use tairix_riscos_kernel::os::{quietly, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::find::{
     INPUT, MUST_EXIST, NO_DIRECTORY, OUTPUT, PATH, UPDATE as KIND,
 };
@@ -47,7 +47,7 @@ pub(crate) fn find(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     };
     regs.r[0] = match mode & KIND {
         INPUT => existing(os, regs.r[1], search, mode, false)?,
-        OUTPUT => create(os, regs.r[1], search)?,
+        OUTPUT => create(os, regs.r[1], search, mode)?,
         _ => existing(os, regs.r[1], search, mode, true)?,
     };
     Ok(())
@@ -88,25 +88,38 @@ fn existing(
     if found.kind == DIRECTORY && (update || mode & NO_DIRECTORY != 0) {
         return Err(refused(os, address, IS_A_DIRECTORY));
     }
-    let handle = open::next_handle(os)?;
-    let opened = if update {
-        call::open_for_update(os, &resolved, handle)?
-    } else {
-        call::open(
-            os,
-            &resolved.calls,
-            fs::open::READ,
-            resolved.named(),
-            handle,
-        )?
-    };
-    match opened {
-        Some(opened) => {
-            let status = if update { writing(&opened) } else { 0 };
-            open::record(os, resolved, opened, status, handle)
+    open::holding(os, |os, handle| {
+        let opened = if update {
+            call::open_for_update(os, &resolved, handle, mode)?
+        } else {
+            call::open(
+                os,
+                &resolved.calls,
+                fs::open::READ,
+                resolved.named(),
+                handle,
+                mode,
+            )?
+        };
+        match opened {
+            Some(opened) => {
+                let status = if update { writing(&opened) } else { 0 };
+                open::record(os, resolved, opened, status, handle)
+            }
+            None => unopened(os, address, mode),
         }
-        None if mode & MUST_EXIST != 0 => Err(missing(os, address)),
-        None => Ok(0),
+    })
+}
+
+/// What an open the filing system answered with no handle gives: "unable
+/// to open" where `mode` asks for an error, else no handle.
+fn unopened(os: &mut Os<'_>, address: u32, mode: u32) -> Result<u32, Fail> {
+    if mode & MUST_EXIST == 0 {
+        return Ok(0);
+    }
+    match name::read(os, address) {
+        Ok(given) => Err(super::error::fail(os, super::error::CANT_OPEN, &[&given])),
+        Err(fail) => Err(fail),
     }
 }
 
@@ -120,11 +133,12 @@ const fn writing(opened: &call::Opened) -> u32 {
     }
 }
 
-/// A file created, or truncated where it exists, and opened for update: its
-/// handle — none where a filing system always called to open opened
-/// nothing, and "not found" where any other did. As on RISC OS 5, a create
-/// the filing system refuses is answered by the open after it.
-fn create(os: &mut Os<'_>, address: u32, search: Search<'_>) -> Result<u32, Fail> {
+/// A file created, or truncated where it exists, and opened for update in
+/// `mode`: its handle. Where the open answers none, a filing system always
+/// called to open gives what [`unopened`] gives, and any other "unable to
+/// open" whatever the mode. As on RISC OS 5, a create the filing system
+/// refuses is answered by the open after it.
+fn create(os: &mut Os<'_>, address: u32, search: Search<'_>, mode: u32) -> Result<u32, Fail> {
     let mut resolved = name::locate(os, address, search)?;
     let found = name::info(os, &mut resolved, Need::Kind)?;
     if found.kind == DIRECTORY || found.kind == call::IMAGE {
@@ -136,36 +150,38 @@ fn create(os: &mut Os<'_>, address: u32, search: Search<'_>) -> Result<u32, Fail
         let mut make = Regs::default();
         make.r[2] = load;
         make.r[3] = exec;
-        match call::file_modifying(os, &resolved, fs::file::CREATE, &mut make) {
-            Ok(()) | Err(Fail::Error(_)) => {}
-            Err(unwind) => return Err(unwind),
-        }
+        quietly(call::file_modifying(
+            os,
+            &resolved,
+            fs::file::CREATE,
+            &mut make,
+        ))?;
     }
-    let handle = open::next_handle(os)?;
-    let opened = call::open_for_update(os, &resolved, handle)?;
-    let Some(mut opened) = opened else {
-        return if always {
-            Ok(0)
-        } else {
-            Err(missing(os, address))
+    let handle = open::holding(os, |os, handle| {
+        let opened = call::open_for_update(os, &resolved, handle, mode)?;
+        let Some(mut opened) = opened else {
+            return unopened(os, address, if always { mode } else { MUST_EXIST });
         };
-    };
-    if opened.buffer != 0 {
-        opened.extent = 0;
-    } else if let Err(refused) = call::args(
-        os,
-        &resolved.calls,
-        fs::args::WRITE_EXTENT,
-        opened.handle,
-        0,
-        0,
-    ) {
-        // The truncation's refusal is the one to report.
-        let _ = call::close(os, &resolved.calls, opened.handle, 0, 0);
-        return Err(refused);
+        if opened.buffer != 0 {
+            opened.extent = 0;
+        } else if let Err(refused) = call::args(
+            os,
+            &resolved.calls,
+            fs::args::WRITE_EXTENT,
+            opened.handle,
+            0,
+            0,
+        ) {
+            // The truncation's refusal is the one to report.
+            let _ = call::close(os, &resolved.calls, opened.handle, 0, 0);
+            return Err(refused);
+        }
+        let status = writing(&opened) | status::MODIFIED;
+        open::record(os, resolved, opened, status, handle)
+    })?;
+    if handle == 0 {
+        return Ok(0);
     }
-    let status = writing(&opened) | status::MODIFIED;
-    let handle = open::record(os, resolved, opened, status, handle)?;
     let mut stream = open::stream(os, handle)?;
     stream.created = true;
     open::put(os, handle, stream)?;

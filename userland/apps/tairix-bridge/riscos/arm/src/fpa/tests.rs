@@ -799,3 +799,28 @@ fn a_packed_store_converts_exactly_and_rounds_to_nearest() {
     .words();
     assert_eq!(store(0, tie), ([0x0001_7100, 0, 0x0000_0200, 0], inexact));
 }
+
+#[test]
+fn a_register_saved_as_extended_raises_nothing_and_leaves_the_status() {
+    let single_signalling = [0x7F80_0001, 0, 0, 0];
+    let status = fpsr::SYSTEM_ID | fpsr::NE | Exception::InvalidOperation.enable();
+    let mut trapping = fpa(&[(1, ONE)], status);
+    trapping
+        .load(Format::Single, 3, single_signalling)
+        .expect("a load raises nothing");
+    assert_eq!(
+        trapping.store(Format::Extended, 3),
+        Err(Exception::InvalidOperation),
+        "STFE traps"
+    );
+    let mut untrapped = fpa(&[], fpsr::SYSTEM_ID | fpsr::NE);
+    untrapped
+        .load(Format::Single, 3, single_signalling)
+        .expect("a load raises nothing");
+    let [a, b, c, _] = untrapped
+        .store(Format::Extended, 3)
+        .expect("no trap enabled");
+    assert_eq!(trapping.extended(3), [a, b, c], "the quiet NaN STFE writes");
+    assert_eq!(trapping.extended(1), ONE);
+    assert_eq!(trapping.fpsr(), status, "no flag raised");
+}

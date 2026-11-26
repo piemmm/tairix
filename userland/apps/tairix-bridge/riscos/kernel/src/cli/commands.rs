@@ -117,10 +117,7 @@ impl Os<'_> {
     fn show_long(&mut self, name: u32) -> Result<(), Fail> {
         let mut probe = Regs::default();
         probe.r[..5].copy_from_slice(&[name, 0, u32::MAX, 0, 0]);
-        match self.perform(X | os::READ_VAR_VAL, &mut probe) {
-            Ok(()) | Err(Fail::Error(_)) => {}
-            Err(unwind) => return Err(unwind),
-        }
+        self.perform_quietly(X | os::READ_VAR_VAL, &mut probe)?;
         let room = (!probe.r[2]).wrapping_add(0xFF) & !0xFF;
         let block = self.rma_claim(room)?;
         let mut read = Regs::default();

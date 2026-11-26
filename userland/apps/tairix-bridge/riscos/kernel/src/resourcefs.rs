@@ -138,6 +138,7 @@ const FS_ENTRIES: usize = 2;
 pub(crate) static RESOURCE_FS: Builtin = Builtin {
     title: "ResourceFS",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: Some(Swis {
         chunk: CHUNK,
@@ -535,23 +536,22 @@ impl Os<'_> {
 
     /// The filing system registered with FileSwitch, if FileSwitch is there
     /// to take it.
-    fn declare(&mut self) -> Result<(), Fail> {
+    fn declare(&mut self) -> Result<(), Unwind> {
         let Some(workspace) = self.world.resource_fs.workspace else {
             return Ok(());
         };
         let declared = self.declare_filing_system(Declaration {
             module: &RESOURCE_FS,
             first_entry: FS_ENTRIES,
+            gbpb: false,
             block: workspace + FS_BLOCK_AT,
             name: workspace + FS_NAME_AT,
             startup: workspace + EMPTY_AT,
             info: FS_INFO,
+            extra: 0,
             workspace,
         });
-        match declared {
-            Ok(()) | Err(Fail::Error(_)) => Ok(()),
-            Err(unwind) => Err(unwind),
-        }
+        crate::os::quietly(declared)
     }
 
     /// Registers the block at `block`, newest: refused if it is registered.
@@ -721,10 +721,7 @@ fn swi(os: &mut Os<'_>, offset: u32, regs: &mut Regs) -> Result<(), Fail> {
 fn service(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Unwind> {
     match regs.r[1] {
         service::TERRITORY_STARTED => os.read_upper_case(),
-        service::FS_REDECLARE => match os.declare() {
-            Ok(()) | Err(Fail::Error(_)) => Ok(()),
-            Err(Fail::Unwind(unwind)) => Err(unwind),
-        },
+        service::FS_REDECLARE => os.declare(),
         _ => Ok(()),
     }
 }

@@ -55,6 +55,13 @@ its two sides as the folders `Drive 0` and `Drive 2`. A file's load and
 execution addresses travel with it, and a change is written to the disc
 as the BBC Micro would write it, every other sector kept as it was.
 
+A RISC OS Squash file (file type `&FCA`) mounts as a volume of the one
+file it compressed, named as the Squash file is less any `,fca` ending,
+its RISC OS file type and date those the Squash file records. The file
+can be rewritten, retyped and redated, and is saved compressed again;
+nothing else can be added, and the file can be no longer than 4 GiB less
+a byte.
+
 The volume stays mounted until you detach it with `unmount`, or your
 login session ends. An image that holds a partitioned disk, one disk of
 a RAID array, or a filesystem whose recorded owners are always honoured
@@ -81,8 +88,8 @@ also asks the user at the computer about a removable disk.
 - `-t, --types <list>` — the filesystems, comma-separated, one of which
   the image must hold, as the mount listing names them (`iso9660`,
   `udf`, `adfs`, `affs`, `fat32`, `zip`, `tar`, `tar.gz`, `tar.bz2`,
-  `gzip`, `bzip2`, `spark`, `arcfs`, `rar`, `dfs`), or `auto` for whatever it
-  holds; a list beginning `no` names the ones it may not hold. What the image
+  `gzip`, `bzip2`, `spark`, `arcfs`, `rar`, `dfs`, `squash`), or `auto` for
+  whatever it holds; a list beginning `no` names the ones it may not hold. What the image
   holds is recognised from its contents, so the order chooses nothing:
   a disc holding both UDF and ISO 9660 is mounted as UDF, unless its
   ISO 9660 keeps Rock Ridge or RISC OS records. An image holding none

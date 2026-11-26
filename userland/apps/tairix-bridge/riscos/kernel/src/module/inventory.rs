@@ -55,10 +55,25 @@ impl Rom {
     }
 }
 
-/// The emulator's own modules, which RISC OS 5's ROM has no place for:
-/// listed after it as an expansion card's ROM, section 0, as RPCEmu lists
-/// its HostFS on RISC OS 5.
-pub static EXTENSION: [Rom; 1] = [rom("HostFS", 100, Held::Bridged)];
+/// The rows whose versions their modules answer for themselves too, in a
+/// SWI or a string.
+pub const FP_EMULATOR_ROM: Rom = rom("FPEmulator", 439, Held::Provided);
+/// As [`FP_EMULATOR_ROM`].
+pub const VFP_SUPPORT_ROM: Rom = rom("VFPSupport", 18, Held::Provided);
+/// As [`FP_EMULATOR_ROM`].
+pub const FONT_MANAGER_ROM: Rom = rom("FontManager", 380, Held::Bridged);
+/// As [`FP_EMULATOR_ROM`].
+pub const SHARED_C_LIBRARY_ROM: Rom = rom("SharedCLibrary", 623, Held::Provided);
+
+/// The modules RISC OS 5's ROM for IOMD has no place for, listed after it as
+/// an expansion card's ROM, section 0, as RPCEmu lists its HostFS on RISC OS
+/// 5: HostFS, the emulator's own, then the two RISC OS 5 loads from disc for
+/// a processor the ROM does not serve.
+pub static EXTENSION: [Rom; 3] = [
+    rom("HostFS", 100, Held::Bridged),
+    VFP_SUPPORT_ROM,
+    rom("CallASWI", 15, Held::Provided),
+];
 
 /// The module of chunk `row`: the ROM's, then the extension's.
 #[must_use]
@@ -81,7 +96,7 @@ pub static INVENTORY: [Rom; 121] = [
     rom("WindowManager", 587, Held::Bridged),
     rom("TaskManager", 154, Held::Bridged),
     rom("Desktop", 277, Held::Provided),
-    rom("SharedCLibrary", 623, Held::Provided),
+    SHARED_C_LIBRARY_ROM,
     rom("ScreenModes", 74, Held::Provided),
     rom("VIDC20Video", 9, Held::Absent),
     rom("Mouse", 11, Held::Absent),
@@ -106,8 +121,8 @@ pub static INVENTORY: [Rom; 121] = [
     rom("Filer", 249, Held::Bridged),
     rom("FilerSWIs", 5, Held::Bridged),
     rom("FSLock", 126, Held::Absent),
-    rom("FontManager", 380, Held::Bridged),
-    rom("FPEmulator", 439, Held::Provided),
+    FONT_MANAGER_ROM,
+    FP_EMULATOR_ROM,
     rom("Free", 42, Held::Provided),
     rom("Hourglass", 219, Held::Bridged),
     rom("IIC", 18, Held::Absent),

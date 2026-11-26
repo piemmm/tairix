@@ -16,6 +16,8 @@ pub mod info {
     pub const SPECIAL_FIELDS: u32 = 1 << 31;
     /// Its streams are interactive.
     pub const INTERACTIVE: u32 = 1 << 30;
+    /// It takes an empty name, as `kbd:` is.
+    pub const NULL_NAMES: u32 = 1 << 29;
     /// It is called to open a file whether or not the file exists.
     pub const ALWAYS_OPEN: u32 = 1 << 28;
     /// `FSEntry_Args` 6 tells it of a flush.
@@ -33,6 +35,13 @@ pub mod info {
     pub const EXTRA: u32 = 1 << 17;
     /// It is read-only, which FileSwitch leaves the filing system to enforce.
     pub const READ_ONLY: u32 = 1 << 16;
+}
+
+/// A filing system's extra information word, which its information word's
+/// [`info::EXTRA`] says it gives.
+pub mod extra {
+    /// It takes I/O controls, `OS_Args` 9.
+    pub const IOCTL: u32 = 1 << 3;
 }
 
 /// A filing system's information block, by word: the offsets from its
@@ -87,6 +96,9 @@ pub struct Declaration {
     /// The first of the module's routines that are its entries, its
     /// `FSEntry_Open`; the rest follow in their words' order.
     pub first_entry: usize,
+    /// Whether the routine after its `FSEntry_Func` is its `FSEntry_GBPB`,
+    /// which serves the unbuffered files it opens for it.
+    pub gbpb: bool,
     /// Where its information block is built.
     pub block: u32,
     /// Its name.
@@ -95,6 +107,8 @@ pub struct Declaration {
     pub startup: u32,
     /// Its information word.
     pub info: u32,
+    /// Its extra information word, read where `info` has [`info::EXTRA`].
+    pub extra: u32,
     /// What FileSwitch hands its entries in R12.
     pub workspace: u32,
 }
@@ -262,6 +276,18 @@ impl Info {
     }
 }
 
+/// An entry a filing system lists: its name, its information, and the
+/// internal name a full record holds.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Listed<'a> {
+    /// Its name.
+    pub name: &'a [u8],
+    /// Its information.
+    pub info: Info,
+    /// Its internal name.
+    pub internal: u32,
+}
+
 /// How a directory's entries are laid out, as `FSEntry_Func` 14, 15 and 19
 /// write them and `OS_GBPB` 9 to 11 give them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -324,6 +350,10 @@ pub mod file {
     pub const SAVE: u32 = 0;
     /// Write an object's catalogue information.
     pub const WRITE_INFO: u32 = 1;
+    /// Write an object's load address.
+    pub const WRITE_LOAD: u32 = 2;
+    /// Write an object's execution address.
+    pub const WRITE_EXEC: u32 = 3;
     /// Write an object's attributes.
     pub const WRITE_ATTRIBUTES: u32 = 4;
     /// Read an object's catalogue information.
@@ -487,6 +517,55 @@ impl Os<'_> {
         self.write_terminated(at.wrapping_add(layout.name_at()), name, 0, name.len() + 1)
     }
 
+    /// `FSEntry_Func` 14, 15 and 19 answered with `entries`, a directory's
+    /// from the R4th: as many as fit in R2's R5 bytes, as `layout` lays them
+    /// out; R3 how many, and R4 the next one's place, or -1 for none read.
+    ///
+    /// # Errors
+    ///
+    /// The abort a write gives.
+    pub fn answer_entries<'a>(
+        &mut self,
+        regs: &mut Regs,
+        layout: Layout,
+        entries: impl IntoIterator<Item = Listed<'a>>,
+    ) -> Result<(), Fail> {
+        let (buffer, offset, room) = (regs.r[2], regs.r[4], regs.r[5]);
+        let read = self.write_entries(buffer, room, layout, entries)?;
+        regs.r[3] = read;
+        regs.r[4] = if read == 0 { u32::MAX } else { offset + read };
+        Ok(())
+    }
+
+    /// As many of `entries` as fit in the `room` bytes at `buffer`, one after
+    /// another as `layout` lays them out, as `FSEntry_Func` 14, 15 and 19
+    /// answer: how many were written.
+    ///
+    /// # Errors
+    ///
+    /// The abort a write gives.
+    pub fn write_entries<'a>(
+        &mut self,
+        buffer: u32,
+        room: u32,
+        layout: Layout,
+        entries: impl IntoIterator<Item = Listed<'a>>,
+    ) -> Result<u32, Fail> {
+        let mut used: u32 = 0;
+        let mut written: u32 = 0;
+        for entry in entries {
+            let size = layout.size(entry.name);
+            if used.saturating_add(size) > room {
+                break;
+            }
+            let at = buffer.wrapping_add(used);
+            self.write_listed(at, layout, &entry.info, entry.internal, entry.name)?;
+            used += size;
+            written += 1;
+        }
+        Ok(written)
+    }
+
     /// The filing system `declaration` describes registered with FileSwitch
     /// by `OS_FSControl` 12, from the information block built for it of
     /// offsets from its module; nothing while the module or one of its
@@ -503,7 +582,9 @@ impl Os<'_> {
         words[block::NAME] = declaration.name.wrapping_sub(base);
         words[block::STARTUP] = declaration.startup.wrapping_sub(base);
         words[block::INFO] = declaration.info;
-        for (offset, word) in ENTRIES.into_iter().enumerate() {
+        words[block::EXTRA] = declaration.extra;
+        let gbpb = declaration.gbpb.then_some(block::GBPB);
+        for (offset, word) in ENTRIES.into_iter().chain(gbpb).enumerate() {
             let routine = declaration.first_entry.saturating_add(offset);
             let Some(at) = self.routine_of(declaration.module, routine) else {
                 return Ok(());

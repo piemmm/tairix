@@ -15,6 +15,7 @@
 use tairix_riscos_arm::psr;
 
 use crate::byte::var;
+use crate::events::number::KEYBOARD as KEYBOARD_EVENT;
 use crate::memory::Bits;
 use crate::os::{Entry, Fail, Os, Regs, Unwind};
 use crate::vectors;
@@ -31,8 +32,7 @@ pub(crate) const NO_KEYBOARD: u8 = 0xFF;
 pub(crate) const PC: u32 = 2;
 /// The keys a handler's map holds, and those it can scan.
 const KEYS: usize = 0x300;
-/// The keyboard event, and `Service_KeyHandler`.
-const KEYBOARD_EVENT: u32 = 11;
+/// `Service_KeyHandler`.
 pub(crate) const KEY_HANDLER: u32 = 0x44;
 /// The status bits: the handler's own bit, a pending Alt; Scroll Lock on,
 /// Num Lock off, Shift held, Caps Lock off, bit 5 normally set, Ctrl held,

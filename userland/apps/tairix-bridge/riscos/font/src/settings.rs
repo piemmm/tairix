@@ -16,7 +16,7 @@ use crate::module::with;
 const SCALE: i32 = MILLIPOINTS_PER_OS_UNIT.cast_signed();
 /// `Font_CacheAddr`'s version: RISC OS 5.30's Font Manager's, in
 /// hundredths.
-const VERSION: u32 = 380;
+const VERSION: u32 = tairix_riscos_kernel::module::inventory::FONT_MANAGER_ROM.version as u32;
 
 /// The `FontMax` values in CMOS: `FontMax` in 64 KiB units, then `FontMax1`
 /// to `FontMax5` in points, the first three stored exclusive-ored with these so

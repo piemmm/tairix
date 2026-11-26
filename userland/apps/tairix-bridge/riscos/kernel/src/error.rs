@@ -37,13 +37,29 @@ pub const fn floating_point(exception: Exception) -> Error {
         Exception::Inexact => (4, "FloatingInexact"),
     };
     Error {
-        number: FLOATING_POINT + offset,
+        number: exception::FLOATING_POINT + offset,
         token,
     }
 }
 
-/// The floating-point errors' first number.
-const FLOATING_POINT: u32 = 0x8000_0200;
+/// The numbers the processor's exceptions are reported by, and the
+/// floating-point errors' family.
+pub mod exception {
+    /// An undefined instruction.
+    pub const UNDEFINED_INSTRUCTION: u32 = 0x8000_0000;
+    /// An instruction fetch aborted.
+    pub const PREFETCH_ABORT: u32 = 0x8000_0001;
+    /// A data transfer aborted.
+    pub const DATA_ABORT: u32 = 0x8000_0002;
+    /// An address exception.
+    pub const ADDRESS_EXCEPTION: u32 = 0x8000_0003;
+    /// A branch through zero.
+    pub const BRANCH_THROUGH_ZERO: u32 = 0x8000_0005;
+    /// The floating-point errors' first number.
+    pub const FLOATING_POINT: u32 = 0x8000_0200;
+    /// The last number of the floating-point errors' family.
+    pub const FLOATING_POINT_LAST: u32 = 0x8000_02FF;
+}
 
 /// The kernel's message file, its texts the emulator's own.
 pub(crate) const MESSAGES: &[u8] = include_bytes!("../resources/Kernel/Messages");

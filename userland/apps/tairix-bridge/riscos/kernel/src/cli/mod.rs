@@ -350,7 +350,11 @@ impl Os<'_> {
     /// A step of a command that runs for as long as its work does: an
     /// interrupt due taken, as RISC OS takes one in a command, then Escape,
     /// acknowledged, if it has been pressed.
-    pub(crate) fn escape_point(&mut self) -> Result<(), Fail> {
+    ///
+    /// # Errors
+    ///
+    /// "Escape", or what the interrupt's work gives.
+    pub fn escape_point(&mut self) -> Result<(), Fail> {
         self.take_interrupt()?;
         if self.escape_set() {
             return Err(self.escape_acknowledged());

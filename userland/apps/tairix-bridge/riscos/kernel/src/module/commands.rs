@@ -209,31 +209,44 @@ impl Os<'_> {
         }
     }
 
+    /// Each ROM module `OS_Module` 20 enumerates, its answer handed to
+    /// `visit`: the main ROM's, then the expansion card's, each answer naming
+    /// the next. Escape stops it.
+    fn each_rom_module(
+        &mut self,
+        mut visit: impl FnMut(&mut Self, &Regs) -> Result<(), Fail>,
+    ) -> Result<(), Fail> {
+        let (mut at, mut section) = (0, u32::MAX);
+        loop {
+            if self.escape_set() {
+                return Err(self.escape_acknowledged());
+            }
+            let mut rom = Regs::default();
+            rom.r[..3].copy_from_slice(&[20, at, section]);
+            if self.perform(os::MODULE, &mut rom).is_err() {
+                return Ok(());
+            }
+            visit(self, &rom)?;
+            (at, section) = (rom.r[1], rom.r[2]);
+        }
+    }
+
     /// `*ROMModules`: a line for each ROM module, laid out as
     /// `OS_PrettyPrint` lays it out.
     fn list_rom_modules(&mut self) -> Result<(), Fail> {
         let mut heading = self.message_with(b"RomModulesHeading", &[])?;
         heading.push(b'\r');
         self.pretty(&heading)?;
-        let mut at = 0;
-        loop {
-            if self.escape_set() {
-                return Err(self.escape_acknowledged());
-            }
-            let mut rom = Regs::default();
-            rom.r[..3].copy_from_slice(&[20, at, u32::MAX]);
-            if self.perform(os::MODULE, &mut rom).is_err() {
-                return Ok(());
-            }
-            let line = self.rom_line(&rom)?;
-            self.pretty(&line)?;
-            at = rom.r[1];
-        }
+        self.each_rom_module(|os, rom| {
+            let line = os.rom_line(rom)?;
+            os.pretty(&line)
+        })
     }
 
     /// `*ROMModules`' line for the module `OS_Module` 20 answered with
-    /// `rom`: its number, a hard space padding it to three columns, where it
-    /// is, its title tabbed to a column of its own, its version and status.
+    /// `rom`: its number in its section, a hard space padding it to three
+    /// columns, where it is, its title tabbed to a column of its own, its
+    /// version and status.
     fn rom_line(&mut self, rom: &Regs) -> Result<Vec<u8>, Fail> {
         let number = crate::convert::Decimal::of(rom.r[1].cast_signed());
         let number = number.as_bytes();
@@ -242,7 +255,12 @@ impl Os<'_> {
         } else {
             3 - number.len()
         };
-        let place = self.message_with(b"SystemRomSection", &[])?;
+        let place = if rom.r[2] == u32::MAX {
+            self.message_with(b"SystemRomSection", &[])?
+        } else {
+            let card = crate::convert::Decimal::of(rom.r[2].cast_signed());
+            self.message_with(b"PoduleSection", &[card.as_bytes()])?
+        };
         let (title, _) = self.read_until(rom.r[3], HELP_MOST, |b| b == 0)?;
         let tabs = (24usize.saturating_sub(title.len())).div_ceil(8);
         let status: &[u8] = match rom.r[4] {
@@ -321,24 +339,18 @@ impl Os<'_> {
     /// none.
     fn list_unplugged(&mut self) -> Result<(), Fail> {
         let mut any = false;
-        let mut at = 0;
-        loop {
-            let mut rom = Regs::default();
-            rom.r[..3].copy_from_slice(&[20, at, u32::MAX]);
-            if self.perform(os::MODULE, &mut rom).is_err() {
-                break;
-            }
+        self.each_rom_module(|os, rom| {
             if rom.r[4] == u32::MAX {
                 if !any {
-                    let heading = self.message_with(b"UnpluggedModulesHeading", &[])?;
-                    self.write_line(&heading)?;
+                    let heading = os.message_with(b"UnpluggedModulesHeading", &[])?;
+                    os.write_line(&heading)?;
                     any = true;
                 }
-                let (title, _) = self.read_until(rom.r[3], HELP_MOST, |b| b == 0)?;
-                self.write_line(&title)?;
+                let (title, _) = os.read_until(rom.r[3], HELP_MOST, |b| b == 0)?;
+                os.write_line(&title)?;
             }
-            at = rom.r[1];
-        }
+            Ok(())
+        })?;
         if !any {
             let none = self.message_with(b"NoModulesUnplugged", &[])?;
             self.write_line(&none)?;

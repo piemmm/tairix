@@ -72,10 +72,7 @@ impl Os<'_> {
         if let Err(error) = self.memory.create_kernel_area(&request, self.world) {
             return Err(self.fail_area(error));
         }
-        match self.resize_ram_disc_pool(pages) {
-            Ok(()) | Err(Fail::Error(_)) => Ok(()),
-            Err(unwind) => Err(unwind),
-        }
+        crate::os::quietly(self.resize_ram_disc_pool(pages)).map_err(Fail::from)
     }
 
     /// The area's handler, entered as its routine is: `ResizePMP`, all a

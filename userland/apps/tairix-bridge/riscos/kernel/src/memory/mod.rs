@@ -283,11 +283,22 @@ impl Memory {
     }
 
     /// The frame showing `address` and the address's offset in it, if a
-    /// privileged mode may read it, or write it when `write`: how the SWIs
-    /// reach guest memory a page at a time.
-    pub(crate) fn privileged_page(&self, address: u32, write: bool) -> Option<(Frame, usize)> {
+    /// privileged mode may read it, or write it when `write`, or user mode
+    /// may where `privileged` is false: how the SWIs and the routines acting
+    /// for a caller reach guest memory a page at a time.
+    pub(crate) fn page_with(
+        &self,
+        address: u32,
+        write: bool,
+        privileged: bool,
+    ) -> Option<(Frame, usize)> {
         let (frame, access) = self.mmu.lookup(self.mmu.table_of(address), address)?;
-        let allowed = match access.privileged {
+        let rights = if privileged {
+            access.privileged
+        } else {
+            access.user
+        };
+        let allowed = match rights {
             Rights::None => false,
             Rights::Read => !write,
             Rights::ReadWrite => true,

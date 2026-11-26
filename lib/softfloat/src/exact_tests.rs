@@ -403,3 +403,52 @@ fn square_roots_bracket_their_radicand_in_every_mode() {
         assert_eq!(root(Mode::Nearest), nearest);
     }
 }
+
+/// The whole number nearest `a ÷ b`, ties to even, by long division a bit at
+/// a time: its low 64 bits.
+fn nearest_quotient_by_bits(a: Parts, b: Parts) -> u64 {
+    let divisor = u128::from(b.sig) << 1;
+    let (mut quotient, mut rest) = (0u64, u128::from(a.sig));
+    for _ in 0..=a.exp - b.exp {
+        quotient <<= 1;
+        rest <<= 1;
+        if rest >= divisor {
+            rest -= divisor;
+            quotient |= 1;
+        }
+    }
+    let twice = rest << 1;
+    quotient.wrapping_add(u64::from(
+        twice > divisor || (twice == divisor && quotient & 1 != 0),
+    ))
+}
+
+#[test]
+fn a_remainder_carries_its_nearest_quotient_s_low_bits() {
+    let mut rng = Prng::new(0x8087_0EA4);
+    for _ in 0..4_000 {
+        let gap = i32::try_from(rng.below(2_100)).unwrap() - 1;
+        let a = Parts {
+            negative: rng.next_u32() & 1 != 0,
+            exp: gap,
+            sig: random_sig(&mut rng),
+        };
+        let b = Parts {
+            negative: rng.next_u32() & 1 != 0,
+            exp: 0,
+            sig: random_sig(&mut rng),
+        };
+        assert_eq!(
+            remainder(a, b).quotient,
+            nearest_quotient_by_bits(a, b),
+            "{a:?} / {b:?}"
+        );
+    }
+    let one = Parts::of(Extended::from_int(1));
+    let quarter = Parts { exp: -2, ..one };
+    assert_eq!(
+        remainder(quarter, one).quotient,
+        0,
+        "a quotient below a half"
+    );
+}

@@ -26,10 +26,11 @@ pub(crate) const COUNTRY: u8 = 0xBA;
 /// The configured territory, its low bit inverted as it is kept.
 pub(crate) const TERRITORY: u8 = 0x18;
 /// The time zone, in quarter hours of standard time.
-pub(crate) const TIME_ZONE: u8 = 0x8B;
-/// Daylight saving in force, in bit 7, among the alarm's settings.
-pub(crate) const ALARM_AND_TIME: u8 = 0xDC;
-pub(crate) const DST: u8 = 1 << 7;
+pub const TIME_ZONE: u8 = 0x8B;
+/// The alarm's settings, daylight saving in force among them.
+pub const ALARM_AND_TIME: u8 = 0xDC;
+/// [`ALARM_AND_TIME`]'s bit saying daylight saving is in force.
+pub const DST: u8 = 1 << 7;
 /// The key auto-repeat delay and rate.
 pub(crate) const KEY_DELAY: u8 = 0x0C;
 pub(crate) const KEY_REPEAT: u8 = 0x0D;
@@ -82,9 +83,10 @@ pub(crate) const SYSTEM_SPEED: u8 = 0xC3;
 /// The configured mode.
 pub(crate) const WIMP_MODE: u8 = 0xC4;
 
-/// `OS_Byte` 161 and 162: read and write a CMOS location.
-const READ_CMOS: u32 = 161;
-const WRITE_CMOS: u32 = 162;
+/// `OS_Byte` 161: read a CMOS location.
+pub const READ_CMOS: u32 = 161;
+/// `OS_Byte` 162: write a CMOS location.
+pub const WRITE_CMOS: u32 = 162;
 
 /// The values a CMOS reset writes, by logical address, for the settings the
 /// kernel's own keywords and start-up read: genuine RISC OS 5's, but for the

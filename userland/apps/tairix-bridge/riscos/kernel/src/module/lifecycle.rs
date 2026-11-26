@@ -8,7 +8,7 @@
 
 use super::header::{Field, BAD_FIELD};
 use super::squeeze::Unsqueezed;
-use super::{Incarnation, ModuleKey, Place, Shape};
+use super::{Incarnation, ModuleKey, Origin, Place, Shape};
 use crate::error::Error;
 use crate::kheap::KernelHeap;
 use crate::os::{len32, Entry, Fail, Os, Regs, Target};
@@ -55,13 +55,13 @@ impl Os<'_> {
         let node = match self.incarnation_node(BASE) {
             Ok(node) => node,
             Err(fail) => {
-                self.free_code(shape.code, shape.rom);
+                self.free_code(shape.code, shape.origin);
                 return Err(fail);
             }
         };
         let Some(key) = self.world.modules.hold(shape) else {
             self.free_system_node(node);
-            self.free_code(shape.code, shape.rom);
+            self.free_code(shape.code, shape.origin);
             return Err(self.no_memory());
         };
         let incarnation = Incarnation { node };
@@ -70,7 +70,7 @@ impl Os<'_> {
                 // Code an initialisation that never returned may still have
                 // claims pointing into stays.
                 if matches!(fail, Fail::Error(_)) {
-                    self.free_code(module.shape.code, module.shape.rom);
+                    self.free_code(module.shape.code, module.shape.origin);
                 }
             }
             return Err(fail);
@@ -143,14 +143,14 @@ impl Os<'_> {
     pub(crate) fn free_module(&mut self, key: ModuleKey) {
         self.release_registrations(key);
         if let Some(module) = self.world.modules.drop_module(key) {
-            self.free_code(module.shape.code, module.shape.rom);
+            self.free_code(module.shape.code, module.shape.origin);
         }
     }
 
-    /// Frees a module's code, unless it is a built-in's image; a block the
-    /// RMA does not hold is left alone.
-    fn free_code(&mut self, code: u32, rom: Option<usize>) {
-        if rom.is_none() {
+    /// Frees a module's code, unless it is a ROM module's own image; a
+    /// block the RMA does not hold is left alone.
+    fn free_code(&mut self, code: u32, origin: Origin) {
+        if origin.rom().is_none() {
             self.free_rma_quietly(code);
         }
     }
@@ -240,7 +240,11 @@ impl Os<'_> {
                     return Err(self.no_memory());
                 }
             }
-            if let Some(builtin) = shape.rom.and_then(|rom| self.world.modules.builtin(rom)) {
+            if let Some(builtin) = shape
+                .origin
+                .builtin()
+                .and_then(|place| self.world.modules.builtin(place))
+            {
                 for default in builtin.vectors {
                     self.world.vectors.own(default.vector, key, default.code);
                 }
@@ -334,7 +338,11 @@ impl Os<'_> {
             return Err(self.no_memory());
         };
         let shape = module.shape;
-        if let Some(builtin) = shape.rom.and_then(|rom| self.world.modules.builtin(rom)) {
+        if let Some(builtin) = shape
+            .origin
+            .builtin()
+            .and_then(|place| self.world.modules.builtin(place))
+        {
             let code = match point {
                 Point::Init => builtin.init,
                 Point::Final => builtin.finalise,
@@ -393,7 +401,7 @@ impl Os<'_> {
                 return Err(fail);
             }
         };
-        self.free_code(shape.code, shape.rom);
+        self.free_code(shape.code, shape.origin);
         if let Some(module) = self.world.modules.get_mut(key) {
             module.shape.code = block;
             module.shape.header = header;

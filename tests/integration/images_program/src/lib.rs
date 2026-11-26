@@ -7,8 +7,8 @@
 //! the real `unmount`, and mounts the floppies and the written archives again
 //! to read back what it wrote. It also mounts a planted original, which the
 //! user may only read, to see it mounted read-only, a RAR archive, which no
-//! one writes, and a DFS disc image, whose files it reads and writes with
-//! their load addresses.
+//! one writes, a DFS disc image, whose files it reads and writes with their
+//! load addresses, and a Squash file, whose one file it rewrites.
 //!
 //! A pass prints [`PASS_MARKER`] and exits `0`. A failure prints its reason
 //! and parks rather than exiting: the vertical arms its end on this program's
@@ -153,6 +153,14 @@ pub const RAR: Archive = Archive {
     volume: "rar",
 };
 
+/// The Squash file the vertical plants, holding [`ARCHIVE_TEXT`] typed
+/// [`TEXT_TYPE`]: the archive driver serves it as a volume of its one file,
+/// named as the Squash file is less its `,fca`, so [`README`].
+pub const SQUASH: Archive = Archive {
+    file: "ReadMe,fca",
+    volume: "squash",
+};
+
 /// The RAR archive's members: the same text, one stored and one compressed.
 pub const RAR_MEMBERS: [&str; 2] = ["stest1.txt", "stest2.txt"];
 
@@ -257,7 +265,7 @@ pub fn run_steps(system: &mut dyn System) -> Result<(), String> {
     expect_file(system, "/Storage/disc", disc_file.name, disc_file.content)?;
 
     for writable in ["/Storage/acorn", workbench.as_str()] {
-        write_file(system, writable)?;
+        write_file(system, writable, WRITTEN)?;
         expect_file(system, writable, WRITTEN, WRITTEN_TEXT)?;
     }
     for read_only in ["/Storage/disc", "/Storage/original"] {
@@ -283,7 +291,9 @@ pub fn run_steps(system: &mut dyn System) -> Result<(), String> {
     for name in ["acorn", AMIGA_NAME] {
         unmount(system, name)?;
     }
-    archive_steps(system)
+    archive_steps(system)?;
+    disc_steps(system)?;
+    squash_steps(system)
 }
 
 /// The archives' steps: each copied into the home and mounted; what it holds
@@ -303,11 +313,8 @@ fn archive_steps(system: &mut dyn System) -> Result<(), String> {
         let volume = format!("/Storage/{}", archive.volume);
         expect_file(system, &volume, README, ARCHIVE_TEXT)?;
         expect_filetype(system, &volume, README, TEXT_TYPE)?;
-        write_file(system, &volume)?;
-        let written = format!("{volume}/{WRITTEN}");
-        system
-            .set_attribute(&written, FILETYPE, DATA_TYPE)
-            .map_err(|err| format!("images: {written}: not typed: {err:?}"))?;
+        write_file(system, &volume, WRITTEN)?;
+        give_attribute(system, &volume, WRITTEN, FILETYPE, DATA_TYPE)?;
     }
     expect_rar(system, &format!("/Storage/{}", RAR.volume))?;
     for archive in WRITTEN_ARCHIVES.iter().chain([&RAR]) {
@@ -323,7 +330,7 @@ fn archive_steps(system: &mut dyn System) -> Result<(), String> {
         expect_filetype(system, &volume, WRITTEN, DATA_TYPE)?;
         unmount(system, archive.volume)?;
     }
-    disc_steps(system)
+    Ok(())
 }
 
 /// The DFS disc's steps: copied into the home and mounted; its file read
@@ -336,13 +343,8 @@ fn disc_steps(system: &mut dyn System) -> Result<(), String> {
     mount(system, &["mount", &copy, &volume])?;
     expect_file(system, &volume, DFS_README, ARCHIVE_TEXT)?;
     expect_attribute(system, &volume, DFS_README, LOAD_ADDRESS, README_LOAD)?;
-    let written = format!("{volume}/{DFS_WRITTEN}");
-    system
-        .write(&written, WRITTEN_TEXT)
-        .map_err(|err| format!("images: {written}: not written: {err:?}"))?;
-    system
-        .set_attribute(&written, LOAD_ADDRESS, WRITTEN_LOAD)
-        .map_err(|err| format!("images: {written}: no load address set: {err:?}"))?;
+    write_file(system, &volume, DFS_WRITTEN)?;
+    give_attribute(system, &volume, DFS_WRITTEN, LOAD_ADDRESS, WRITTEN_LOAD)?;
     unmount(system, DFS_DISC.volume)?;
     mount(system, &["mount", &copy, &volume])?;
     expect_file(system, &volume, DFS_README, ARCHIVE_TEXT)?;
@@ -350,6 +352,29 @@ fn disc_steps(system: &mut dyn System) -> Result<(), String> {
     expect_file(system, &volume, DFS_WRITTEN, WRITTEN_TEXT)?;
     expect_attribute(system, &volume, DFS_WRITTEN, LOAD_ADDRESS, WRITTEN_LOAD)?;
     unmount(system, DFS_DISC.volume)
+}
+
+/// The Squash file's steps: copied into the home and mounted; its one file
+/// read with its filetype, written anew and typed again, and a second file
+/// refused; ejected, and mounted again to read the file and its type back.
+fn squash_steps(system: &mut dyn System) -> Result<(), String> {
+    copy_home(system, SQUASH.file)?;
+    let copy = format!("{HOME}/{}", SQUASH.file);
+    let volume = format!("/Storage/{}", SQUASH.volume);
+    mount(system, &["mount", &copy, &volume])?;
+    expect_file(system, &volume, README, ARCHIVE_TEXT)?;
+    expect_filetype(system, &volume, README, TEXT_TYPE)?;
+    write_file(system, &volume, README)?;
+    give_attribute(system, &volume, README, FILETYPE, DATA_TYPE)?;
+    let second = format!("{volume}/{WRITTEN}");
+    if system.write(&second, WRITTEN_TEXT).is_ok() {
+        return Err(format!("images: {second}: a second file in a Squash file"));
+    }
+    unmount(system, SQUASH.volume)?;
+    mount(system, &["mount", &copy, &volume])?;
+    expect_file(system, &volume, README, WRITTEN_TEXT)?;
+    expect_filetype(system, &volume, README, DATA_TYPE)?;
+    unmount(system, SQUASH.volume)
 }
 
 /// Copy the planted `name` into the home, as the session user.
@@ -419,6 +444,20 @@ fn expect_attribute(
     Ok(())
 }
 
+/// Give `dir`'s `file` the attribute `key` holding `value`.
+fn give_attribute(
+    system: &mut dyn System,
+    dir: &str,
+    file: &str,
+    key: &str,
+    value: &[u8],
+) -> Result<(), String> {
+    let path = format!("{dir}/{file}");
+    system
+        .set_attribute(&path, key, value)
+        .map_err(|err| format!("images: {path}: no {key} set: {err:?}"))
+}
+
 /// Run `mount` with `args`, and see it succeed.
 fn mount(system: &mut dyn System, args: &[&str]) -> Result<(), String> {
     match system.run(MOUNT, args)? {
@@ -461,9 +500,9 @@ fn expect_file(
     Ok(())
 }
 
-/// Write [`WRITTEN_TEXT`] to `dir`'s [`WRITTEN`].
-fn write_file(system: &mut dyn System, dir: &str) -> Result<(), String> {
-    let path = format!("{dir}/{WRITTEN}");
+/// Write [`WRITTEN_TEXT`] to `dir`'s `file`.
+fn write_file(system: &mut dyn System, dir: &str, file: &str) -> Result<(), String> {
+    let path = format!("{dir}/{file}");
     system
         .write(&path, WRITTEN_TEXT)
         .map_err(|err| format!("images: {path}: not written: {err:?}"))
@@ -473,11 +512,12 @@ fn write_file(system: &mut dyn System, dir: &str) -> Result<(), String> {
 #[must_use]
 pub fn pass_line() -> String {
     format!(
-        "{PASS_MARKER}: {ACORN}, {AMIGA}, {DISC}, {} archives and {} mounted from {HOME}, \
+        "{PASS_MARKER}: {ACORN}, {AMIGA}, {DISC}, {} archives, {} and {} mounted from {HOME}, \
          read, written where writable, ejected, and read back with their RISC OS fields once \
          mounted again\n",
         WRITTEN_ARCHIVES.len() + 1,
-        DFS_DISC.file
+        DFS_DISC.file,
+        SQUASH.file
     )
 }
 
@@ -516,7 +556,7 @@ mod tests {
             ] {
                 fake.plant(image, &[(file, text)]);
             }
-            for archive in WRITTEN_ARCHIVES {
+            for archive in WRITTEN_ARCHIVES.iter().chain([&SQUASH]) {
                 fake.plant(archive.file, &[(README, ARCHIVE_TEXT)]);
                 fake.attributes.insert(
                     (
@@ -622,10 +662,12 @@ mod tests {
                 if !writable {
                     return Err(Errno::ReadOnly);
                 }
-                self.volumes
-                    .entry(image)
-                    .or_default()
-                    .insert(file, bytes.to_vec());
+                let lone = image == SQUASH.file;
+                let volume = self.volumes.entry(image).or_default();
+                if lone && !volume.contains_key(&file) {
+                    return Err(Errno::NotSupported);
+                }
+                volume.insert(file, bytes.to_vec());
                 return Ok(());
             }
             self.files.insert(path.to_string(), bytes.to_vec());
@@ -827,6 +869,41 @@ mod tests {
         }
         let why = run_steps(&mut Writable(Fake::planted())).expect_err("a RAR took a write");
         assert!(why.contains("written on a RAR archive"), "{why}");
+    }
+
+    #[test]
+    fn a_squash_file_that_takes_a_second_file_fails() {
+        struct Roomy(Fake);
+        impl System for Roomy {
+            fn run(&mut self, path: &str, args: &[&str]) -> Result<i32, String> {
+                self.0.run(path, args)
+            }
+            fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
+                self.0.read(path)
+            }
+            fn write(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
+                if let Some((image, true, file)) = self.0.on_volume(path) {
+                    self.0
+                        .volumes
+                        .entry(image)
+                        .or_default()
+                        .insert(file, bytes.to_vec());
+                    return Ok(());
+                }
+                self.0.write(path, bytes)
+            }
+            fn exists(&mut self, path: &str) -> bool {
+                self.0.exists(path)
+            }
+            fn attribute(&mut self, path: &str, key: &str) -> Result<Vec<u8>, Errno> {
+                self.0.attribute(path, key)
+            }
+            fn set_attribute(&mut self, path: &str, key: &str, value: &[u8]) -> Result<(), Errno> {
+                self.0.set_attribute(path, key, value)
+            }
+        }
+        let why = run_steps(&mut Roomy(Fake::planted())).expect_err("a second file taken");
+        assert!(why.contains("a second file in a Squash file"), "{why}");
     }
 
     #[test]

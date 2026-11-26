@@ -90,9 +90,18 @@ an application's own documents folder, the reference harness);
 | RO25.6 | ColourTrans's `SetFontColours` through `Font_SetPalette` in modes of 256 colours or more, pinned | done |
 | RO25.7 | DrawFile's text and text areas through the Font Manager, pinned against genuine RISC OS | done |
 | RO25.8 | The desktop font as the TAIRiX interface face, the Font Manager's half: the session's desktop face, the `Desktop` ROM family resolved to it, and the Wimp's `Wimp$Font` variables naming it; the front end gives the desktop's text (RO28) and the Wimp reads it (RO39) | done |
-| RO26 | SharedCLibrary; the FPEmulator, VFPSupport, CallASWI and DDEUtils SWIs | planned |
+| RO26.1 | SharedCLibrary's frame and the library kernel: the `clib` crate and module, its five `LibInit` SWIs, stub descriptions, entry vectors, statics, the root stack chunk, and every entry of chunk 1 | done |
+| RO26.2 | Chunk 2's core: `_clib_initialise`, `errno`, `ctype`, `string`, `stdlib` with the heap in the program's memory, `setjmp`, `signal`, `assert`, `locale` and the multibyte functions | done |
+| RO26.3 | Chunk 2's time and maths: `time.h` over the Territory and the clock, and every `math.h` function as RISC OS 5.30 computes it | done |
+| RO26.4 | Chunk 2's `stdio`: `FILE` blocks as the headers lay them out, buffering, the standard streams, files through FileSwitch, the `printf` and `scanf` families as RISC OS 5.30 writes and reads; the PRM's 183 entries whole | done |
+| RO26.5 | RISC OS 5's additions: chunk 2's entries past the PRM's and chunks 4 to 9, each recorded | done |
+| RO26.6 | FPEmulator: its SWIs and contexts, and an FPA trap raised as FPEmulator raises it | done |
+| RO26.7 | VFPSupport's contexts and the lazy context switch; CallASWI as RISC OS 5 answers for it | done |
+| RO26.8 | Squash's two SWIs as RISC OS 5.30's module answers them, over `lib/compress::squash`, and a Squash file a volume of its one file (`plans/ARCHIVES.md` AR13); MimeMap from TAIRiX's shared type tables | done |
+| RO26.9 | BufferManager; DeviceFS with SystemDevices' devices; PipeFS | done |
 | RO27 | The session worker and its protocol: contexts, scheduling, pacing, the relays, containment | planned |
 | RO28 | The front end: launches, single-tasking screens, fullscreen, input, settings, the session window, the bundle | planned |
+| RO61 | Hourglass, whole: its SWIs and the pointer it shows, bridged as the desktop's busy cursor | planned |
 | RO29 | Sound: SoundDMA, SoundChannels, SoundScheduler, SharedSound, the voices, `audio-v1` | planned |
 | RO30 | The debugger: SWI and service trace, breakpoints and watches, stepping, the listing, the Debugger module | planned |
 | RO31 | Machine mode, tier 1: the Archimedes running RISC OS 3.1 (its layout and version answers), VIDC1's colour registers and MEMC's video and cursor addresses on the frame clock, the boundary table, the refusal, and the offer to run again in machine mode | planned |
@@ -104,7 +113,9 @@ an application's own documents folder, the reference harness);
 | RO37 | Save drags started by an application, and asking the desktop to open a held document | planned |
 | RO38 | Tooltips long enough for hosted interactive help | planned |
 | RO39 | The Wimp: tasks, slots, polling, messages, the Task Manager; the boot sequence's desktop half, `Resources` booted and `Tasks` started | planned |
+| RO62 | DDEUtils, whole: the prefix, long command lines, and throwback over the Wimp's messages | planned |
 | RO40 | The Wimp: windows, redraw, nested windows and panes, icons, the caret, templates, error boxes | planned |
+| RO63 | Free, whole: `Free_Register`, `Free_DeRegister` and `*ShowFree`'s desktop window | planned |
 | RO41 | The Wimp: menus in the TAIRiX look | planned |
 | RO42 | The Wimp: drags, data transfer and the clipboard, bridged to the desktop | planned |
 | RO43 | The Wimp: the icon bar, interactive help, quitting with the session | planned |
@@ -491,7 +502,7 @@ is fuzzed.
   transfer — the FPA's hardware or the operand's value decides, as the docs
   page states. An enabled trap stops the processor
   for the session to enter the guest's floating-point exception path, as the
-  FPE's would (RO26).
+  FPE's would (RO26.6).
 - **VFP.** VFPv4 with 32 doublewords and ARMv8's AArch32 additions, under
   the FPSCR's modes: rounding, flush-to-zero, default NaN, alternative half
   precision, the cumulative flags, and the short-vector `LEN`/`STRIDE` mode
@@ -503,7 +514,7 @@ is fuzzed.
     fused operation with either set are UNPREDICTABLE.
   - CPACR's grant of coprocessors 10 and 11 and FPEXC.EN gate the unit, so a
     disabled unit takes the undefined instruction exception VFPSupport's
-    lazy context switch relies on (RO26).
+    lazy context switch relies on (RO26.7).
   - The interpreter may use the host FPU only where that is proven
     bit-identical: a correctly rounded operation in round-to-nearest, with
     ARM's NaN and flag rules applied to its result. A differential test holds
@@ -1287,7 +1298,10 @@ is fuzzed.
 
 - `Wimp_Initialise` takes every known version, with its message list.
   - Each task has its own slot (§3). `Wimp_SlotSize` draws on the free pool
-    the memory policy gives.
+    the memory policy gives. SharedCLibrary's `_kernel_alloc` then extends a
+    task's slot when its heap is full, or asks the slot-extension procedure
+    the task registered where something else holds the space above the heap,
+    as RISC OS 5.30's library does under the desktop (§10).
   - `Wimp_StartTask` runs the new task until its first poll.
 - `Wimp_Poll` and `Wimp_PollIdle` provide every reason with its mask, the poll
   word, and priority as the Wimp orders them.
@@ -1430,25 +1444,128 @@ is fuzzed.
   SaveAs, Scale, and the text gadgets.
 - **Res files.** Decoded in the worker and fuzzed.
 
-## 10. The C library and support modules (RO26)
+## 10. The C library and support modules (RO26, RO61–RO63)
 
 - **SharedCLibrary.** Every function of the ANSI library and the RISC OS
   kernel library (`_kernel_…`), through every initialisation the stubs use:
   APCS-R, APCS-32 and the module form.
+  - The PRM's chapter fixes RISC OS 3's interface: chunk 1's 48 entries and
+    &31C bytes of statics, chunk 2's 183 entries and &B48 bytes, the stub
+    descriptions, and the exported data's offsets. What RISC OS 5.30's 6.23
+    adds past it — more entries, more chunks, larger statics — is recorded
+    from genuine RISC OS (RO14) before it is built.
+  - Each entry is a routine of the module's image, entered from the vector
+    `LibInit` writes, in the mode and calling standard of the call that
+    initialised it. A 26-bit client's vector holds a branch an entry, which
+    reaches the host pages by the 26-bit PC's wrap, as the PRM's library's
+    do; a 32-bit client's holds RISC OS 5's `LDR PC` an entry with the
+    entries' addresses after them, twice the words the stub's limit gives,
+    as RISC OS 5 writes it.
+  - `LibInit` takes a chunk only once every entry it holds is built, so each
+    item leaves the library as a release had it: a stub asking more entries
+    than are built is refused as out of date, a chunk not yet built as
+    unknown.
   - The library's guest-visible data is laid out as its headers define, so
     macro expansions compiled into programs read the right fields: `FILE` and
     its buffers, the `ctype` tables, `errno`, the locale tables.
   - The heap lives in the program's memory.
-- **Support modules.** The FPEmulator SWIs, VFPSupport's contexts, CallASWI and
-  DDEUtils (long command lines, throwback).
+  - The library kernel's procedures — a language's initialisation, trap,
+    event and finalisation procedures — are entered as continuations, never
+    nested calls, so one that never returns (a signal handler's `longjmp`)
+    leaves nothing of the library behind; only a new application's upcall
+    calls the finalisation procedures nested, as RISC OS 5.30 does. `_main`
+    enters `main` the same way.
+  - A language named C has the C library's `Finalise` as its default
+    finalisation procedure, which the PRM's example language — no procedure
+    of its own, the name "C" — relies on.
+  - Stack extension keeps the overflowing frame's real return in a frame
+    record of the library's below it, as RISC OS 5.30 does, so backtraces
+    walk through it; frame walks read with the caller's own rights and never
+    abort.
+  - Under the desktop, `_kernel_alloc` extends the slot by `Wimp_SlotSize`,
+    or asks the registered slot-extension procedure where another has taken
+    the space above the heap: that lands with the Wimp's slots (RO39).
+  - Where RISC OS 5.30 does other than the PRM describes and no program
+    could rely on it — `_kernel_escape_seen` always 0, `copyargs` corrupting
+    registers and branching through zero, a privileged stack extension
+    hanging, unwinding leaving SL behind — the library does as the PRM
+    describes; `docs/src/desktop/tairix-bridge.md` lists each difference.
+    The C99 chunks keep RISC OS 5.30's answers wherever they are its own
+    working, its slips among them (`catanh` answering `casinh` for a
+    negative-signed real part, `llroundf`'s lost borrow); where its answer
+    is no answer (`cproj`), or a stray value where C99 names the answer
+    (`cacosh(±0)`'s rounding, a division helper's real part for a NaN
+    operand), the library gives C99's.
+- **Support modules.** The FPEmulator SWIs, VFPSupport's contexts and
+  CallASWI. VFPSupport and CallASWI are not in the IOMD ROM; they are listed
+  after it with HostFS, as RISC OS 5's soft-loaded copies answer for them.
   - An FPA trap (`Stop::FloatingPoint`) is raised as FPEmulator raises it:
     the registers into the exception dump area, the FPA's into its own dump,
     then the error from `&80000200` (invalid operation, overflow, division by
     zero, underflow, inexact).
-- **Other modules** from the inventory (§4.3), each complete: Squash, over
-  `lib/compress`'s LZW and the `SQSH` container; MimeMap, over the shared
-  filetype table; Hourglass, as the desktop's busy cursor; Free; BufferManager;
-  DeviceFS with SystemDevices' devices; PipeFS.
+  - VFPSupport is the ROOL wiki's 0.18 interface, nothing of it recordable
+    on RPCEmu: the version, context layout and errors are TAIRiX Bridge's.
+    The unit is the 32-bit profile's processor's. CPACR is the gate: it
+    grants the unit only while a context is active and loaded, so the lazy
+    switch is VFPSupport's claim on the undefined instruction vector, which
+    activates the context awaiting and runs the instruction again, its
+    accesses the instruction's own. The elementary functions are
+    `lib/softfloat`'s IEEE 754 functions, each table entry first executing
+    an instruction of the unit's, so the gate stands before them.
+  - CallASWI 0.15 provides nothing: RISC OS 5's kernel performs its SWIs.
+- **Squash 0.31.** `Squash_Compress` and `Squash_Decompress` are
+  `lib/compress::squash`, which holds the stream to RISC OS 5.30's module
+  byte for byte and call by call: both of its compressors, the first call
+  choosing between them (a whole input with room for all it can make
+  compresses at once, anything else clears a full table every 32 KiB), the
+  size queries, and the errors from &921. The workspace is the stream's
+  whole state, saved and checked in the guest's memory; a call's input and
+  output cross the host in bounded pieces. Where genuine Squash loses data
+  or hangs — an empty input, a header-only stream, a code no table holds, an
+  unaligned workspace, a stream carried on with nothing to carry — this one
+  answers as its errors say; `docs/src/desktop/tairix-bridge.md` lists each.
+  The archive driver serves a Squash file as a volume of its one file
+  (`plans/ARCHIVES.md` AR13), so the files the guest writes open on the
+  desktop.
+- **MimeMap 0.19.** `MimeMap_Translate` between file types, their names,
+  MIME types and extensions, and `*MimeMap`, answered from TAIRiX's own type
+  registry (`lib/browse`'s media types and FileSwitch's type names) rather
+  than a mappings file: the desktop and the guest give a type the one
+  meaning. Each form's reading is RISC OS 5.30's: a name, MIME type or
+  extension compared without case, a MIME type ending at a control
+  character or a space, an extension only at its zero, its leading dot
+  passed over, an unnamed type `&xxx`. `*ReadMimeMap` has nothing to read
+  again.
+- **BufferManager 0.39** (`kernel/src/buffers.rs`) is the default of `InsV`,
+  `RemV` and `CnpV` while active, the kernel keeping only the keyboard's and
+  buffers 4 to 8; it makes the mouse, serial and printer buffers at its start,
+  in the RMA, and its records are charged there. Its SWIs, events, `UpCall`s 8
+  and 9, wake-ups and service routine are RISC OS 5's as recorded.
+- **DeviceFS 0.73** (`filing/src/devicefs*`) holds registered drivers' devices
+  as `devices:$`, each driver and stream a block of the RMA. Its driver
+  protocol — entries, registers, special blocks from validation strings,
+  BufferManager buffers, `UpCall`s 6, 7, 10 and 11, services, I/O controls and
+  monitoring — is RISC OS 5's; a wait parks on the host, never spins. Where
+  RISC OS 5 hangs or aborts on a dead stream or a stale handle, this one
+  answers as `docs/src/desktop/tairix-bridge.md` lists.
+- **SystemDevices 1.34** (`filing/src/systemdevices*`) is six filing systems
+  sharing one set of entries, told apart by R12. `vdu:` is the kernel's
+  `*Type` filter (`kernel/src/listing.rs`) in the `DumpFormat` read at its
+  start; `kbd:` is `OS_ReadLine`'s 255-character line; `printer:` follows the
+  PRM's routing to `PrinterType$n` (the kernel's `Os::printer_file`), which
+  RISC OS 5 on RPCEmu does not.
+- **PipeFS 0.25** (`filing/src/pipefs*`) keeps each pipe's bytes and its three
+  poll words in the RMA, its waits `UpCall` 6, untaken a failed read or a
+  grown pipe, and its pointers, extents, persistence, consumption and
+  `UpCall` 7s RISC OS 5's as recorded. `fuzz_devices` drives all three.
+- **Modules whose desktop side waits for a later item** each land whole,
+  never in part, right after it:
+  - Hourglass (RO61, after RO28): bridged as the desktop's busy cursor over
+    the session window.
+  - DDEUtils (RO62, after RO39): the prefix and long command lines, and
+    throwback, which is Wimp messages to the editor that registered.
+  - Free (RO63, after RO40): `*ShowFree` opens its display in a desktop
+    window.
 
 ## 11. Sound, network, printing
 

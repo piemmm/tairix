@@ -2,7 +2,7 @@ use super::super::tests::{processor, r, run, Ram, UNMAPPED};
 use crate::cpu::{Cpu, Exception};
 use crate::profile::BIT32;
 use crate::psr::{self, Mode};
-use crate::vfp::fpscr;
+use crate::vfp::{fpscr, Access};
 
 /// Where `exception` enters on the 32-bit profile.
 fn vector(exception: Exception) -> u32 {
@@ -99,6 +99,45 @@ fn the_unit_is_refused_until_cpacr_grants_it_and_fpexc_enables_it() {
     run(&mut cpu, &mut ram, 1);
     assert_eq!(cpu.vfp().s(0), f(3.75));
     assert_eq!(cpu.pc(), 0x8004);
+}
+
+#[test]
+fn a_host_grant_is_cpacr_s_fields_and_a_processor_without_the_unit_takes_none() {
+    let mut ram = Ram::new();
+    ram.program(&BIT32, 0x8000, &[(0xEE30_0A81, "VADD.F32 S0,S1,S2")]);
+    let at = |cpu: &mut Cpu, ram: &mut Ram, mode: Mode| {
+        cpu.set_cpsr(mode.bits()).expect("a mode the profile has");
+        cpu.set_reg(crate::reg::Reg::PC, 0x8000);
+        run(cpu, ram, 1);
+        cpu.pc()
+    };
+    let mut cpu = processor(&BIT32, Mode::Supervisor, 0x8000);
+    cpu.vfp_mut().set_fpexc(crate::vfp::fpexc::EN);
+    cpu.grant_simdfp(Access::Privileged);
+    assert_eq!(cpu.system_register([0, 1, 0, 2]), Some(0x0050_0000));
+    assert_eq!(at(&mut cpu, &mut ram, Mode::Supervisor), 0x8004);
+    assert_eq!(
+        at(&mut cpu, &mut ram, Mode::User),
+        vector(Exception::Undefined)
+    );
+    cpu.grant_simdfp(Access::Full);
+    assert_eq!(cpu.system_register([0, 1, 0, 2]), Some(0x00F0_0000));
+    assert_eq!(at(&mut cpu, &mut ram, Mode::User), 0x8004);
+    cpu.grant_simdfp(Access::Denied);
+    assert_eq!(cpu.system_register([0, 1, 0, 2]), Some(0));
+    assert_eq!(
+        at(&mut cpu, &mut ram, Mode::Supervisor),
+        vector(Exception::Undefined)
+    );
+
+    let mut sa110 = processor(&crate::profile::BIT26, Mode::Supervisor, 0x8000);
+    let control = sa110.system_register([0, 1, 0, 0]);
+    sa110.grant_simdfp(Access::Full);
+    assert_eq!(
+        sa110.system_register([0, 1, 0, 0]),
+        control,
+        "no CPACR to write"
+    );
 }
 
 #[test]

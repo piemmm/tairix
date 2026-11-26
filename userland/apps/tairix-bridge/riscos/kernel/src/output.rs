@@ -443,11 +443,7 @@ impl Os<'_> {
         }
         if self.world.printer == 0 {
             let printer_type = self.byte_var(var::PRINTER_TYPE);
-            let mut variable = *b"PrinterType$\0\0\0\0";
-            let digits = crate::convert::Decimal::of(i32::from(printer_type));
-            let digits = digits.as_bytes();
-            variable[12..12 + digits.len()].copy_from_slice(digits);
-            let Some(file) = self.variable_text(&variable[..12 + digits.len()])? else {
+            let Some(file) = self.printer_file(printer_type)? else {
                 return Ok(());
             };
             let mut name = file;
@@ -504,6 +500,21 @@ impl Os<'_> {
             return Err(fail);
         }
         Ok(())
+    }
+
+    /// The file printer type `printer_type` writes to, as `PrinterType$n`
+    /// names it; none where that is unset.
+    ///
+    /// # Errors
+    ///
+    /// What reading the variable gives.
+    pub fn printer_file(&mut self, printer_type: u8) -> Result<Option<alloc::vec::Vec<u8>>, Fail> {
+        let mut variable = *b"PrinterType$\0\0\0";
+        let digits = crate::convert::Decimal::of(i32::from(printer_type));
+        let digits = digits.as_bytes();
+        let end = 12 + digits.len();
+        variable[12..end].copy_from_slice(digits);
+        self.variable_text(&variable[..end])
     }
 
     /// Printing stops after an error: the printer stream closed and

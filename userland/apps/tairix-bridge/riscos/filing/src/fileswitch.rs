@@ -34,7 +34,7 @@ pub mod open;
 mod run;
 pub mod system;
 mod tree;
-mod types;
+pub(crate) mod types;
 
 use alloc::vec::Vec;
 
@@ -59,6 +59,7 @@ const WORKSPACE: u32 = MESSAGES_FILE.room();
 pub static FILE_SWITCH: Builtin = Builtin {
     title: "FileSwitch",
     help_name: None,
+    help_suffix: None,
     bridge: true,
     swis: None,
     services: Some(Services {

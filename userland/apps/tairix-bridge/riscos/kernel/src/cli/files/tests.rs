@@ -1,100 +1,13 @@
-//! The file commands' tests: what the listings and the dump make of a file's
-//! bytes, and what each command asks of the filing system.
+//! The file commands' tests: what the dump makes of a file's bytes, and what
+//! each command asks of the filing system.
 
 use alloc::vec::Vec;
 
-use super::{Dump, Listing, Progress, ANGLED, HEXADECIMAL, RAW_TOP, SEVEN_BIT};
+use super::Dump;
 use crate::cli::tests::{cli, plain, refused, session, written};
 use crate::input::InputEvent;
+use crate::listing::{RAW_TOP, SEVEN_BIT};
 use crate::testkit::{OneFile, Session, DATA};
-
-/// `bytes` listed as `listing` lists them, the file's end included.
-fn listed(listing: Listing, bytes: &[u8]) -> Vec<u8> {
-    let mut progress = Progress::default();
-    let mut out = Vec::new();
-    for &byte in bytes {
-        listing.feed(&mut progress, byte, &mut out);
-    }
-    listing.end(progress, &mut out);
-    out
-}
-
-fn filtered(format: u8, numbered: bool) -> Listing {
-    Listing {
-        filter: Some(format),
-        numbered,
-        tabs: false,
-    }
-}
-
-#[test]
-fn a_listing_ends_lines_at_cr_lf_or_a_pair_of_them_and_numbers_each() {
-    assert_eq!(
-        listed(filtered(0, true), b"one\r\ntwo\n\nthree"),
-        b"   1 one\n\r   2 two\n\r   3 \n\r   4 three\n\r",
-    );
-    assert_eq!(
-        listed(filtered(0, false), b"one\n\rtwo\r"),
-        b"one\n\rtwo\n\r",
-        "LF CR is a pair too"
-    );
-    assert_eq!(
-        listed(filtered(0, false), b""),
-        b"",
-        "nothing for an empty file"
-    );
-}
-
-#[test]
-fn line_numbers_take_four_columns_until_they_need_more() {
-    let lines: Vec<u8> = (0..1000).flat_map(|_| *b"x\n").collect();
-    let text = listed(filtered(0, true), &lines);
-    assert!(text.starts_with(b"   1 x\n\r"));
-    assert!(text.ends_with(b" 999 x\n\r1000 x\n\r"));
-}
-
-#[test]
-fn an_unprintable_byte_is_shown_as_gstrans_would_read_it_back() {
-    let bytes = b"\x07|\"<\x7F\xA2\xC1";
-    assert_eq!(listed(filtered(0, false), bytes), b"|G||\"<|?|!|\"|!A\n\r");
-    assert_eq!(
-        listed(filtered(ANGLED, false), bytes),
-        b"<7><124>\"<<127><162><193>\n\r"
-    );
-    assert_eq!(
-        listed(filtered(ANGLED | HEXADECIMAL, false), bytes),
-        b"<&07><&7C>\"<<&7F><&A2><&C1>\n\r",
-    );
-    assert_eq!(listed(filtered(HEXADECIMAL, false), bytes), b".|\"<...\n\r");
-    assert_eq!(
-        listed(filtered(RAW_TOP, false), bytes),
-        b"|G||\"<|?\xA2\xC1\n\r"
-    );
-    assert_eq!(
-        listed(filtered(SEVEN_BIT, false), bytes),
-        b"|G||\"<|?|\"A\n\r"
-    );
-}
-
-#[test]
-fn a_tab_is_eight_spaces_only_when_asked_for() {
-    let expanding = Listing {
-        tabs: true,
-        ..filtered(0, false)
-    };
-    assert_eq!(listed(expanding, b"a\tb"), b"a        b\n\r");
-    assert_eq!(listed(filtered(0, false), b"a\tb"), b"a|Ib\n\r");
-}
-
-#[test]
-fn print_writes_each_byte_as_it_is_and_nothing_more() {
-    let raw = Listing {
-        filter: None,
-        numbered: false,
-        tabs: false,
-    };
-    assert_eq!(listed(raw, b"a\r\n\x07"), b"a\r\n\x07");
-}
 
 #[test]
 fn a_dump_line_holds_what_fits_the_window_cut_to_a_power_of_two_and_a_half() {

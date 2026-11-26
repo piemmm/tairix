@@ -829,33 +829,36 @@ fn depth_of(resolved: &Resolved) -> u32 {
 
 /// `resolved` opened to be read.
 fn open_read(os: &mut Os<'_>, resolved: &Resolved) -> Result<u32, Fail> {
-    let handle = open::next_handle(os)?;
-    let Some(opened) = call::open(
-        os,
-        &resolved.calls,
-        fs::open::READ,
-        resolved.named(),
-        handle,
-    )?
-    else {
-        return Err(name::named_error(os, NOT_FOUND, &resolved.path));
-    };
-    open::record(os, resolved.clone(), opened, 0, handle)
+    open::holding(os, |os, handle| {
+        let Some(opened) = call::open(
+            os,
+            &resolved.calls,
+            fs::open::READ,
+            resolved.named(),
+            handle,
+            call::OWN_READ,
+        )?
+        else {
+            return Err(name::named_error(os, NOT_FOUND, &resolved.path));
+        };
+        open::record(os, resolved.clone(), opened, 0, handle)
+    })
 }
 
 /// `resolved` opened for update, after `UpCall_ModifyingFile` tells of it.
 fn open_update(os: &mut Os<'_>, resolved: &Resolved) -> Result<u32, Fail> {
-    let handle = open::next_handle(os)?;
-    let Some(opened) = call::open_for_update(os, resolved, handle)? else {
-        return Err(name::named_error(os, NOT_FOUND, &resolved.path));
-    };
-    open::record(
-        os,
-        resolved.clone(),
-        opened,
-        status::WRITE | status::MODIFIED,
-        handle,
-    )
+    open::holding(os, |os, handle| {
+        let Some(opened) = call::open_for_update(os, resolved, handle, call::OWN_UPDATE)? else {
+            return Err(name::named_error(os, NOT_FOUND, &resolved.path));
+        };
+        open::record(
+            os,
+            resolved.clone(),
+            opened,
+            status::WRITE | status::MODIFIED,
+            handle,
+        )
+    })
 }
 
 /// The file `to` made empty to `info`'s length, stamped as `info` is, by

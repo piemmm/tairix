@@ -10,7 +10,8 @@
 //! Each writable format's base is written by the driver itself, from the
 //! least archive of its format, so the bases carry what the writer writes:
 //! directories, compressed and stored members, RISC OS fields, a DFS disc's
-//! files on each side of it. RAR, which is only read, takes its bases from
+//! files on each side of it, a Squash file's table cleared. RAR, which is
+//! only read, takes its bases from
 //! the test fixtures: every version's compression, solid runs, PPMd and the
 //! filters. A seeded stream then
 //! flips, cuts and overwrites their bytes; a plain `cargo test` runs a quick
@@ -64,7 +65,7 @@ fn open(archive: &[u8], writable: bool, name: &[u8]) -> Option<Open> {
 
 /// Walk every directory from `dir` down, reading each file and its RISC OS
 /// fields; nothing it meets may panic.
-fn walk(fs: &mut ArchiveFs<MemoryAccess>, dir: NodeId, depth: usize) {
+fn walk(fs: &mut ArchiveFs<MemoryAccess>, dir: NodeId, depth: usize, rng: &mut Prng) {
     let mut entries = Vec::new();
     let _ = fs.read_dir(dir, 0, &[], &mut |entry, name| {
         entries.push((entry.node, entry.info.kind, name.to_vec()));
@@ -75,7 +76,7 @@ fn walk(fs: &mut ArchiveFs<MemoryAccess>, dir: NodeId, depth: usize) {
         let mut value = [0u8; 64];
         let _ = fs.get_attr(node, b"acorn.filetype", &mut value);
         match kind {
-            NodeKind::Directory if depth < 64 => walk(fs, node, depth + 1),
+            NodeKind::Directory if depth < 64 => walk(fs, node, depth + 1, rng),
             NodeKind::RegularFile => {
                 let size = fs.node_info(node).map_or(0, |info| info.size).min(READ_MAX);
                 let mut buf = vec![0u8; 16 * 1024];
@@ -85,6 +86,12 @@ fn walk(fs: &mut ArchiveFs<MemoryAccess>, dir: NodeId, depth: usize) {
                         Ok(0) | Err(_) => break,
                         Ok(got) => at += got as u64,
                     }
+                }
+                // Once more from anywhere, which a reader resumes from the
+                // nearest place its stream noted before it.
+                if size > 0 {
+                    let anywhere = rng.below(usize::try_from(size).unwrap_or(usize::MAX));
+                    let _ = fs.read_at(node, anywhere as u64, &mut buf);
                 }
             }
             NodeKind::Symlink => {
@@ -96,7 +103,7 @@ fn walk(fs: &mut ArchiveFs<MemoryAccess>, dir: NodeId, depth: usize) {
 }
 
 /// One base: the archive, the name it is attached by, and the path of the
-/// file a change makes in it, as its format names files.
+/// file a change writes in it, as its format names files.
 struct Base {
     archive: Vec<u8>,
     name: &'static [u8],
@@ -106,9 +113,10 @@ struct Base {
 /// The file a change makes in an archive of a format naming files freely.
 const FRESH: &[&[u8]] = &[b"Fuzz"];
 
-/// Open `archive`, walk it, and where it may be written, make the file
-/// `fresh`, commit and walk what the commit wrote.
-fn exercise(archive: &[u8], name: &[u8], fresh: &[&[u8]]) {
+/// Open `archive`, walk it, and where it may be written, write the file
+/// `fresh`, made where it is not there yet, commit and walk what the commit
+/// wrote.
+fn exercise(archive: &[u8], name: &[u8], fresh: &[&[u8]], rng: &mut Prng) {
     let Some(Open {
         attachment,
         mut fs,
@@ -118,7 +126,7 @@ fn exercise(archive: &[u8], name: &[u8], fresh: &[&[u8]]) {
         return;
     };
     let root = fs.root();
-    walk(&mut fs, root, 0);
+    walk(&mut fs, root, 0, rng);
     if !writable {
         return;
     }
@@ -128,15 +136,18 @@ fn exercise(archive: &[u8], name: &[u8], fresh: &[&[u8]]) {
     let dir = dirs
         .iter()
         .try_fold(root, |dir, part| fs.lookup(dir, part).ok());
-    if let Some(file) =
-        dir.and_then(|dir| fs.create(dir, leaf, NodeKind::RegularFile, &RECORD).ok())
-    {
+    let file = dir.and_then(|dir| {
+        fs.lookup(dir, leaf)
+            .or_else(|_| fs.create(dir, leaf, NodeKind::RegularFile, &RECORD))
+            .ok()
+    });
+    if let Some(file) = file {
         let _ = fs.write_at(file, 0, b"fuzzed and committed");
     }
     if fs.flush().is_ok() {
         if let Some(mut again) = open(&attachment.archive(), false, name) {
             let root = again.fs.root();
-            walk(&mut again.fs, root, 0);
+            walk(&mut again.fs, root, 0, rng);
         }
     }
 }
@@ -153,15 +164,55 @@ fn written(seed: &[u8], name: &[u8]) -> Vec<u8> {
             &NodeSecurity::new(0o755, 0, 0),
         )?;
         let text = fs.create(dir, b"Text", NodeKind::RegularFile, &RECORD)?;
-        fs.write_all(text, 0, &b"compressible text, ".repeat(200))?;
+        fs.write_all(text, 0, &compressible())?;
         fs.set_attr(text, b"acorn.filetype", b"fff")?;
-        let noise = fs.create(root, b"Noise", NodeKind::RegularFile, &RECORD)?;
-        let noise_bytes: Vec<u8> = (0u32..300)
-            .map(|at| at.wrapping_mul(2_654_435_761).to_le_bytes()[2])
-            .collect();
-        fs.write_all(noise, 0, &noise_bytes)
+        let noise_file = fs.create(root, b"Noise", NodeKind::RegularFile, &RECORD)?;
+        fs.write_all(noise_file, 0, &noise(300))
     })
     .expect("the seed archive is written back")
+}
+
+/// `seed`, the archive of one file named `file` attached by `name`, written
+/// back by the driver with that file made text, then noise enough to fill
+/// any table its stream codes with, and typed.
+fn written_lone(seed: &[u8], name: &[u8], file: &[u8]) -> Vec<u8> {
+    tairix_test_archive_image::written(seed, name, |fs| {
+        let node = fs.lookup(fs.root(), file)?;
+        let mut bytes = compressible();
+        bytes.extend(noise(16_000));
+        fs.write_all(node, 0, &bytes)?;
+        fs.set_attr(node, b"acorn.filetype", b"fff")
+    })
+    .expect("the seed file is written back")
+}
+
+fn compressible() -> Vec<u8> {
+    b"compressible text, ".repeat(200)
+}
+
+/// Bytes with nothing a compressor finds.
+fn noise(len: usize) -> Vec<u8> {
+    let mut noise = vec![0u8; len];
+    Prng::new(0x5EED).fill(&mut noise);
+    noise
+}
+
+/// How often the stream of the Squash file `archive` clears its table.
+fn clears_in(archive: &[u8]) -> usize {
+    use tairix_compress::squash::{decompress, start_decompression, Status, DECOMPRESS_WORK};
+    let mut stream = &archive[tairix_compress::squash::FILE_HEADER_LEN..];
+    let mut work = vec![0u8; DECOMPRESS_WORK];
+    start_decompression(&mut work).expect("a workspace");
+    let mut out = vec![0u8; 1 << 16];
+    let mut clears = 0;
+    loop {
+        let progress = decompress(&mut work, stream, false, &mut out, &mut |_| clears += 1)
+            .expect("the base decodes");
+        stream = &stream[progress.consumed..];
+        if progress.status == Status::Done {
+            return clears;
+        }
+    }
 }
 
 /// `seed`, a DFS disc attached by `name`, written back by the driver with
@@ -201,15 +252,28 @@ fn bases() -> Vec<Base> {
         name,
         fresh: FRESH,
     };
+    let squashed = written_lone(
+        &seed(Format::Squash),
+        b"seed,fca",
+        tairix_test_archive_image::SEED,
+    );
+    assert!(clears_in(&squashed) > 0, "the Squash base clears its table");
     let mut bases = vec![
         base(written(&seed(Format::Zip), b"seed.zip"), b"seed.zip"),
         base(written(&seed(Format::Tar), b"seed.tar"), b"seed.tar"),
         base(written(&seed(Format::TarGzip), b"seed.tgz"), b"seed.tgz"),
         base(written(&seed(Format::TarBzip2), b"seed.tbz2"), b"seed.tbz2"),
-        base(
-            tairix_test_archive_image::gzip(b"one file, compressed alone").expect("a stream"),
-            b"lone.gz",
-        ),
+        Base {
+            archive: tairix_test_archive_image::gzip(b"one file, compressed alone")
+                .expect("a stream"),
+            name: b"lone.gz",
+            fresh: &[b"lone"],
+        },
+        Base {
+            archive: squashed,
+            name: b"seed,fca",
+            fresh: &[tairix_test_archive_image::SEED],
+        },
         base(written(&seed(Format::Spark), b"seed.spk"), b"seed.spk"),
         base(written(&seed(Format::ArcFs), b"seed.arc"), b"seed.arc"),
         Base {
@@ -262,7 +326,7 @@ fn fuzz_archive_open() {
         },
     ) in bases.iter().enumerate()
     {
-        exercise(base, name, fresh);
+        exercise(base, name, fresh, &mut rng);
         let until = slices(u32::try_from(index).unwrap());
         let mut iteration = 0u64;
         loop {
@@ -290,7 +354,7 @@ fn fuzz_archive_open() {
                     mutated[at..end].copy_from_slice(&edge.to_le_bytes()[..end - at]);
                 }
             }
-            exercise(&mutated, name, fresh);
+            exercise(&mutated, name, fresh, &mut rng);
             iteration += 1;
             if !tairix_fuzzseed::within_budget(until) && iteration >= SMOKE_ITERATIONS {
                 break;

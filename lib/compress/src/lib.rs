@@ -65,13 +65,16 @@
 //! a full 32 KiB window and, on the encode side, a match finder, so they are
 //! tens to hundreds of kilobytes: heap-own one, do not put it on a stack.
 //!
-//! # Archive formats: [`bzip2`] and [`arc`]
+//! # Archive formats: [`bzip2`], [`arc`] and [`squash`]
 //!
 //! [`bzip2`] and the ARC family's methods ([`arc`]) are the other foreign
 //! formats archives are written in, both directions. They stream through
 //! [`Input`] and [`Output`] over workspace the caller places — a bzip2 block
 //! decodes through four bytes a symbol — and bzip2 reports where each block
 //! begins and resumes there, so a reader can seek into a long stream.
+//! [`squash`] is RISC OS's Squash file and its stream, coded a call at a time
+//! as the Squash module codes it, its whole state in its workspace; its
+//! stream is compress's LZW, the coding the ARC family's dynamic LZW shares.
 //!
 //! All of it keeps the same total, `unsafe`-free, fail-closed discipline as
 //! the RLZ codec, and allocates nothing of its own: see the module
@@ -86,6 +89,8 @@ pub mod bzip2;
 pub mod deflate;
 pub mod gzip;
 pub mod inflate;
+mod lzw;
+pub mod squash;
 pub mod zlib;
 
 /// Where a streaming decoder reads its input, a byte at a time.

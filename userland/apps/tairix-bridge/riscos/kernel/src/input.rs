@@ -1,8 +1,9 @@
-//! Character input (`plans/RISCOS-EMULATOR.md` §4.5): the kernel's ten
-//! buffers behind `InsV`, `RemV` and `CnpV`, the keyboard buffer the session puts
-//! keys into, the escape condition, and `OS_ReadC` through `RdchV`, which
-//! reads redirection, then the `*Exec` file, then the selected buffer, with
-//! function keys expanded as `OS_Byte` sets them.
+//! Character input (`plans/RISCOS-EMULATOR.md` §4.5): the kernel's own
+//! buffers behind `InsV`, `RemV` and `CnpV` — the keyboard's, which the
+//! session puts keys into, and the four-byte sound and speech buffers; the
+//! buffer manager holds the rest — the escape condition, and `OS_ReadC`
+//! through `RdchV`, which reads redirection, then the `*Exec` file, then the
+//! selected buffer, with function keys expanded as `OS_Byte` sets them.
 //!
 //! A read that finds nothing waits: from a program's own `SWI` the context
 //! sleeps until a key comes, and the `SWI` is performed again; from deeper
@@ -15,28 +16,32 @@ use tairix_riscos_arm::psr;
 use tairix_riscos_arm::reg::Reg;
 
 use crate::byte::var;
+use crate::events::number::{CHAR_INPUT, ESCAPE as ESCAPE_EVENT, INPUT_FULL, OUTPUT_EMPTY};
 use crate::memory::layout::HIGH_ZERO_PAGE;
 use crate::mouse::Packet;
 use crate::os::{len32, Ending, Entry, Fail, Os, Regs, Unwind, Wait};
 use crate::vectors::{self, Carry};
 use crate::zeropage;
 
-/// The buffers there are, and each one's size; each holds a byte fewer.
-const SIZES: [usize; 10] = [0x100, 0x100, 0xC0, 0x400, 4, 4, 4, 4, 4, 0x40];
 /// The keyboard buffer.
 pub(crate) const KEYBOARD: u32 = 0;
 /// The serial input buffer.
-const SERIAL_IN: u32 = 1;
+pub(crate) const SERIAL_IN: u32 = 1;
+/// The serial output buffer.
+pub(crate) const SERIAL_OUT: u32 = 2;
+/// The printer buffer.
+pub(crate) const PRINTER: u32 = 3;
+/// The sound and speech buffers, which nothing uses.
+const SOUND_AND_SPEECH: core::ops::RangeInclusive<u32> = 4..=8;
 /// The mouse buffer.
 pub(crate) const MOUSE: u32 = 9;
+/// The sizes of the kernel's own buffers, the keyboard's and each sound and
+/// speech buffer's; each holds a byte fewer.
+const KEYBOARD_SIZE: usize = 0x100;
+const SOUND_SIZE: usize = 4;
 /// The escape character's effect: the escape condition, in `ESC_Status`'s
 /// bit 6.
 const ESCAPE_BIT: u8 = 1 << 6;
-/// Events the buffers raise.
-const OUTPUT_EMPTY: u32 = 0;
-const INPUT_FULL: u32 = 1;
-const CHAR_INPUT: u32 = 2;
-const ESCAPE_EVENT: u32 = 6;
 /// The escape character, as `OS_ReadC` returns it.
 const ESCAPE: u8 = 0x1B;
 /// The codes a key handler gives Copy and the cursor keys: Copy, left,
@@ -88,8 +93,9 @@ impl Ring {
 /// `InsV`'s and `RemV`'s R1 bit for a block of bytes rather than one.
 pub(crate) const BLOCK: u32 = 1 << 31;
 
-/// The buffers and what reading them holds over between calls.
+/// The kernel's own buffers and what reading them holds over between calls.
 pub(crate) struct Input {
+    /// The keyboard's buffer, then the sound and speech buffers.
     rings: Vec<Ring>,
     /// What is left of a function key's expansion.
     soft: VecDeque<u8>,
@@ -137,11 +143,12 @@ pub enum InputEvent {
 
 impl Input {
     pub(crate) fn new() -> Result<Self, crate::os::BootError> {
+        let sizes = core::iter::once(KEYBOARD_SIZE).chain(SOUND_AND_SPEECH.map(|_| SOUND_SIZE));
         let mut rings = Vec::new();
         rings
-            .try_reserve_exact(SIZES.len())
+            .try_reserve_exact(1 + SOUND_AND_SPEECH.count())
             .map_err(|_| crate::os::BootError::NoMemory)?;
-        for size in SIZES {
+        for size in sizes {
             let data = tairix_util::fallible::zeroed(size).ok_or(crate::os::BootError::NoMemory)?;
             rings.push(Ring {
                 data,
@@ -157,37 +164,21 @@ impl Input {
         })
     }
 
+    /// Buffer `buffer`, where it is one of the kernel's own.
     fn ring(&mut self, buffer: u32) -> Option<&mut Ring> {
-        self.rings.get_mut(buffer as usize)
+        let index = if buffer == KEYBOARD {
+            0
+        } else if SOUND_AND_SPEECH.contains(&buffer) {
+            (buffer - SOUND_AND_SPEECH.start()) as usize + 1
+        } else {
+            return None;
+        };
+        self.rings.get_mut(index)
     }
 
     /// Ends a function key's expansion part way.
     pub(crate) fn end_soft_key(&mut self) {
         self.soft.clear();
-    }
-
-    /// Buffers a mouse packet where the whole of it fits.
-    pub(crate) fn buffer_mouse_packet(&mut self, packet: [u8; Packet::BYTES]) {
-        if let Some(ring) = self.ring(MOUSE) {
-            if ring.capacity() - ring.len >= Packet::BYTES {
-                for byte in packet {
-                    ring.push(byte);
-                }
-            }
-        }
-    }
-
-    /// The next buffered mouse packet.
-    pub(crate) fn take_mouse_packet(&mut self) -> Option<Packet> {
-        let ring = self.rings.get_mut(MOUSE as usize)?;
-        if ring.len < Packet::BYTES {
-            return None;
-        }
-        let mut packet = [0u8; Packet::BYTES];
-        for slot in &mut packet {
-            *slot = ring.pop().unwrap_or(0);
-        }
-        Some(Packet::from_bytes(packet))
     }
 }
 
@@ -206,12 +197,18 @@ pub(crate) enum Continuation {
 }
 
 impl Os<'_> {
-    /// `InsV`'s default: R0's byte into buffer R1, or with R1's bit 31 set,
-    /// R3 bytes from R2 as far as they fit, R2 and R3 left at the rest; C
-    /// set if not everything went in.
+    /// `InsV`'s default: R0's byte into the kernel's buffer R1, or with R1's
+    /// bit 31 set, R3 bytes from R2 as far as they fit, R2 and R3 left at
+    /// the rest; C set if not everything went in, as for a buffer that is
+    /// not the kernel's.
     pub(crate) fn default_insert(&mut self, regs: &mut Regs) -> Result<(), Fail> {
         let buffer = regs.r[1] & !BLOCK;
         let block = regs.r[1] & BLOCK != 0;
+        regs.set_flag(psr::V, false);
+        if self.world.input.ring(buffer).is_none() {
+            regs.set_flag(psr::C, true);
+            return Ok(());
+        }
         let (mut at, mut left) = if block {
             (regs.r[2], regs.r[3])
         } else {
@@ -225,9 +222,6 @@ impl Os<'_> {
                 regs.byte(0)
             };
             let Some(ring) = self.world.input.ring(buffer) else {
-                if !block {
-                    return Ok(());
-                }
                 break;
             };
             if !ring.push(byte) {
@@ -242,7 +236,7 @@ impl Os<'_> {
             regs.r[3] = left;
         }
         regs.set_flag(psr::C, left > 0);
-        if let Some(byte) = refused.filter(|_| matches!(buffer, KEYBOARD | SERIAL_IN | MOUSE)) {
+        if let Some(byte) = refused.filter(|_| buffer == KEYBOARD) {
             let mut event = Regs::new([
                 INPUT_FULL,
                 buffer,
@@ -263,13 +257,17 @@ impl Os<'_> {
         Ok(())
     }
 
-    /// `RemV`'s default: a byte from buffer R1 into R0 and R2, or with R1's
-    /// bit 31 set, up to R3 bytes into the block at R2, R2 and R3 left past
-    /// what came; removed unless V asks only to look. C set if it was empty.
+    /// `RemV`'s default: a byte from the kernel's buffer R1 into R0 and R2,
+    /// or with R1's bit 31 set, up to R3 bytes into the block at R2, R2 and
+    /// R3 left past what came; removed unless V asks only to look. C set if
+    /// it was empty. A buffer that is not the kernel's is left with C clear,
+    /// as RISC OS 5 leaves it.
     pub(crate) fn default_remove(&mut self, regs: &mut Regs) -> Result<(), Fail> {
         let buffer = regs.r[1] & !BLOCK;
         let examine = regs.flag(psr::V);
+        regs.set_flag(psr::V, false);
         let Some(empty) = self.world.input.ring(buffer).map(|ring| ring.len == 0) else {
+            regs.set_flag(psr::C, false);
             return Ok(());
         };
         regs.set_flag(psr::C, empty);
@@ -289,7 +287,7 @@ impl Os<'_> {
                 .input
                 .ring(buffer)
                 .is_some_and(|ring| ring.len == 0);
-        if emptied && (2..=8).contains(&buffer) {
+        if emptied && SOUND_AND_SPEECH.contains(&buffer) {
             let mut event = Regs::new([OUTPUT_EMPTY, buffer, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
             self.raise_event(&mut event)?;
         }
@@ -324,13 +322,15 @@ impl Os<'_> {
         Ok(())
     }
 
-    /// `CnpV`'s default: buffer R1 purged if V is set, else its bytes (C clear)
-    /// or its free space (C set) counted into R1's low byte and R2.
+    /// `CnpV`'s default: the kernel's buffer R1 purged if V is set, else its
+    /// bytes (C clear) or its free space (C set) counted into R1's low byte
+    /// and R2; a buffer that is not the kernel's is left as it is.
     #[expect(clippy::unnecessary_wraps, reason = "a vector default's signature")]
     pub(crate) fn default_count_purge(&mut self, regs: &mut Regs) -> Result<(), Fail> {
-        let buffer = regs.r[1];
+        let buffer = regs.r[1] & !BLOCK;
         let purge = regs.flag(psr::V);
         let spaces = regs.flag(psr::C);
+        regs.set_flag(psr::V, false);
         let Some(ring) = self.world.input.ring(buffer) else {
             return Ok(());
         };
@@ -377,6 +377,39 @@ impl Os<'_> {
         regs.set_flag(psr::C, spaces);
         self.call_vector(vectors::CNP, &mut regs, Entry::SupervisorNoIrq)?;
         Ok((regs.r[1] & 0xFF) | (regs.r[2] << 8))
+    }
+
+    /// Buffers `packet` in the mouse buffer through `InsV` where the whole
+    /// of it fits, as the kernel inserts its nine bytes together.
+    pub(crate) fn buffer_mouse_packet(&mut self, packet: [u8; Packet::BYTES]) -> Result<(), Fail> {
+        let bytes = len32(Packet::BYTES);
+        if self.count(MOUSE, true)? < bytes {
+            return Ok(());
+        }
+        self.below_supervisor_stack(bytes, |os, at| {
+            os.write_bytes(at, &packet)?;
+            let mut regs = Regs::new([0, MOUSE | BLOCK, at, bytes, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            os.call_vector(vectors::INS, &mut regs, Entry::SupervisorNoIrq)?;
+            Ok(())
+        })
+    }
+
+    /// The next packet the mouse buffer holds, taken through `RemV`.
+    pub(crate) fn take_mouse_packet(&mut self) -> Result<Option<Packet>, Fail> {
+        let bytes = len32(Packet::BYTES);
+        if self.count(MOUSE, false)? < bytes {
+            return Ok(None);
+        }
+        self.below_supervisor_stack(bytes, |os, at| {
+            let mut regs = Regs::new([0, MOUSE | BLOCK, at, bytes, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            os.call_vector(vectors::REM, &mut regs, Entry::SupervisorNoIrq)?;
+            if regs.r[3] != 0 {
+                return Ok(None);
+            }
+            let mut packet = [0u8; Packet::BYTES];
+            os.read_bytes(at, &mut packet)?;
+            Ok(Some(Packet::from_bytes(packet)))
+        })
     }
 
     /// A character for buffer `buffer` as the keyboard driver and `OS_Byte`
@@ -721,6 +754,16 @@ impl Os<'_> {
     /// The unwind the host's stop or an interrupt's work starts.
     pub fn await_input(&mut self) -> Result<(), Fail> {
         self.host_wait(None)
+    }
+
+    /// As [`Self::await_input`], waking at `deadline` if nothing comes
+    /// first: for a wait whose caller must look again by then.
+    ///
+    /// # Errors
+    ///
+    /// The unwind the host's stop or an interrupt's work starts.
+    pub fn await_input_until(&mut self, deadline: u64) -> Result<(), Fail> {
+        self.host_wait(Some(deadline))
     }
 
     /// The host waits for input, the next timed work or `deadline`, and the

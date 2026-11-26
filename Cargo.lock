@@ -4718,6 +4718,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-riscos-clib"
+version = "0.0.0"
+dependencies = [
+ "tairix-fscopy",
+ "tairix-fuzzseed",
+ "tairix-riscos-arm",
+ "tairix-riscos-basic",
+ "tairix-riscos-filing",
+ "tairix-riscos-kernel",
+ "tairix-softfloat",
+]
+
+[[package]]
 name = "tairix-riscos-draw"
 version = "0.0.0"
 dependencies = [
@@ -4752,6 +4765,7 @@ dependencies = [
  "tairix-obey",
  "tairix-reclaim",
  "tairix-riscos-arm",
+ "tairix-riscos-basic",
  "tairix-riscos-filing",
  "tairix-riscos-kernel",
  "tairix-tz",
@@ -4791,6 +4805,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-collections",
+ "tairix-compress",
  "tairix-fsmeta",
  "tairix-fuzzseed",
  "tairix-hash",
@@ -4799,6 +4814,7 @@ dependencies = [
  "tairix-obey",
  "tairix-reclaim",
  "tairix-riscos-arm",
+ "tairix-softfloat",
  "tairix-theme",
  "tairix-tz",
  "tairix-tzcompile",

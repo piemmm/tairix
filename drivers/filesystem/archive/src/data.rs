@@ -770,13 +770,7 @@ impl Cursors {
 /// A decoder of an ARC-family member coded as `method`, with workspace for
 /// its tables where it codes with some.
 fn arc_decoding(method: arc::Method) -> Result<Decoding, DriverError> {
-    let (table, stack) = match method {
-        arc::Method::Packed => (0, 0),
-        arc::Method::Squeezed => (arc::SQUEEZE_TABLE, 0),
-        arc::Method::Crunched { .. } | arc::Method::Lzw { .. } => {
-            (arc::DECODER_TABLE, arc::DECODER_STACK)
-        }
-    };
+    let (table, stack) = arc::decoder_workspace(method);
     let table = tairix_util::fallible::filled(table, 0u32).ok_or(DriverError::OutOfMemory)?;
     let stack = tairix_util::fallible::filled(stack, 0u8).ok_or(DriverError::OutOfMemory)?;
     let decoder = arc::Decoder::new(table, stack, method).map_err(|_| DriverError::BadMagic)?;

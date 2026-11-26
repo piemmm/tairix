@@ -92,6 +92,19 @@ impl Parts {
             (true, true) => other.cmp_magnitude(self),
         }
     }
+
+    /// Whether this nonzero value is an integer, and if it is, whether it is
+    /// odd: every value of 2^64 or more is an even one.
+    #[must_use]
+    pub fn parity(self) -> Option<bool> {
+        let p = self.normalized();
+        if p.exp >= 64 {
+            return Some(false);
+        }
+        let fraction_bits = u32::try_from(63 - p.exp).ok().filter(|&bits| bits < 64)?;
+        let fraction = p.sig & ((1 << fraction_bits) - 1);
+        (fraction == 0).then_some(p.sig >> fraction_bits & 1 != 0)
+    }
 }
 
 /// A count of places as an exponent step: no count here reaches `i32`'s
@@ -182,10 +195,7 @@ impl Exact {
     /// The 64-bit significand, chopped.
     #[must_use]
     pub const fn chopped(self) -> u64 {
-        let bits = (self.sig >> (POINT - 63)).to_le_bytes();
-        u64::from_le_bytes([
-            bits[0], bits[1], bits[2], bits[3], bits[4], bits[5], bits[6], bits[7],
-        ])
+        low_word(self.sig >> (POINT - 63))
     }
 
     /// The significand rounded to `rounding`'s bits at the integer bit's
@@ -219,32 +229,46 @@ impl Exact {
     }
 }
 
+/// A remainder, and the quotient it was taken with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Remainder {
+    /// The remainder, exact.
+    pub rest: Parts,
+    /// The quotient's magnitude, the whole number nearest `a ÷ b`, ties to
+    /// the even one: its low 64 bits.
+    pub quotient: u64,
+}
+
 /// The remainder of `a` by `b`, both normalized and nonzero, as IEEE 754
 /// defines it: exact, its magnitude at most half of `b`'s.
 #[must_use]
-pub fn remainder(a: Parts, b: Parts) -> Parts {
+pub fn remainder(a: Parts, b: Parts) -> Remainder {
     let gap = a.exp - b.exp;
     if gap < -1 {
-        return a;
+        return Remainder {
+            rest: a,
+            quotient: 0,
+        };
     }
     let divisor = u128::from(b.sig);
-    // `rest` stays below `divisor` and `odd` is the quotient's last bit.
-    let (mut rest, mut odd) = if gap == -1 {
-        (u128::from(a.sig), false)
+    // `rest` stays below `divisor`; each step brings down its quotient bits.
+    let (mut rest, mut quotient) = if gap == -1 {
+        (u128::from(a.sig), 0)
     } else {
         (
             u128::from(a.sig) % divisor,
-            (u128::from(a.sig) / divisor) & 1 != 0,
+            low_word(u128::from(a.sig) / divisor),
         )
     };
-    let mut left = gap.max(0);
+    let mut left = gap.max(0).cast_unsigned();
     while left > 0 {
         let step = left.min(63);
-        let shifted = rest << u32::try_from(step).unwrap_or(63);
-        odd = (shifted / divisor) & 1 != 0;
+        let shifted = rest << step;
+        quotient = quotient << step | low_word(shifted / divisor);
         rest = shifted % divisor;
         left -= step;
     }
+    let odd = quotient & 1 != 0;
     // `rest` is at `b`'s scale, or at half of it where `a` is the smaller,
     // so half of `b` is the divisor once or twice `rest`'s units.
     let (scale, twice) = if gap == -1 {
@@ -258,13 +282,24 @@ pub fn remainder(a: Parts, b: Parts) -> Parts {
         (true, true) => (divisor << 1) - rest,
         (true, false) => divisor - rest,
     };
-    let negative = a.negative != flip;
-    Parts {
-        negative,
+    let rest = Parts {
+        negative: a.negative != flip,
         exp: scale,
         sig: u64::try_from(magnitude).unwrap_or(u64::MAX),
     }
-    .normalized()
+    .normalized();
+    Remainder {
+        rest,
+        quotient: quotient.wrapping_add(u64::from(flip)),
+    }
+}
+
+/// The low 64 bits of `x`.
+pub(crate) const fn low_word(x: u128) -> u64 {
+    let bytes = x.to_le_bytes();
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
 }
 
 /// `a + b`, or `a − b` where `subtract`, exactly. The result is normalized as
@@ -328,6 +363,44 @@ pub fn multiply(a: Parts, b: Parts) -> Exact {
         sticky: false,
     }
     .normalized(false)
+}
+
+/// `a × b + c`, each normalized and nonzero, exactly enough to round
+/// correctly at any precision: none where they cancel to exactly zero.
+#[must_use]
+pub fn fused(a: Parts, b: Parts, c: Parts) -> Option<Exact> {
+    let (product_negative, product_exp) = (a.negative != b.negative, a.exp + b.exp + 1);
+    // Each at the top of a 256-bit window: bit 254 the place whose exponent
+    // each names, bit 255 free for a carry.
+    let product = Wide::of(u128::from(a.sig) * u128::from(b.sig)).shl(127);
+    let addend = Wide::of(u128::from(c.sig)).shl(191);
+    let ((big_negative, big_bits), (small_negative, small_bits, gap), exp) = if product_exp >= c.exp
+    {
+        (
+            (product_negative, product),
+            (c.negative, addend, product_exp - c.exp),
+            product_exp,
+        )
+    } else {
+        (
+            (c.negative, addend),
+            (product_negative, product, c.exp - product_exp),
+            c.exp,
+        )
+    };
+    let (small_bits, sticky) = small_bits.shr_sticky(u32::try_from(gap).unwrap_or(u32::MAX));
+    let (negative, bits, sticky) = if big_negative == small_negative {
+        (big_negative, big_bits.add(small_bits), sticky)
+    } else {
+        match big_bits.cmp(small_bits) {
+            Ordering::Greater if sticky => (big_negative, big_bits.sub(small_bits).dec(), true),
+            Ordering::Greater => (big_negative, big_bits.sub(small_bits), false),
+            Ordering::Less => (small_negative, small_bits.sub(big_bits), sticky),
+            Ordering::Equal if sticky => (small_negative, Wide::ZERO, true),
+            Ordering::Equal => return None,
+        }
+    };
+    Some(bits.exact(negative, exp, sticky))
 }
 
 /// `a ÷ b` exactly, `b` normal: unnormal where `a` is. None where `b`'s
@@ -417,6 +490,125 @@ pub fn to_integer(p: Parts, mode: Mode) -> (Option<u64>, bool) {
     };
     (whole.checked_add(u64::from(up)), inexact)
 }
+
+/// A 256-bit unsigned integer, high half first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Wide {
+    high: u128,
+    low: u128,
+}
+
+impl Wide {
+    const ZERO: Self = Self { high: 0, low: 0 };
+
+    const fn of(low: u128) -> Self {
+        Self { high: 0, low }
+    }
+
+    fn shl(self, n: u32) -> Self {
+        match n {
+            0 => self,
+            1..=127 => Self {
+                high: self.high << n | self.low >> (128 - n),
+                low: self.low << n,
+            },
+            128..=255 => Self {
+                high: self.low << (n - 128),
+                low: 0,
+            },
+            _ => Self::ZERO,
+        }
+    }
+
+    /// Shifted right `n` places, and whether anything nonzero fell off.
+    fn shr_sticky(self, n: u32) -> (Self, bool) {
+        match n {
+            0 => (self, false),
+            1..=127 => (
+                Self {
+                    high: self.high >> n,
+                    low: self.low >> n | self.high << (128 - n),
+                },
+                self.low & ((1 << n) - 1) != 0,
+            ),
+            128 => (Self::of(self.high), self.low != 0),
+            129..=255 => (
+                Self::of(self.high >> (n - 128)),
+                self.low != 0 || self.high & ((1 << (n - 128)) - 1) != 0,
+            ),
+            _ => (Self::ZERO, self != Self::ZERO),
+        }
+    }
+
+    fn add(self, other: Self) -> Self {
+        let (low, carry) = self.low.overflowing_add(other.low);
+        Self {
+            high: self.high + other.high + u128::from(carry),
+            low,
+        }
+    }
+
+    /// `self − other`, `other` no larger.
+    fn sub(self, other: Self) -> Self {
+        let (low, borrow) = self.low.overflowing_sub(other.low);
+        Self {
+            high: self.high - other.high - u128::from(borrow),
+            low,
+        }
+    }
+
+    /// One less, from a nonzero value.
+    fn dec(self) -> Self {
+        self.sub(Self::of(1))
+    }
+
+    fn cmp(self, other: Self) -> Ordering {
+        self.high.cmp(&other.high).then(self.low.cmp(&other.low))
+    }
+
+    fn leading_zeros(self) -> u32 {
+        if self.high == 0 {
+            128 + self.low.leading_zeros()
+        } else {
+            self.high.leading_zeros()
+        }
+    }
+
+    /// The value `self × 2^(exp − 254)`, `sticky` below it, as an exact
+    /// result, normalized.
+    fn exact(self, negative: bool, exp: i32, sticky: bool) -> Exact {
+        if self == Self::ZERO {
+            // Only a sticky remnant: below every bit the window holds.
+            return Exact {
+                negative,
+                exp: exp - 256,
+                sig: 0,
+                sticky,
+            };
+        }
+        // Brought to bit 254, the window's integer place; a carry into 255
+        // is brought down by the exact result's own normalizing.
+        let zeros = self.leading_zeros();
+        let (bits, sticky, exp) = if zeros == 0 {
+            let (bits, lost) = self.shr_sticky(1);
+            (bits, sticky || lost, exp + 1)
+        } else {
+            let up = zeros - 1;
+            (self.shl(up), sticky, exp - i32::try_from(up).unwrap_or(0))
+        };
+        // Bits 254..128 are the result's 127 bits with bit 126 its integer
+        // place.
+        Exact {
+            negative,
+            exp,
+            sig: bits.high,
+            sticky: sticky || bits.low != 0,
+        }
+        .normalized(false)
+    }
+}
+
+const _: () = assert!(POINT == 126);
 
 #[cfg(test)]
 #[path = "exact_tests.rs"]

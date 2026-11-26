@@ -28,7 +28,7 @@ use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::os::{Ending, Fail, Host, Kernel, Pulse, Regs};
 use tairix_riscos_kernel::swi::os::exit::ABEX;
 use tairix_riscos_kernel::swi::os::{self as swi, environment};
-use tairix_riscos_kernel::swi::X;
+use tairix_riscos_kernel::swi::{buffer, fp_emulator, squash, vfp_support, X};
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_RUNS: u64 = 40;
@@ -43,6 +43,45 @@ const BUDGET: u64 = 20_000;
 /// The host's words a call is given before it is stopped, each after a
 /// slice of work.
 const WORDS: u32 = 0;
+/// The kernel's modules' SWIs, too far up for a random number to find:
+/// Squash's, whose workspace is the caller's, the buffer manager's, whose
+/// buffers the caller names and may register anywhere, and the
+/// floating-point modules', whose contexts the caller names and places.
+const MODULE_SWIS: [u32; 33] = [
+    squash::COMPRESS,
+    squash::DECOMPRESS,
+    buffer::CREATE,
+    buffer::REMOVE,
+    buffer::REGISTER,
+    buffer::DEREGISTER,
+    buffer::MODIFY_FLAGS,
+    buffer::LINK_DEVICE,
+    buffer::UNLINK_DEVICE,
+    buffer::GET_INFO,
+    buffer::THRESHOLD,
+    buffer::INTERNAL_INFO,
+    fp_emulator::VERSION,
+    fp_emulator::DEACTIVATE_CONTEXT,
+    fp_emulator::ACTIVATE_CONTEXT,
+    fp_emulator::CHANGE_CONTEXT,
+    fp_emulator::CONTEXT_LENGTH,
+    fp_emulator::INIT_CONTEXT,
+    fp_emulator::EXCEPTION_DUMP,
+    fp_emulator::ABORT,
+    fp_emulator::LOAD_CONTEXT,
+    fp_emulator::SAVE_CONTEXT,
+    vfp_support::CHECK_CONTEXT,
+    vfp_support::CREATE_CONTEXT,
+    vfp_support::DESTROY_CONTEXT,
+    vfp_support::CHANGE_CONTEXT,
+    vfp_support::EXAMINE_CONTEXT,
+    vfp_support::FAST_API,
+    vfp_support::ACTIVE_CONTEXT,
+    vfp_support::VERSION,
+    vfp_support::FEATURES,
+    vfp_support::EXCEPTION_DUMP,
+    vfp_support::ELEMENTARY_FUNCTIONS,
+];
 
 /// A host whose clock moves on as it is asked, with input now and then, and
 /// which stops work after a few of its words.
@@ -157,11 +196,12 @@ fn salt(run: &mut Run, rng: &mut Prng) {
 
 /// A SWI number: mostly the kernel's own, sometimes past them.
 fn swi_number(rng: &mut Prng) -> u32 {
-    match rng.below(10) {
+    match rng.below(11) {
         0..=5 => u32::try_from(rng.below(0x80)).unwrap_or(0),
         6 => 0xC0 + u32::try_from(rng.below(0x2E)).unwrap_or(0),
         7 => 0x100 + u32::try_from(rng.below(0x100)).unwrap_or(0),
         8 => u32::try_from(rng.below(0x200)).unwrap_or(0),
+        9 => *rng.pick(&MODULE_SWIS),
         _ => rng.next_u32() & 0xF_FFFF,
     }
 }

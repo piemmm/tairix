@@ -50,7 +50,19 @@ impl Processor {
 
     /// The current processor.
     pub(crate) fn cpu(&mut self) -> &mut Cpu {
-        let (bits, memo_pages) = (self.current, self.memo_pages);
+        self.of(self.current)
+    }
+
+    /// The 32-bit profile's processor, made if it has not yet run: the only
+    /// one with VFP and Advanced SIMD, whose unit VFPSupport keeps whichever
+    /// profile is running.
+    pub(crate) fn with_vfp(&mut self) -> &mut Cpu {
+        self.of(Bits::Bit32)
+    }
+
+    /// The processor of `bits`, made if it has not yet run.
+    fn of(&mut self, bits: Bits) -> &mut Cpu {
+        let memo_pages = self.memo_pages;
         self.cpus[index(bits)].get_or_insert_with(|| Cpu::new(profile(bits), memo_pages))
     }
 
@@ -65,13 +77,14 @@ impl Processor {
         if bits == self.current {
             return self.cpu().set_state(state);
         }
-        let fpa = *self.cpu().fpa();
-        let memo_pages = self.memo_pages;
-        let cpu = self.cpus[index(bits)].get_or_insert_with(|| Cpu::new(profile(bits), memo_pages));
+        let (fpa, fpa_active) = (*self.cpu().fpa(), self.cpu().fpa_active());
+        let irq = self.irq;
+        let cpu = self.of(bits);
         cpu.set_state(state)?;
         *cpu.fpa_mut() = fpa;
+        cpu.set_fpa_active(fpa_active);
         cpu.clear_exclusive();
-        cpu.set_irq(self.irq);
+        cpu.set_irq(irq);
         if let Some(previous) = self.cpus[index(self.current)].as_mut() {
             previous.set_irq(false);
         }

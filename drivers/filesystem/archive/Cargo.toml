@@ -1,6 +1,6 @@
 [package]
 name = "tairix-drv-fs-archive"
-description = "TAIRiX archive filesystem driver: zip, tar (plain, gzip, bzip2), RISC OS Spark and ArcFS read and written, RAR read, each served as a volume of its members."
+description = "TAIRiX archive filesystem driver: zip, tar (plain, gzip, bzip2), RISC OS Spark and ArcFS, Acorn DFS discs and RISC OS Squash files read and written, RAR read, each served as a volume of its members."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

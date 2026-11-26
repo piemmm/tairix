@@ -483,7 +483,7 @@ impl Unit {
             return Ok(Value::Final(Internal::zero(a.negative())));
         }
         let (x, y) = (a.number(), b.number());
-        let rest = exact::remainder(x.parts(), y.parts());
+        let rest = exact::remainder(x.parts(), y.parts()).rest;
         if rest.is_zero() {
             return Ok(Value::Final(Internal::zero(x.negative)));
         }

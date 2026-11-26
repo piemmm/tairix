@@ -29,7 +29,7 @@ use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::filing::fs::{block, info, Declaration};
 use tairix_riscos_kernel::module::{Builtin, Resource, Services, Swis};
 use tairix_riscos_kernel::msgtrans::{Own, OwnFile};
-use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, Target, Unwind, World};
+use tairix_riscos_kernel::os::{len32, quietly, Fail, Os, Regs, Target, Unwind, World};
 use tairix_riscos_kernel::service::FS_REDECLARE;
 use tairix_riscos_kernel::swi::os::{fs_control, FS_CONTROL};
 use tairix_riscos_kernel::swi::X;
@@ -162,6 +162,7 @@ const RELEASE_FIQ: usize = 9;
 pub static FILE_CORE: Builtin = Builtin {
     title: "FileCore",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: Some(Swis {
         chunk: CHUNK,
@@ -555,10 +556,12 @@ fn declare(os: &mut Os<'_>, workspace: u32, client: &Client) -> Result<(), Fail>
     os.declare_filing_system(Declaration {
         module: &FILE_CORE,
         first_entry: ENTRIES,
+        gbpb: false,
         block: workspace + INFO_AT,
         name: client.title,
         startup: workspace + EMPTY_AT,
         info: u32::from(client.number) | INFO,
+        extra: 0,
         workspace,
     })
 }
@@ -579,10 +582,7 @@ fn service(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Unwind> {
         return Ok(());
     };
     for (workspace, client) in instances {
-        match declare(os, workspace, &client) {
-            Ok(()) | Err(Fail::Error(_)) => {}
-            Err(Fail::Unwind(unwind)) => return Err(unwind),
-        }
+        quietly(declare(os, workspace, &client))?;
     }
     Ok(())
 }

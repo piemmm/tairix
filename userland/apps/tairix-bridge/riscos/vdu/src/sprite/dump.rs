@@ -8,7 +8,7 @@
 use tairix_image::{
     sprite_area as block, SpriteModeWord, SpriteName, SPRITE_HEADER_LEN, SPRITE_PALETTE_ENTRY_LEN,
 };
-use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
+use tairix_riscos_kernel::os::{len32, quietly, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::{screen_mode, SCREEN_MODE};
 use tairix_riscos_kernel::swi::X;
 use tairix_vdu::mode::var;
@@ -107,10 +107,7 @@ fn adopt_mode(os: &mut Os<'_>, sprite: &Sprite) -> Result<(), Fail> {
     } else {
         select_like(os, sprite, &mut regs)
     };
-    match selected {
-        Ok(()) | Err(Fail::Error(_)) => Ok(()),
-        Err(unwind) => Err(unwind),
-    }
+    quietly(selected).map_err(Fail::from)
 }
 
 /// Selects a mode of `sprite`'s pixels, eigen factors and colours as wide

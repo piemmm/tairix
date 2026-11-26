@@ -15,12 +15,8 @@ use tairix_riscos_kernel::swi::os::args::{
 };
 
 use super::call::{self, Named};
-use super::open::{self, status, Stream};
+use super::open::{self, file_info, status, Stream};
 use super::{error, with};
-
-/// The extra information word's bit that says a filing system takes I/O
-/// controls.
-const EXTRA_IOCTL: u32 = 1 << 3;
 
 /// `ArgsV`'s default.
 pub(crate) fn args(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
@@ -240,7 +236,7 @@ fn ioctl(os: &mut Os<'_>, stream: &Stream, regs: &mut Regs) -> Result<(), Fail> 
     let extra = with(os, |state| {
         state.system(stream.calls.number).map_or(0, |s| s.extra)
     })?;
-    if extra & EXTRA_IOCTL == 0 {
+    if extra & fs::extra::IOCTL == 0 {
         return Ok(());
     }
     call::args(
@@ -266,14 +262,19 @@ fn stream_status(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     Ok(())
 }
 
-/// An open file's stream status word.
+/// An open file's stream status word: what changes as it is used, and what
+/// its filing system opened it with.
 pub(crate) fn status_of(stream: &Stream) -> u32 {
+    let opened = |bit, word| if stream.info & bit != 0 { word } else { 0 };
     let unbuffered = if stream.buffer.is_none() {
-        status::UNBUFFERED
+        status::UNBUFFERED | opened(file_info::GBPB, status::DIRECT_GBPB)
     } else {
         0
     };
-    status::READ | stream.status | unbuffered
+    stream.status
+        | unbuffered
+        | opened(file_info::READ, status::READ)
+        | opened(file_info::INTERACTIVE, status::INTERACTIVE)
 }
 
 /// `OS_Args` 255 on one file: its held block written back.

@@ -11,7 +11,7 @@ use tairix_riscos_arm::cpu::State;
 use tairix_riscos_arm::psr::{self, Mode};
 use tairix_riscos_arm::reg::Reg;
 
-use crate::error::Error;
+use crate::error::{exception, Error};
 use crate::memory::Bits;
 use crate::os::{Ended, Entry, Fail, Os, Regs, Transfer, Unwind};
 use crate::swi::os::fs_control::START_APPLICATION;
@@ -120,7 +120,7 @@ pub(crate) fn dump_words(
     }
 }
 /// The command line `OS_GetEnv` points at.
-pub(crate) const COMMAND_LINE: u32 = 1024;
+pub const COMMAND_LINE: u32 = 1024;
 
 /// The handlers an error the error handler cannot take returns to their
 /// defaults.
@@ -304,6 +304,16 @@ pub fn hex8(n: u32) -> [u8; 8] {
     digits
 }
 
+/// The whole register state a built-in routine is entered with and may
+/// leave with: R0 to R15 and the flags.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Registers {
+    /// R0 to R15, R15 the address to go on at.
+    pub r: [u32; 16],
+    /// N, Z, C and V at their CPSR positions.
+    pub flags: u32,
+}
+
 impl Os<'_> {
     /// The profile of the code running: a SWI's caller's.
     pub fn caller_bits(&mut self) -> Bits {
@@ -447,7 +457,11 @@ impl Os<'_> {
     /// An error from a SWI without X: `Service_Error`, then `ErrorV`. A claimant
     /// of `ErrorV` may swallow it, and the SWI then returns as though it had
     /// not failed; otherwise the error handler is entered.
-    pub(crate) fn raise(&mut self, block: u32) -> Result<(), Unwind> {
+    ///
+    /// # Errors
+    ///
+    /// The unwind that enters the error handler, or one a claimant starts.
+    pub fn raise(&mut self, block: u32) -> Result<(), Unwind> {
         let mut regs = Regs::new([block, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         self.service(&mut regs)?;
         let mut regs = Regs::new([block, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
@@ -457,15 +471,16 @@ impl Os<'_> {
     /// `ErrorV`'s default claimant: the error copied into the error handler's
     /// buffer, redirection ended as RISC OS 5 ends it, so the handler reports
     /// to the screen, the privileged stacks emptied, and the handler entered
-    /// in User mode with its R12 in R0.
+    /// in User mode with its R12 in R0 and R1 to R14 as the failing code had
+    /// them, as RISC OS 5.30 enters it.
     pub(crate) fn enter_error_handler(&mut self, block: u32) -> Result<(), Fail> {
         if !self.error_handler_sound() {
             self.world.env.reinstate(&ERROR_HANDLERS);
         }
+        let state = self.world.processor.state();
         let (pc, upper) = if let Some(frame) = self.world.frame {
             (frame.return_pc, frame.upper)
         } else {
-            let state = self.world.processor.state();
             (state.pc, [state.user[10], state.user[11], state.user[12]])
         };
         let slot = self.world.env.slot(ERROR);
@@ -479,6 +494,7 @@ impl Os<'_> {
         self.world.env.set_active_object(slot.address);
         let mut registers = [0; 13];
         registers[0] = slot.workspace;
+        registers[1..10].copy_from_slice(&state.user[1..10]);
         registers[10..13].copy_from_slice(&upper);
         let transfer = self.user_transfer(slot, registers);
         self.world.callbacks_first = true;
@@ -574,11 +590,15 @@ impl Os<'_> {
     /// progress — so it can leave for User mode code of its choosing.
     #[must_use]
     pub fn at_outermost(&mut self) -> bool {
+        self.nothing_nested() && !self.world.processor.cpu().mode().privileged()
+    }
+
+    /// Whether no call into guest code, SWI or interrupt is in progress.
+    fn nothing_nested(&self) -> bool {
         self.world.depth == 0
             && self.world.frame.is_none()
             && self.world.kernel_calls == 0
             && !self.world.in_interrupt
-            && !self.world.processor.cpu().mode().privileged()
     }
 
     /// Control carried on in User mode at `pc` under `bits`' profile, R0 to
@@ -595,6 +615,29 @@ impl Os<'_> {
         if !self.at_outermost() {
             return self.error(crate::error::BAD_PARAMETERS);
         }
+        self.leave_for_user(bits, pc, registers, flags)
+    }
+
+    /// As [`continue_in_user`](Self::continue_in_user), from a handler the
+    /// kernel entered in a privileged mode — an exception or callback
+    /// handler, whose privileged context nothing else holds — the
+    /// privileged stacks emptied. Where a call into guest code, a SWI or an
+    /// interrupt is in progress something would be abandoned, so it is
+    /// refused as "Invalid parameters".
+    pub fn resume_in_user(
+        &mut self,
+        bits: Bits,
+        pc: u32,
+        registers: [u32; 15],
+        flags: u32,
+    ) -> Fail {
+        if !self.nothing_nested() {
+            return self.error(crate::error::BAD_PARAMETERS);
+        }
+        self.leave_for_user(bits, pc, registers, flags)
+    }
+
+    fn leave_for_user(&mut self, bits: Bits, pc: u32, registers: [u32; 15], flags: u32) -> Fail {
         let mut transfer = self.user_entry(bits, pc, |user| *user = registers);
         transfer.state.cpsr |= flags & psr::NZCV;
         Fail::Unwind(self.transfer(transfer))
@@ -755,8 +798,13 @@ impl Os<'_> {
 
     /// A host routine entered as a subroutine: `work` given the caller's R0
     /// to R12 and flags, which it answers in, V set and R0 the block if it
-    /// fails, then a return through R14.
-    pub(crate) fn as_subroutine(
+    /// fails, then a return through R14 — or, where it asked to leave with
+    /// other registers ([`Os::leave_with`]) and did not fail, those.
+    ///
+    /// # Errors
+    ///
+    /// The unwind `work` left with.
+    pub fn as_subroutine(
         &mut self,
         work: impl FnOnce(&mut Self, &mut Regs) -> Result<(), Fail>,
     ) -> Result<(), Unwind> {
@@ -766,10 +814,21 @@ impl Os<'_> {
             *slot = cpu.reg(Reg::field(n));
         }
         regs.flags = cpu.cpsr() & psr::NZCV;
+        let depth = self.world.depth;
         let result = work(self, &mut regs);
+        let leaving = self
+            .world
+            .leaving
+            .take_if(|(at, _)| *at == depth)
+            .map(|(_, registers)| registers);
         let mut flags = regs.flags & !psr::V;
         match result {
-            Ok(()) => {}
+            Ok(()) => {
+                if let Some(registers) = leaving {
+                    self.load_registers(&registers);
+                    return Ok(());
+                }
+            }
             Err(Fail::Error(block)) => {
                 regs.r[0] = block;
                 flags |= psr::V;
@@ -785,16 +844,50 @@ impl Os<'_> {
         Ok(())
     }
 
-    /// Returns from a handler called like a subroutine, as `MOV PC, R14`.
-    pub(crate) fn return_to_lr(&mut self) {
+    /// The registers the routine running now was entered with, R15 the
+    /// address it returns to.
+    #[must_use]
+    pub fn registers(&mut self) -> Registers {
+        let mut registers = Registers::default();
+        registers.r[..15].copy_from_slice(&self.current_registers());
+        registers.r[15] = self.return_address();
+        registers.flags = self.world.processor.cpu().cpsr() & psr::NZCV;
+        registers
+    }
+
+    /// Where the code running returns to through R14: a 26-bit mode's PSR
+    /// bits in it stripped.
+    fn return_address(&mut self) -> u32 {
         let cpu = self.world.processor.cpu();
         let lr = cpu.reg(Reg::LR);
-        let target = if cpu.mode().is_26bit() {
+        if cpu.mode().is_26bit() {
             lr & psr::R15_PC
         } else {
             lr
-        };
-        cpu.set_reg(Reg::PC, target);
+        }
+    }
+
+    /// Has the routine running now leave with `registers` once it returns
+    /// without failing, going on at their R15, rather than return through
+    /// R14 with its answer in R0 to R12: a routine that moves the stack or
+    /// goes on elsewhere. A routine it calls asks for itself.
+    pub fn leave_with(&mut self, registers: Registers) {
+        self.world.leaving = Some((self.world.depth, registers));
+    }
+
+    fn load_registers(&mut self, registers: &Registers) {
+        let cpu = self.world.processor.cpu();
+        for (n, &value) in (0..15).zip(&registers.r) {
+            cpu.set_reg(Reg::field(n), value);
+        }
+        cpu.set_nzcv(registers.flags & psr::NZCV);
+        cpu.set_reg(Reg::PC, registers.r[15]);
+    }
+
+    /// Returns from a handler called like a subroutine, as `MOV PC, R14`.
+    pub(crate) fn return_to_lr(&mut self) {
+        let target = self.return_address();
+        self.world.processor.cpu().set_reg(Reg::PC, target);
     }
 
     /// A default handler's host routine, entered as its slot's code is.
@@ -831,26 +924,66 @@ impl Os<'_> {
         }
     }
 
-    /// The exception handlers' default, entered in the exception's mode: the
-    /// registers dumped, and the exception's error raised.
-    fn default_exception(&mut self, handler: u32) -> Result<(), Unwind> {
+    /// The registers of the code the exception being handled interrupted:
+    /// R0 to R12 as they are, the interrupted mode's R13 and R14, the flags
+    /// of the PSR the exception saved, and R15 the exception's return
+    /// address.
+    #[must_use]
+    pub fn interrupted(&mut self) -> Registers {
         let state = self.world.processor.state();
-        let mode = Mode::from_bits(state.cpsr).unwrap_or(Mode::Undefined);
-        let bank = mode.bank();
         let saved = self.world.processor.cpu().spsr().unwrap_or(state.cpsr);
-        let return_address = self.world.processor.cpu().reg(Reg::LR);
-        let interrupted = Mode::from_bits(saved).unwrap_or(Mode::User);
-        let mut registers = state.user;
-        // The interrupted mode's R13 and R14, but where it shares the
-        // exception's bank, whose R14 the exception took for its return.
-        [registers[13], registers[14]] = match interrupted.bank() {
-            tairix_riscos_arm::psr::Bank::User => [state.user[13], state.user[14]],
-            tairix_riscos_arm::psr::Bank::Fiq => [state.fiq[5], state.fiq[6]],
-            other if other == bank => [state.banked[other.index() - 2][0], 0],
-            other => state.banked[other.index() - 2],
+        let mut registers = Registers::default();
+        registers.r[..15].copy_from_slice(&interrupted_registers(&state, saved));
+        registers.r[15] = self.world.processor.cpu().reg(Reg::LR);
+        registers.flags = saved & psr::NZCV;
+        registers
+    }
+
+    /// The kernel's own error for an exception of `kind` at `pc`, as its
+    /// default handlers raise it.
+    pub fn exception_error(&mut self, kind: ExceptionKind, pc: u32) -> Fail {
+        let error = match kind {
+            ExceptionKind::Undefined => UNDEFINED_INSTRUCTION,
+            ExceptionKind::PrefetchAbort => INSTRUCTION_ABORT,
+            ExceptionKind::DataAbort => DATA_ABORT_ERROR,
+            ExceptionKind::AddressException => ADDRESS_EXCEPTION_ERROR,
         };
+        self.error_with(error, &[&hex8(pc)])
+    }
+
+    /// Whether the code running is privileged.
+    #[must_use]
+    pub fn caller_privileged(&mut self) -> bool {
+        let cpsr = self.world.processor.cpu().cpsr();
+        Mode::from_bits(cpsr).is_some_and(Mode::privileged)
+    }
+
+    /// Whether the code running has IRQs disabled.
+    #[must_use]
+    pub fn caller_irqs_disabled(&mut self) -> bool {
+        self.world.processor.cpu().cpsr() & psr::I != 0
+    }
+
+    /// The code running's IRQs disabled or enabled, where it is privileged:
+    /// User mode may change neither, and is left as it was.
+    pub fn set_caller_irqs_disabled(&mut self, disabled: bool) {
+        if !self.caller_privileged() {
+            return;
+        }
+        let cpu = self.world.processor.cpu();
+        let cpsr = if disabled {
+            cpu.cpsr() | psr::I
+        } else {
+            cpu.cpsr() & !psr::I
+        };
+        let _ = cpu.set_cpsr(cpsr);
+    }
+
+    /// `registers`, `pc` and `psr` written to the exception register dump,
+    /// the kernel's own where the one set cannot take them: the words.
+    fn dump_exception_registers(&mut self, registers: &[u32; 15], pc: u32, psr: u32) -> [u32; 17] {
         let slot = self.world.env.slot(EXCEPTION_DUMP);
-        let (words, len) = dump_words(&registers, return_address, saved, slot.bits);
+        let (words, len) = dump_words(registers, pc, psr, slot.bits);
         let size = 4 * len as u64;
         let dump = if slot.address.is_multiple_of(4)
             && self.writable(slot.address, u64::from(slot.address) + size)
@@ -864,6 +997,18 @@ impl Os<'_> {
         for (i, &word) in (0..).zip(&words[..len]) {
             let _ = self.poke_word(dump + 4 * i, word);
         }
+        words
+    }
+
+    /// The exception handlers' default, entered in the exception's mode: the
+    /// registers dumped, and the exception's error raised.
+    fn default_exception(&mut self, handler: u32) -> Result<(), Unwind> {
+        let state = self.world.processor.state();
+        let saved = self.world.processor.cpu().spsr().unwrap_or(state.cpsr);
+        let return_address = self.world.processor.cpu().reg(Reg::LR);
+        let interrupted = Mode::from_bits(saved).unwrap_or(Mode::User);
+        let registers = interrupted_registers(&state, saved);
+        let words = self.dump_exception_registers(&registers, return_address, saved);
         let thumb = saved & psr::T != 0;
         let (error, rewind) = match handler {
             UNDEFINED => (UNDEFINED_INSTRUCTION, if thumb { 2 } else { 4 }),
@@ -945,12 +1090,25 @@ impl Os<'_> {
 }
 
 impl Os<'_> {
-    /// An FPA instruction met an exception its trap is enabled for: its
-    /// error raised as FPEmulator raises it.
-    pub(crate) fn floating_point(
+    /// An FPA instruction met an exception its trap is enabled for: the
+    /// registers as it left them dumped, the FPA's in FPEmulator's dump, and
+    /// its error raised, as FPEmulator does, a routine's FPA work on the
+    /// guest's behalf included.
+    ///
+    /// # Errors
+    ///
+    /// The unwind the raise leaves with.
+    pub fn floating_point(
         &mut self,
         exception: tairix_riscos_arm::fpa::Exception,
     ) -> Result<(), Unwind> {
+        let registers = self.current_registers();
+        let cpu = self.world.processor.cpu();
+        let (pc, psr) = (cpu.pc(), cpu.cpsr());
+        self.dump_exception_registers(&registers, pc, psr);
+        if let Err(Fail::Unwind(unwind)) = crate::fpemulator::dump(self) {
+            return Err(unwind);
+        }
         match self.error(crate::error::floating_point(exception)) {
             Fail::Error(block) => self.raise(block),
             Fail::Unwind(unwind) => Err(unwind),
@@ -980,6 +1138,62 @@ impl Os<'_> {
         Ok(u64::from(high) << 32 | u64::from(low))
     }
 
+    /// FPA register `n` as `STFE` stores it.
+    ///
+    /// # Errors
+    ///
+    /// The exception an enabled trap stopped the store with.
+    pub fn fpa_extended(&mut self, n: u8) -> Result<[u32; 3], tairix_riscos_arm::fpa::Exception> {
+        let fpa = self.world.processor.cpu().fpa_mut();
+        let [sign_exponent, high, low, _] =
+            fpa.store(tairix_riscos_arm::fpa::Format::Extended, n)?;
+        Ok([sign_exponent, high, low])
+    }
+
+    /// FPA register `n` loaded with `words`, as `LDFE` loads them.
+    ///
+    /// # Errors
+    ///
+    /// The exception an enabled trap stopped the load with.
+    pub fn set_fpa_extended(
+        &mut self,
+        n: u8,
+        [sign_exponent, high, low]: [u32; 3],
+    ) -> Result<(), tairix_riscos_arm::fpa::Exception> {
+        let fpa = self.world.processor.cpu().fpa_mut();
+        fpa.load(
+            tairix_riscos_arm::fpa::Format::Extended,
+            n,
+            [sign_exponent, high, low, 0],
+        )
+    }
+
+    /// FPA register `n` as `STFP` stores it: the packed decimal's words, the
+    /// fourth nought unless the FPSR's EP bit asks for it.
+    ///
+    /// # Errors
+    ///
+    /// The exception an enabled trap stopped the store with.
+    pub fn fpa_packed(&mut self, n: u8) -> Result<[u32; 4], tairix_riscos_arm::fpa::Exception> {
+        let fpa = self.world.processor.cpu().fpa_mut();
+        fpa.store(tairix_riscos_arm::fpa::Format::Packed, n)
+    }
+
+    /// FPA register `n` loaded with the packed decimal `words`, as `LDFP`
+    /// loads one.
+    ///
+    /// # Errors
+    ///
+    /// The exception an enabled trap stopped the load with.
+    pub fn set_fpa_packed(
+        &mut self,
+        n: u8,
+        words: [u32; 4],
+    ) -> Result<(), tairix_riscos_arm::fpa::Exception> {
+        let fpa = self.world.processor.cpu().fpa_mut();
+        fpa.load(tairix_riscos_arm::fpa::Format::Packed, n, words)
+    }
+
     /// FPA register `n` loaded with the double `bits`, as `LDFD` loads one.
     pub fn set_fpa_double(&mut self, n: u8, bits: u64) {
         let fpa = self.world.processor.cpu().fpa_mut();
@@ -995,24 +1209,55 @@ impl Os<'_> {
     }
 }
 
+/// The kinds of exception the kernel has an error for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExceptionKind {
+    /// An undefined instruction.
+    Undefined,
+    /// An instruction fetch that aborted.
+    PrefetchAbort,
+    /// A data transfer that aborted.
+    DataAbort,
+    /// A 26-bit address past 64 MiB.
+    AddressException,
+}
+
+/// The user registers as an exception taken from code in `saved`'s mode
+/// finds them: that mode's R13 and R14, but where it shares the exception's
+/// bank, whose R14 the exception took for its return.
+fn interrupted_registers(state: &State, saved: u32) -> [u32; 15] {
+    let bank = Mode::from_bits(state.cpsr)
+        .unwrap_or(Mode::Undefined)
+        .bank();
+    let interrupted = Mode::from_bits(saved).unwrap_or(Mode::User);
+    let mut registers = state.user;
+    [registers[13], registers[14]] = match interrupted.bank() {
+        tairix_riscos_arm::psr::Bank::User => [state.user[13], state.user[14]],
+        tairix_riscos_arm::psr::Bank::Fiq => [state.fiq[5], state.fiq[6]],
+        other if other == bank => [state.banked[other.index() - 2][0], 0],
+        other => state.banked[other.index() - 2],
+    };
+    registers
+}
+
 /// "Undefined instruction executed at &%0".
 const UNDEFINED_INSTRUCTION: Error = Error {
-    number: 0x8000_0000,
+    number: exception::UNDEFINED_INSTRUCTION,
     token: "UndefinedInstructionAt",
 };
 /// "Instruction fetch aborted at &%0".
 const INSTRUCTION_ABORT: Error = Error {
-    number: 0x8000_0001,
+    number: exception::PREFETCH_ABORT,
     token: "PrefetchAbortAt",
 };
 /// "Data transfer aborted at &%0".
 const DATA_ABORT_ERROR: Error = Error {
-    number: 0x8000_0002,
+    number: exception::DATA_ABORT,
     token: "DataAbortAt",
 };
 /// "Address exception raised at &%0".
 const ADDRESS_EXCEPTION_ERROR: Error = Error {
-    number: 0x8000_0003,
+    number: exception::ADDRESS_EXCEPTION,
     token: "AddressExceptionAt",
 };
 

@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use tairix_riscos_arm::psr;
 use tairix_riscos_kernel::filing::fs;
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
-use tairix_riscos_kernel::swi::os::UPCALL;
+use tairix_riscos_kernel::swi::os::{find, UPCALL};
 
 use super::name::Resolved;
 use super::system::{enter, info, Calls, Point};
@@ -230,12 +230,21 @@ pub fn file_modifying(
     file(os, &resolved.calls, reason, resolved.named(), regs)
 }
 
+/// The `OS_Find` mode FileSwitch's own update hands a filing system in R7,
+/// where a program's open hands its own, as RISC OS 5's save by open hands
+/// it.
+pub const OWN_UPDATE: u32 = find::UPDATE | find::MUST_OPEN;
+/// The `OS_Find` mode FileSwitch's own read hands a filing system in R7.
+pub const OWN_READ: u32 = find::INPUT | find::MUST_OPEN;
+
 /// `FSEntry_Open` for update on what `resolved` names for FileSwitch's
-/// `handle`, after the `UpCall_ModifyingFile` that tells of it.
+/// `handle`, opened in `mode`, after the `UpCall_ModifyingFile` that tells
+/// of it.
 pub fn open_for_update(
     os: &mut Os<'_>,
     resolved: &Resolved,
     handle: u32,
+    mode: u32,
 ) -> Result<Option<Opened>, Fail> {
     modifying(
         os,
@@ -251,6 +260,7 @@ pub fn open_for_update(
         fs::open::UPDATE,
         resolved.named(),
         handle,
+        mode,
     )
 }
 
@@ -421,14 +431,15 @@ pub fn func_registers(
     enter(os, target, regs)
 }
 
-/// `FSEntry_Open` `reason` on `path` for FileSwitch's `handle`: none where
-/// the filing system opened nothing.
+/// `FSEntry_Open` `reason` on `path` for FileSwitch's `handle`, opened in
+/// `mode`: none where the filing system opened nothing.
 pub fn open(
     os: &mut Os<'_>,
     calls: &Calls,
     reason: u32,
     named: Named<'_>,
     handle: u32,
+    mode: u32,
 ) -> Result<Option<Opened>, Fail> {
     let target = target(os, calls, Point::Open)?;
     with_names(os, calls, named, 0, |os, at, special_at, _| {
@@ -438,6 +449,7 @@ pub fn open(
         regs.r[2] = handle;
         regs.r[3] = handle;
         regs.r[6] = special_at;
+        regs.r[7] = mode;
         enter(os, target, &mut regs)?;
         Ok((regs.r[1] != 0).then_some(Opened {
             info: regs.r[0],

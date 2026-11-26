@@ -45,10 +45,7 @@ pub(super) fn save(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         if handle != 0 {
             let mut write = Regs::default();
             write.r[..4].copy_from_slice(&[gbpb::WRITE, handle, image, length]);
-            match os.perform(X | swi::GBPB, &mut write) {
-                Ok(()) | Err(Fail::Error(_)) => {}
-                Err(unwind) => return Err(unwind),
-            }
+            os.perform_quietly(X | swi::GBPB, &mut write)?;
             let mut close = Regs::default();
             close.r[1] = handle;
             os.perform(X | swi::FIND, &mut close)?;

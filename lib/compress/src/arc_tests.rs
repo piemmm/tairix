@@ -8,6 +8,8 @@ extern crate std;
 use std::vec;
 use std::vec::Vec;
 
+use tairix_fuzzseed::Prng;
+
 use super::*;
 
 /// Bytes a byte at a time.
@@ -52,7 +54,7 @@ fn decode(stream: &[u8], method: Method, want: usize, piece: usize) -> Result<Ve
 }
 
 fn encode(plain: &[u8], max_bits: u8) -> Vec<u8> {
-    let mut encoder = Encoder::new(vec![0u32; ENCODER_WORK], max_bits).unwrap();
+    let mut encoder = Encoder::new(vec![0u8; encoder_work(max_bits, u64::MAX)], max_bits).unwrap();
     let mut out = Gathered::default();
     for piece in plain.chunks(1000) {
         encoder.write(piece, &mut out).unwrap();
@@ -71,15 +73,12 @@ fn prose(len: usize, seed: u64) -> Vec<u8> {
         b"filer ",
         b"!Boot\n",
     ];
-    let mut state = seed;
+    let mut rng = Prng::new(seed);
     let mut out = Vec::with_capacity(len + 16);
     while out.len() < len {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        out.extend_from_slice(WORDS[(state % 6) as usize]);
-        if state.is_multiple_of(5) {
-            out.extend_from_slice(&state.to_le_bytes()[..3]);
+        out.extend_from_slice(WORDS[rng.below(WORDS.len())]);
+        if rng.below(5) == 0 {
+            out.extend_from_slice(&rng.next_u32().to_le_bytes()[..3]);
         }
     }
     out.truncate(len);
@@ -248,15 +247,9 @@ fn what_the_encoder_writes_decodes_back_at_every_width() {
 
 /// Bytes with no structure to find: a fixed generator's.
 fn tairix_test_noise(len: usize) -> Vec<u8> {
-    let mut state = 0x9E37_79B9_7F4A_7C15u64;
-    (0..len)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state.to_le_bytes()[0]
-        })
-        .collect()
+    let mut noise = vec![0; len];
+    Prng::new(0x9E37_79B9_7F4A_7C15).fill(&mut noise);
+    noise
 }
 
 #[test]
@@ -273,7 +266,7 @@ fn a_full_table_that_stops_paying_is_cleared_and_the_stream_still_decodes() {
         let mut count = 0;
         // Codes before the first clear are all nine bits wide.
         while let Some(code) = bits.take(&mut input, 9) {
-            if code == CLEAR {
+            if code == crate::lzw::CLEAR {
                 count += 1;
                 break;
             }
@@ -422,7 +415,7 @@ fn a_stream_out_of_shape_is_refused() {
             Err(Error::Corrupt)
         ));
         assert!(matches!(
-            Encoder::new(vec![0u32; ENCODER_WORK], max_bits),
+            Encoder::new(vec![0u8; encoder_work(LZW_MAX_BITS, u64::MAX)], max_bits),
             Err(Error::Corrupt)
         ));
     }
@@ -438,7 +431,7 @@ fn a_stream_out_of_shape_is_refused() {
         Err(Error::WorkspaceTooSmall)
     ));
     assert!(matches!(
-        Encoder::new(vec![0u32; 100], 12),
+        Encoder::new(vec![0u8; 100], 12),
         Err(Error::WorkspaceTooSmall)
     ));
 }
@@ -448,11 +441,12 @@ fn a_dictionary_sized_to_its_input_codes_as_the_largest_and_one_too_small_clears
     let plain = prose(40_000, 5);
     let full = encode(&plain, 16);
     for len in [0, 1, 500, 40_000, 1 << 20] {
-        assert!(encoder_work(len) <= ENCODER_WORK);
-        assert!(encoder_work(len) >= encoder_work(0));
+        assert!(encoder_work(16, len) <= encoder_work(16, u64::MAX));
+        assert!(encoder_work(16, len) >= encoder_work(16, 0));
     }
     let sized = {
-        let mut encoder = Encoder::new(vec![0u32; encoder_work(plain.len() as u64)], 16).unwrap();
+        let mut encoder =
+            Encoder::new(vec![0u8; encoder_work(16, plain.len() as u64)], 16).unwrap();
         let mut out = Gathered::default();
         encoder.write(&plain, &mut out).unwrap();
         encoder.finish(&mut out).unwrap();
@@ -465,7 +459,7 @@ fn a_dictionary_sized_to_its_input_codes_as_the_largest_and_one_too_small_clears
     // The smallest dictionary half fills long before 16-bit codes run out:
     // it clears, and the reader follows.
     let small = {
-        let mut encoder = Encoder::new(vec![0u32; encoder_work(0)], 16).unwrap();
+        let mut encoder = Encoder::new(vec![0u8; encoder_work(16, 0)], 16).unwrap();
         let mut out = Gathered::default();
         encoder.write(&plain, &mut out).unwrap();
         encoder.finish(&mut out).unwrap();

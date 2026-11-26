@@ -16,6 +16,10 @@ use tairix_fsmeta::preset::acorn::{self, Filetype, LoadExec};
 
 use crate::tree::{Meta, Recorded};
 
+/// The attributes of an object whose record keeps none: its owner's to read
+/// and write.
+pub(crate) const UNRECORDED_ATTR: u16 = acorn::ATTR_OWNER_READ | acorn::ATTR_OWNER_WRITE;
+
 /// A member's RISC OS words, as its archive records them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Words {
@@ -119,7 +123,7 @@ pub(crate) fn words_of(meta: &Meta, untyped: Filetype) -> Result<Words, DriverEr
         return Ok(Words {
             load,
             exec,
-            attr: acorn::attr_to_fileswitch(acorn::ATTR_OWNER_READ | acorn::ATTR_OWNER_WRITE),
+            attr: acorn::attr_to_fileswitch(UNRECORDED_ATTR),
         });
     };
     let (load, exec) = match acorn::decode_load_exec(object.load, object.exec) {

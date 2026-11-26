@@ -270,6 +270,7 @@ const DIALLING: [(u32, u32); 26] = [
 pub(crate) static INTERNATIONAL_KEYBOARD: Builtin = Builtin {
     title: "InternationalKeyboard",
     help_name: Some("Key Layouts"),
+    help_suffix: None,
     bridge: false,
     swis: None,
     services: Some(Services {

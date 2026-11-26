@@ -1,8 +1,8 @@
 # ARCHIVES.md — Archives as volumes
 
 Binding under `AGENTS.md`. A user double-clicks a zip, a tar (plain, gzip'd or
-bzip2'd), a RISC OS Spark or ArcFS archive, a RAR archive, or an Acorn DFS
-disc image, and its contents appear as a volume at `/Storage/<name>`, private
+bzip2'd), a RISC OS Spark or ArcFS archive, a RAR archive, an Acorn DFS
+disc image, or a RISC OS Squash file, and its contents appear as a volume at `/Storage/<name>`, private
 to them, which every program reads and — for every format but RAR — writes:
 copy in and out, rename, move, delete, make directories where the format
 has them. RISC OS filetypes, load and exec addresses and
@@ -29,17 +29,20 @@ volume), `plans/ARXFS-METADATA.md` §6.3 (attributes through archives) and
 | AR10 | The desktop and the command line: archive content types and icons, activation mounting an archive, *Eject*, `mount ARCHIVE` | done |
 | AR11 | A QEMU vertical: an archive of each format mounted, read, written where writable, ejected, and read back with its RISC OS attributes | done |
 | AR12 | Acorn DFS disc images (`.ssd`, `.dsd`): `lib/dfs`, recognition, the sides and files served, written in place as DFS writes; activation mounting one; the emulator's lock on a disc it writes | done |
+| AR13 | RISC OS Squash files (`&FCA`): `lib/compress::squash`'s stream and `SQSH` header, recognition, a volume of the one file typed and dated by its header, read through every clear of its table and written back as the Squash module writes it; activation mounting one; the vertical | done |
 
 ## 1. What an archive is
 
 - **One file, one volume.** The archive's members are the volume's tree; a
   member path's components are its directories, made where the archive names
   none; an empty component and `.` name nothing and are passed over. A lone
-  gzip or bzip2 stream that holds no tar is a volume of one file, named by
-  the gzip header's name or the archive's own name less its ending.
+  gzip or bzip2 stream that holds no tar, and a Squash file, is a volume of
+  one file, named by the gzip header's name or the archive's own name less
+  its ending.
 - **Recognised by content.** The kernel's probe (`lib/fsprobe`, AR1) knows each
   format by its signature: zip by its end-of-central-directory record, tar by a
-  header whose checksum holds, gzip and bzip2 by their stream magic, Spark by
+  header whose checksum holds, gzip and bzip2 by their stream magic, a Squash
+  file by `SQSH` then its stream's magic, Spark by
   its marker and method bytes, ArcFS by `Archive\0`, RAR by `Rar!\x1a\x07`, a
   DFS disc by a first catalogue `lib/dfs` believes, tried last as the one
   format with no signature of its own. It never decompresses: whether a gzip or bzip2 stream holds a tar is the
@@ -196,6 +199,20 @@ no second consumer exists to put them in `lib/*`.
   written sector. Room and the 31 entries are held to before a change is
   taken, so a commit never finds a side outgrown. A Watford 62-file
   catalogue, which DFS 1.20 would write over, leaves the disc read only.
+- **Squash** (AR13): a 20-byte header — `SQSH`, the file's length, its load
+  and exec words, a reserved word — then one stream of `compress`'s LZW as
+  the Squash module writes it, 12-bit codes, `lib/compress::squash` reading
+  and writing it on the one LZW coder the ARC methods use. The file is named
+  as the Squash file is less `,fca`, typed and dated by its words; a stream
+  decoding to other than the header's length is refused (`MediumError`). It
+  is never a tar's container: a Squash file holds one RISC OS file. The
+  stream's index (AR4) holds every place its table is cleared, which reader
+  and writer both note. A commit compresses the file whole, as the module
+  compresses a file given it whole with room for all it makes
+  (`Clearing::AtOnce`), so the stream is the one RISC OS writes. The header
+  records no name or attributes, so a rename, a second file and any
+  attribute but those the file is read with are refused, and a file past a
+  word's length is refused for want of room in the header.
 - **RAR** (AR9): RAR 1.5–4 and RAR 5 archives, solid and not, in the driver's
   `rar` module: 1.5's adaptive coding, 2's LZ and audio modes, 3's LZ, PPMd
   variant H and its six standard filters (recognised by bytecode checksum and
@@ -217,9 +234,9 @@ no second consumer exists to put them in `lib/*`.
 
 ## 5. The desktop and the command line (AR10)
 
-- `lib/browse` types zip, tar, tar.gz/tgz, tar.bz2/tbz2, gz, bz2, spk, arc and
-  rar, and the RISC OS filetypes &A91 (zip), &DDC (Spark), &3FB (ArcFS), &C46
-  (tar) and &F89 (gzip); activating one mounts it, exactly as a disk image
+- `lib/browse` types zip, tar, tar.gz/tgz, tar.bz2/tbz2, gz, bz2, spk, arc,
+  rar and fca, and the RISC OS filetypes &A91 (zip), &DDC (Spark), &3FB
+  (ArcFS), &C46 (tar), &F89 (gzip) and &FCA (Squash); activating one mounts it, exactly as a disk image
   (`Activation::MountImage`), read-write where the user may write the file and
   its directory. Their icons are the archive masters (`plans/ICONS.md`).
 - `mount ARCHIVE [TARGET]` mounts an archive as it does an image, and
@@ -247,6 +264,10 @@ each with `mount`, reads `ReadMe` and its filetype, writes and types a file,
 ejects it — the commit — and mounts it again to read both files and their
 types back. A RAR archive the RAR encoder wrote is mounted beside them, its
 members read whole through their BLAKE2sp checks, and a write to it refused.
-A DFS disc holding `$.README` at the I/O processor's &1900 is mounted last,
+A DFS disc holding `$.README` at the I/O processor's &1900 is mounted next,
 read with its load address, given `$.WRITTEN` with one of its own, ejected,
-and read back.
+and read back. A Squash file, `ReadMe,fca`, is mounted last: its one file
+read with its type, rewritten and retyped, a second file refused, ejected,
+and read back. The Squash stream itself is pinned against RISC OS 5.30's
+Squash module observed under an emulator: both compressors' streams and
+every call of the traces recorded.

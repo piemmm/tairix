@@ -36,13 +36,15 @@ pub const DISC: &str = "/disc";
 pub const SLOT_BYTES: u32 = 0x10_0000;
 
 /// A host whose clock moves on as the guest waits, whose keyboard types the
-/// keys a test gives, which stops a wait with nothing left to type, which
-/// stops work once the words a test allows are spent, and which serves
-/// HostFS where a test gives it a disc.
+/// keys a test gives, which stops a wait with nothing left to type — unless
+/// the test lets the wait go on to the timed work due next — which stops
+/// work once the words a test allows are spent, and which serves HostFS
+/// where a test gives it a disc.
 struct ScriptHost {
     clock: Rc<Cell<u64>>,
     keys: Rc<RefCell<VecDeque<u8>>>,
     words: Rc<Cell<Option<u32>>>,
+    timed: Rc<Cell<bool>>,
     disc: Option<Server<Handle>>,
     fonts: Fonts,
 }
@@ -80,6 +82,10 @@ impl Host for ScriptHost {
         }
         match (until, ending) {
             (Some(at), Ending::Clock) => {
+                self.clock.set(self.clock.get().max(at));
+                Pulse::Continue
+            }
+            (Some(at), Ending::Input) if self.timed.get() => {
                 self.clock.set(self.clock.get().max(at));
                 Pulse::Continue
             }
@@ -123,17 +129,25 @@ pub struct Setup<'a> {
     pub disc: Option<&'a Tree>,
 }
 
-/// A test's session: its kernel, and the clock, words and font service its
-/// host keeps.
+/// A test's session: its kernel, and the clock, words, timed waking and
+/// font service its host keeps.
 pub struct Session {
     /// Its kernel.
     pub kernel: Kernel,
     clock: Rc<Cell<u64>>,
     words: Rc<Cell<Option<u32>>>,
+    timed: Rc<Cell<bool>>,
     fonts: Fonts,
 }
 
 impl Session {
+    /// Lets a wait for input go on, from now on, to the timed work due next
+    /// — a ticker, an event — where there is some, as a real host's would,
+    /// rather than stopping the run.
+    pub fn wake_for_timed_work(&self, wake: bool) {
+        self.timed.set(wake);
+    }
+
     /// Serves the session's font requests through `service` from now on.
     pub fn serve_fonts(&self, service: FontService) {
         *self.fonts.borrow_mut() = Some(service);
@@ -165,6 +179,7 @@ impl Session {
 pub fn session(setup: &Setup<'_>) -> Session {
     let clock = Rc::new(Cell::new(0));
     let words = Rc::new(Cell::new(None));
+    let timed = Rc::new(Cell::new(false));
     let fonts: Fonts = Rc::new(RefCell::new(None));
     let keys = Rc::new(RefCell::new(setup.keys.iter().copied().collect()));
     let disc = setup.disc.map(|tree| {
@@ -183,6 +198,7 @@ pub fn session(setup: &Setup<'_>) -> Session {
             clock: Rc::clone(&clock),
             keys,
             words: Rc::clone(&words),
+            timed: Rc::clone(&timed),
             disc,
             fonts: Rc::clone(&fonts),
         }),
@@ -200,6 +216,7 @@ pub fn session(setup: &Setup<'_>) -> Session {
         kernel,
         clock,
         words,
+        timed,
         fonts,
     }
 }

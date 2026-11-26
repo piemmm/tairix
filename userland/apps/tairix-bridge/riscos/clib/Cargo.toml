@@ -1,0 +1,31 @@
+[package]
+name = "tairix-riscos-clib"
+description = "TAIRiX Bridge's SharedCLibrary: the library kernel and the C library as host calls over guest memory, held to RISC OS 5.30's recorded interface. no_std, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The kernel: guest memory, SWIs, the environment and the module seam.
+tairix-riscos-kernel = { path = "../kernel", version = "=0.0.0" }
+# The processor's encoder, which makes the words a client's vector holds, and
+# its FPA, which math.h is worked on.
+tairix-riscos-arm = { path = "../arm", version = "=0.0.0" }
+# Exact decimal reading and IEEE rounding, which strtod reads a number by.
+tairix-softfloat = { path = "../../../../../lib/softfloat", version = "=0.0.0" }
+
+[dev-dependencies]
+# The fuzz harness's seeded generator and budget.
+tairix-fuzzseed = { path = "../../../../../tests/fuzzseed", version = "=0.0.0" }
+# The session a test makes, with the filing system and BASIC the recorded
+# programs run under.
+tairix-riscos-filing = { path = "../filing", version = "=0.0.0", features = ["test-support"] }
+tairix-riscos-basic = { path = "../basic", version = "=0.0.0" }
+# The in-memory tree a session's HostFS disc is served over.
+tairix-fscopy = { path = "../../../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }

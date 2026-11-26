@@ -1,21 +1,27 @@
-//! A lone compressed file (`plans/ARCHIVES.md` AR5): a gzip or bzip2 stream
-//! that holds no tar, served as a volume of its one file. The file is named
-//! by the gzip header's name, else by the archive's own name less its ending,
-//! as gzip and bzip2 name what they decompress. Its bytes may be written,
-//! and a gzip one's name changed, the stream then compressed again whole.
+//! A lone compressed file (`plans/ARCHIVES.md` AR5, AR13): a gzip or bzip2
+//! stream that holds no tar, or a RISC OS Squash file, served as a volume of
+//! its one file. The file is named by the gzip header's name, else by the
+//! archive's own name less its ending, as gzip and bzip2 name what they
+//! decompress and as a Squash file's `,fca` types it. A Squash file's header
+//! gives its file's RISC OS load and execution words, so its type and date.
+//! Its bytes may be written, a gzip one's name changed and a Squash one's
+//! words, the stream then compressed again whole.
 
 use alloc::vec::Vec;
 
-use tairix_abi::driver::filesystem::{NameMatching, NodeTimes, StampField};
+use tairix_abi::driver::filesystem::{NameMatching, NodeKind, NodeTimes, StampField};
 use tairix_abi::time::Time64;
 use tairix_abi::volume::{ArchiveName, FormatName};
 use tairix_abi::DriverError;
+use tairix_compress::squash::{self, FileHeader as SquashHeader};
+use tairix_fsmeta::preset::acorn::{self, Filetype};
 use tairix_fsserve::VolumeAccess;
 
 use crate::data::{Archived, Check, Coding, Data, Lead};
 use crate::format::{Content, Format, Placed, Read};
 use crate::name::{servable, Charset};
 use crate::region::Regions;
+use crate::riscos::{self, Words, UNRECORDED_ATTR};
 use crate::stream::{Compression, Packing, Stream, Writer};
 use crate::tree::{Body, Meta, Recorded, Tree, ROOT};
 use crate::zip::directory_meta;
@@ -41,6 +47,16 @@ const BZIP2_ENDINGS: &[(&[u8], &[u8])] = &[
     (b".tbz", b".tar"),
 ];
 
+/// The ending that types a Squash file where its volume keeps no type: `,`
+/// and its file type.
+const SQUASH_ENDING: [u8; 4] = {
+    let [first, second, third] = Filetype::from_low_bits(squash::FILE_TYPE).hex();
+    [b',', first, second, third]
+};
+
+/// The ending a Squash file's name carries, which its file's name lacks.
+const SQUASH_ENDINGS: &[(&[u8], &[u8])] = &[(&SQUASH_ENDING, b"")];
+
 /// What bzip2 appends to a name that carries none of its endings.
 const NO_ENDING: &[u8] = b".out";
 
@@ -62,12 +78,14 @@ impl Lone {
         match self.packing.compression() {
             Compression::Gzip => FormatName::Gzip,
             Compression::Bzip2 => FormatName::Bzip2,
+            Compression::Squash => FormatName::Squash,
         }
     }
 
-    /// What the stream keeps of its file's modification time: a gzip header's
-    /// unsigned seconds, the zero meaning none, and nothing of bzip2's.
-    pub(crate) const fn modified_field(&self) -> Option<StampField> {
+    /// What the stream keeps of the modification time of its file, which has
+    /// `meta`: a gzip header's unsigned seconds, the zero meaning none,
+    /// nothing of bzip2's, and a Squash file's typed words' RISC OS stamp.
+    pub(crate) fn modified_field(&self, meta: &Meta) -> Option<StampField> {
         match self.packing {
             Packing::Gzip { .. } => Some(StampField::new(
                 Time64::UNIX_EPOCH,
@@ -75,22 +93,47 @@ impl Lone {
                 1..1 << 32,
             )),
             Packing::Bzip2 { .. } => None,
+            Packing::Squash(_) => riscos::stamp_field(meta),
         }
     }
 
-    /// Refuse a name the stream cannot record: any for bzip2, whose stream
-    /// records none, and for gzip one with a character ISO 8859-1 lacks.
+    /// Refuse a name the stream cannot record: any for bzip2 and Squash,
+    /// whose streams record none, and for gzip one with a character ISO
+    /// 8859-1 lacks.
     pub(crate) fn admits_name(&self, name: &[u8]) -> Result<(), DriverError> {
         match self.packing {
             Packing::Gzip { .. } if Charset::Latin1.encode(name).is_some() => Ok(()),
             Packing::Gzip { .. } => Err(DriverError::LengthOutOfRange),
-            Packing::Bzip2 { .. } => Err(DriverError::Unsupported),
+            Packing::Bzip2 { .. } | Packing::Squash(_) => Err(DriverError::Unsupported),
+        }
+    }
+
+    /// Whether the file's RISC OS fields are kept: a Squash file's words.
+    pub(crate) const fn keeps_attributes(&self) -> bool {
+        matches!(self.packing, Packing::Squash(_))
+    }
+
+    /// Refuse RISC OS fields `object` the stream cannot keep: a Squash file
+    /// records no attributes, so its file keeps those it is read with.
+    pub(crate) fn keeps_object(&self, object: &acorn::Object) -> Result<(), DriverError> {
+        match self.packing {
+            Packing::Squash(_) if object.attr != UNRECORDED_ATTR => Err(DriverError::OutOfRange),
+            _ => Ok(()),
+        }
+    }
+
+    /// The longest file the stream can record: a Squash file's header keeps
+    /// its length in a word.
+    pub(crate) const fn largest_member(&self) -> u64 {
+        match self.packing {
+            Packing::Squash(_) => u32::MAX as u64,
+            Packing::Gzip { .. } | Packing::Bzip2 { .. } => u64::MAX,
         }
     }
 
     /// How the stream is written from `tree`: a gzip header naming the file
     /// where the archive's own name does not, stamped with its modification
-    /// time.
+    /// time; a Squash file's header with its length and its words.
     pub(crate) fn packing(&self, tree: &Tree) -> Result<Packing, DriverError> {
         let (_, node) = the_file(tree)?;
         Ok(match &self.packing {
@@ -109,6 +152,17 @@ impl Lone {
                 Packing::Gzip { name, mtime }
             }
             bzip2 @ Packing::Bzip2 { .. } => bzip2.clone(),
+            Packing::Squash(_) => {
+                let Body::File(data) = &node.body else {
+                    return Err(DriverError::DeviceFault);
+                };
+                let words = riscos::words_of(&node.meta, Filetype::DATA)?;
+                Packing::Squash(SquashHeader {
+                    length: u32::try_from(data.len()).map_err(|_| DriverError::LengthOutOfRange)?,
+                    load: words.load,
+                    exec: words.exec,
+                })
+            }
         })
     }
 }
@@ -169,31 +223,49 @@ pub(crate) fn read<A: VolumeAccess>(
     mut stream: Stream,
     archive: Option<&ArchiveName>,
 ) -> Result<Read, DriverError> {
-    let len = stream.measure(regions)?;
+    let len = match &packing {
+        Packing::Squash(header) => stream.measure_within(regions, u64::from(header.length))?,
+        Packing::Gzip { .. } | Packing::Bzip2 { .. } => stream.measure(regions)?,
+    };
     let derived = match archive {
         Some(archive) => decompressed_name(packing.compression(), archive.as_bytes())?,
         None => joined(UNNAMED, b"")?,
     };
     let (name, mtime) = match &packing {
         Packing::Gzip { name, mtime } => (name.as_deref().and_then(recorded_name), *mtime),
-        Packing::Bzip2 { .. } => (None, 0),
+        Packing::Bzip2 { .. } | Packing::Squash(_) => (None, 0),
     };
-    let modified = if mtime == 0 {
-        Time64::UNIX_EPOCH
-    } else {
-        Time64::from_secs(i64::from(mtime))
-    };
-    let meta = Meta {
-        mode: 0o644,
-        owner: None,
-        times: NodeTimes {
-            created: Time64::UNIX_EPOCH,
-            modified,
-            accessed: Time64::UNIX_EPOCH,
-            changed: Time64::UNIX_EPOCH,
+    let meta = match &packing {
+        // A stream that decodes to other than its header's length is not
+        // the file the header describes.
+        Packing::Squash(header) if len != u64::from(header.length) => {
+            return Err(DriverError::MediumError);
+        }
+        Packing::Squash(header) => riscos::meta_of(
+            Some(Words {
+                load: header.load,
+                exec: header.exec,
+                attr: acorn::attr_to_fileswitch(UNRECORDED_ATTR),
+            }),
+            None,
+            NodeKind::RegularFile,
+        ),
+        Packing::Gzip { .. } | Packing::Bzip2 { .. } => Meta {
+            mode: 0o644,
+            owner: None,
+            times: NodeTimes {
+                created: Time64::UNIX_EPOCH,
+                modified: if mtime == 0 {
+                    Time64::UNIX_EPOCH
+                } else {
+                    Time64::from_secs(i64::from(mtime))
+                },
+                accessed: Time64::UNIX_EPOCH,
+                changed: Time64::UNIX_EPOCH,
+            },
+            acorn: None,
+            recorded: Recorded::default(),
         },
-        acorn: None,
-        recorded: Recorded::default(),
     };
     let mut tree = Tree::new(NameMatching::Exact, directory_meta());
     let name = match name {
@@ -220,12 +292,14 @@ fn recorded_name(field: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The name of what an archive named `archive` decompresses to: the name
-/// with its compressor's ending replaced, else with [`NO_ENDING`] added,
-/// else the name itself.
+/// with its compressor's ending replaced, else, for gzip and bzip2, with
+/// [`NO_ENDING`] added, else the name itself — a Squash file's file is
+/// named as the Squash file is.
 fn decompressed_name(compression: Compression, archive: &[u8]) -> Result<Vec<u8>, DriverError> {
     let endings = match compression {
         Compression::Gzip => GZIP_ENDINGS,
         Compression::Bzip2 => BZIP2_ENDINGS,
+        Compression::Squash => SQUASH_ENDINGS,
     };
     for &(ending, stands_for) in endings {
         if let Some(stem) = strip_ending(archive, ending) {
@@ -235,9 +309,11 @@ fn decompressed_name(compression: Compression, archive: &[u8]) -> Result<Vec<u8>
             }
         }
     }
-    let name = joined(archive, NO_ENDING)?;
-    if servable(&name) {
-        return Ok(name);
+    if compression != Compression::Squash {
+        let name = joined(archive, NO_ENDING)?;
+        if servable(&name) {
+            return Ok(name);
+        }
     }
     joined(archive, b"")
 }

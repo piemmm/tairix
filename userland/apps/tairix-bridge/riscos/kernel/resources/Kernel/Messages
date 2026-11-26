@@ -164,10 +164,23 @@ SwiOutOfRangeForModule:Module %0 provides no such SWI
 InvalidAlignment:Alignment must be a power of two
 Escape:Escape
 
+# Squash.
+SquashBadAddress:Squash cannot reach all the memory it was given
+SquashBadInput:Squash was given data it did not compress
+SquashBadWorkspace:Squash's workspace holds no operation it can carry on
+SquashBadParameters:Squash does not know those flags
+
+# The buffer manager.
+BufferNotKnown:No buffer has that handle
+BufferOwnerStays:The buffer's owner will not let it go
+BufferHandleInUse:That buffer handle is already taken
+BufferTooSmall:A buffer must be at least a byte long
+
 # What the module commands print.
 ModulesHeading:No. Position Workspace Name
 RomModulesHeading:No. Position	Module name		Version	Status
 SystemRomSection:System ROM
+PoduleSection:Podule %0
 ModuleActive:Active
 ModuleDormant:Dormant
 ModuleUnplugged:Unplugged

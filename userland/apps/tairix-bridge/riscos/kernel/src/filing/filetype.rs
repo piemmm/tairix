@@ -3,6 +3,8 @@
 
 use tairix_abi::fs::Filetype;
 
+/// `Device`: a port into a device driver, as DeviceFS lists one.
+pub const DEVICE: u32 = 0xFCC;
 /// `Obey`: commands, a line each.
 pub const OBEY: u32 = 0xFEB;
 /// `Font`: a font's metrics, outlines or bitmaps.

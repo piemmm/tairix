@@ -6,11 +6,9 @@
 
 use alloc::vec::Vec;
 
-use tairix_riscos_arm::a32;
-use tairix_riscos_arm::cond::Condition;
-use tairix_riscos_arm::instruction::{BranchOp, CallOp, Instruction, Op};
+use tairix_riscos_arm::instruction::{CallOp, Op};
 use tairix_riscos_kernel::memory::MemoryError;
-use tairix_riscos_kernel::module::{Builtin, Code, Command};
+use tairix_riscos_kernel::module::{instruction, routine_branch as branch, Builtin, Code, Command};
 use tairix_riscos_kernel::os::{len32, Fail, Os, Regs};
 use tairix_riscos_kernel::swi::{os as swi, X};
 
@@ -22,6 +20,7 @@ use crate::workspace::{self as ws, reg};
 pub static BASIC: Builtin = Builtin {
     title: "BASIC",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: None,
     services: None,
@@ -39,6 +38,7 @@ pub static BASIC: Builtin = Builtin {
 pub static BASIC64: Builtin = Builtin {
     title: "BASIC64",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: None,
     services: None,
@@ -137,29 +137,6 @@ const OFFSETS: [ws::Slot; 11] = [
     ws::WIDTHLOC,
 ];
 
-fn encode(op: Op) -> Result<u32, MemoryError> {
-    a32::encode(&Instruction {
-        cond: Condition::Al,
-        op,
-    })
-    .map_err(|_| MemoryError::HostFull)
-}
-
-/// A branch from the word at `from` to the entry of routine `index`, the
-/// first entry at `first`, all relative to the code's start.
-fn branch(from: usize, first: i32, index: usize) -> Result<u32, MemoryError> {
-    let target = index
-        .checked_mul(8)
-        .and_then(|offset| i32::try_from(offset).ok())
-        .and_then(|offset| first.checked_add(offset))
-        .ok_or(MemoryError::HostFull)?;
-    let from = 4 * i32::try_from(from).map_err(|_| MemoryError::HostFull)?;
-    encode(Op::Branch {
-        op: BranchOp::B,
-        offset: target - (from + 8),
-    })
-}
-
 /// The guest code: the routine table, its floating-point routines where
 /// `floating`, then the SWI stub.
 fn emit(first: i32, floating: bool) -> Result<Vec<u32>, MemoryError> {
@@ -181,7 +158,7 @@ fn emit(first: i32, floating: bool) -> Result<Vec<u32>, MemoryError> {
     } else {
         words.extend_from_slice(&[0; 1 + FLOATING]);
     }
-    words.push(encode(Op::Call {
+    words.push(instruction(Op::Call {
         op: CallOp::Swi,
         value: swi::CALL_A_SWI_R12,
     })?);

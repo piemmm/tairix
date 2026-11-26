@@ -142,6 +142,7 @@ const MAP_MOST: u8 = 255;
 pub(crate) static COLOUR_TRANS: Builtin = Builtin {
     title: "ColourTrans",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: Some(Swis {
         chunk: chunk::COLOUR_TRANS,
@@ -309,11 +310,11 @@ fn vector(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
             matched(os, regs, Of::Named, Look::Furthest, Answer::Number)
         }
         swi::GCOL_TO_COLOUR_NUMBER => {
-            regs.r[0] = u32::from(number_of_gcol(regs.r[0].to_le_bytes()[0]));
+            regs.r[0] = u32::from(number_of_gcol(regs.byte(0)));
             Ok(())
         }
         swi::COLOUR_NUMBER_TO_GCOL => {
-            regs.r[0] = u32::from(gcol_of_number(regs.r[0].to_le_bytes()[0]));
+            regs.r[0] = u32::from(gcol_of_number(regs.byte(0)));
             Ok(())
         }
         swi::READ_PALETTE => readwrite::read_palette(os, regs),
@@ -589,10 +590,7 @@ fn serve(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Unwind> {
     match regs.r[1] {
         service::MODE_CHANGE => make_stale(os),
         service::SWITCHING_OUTPUT_TO_SPRITE => {
-            match os.perform(X | swi::INVALIDATE_CACHE, &mut Regs::default()) {
-                Ok(()) | Err(Fail::Error(_)) => {}
-                Err(Fail::Unwind(unwind)) => return Err(unwind),
-            }
+            os.perform_quietly(X | swi::INVALIDATE_CACHE, &mut Regs::default())?;
         }
         service::WIMP_SAVE_DESKTOP => {
             let saved = calibration::write_commands(os, regs.r[2], false)

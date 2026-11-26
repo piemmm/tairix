@@ -128,6 +128,9 @@ pub(crate) fn read_file(
     at: Option<u32>,
 ) -> Result<Moved, Fail> {
     let mut stream = open::stream(os, handle)?;
+    if !stream.readable() {
+        return Err(error::fail(os, error::NOT_FOR_READING, &[]));
+    }
     let moved = match stream.buffer {
         Some(mut buffer) => {
             let start = at.unwrap_or(buffer.pointer);
@@ -312,7 +315,10 @@ fn current_entries(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 fn directory(os: &mut Os<'_>, regs: &Regs) -> Result<name::Resolved, Fail> {
     let (mut resolved, found) = name::find(os, regs.r[1], Search::Plain, Need::Kind)?;
     super::image::root(os, &mut resolved, &found)?;
-    if found.kind != DIRECTORY && found.kind != call::IMAGE {
+    // An empty name, which only a filing system that takes one is given, is
+    // that filing system's own directory, as RISC OS 5 lists `null:`.
+    let listed = found.kind == DIRECTORY || found.kind == call::IMAGE || resolved.path.is_empty();
+    if !listed {
         let given = name::read(os, regs.r[1])?;
         let error = if found.kind == A_FILE {
             tairix_riscos_kernel::filing::IS_A_FILE

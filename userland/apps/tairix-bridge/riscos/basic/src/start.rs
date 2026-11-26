@@ -303,10 +303,8 @@ fn variable_set(m: &mut Machine<'_, '_>, name: &[u8]) -> crate::machine::Step<bo
     m.os.write_byte(at + super::machine::len32(name.len()), 0)?;
     let mut regs = Regs::default();
     regs.r[..5].copy_from_slice(&[at, 0, u32::MAX, 0, 0]);
-    Ok(match m.os.perform(X | swi::READ_VAR_VAL, &mut regs) {
-        Ok(()) | Err(Fail::Error(_)) => regs.r[2] != 0,
-        Err(Fail::Unwind(unwind)) => return Err(unwind.into()),
-    })
+    m.os.perform_quietly(X | swi::READ_VAR_VAL, &mut regs)?;
+    Ok(regs.r[2] != 0)
 }
 
 /// The banner and the room free.

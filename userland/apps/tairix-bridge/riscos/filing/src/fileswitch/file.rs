@@ -141,18 +141,19 @@ fn save(os: &mut Os<'_>, regs: &mut Regs, load: u32, exec: u32) -> Result<(), Fa
     let mut entry = Regs::default();
     entry.r[2..6].copy_from_slice(&[load, exec, start, end]);
     call::file_modifying(os, &resolved, fs::file::CREATE, &mut entry)?;
-    let handle = open::next_handle(os)?;
-    let opened = call::open_for_update(os, &resolved, handle)?;
-    let Some(opened) = opened else {
-        return Err(named(os, regs, NOT_FOUND));
-    };
-    let handle = open::record(
-        os,
-        resolved.clone(),
-        opened,
-        status::WRITE | status::MODIFIED,
-        handle,
-    )?;
+    let handle = open::holding(os, |os, handle| {
+        let opened = call::open_for_update(os, &resolved, handle, call::OWN_UPDATE)?;
+        let Some(opened) = opened else {
+            return Err(named(os, regs, NOT_FOUND));
+        };
+        open::record(
+            os,
+            resolved.clone(),
+            opened,
+            status::WRITE | status::MODIFIED,
+            handle,
+        )
+    })?;
     let written = super::gbpb::write_file(os, handle, start, end.wrapping_sub(start), None);
     let closed = open::close_stamped(os, handle, false);
     written.and(closed)?;
@@ -168,10 +169,11 @@ fn announce(os: &mut Os<'_>, resolved: &Resolved, info: &Info) -> Result<(), Fai
 /// `OS_File` 1 to 4: the information R2, R3 and R5 give written to the
 /// object R1 names, by `FSEntry_File` 1 as RISC OS 5 writes it — reasons 2
 /// to 4, `only` one part, with the rest as the object has it; "not found"
-/// for none.
+/// for none, but on a filing system that opens what is not there, which is
+/// asked all the same.
 fn write_info(os: &mut Os<'_>, regs: &mut Regs, only: Option<u32>) -> Result<(), Fail> {
     let (resolved, found) = target(os, regs, Need::Kind)?;
-    if found.kind == NOTHING {
+    if found.kind == NOTHING && !resolved.calls.has(info::ALWAYS_OPEN) {
         return Err(named(os, regs, NOT_FOUND));
     }
     let mut write = Regs::default();
@@ -331,18 +333,20 @@ fn load_by_open(
     at: u32,
     length: u32,
 ) -> Result<(), Fail> {
-    let handle = open::next_handle(os)?;
-    let opened = call::open(
-        os,
-        &resolved.calls,
-        fs::open::READ,
-        resolved.named(),
-        handle,
-    )?;
-    let Some(opened) = opened else {
-        return Err(named(os, regs, NOT_FOUND));
-    };
-    let handle = open::record(os, resolved.clone(), opened, 0, handle)?;
+    let handle = open::holding(os, |os, handle| {
+        let opened = call::open(
+            os,
+            &resolved.calls,
+            fs::open::READ,
+            resolved.named(),
+            handle,
+            call::OWN_READ,
+        )?;
+        let Some(opened) = opened else {
+            return Err(named(os, regs, NOT_FOUND));
+        };
+        open::record(os, resolved.clone(), opened, 0, handle)
+    })?;
     let read = super::gbpb::read_file(os, handle, at, length, None);
     let closed = open::close_stamped(os, handle, false);
     read.and(closed).map(drop)

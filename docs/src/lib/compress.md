@@ -3,8 +3,8 @@
 The one home for lossless compression in TAIRiX. Its codecs do not compete:
 the first-party `RLZ1` codec is what TAIRiX's own storage uses, and the
 foreign codecs — RFC 1951 / RFC 1950 DEFLATE and zlib, the RFC 1952 gzip
-member read over DEFLATE, bzip2, and the ARC family's methods — are what other
-software already speaks.
+member read over DEFLATE, bzip2, the ARC family's methods, and RISC OS's
+Squash — are what other software already speaks.
 
 The crate needs no `alloc` and allocates nothing, and its one dependency,
 `lib/crc32`, the checksum gzip's trailer is held to, needs neither. Its
@@ -31,19 +31,22 @@ OpenSSH peer reads (`plans/SSH.md`). Neither codec is a fallback for the
 other: a TAIRiX-native format never stores DEFLATE, and a foreign format is
 never handed `RLZ1`.
 
-bzip2 and the ARC methods exist for the same reason: archives were written
-in them long before TAIRiX. The archive driver (`docs/src/filesystem/archive.md`)
-reads `.tar.bz2` and `.bz2` through bzip2, and ARC, Spark and ArcFS members
-through the ARC methods. It writes both formats back, because changing an
-archive means compressing what changed the way the archive's own tools
-would.
+bzip2, the ARC methods and Squash exist for the same reason: archives were
+written in them long before TAIRiX. The archive driver
+(`docs/src/filesystem/archive.md`) reads `.tar.bz2` and `.bz2` through bzip2,
+ARC, Spark and ArcFS members through the ARC methods, and a Squash file
+through Squash. It writes them all back, because changing an archive means
+compressing what changed the way the archive's own tools would. TAIRiX
+Bridge's Squash module ([TAIRiX Bridge](../desktop/tairix-bridge.md)) answers
+a RISC OS program's `Squash_Compress` and `Squash_Decompress` through the
+same Squash, so a stream either writes the other reads.
 
 ## The two shapes, and why both exist
 
 | Shape | Entry point | For |
 |---|---|---|
 | Whole stream | `compress` / `decompress` / `decompressed_len`, `inflate::inflate_into`, `inflate::inflate_prefix`, `zlib::decompress_into`, `gzip::Header::parse`, `gzip::decompress` | data that is present in one buffer: a filesystem record, a PNG `IDAT`, the header of a compressed archive member, a gzip stream of one member or several |
-| Streaming | `deflate::Deflate`, `inflate::Inflater`, `zlib::Encoder`, `zlib::Decoder`, `gzip::Member`, `bzip2::Decoder`, `bzip2::Encoder`, `arc::Decoder`, `arc::Encoder` | a conversation, one stream per direction flushed per message; or an archive member read from, or written to, the middle of a file larger than memory |
+| Streaming | `deflate::Deflate`, `inflate::Inflater`, `zlib::Encoder`, `zlib::Decoder`, `gzip::Member`, `bzip2::Decoder`, `bzip2::Encoder`, `arc::Decoder`, `arc::Encoder`, `squash::compress`, `squash::decompress` | a conversation, one stream per direction flushed per message; or an archive member read from, or written to, the middle of a file larger than memory |
 
 A one-shot function cannot express what a protocol needs. `zlib@openssh.com`
 keeps a single zlib stream alive for the whole session and flushes it at each
@@ -71,6 +74,30 @@ whole block before it can emit the block's first byte, so reading takes a
 byte at a time from the caller's source rather than a slice the caller
 re-presents.
 
+Squash streams over slices with nothing held anywhere but the caller's
+workspace, because that is the contract of the RISC OS calls it answers: a
+program hands `Squash_Compress` a workspace, input and room, and calls again
+with the same workspace to carry on, so the workspace is the whole of a
+stream's state. Each call saves the coder's few bytes of state there beside
+its tables and restores them at the next, and the state and tables are held
+to what a coder could have left as they are read, since a program may have
+written over them between calls: a workspace a stranger wrote is refused,
+never followed.
+
+## One LZW, two sets of rules
+
+The ARC family's dynamic LZW and Squash are one coding, Unix `compress`'s,
+and one coder (`lzw`) writes and reads both. They differ in two rules, which
+the coder is told rather than written twice: when a full table is cleared —
+`compress`'s once a check finds it compressing worse, Squash's on a fixed
+schedule — and whether a stream's last code may be read one bit short, as
+Squash's decoder reads one. Squash itself has two compressors, and which one
+a stream gets is the first call's to decide: a whole input with room for all
+it can make is compressed at once, clearing the table as its last code would
+be assigned; anything else clears a full table every 32 KiB of input. A
+stream's codes do not depend on how its calls split it, so both are
+reproduced byte for byte, call by call.
+
 ## Seeking into a long stream
 
 A stream with no index can only be read from its start, which turns a read
@@ -87,6 +114,10 @@ resume a stream partway through:
 - A bzip2 block depends on nothing before it. `bzip2::Decoder::next_block`
   reports the bit each block began at, and `resume` starts at such a bit.
   `bzip2::Encoder` reports each block's start through `BlockIndex`.
+- A Squash stream read on from where its table was cleared needs nothing
+  before it. `squash::compress` and `squash::decompress` tell their caller
+  each such place as they pass it, and `start_decompression_at_place` starts
+  a decoder there.
 
 Choosing where to keep checkpoints, and how many, is the caller's
 business. The archive driver's policy is in its own page.
@@ -115,11 +146,14 @@ in, because their sizes depend on the stream:
 | Codec | Decode | Encode |
 |---|---|---|
 | bzip2 | one `u32` a block symbol: up to 3.6 MB at level 9 (`decoder_work`), or for a stream known to decode to `len` bytes `block_symbols(len)`, five quarters of it; a block past the workspace is refused | five `u32` a symbol plus a byte block: up to 18.9 MB at level 9 |
-| ARC methods | for 16-bit LZW, a 256 KiB table and a 64 KiB string stack (`DECODER_TABLE`, `DECODER_STACK`); narrower codes need less, and a squeezed member's tree 2 KiB (`SQUEEZE_TABLE`) | `encoder_work(len)`: just enough for every string `len` bytes can make, up to 1 MiB |
+| ARC methods | for 16-bit LZW, 255 KiB of table and string stack (`DECODER_STACK`); ARC 4's crunching, its 32 KiB table (`DECODER_TABLE`); narrower codes need less, and a squeezed member's tree 2 KiB (`decoder_workspace` says which) | `encoder_work(max_bits, len)`: just enough for every string `len` bytes can make, up to 447 KiB for 16-bit codes |
+| Squash | `DECOMPRESS_WORK`, 17 KiB | `COMPRESS_WORK`, 31 KiB |
 
-An ARC dictionary is cleared whole each time an encoder starts. Sizing it to
+An LZW dictionary is cleared whole each time an encoder starts. Sizing it to
 the member keeps that cost proportional to the member, so compressing a
-thousand small files does not cost a thousand 1 MiB clears.
+thousand small files does not cost a thousand full-size clears. Squash's
+workspaces are the sizes the Squash module asks for, so a RISC OS program's
+workspace holds what TAIRiX's coder keeps.
 
 ## Output sizing, and why it is a bound rather than a retry
 
@@ -162,10 +196,11 @@ a production path: a malformed, truncated, or adversarial stream returns a
 typed error. Output bounds are checked before any byte is produced.
 
 Every decoder is attacker-reachable: a PNG from anywhere, an SSH peer's
-traffic, an archive from a download. Each carries a fuzz harness in
-`cargo xtask fuzz`: `fuzz_inflate`, `fuzz_zlib`, `fuzz_bzip2` and
-`fuzz_arc`, alongside the `RLZ1` decoder's `fuzz_compress`. The bzip2 and
-ARC harnesses also round-trip what their encoders write.
+traffic, an archive from a download, a RISC OS program's workspace. Each
+carries a fuzz harness in `cargo xtask fuzz`: `fuzz_inflate`, `fuzz_zlib`,
+`fuzz_bzip2`, `fuzz_arc` and `fuzz_squash`, alongside the `RLZ1` decoder's
+`fuzz_compress`. The bzip2, ARC and Squash harnesses also round-trip what
+their encoders write, and Squash's scribbles over a workspace between calls.
 
 ## Proven against the real thing
 
@@ -187,6 +222,12 @@ tree, the decoders were also run over more than ten thousand members of real
 ARC, Spark and ArcFS archives. Every member they refused was refused by an
 independent decoder too. That corpus is other people's work, so it is not
 committed.
+
+Squash is pinned against RISC OS 5.30's Squash module, observed from outside
+under an emulator: the streams both its compressors wrote, by length and
+CRC-32, every one of 1,307 recorded calls' input taken, output made and
+status, and its answers at the edges. The inputs are regenerated in the
+tests; nothing the module wrote but those figures is committed.
 
 ## Stability tier
 

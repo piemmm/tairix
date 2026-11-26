@@ -13687,7 +13687,7 @@ fn guest_bar(width: u32, height: u32) -> tairix_geometry::Rect {
 /// account's home, the system's, so the account may only read them: an Acorn
 /// ADFS floppy and an AmigaDOS floppy each holding the fixture's `ReadMe`,
 /// the RISC OS disc (`plans/DISK-IMAGES.md` DI7), and an archive of each
-/// format (`plans/ARCHIVES.md` AR11).
+/// format (`plans/ARCHIVES.md` AR11, AR13).
 fn disk_image_plants(t: &QemuTest) -> Result<Vec<RootPlant>, String> {
     use tairix_abi::driver::filesystem::{
         FilesystemRead as _, FilesystemWrite as _, NodeKind, NodeSecurity,
@@ -13750,7 +13750,30 @@ fn disk_image_plants(t: &QemuTest) -> Result<Vec<RootPlant>, String> {
         disc,
         written_disc().map_err(|err| fail(disc, err))?,
     )?);
+    let squash = tairix_test_images::SQUASH.file;
+    plants.push(planted(
+        squash,
+        written_squash().map_err(|err| fail(squash, err))?,
+    )?);
     Ok(plants)
+}
+
+/// The disk-image vertical's Squash file: the least one, written back by the
+/// archive driver holding the fixture's text, typed as RISC OS text.
+fn written_squash() -> Result<Vec<u8>, tairix_abi::DriverError> {
+    use tairix_abi::driver::filesystem::{
+        FilesystemAttrs as _, FilesystemRead as _, FilesystemWrite as _,
+    };
+    use tairix_test_archive_image::Format;
+    use tairix_test_images::{ARCHIVE_TEXT, FILETYPE, README, SQUASH, TEXT_TYPE};
+
+    let seed = tairix_test_archive_image::seed(Format::Squash)?;
+    tairix_test_archive_image::written(&seed, SQUASH.file.as_bytes(), |fs| {
+        let readme = fs.lookup(fs.root(), README.as_bytes())?;
+        fs.truncate(readme, 0)?;
+        fs.write_all(readme, 0, ARCHIVE_TEXT)?;
+        fs.set_attr(readme, FILETYPE.as_bytes(), TEXT_TYPE)
+    })
 }
 
 /// The disk-image vertical's DFS disc: the least single-sided disc, written
@@ -24305,15 +24328,15 @@ mod tests {
     }
 
     /// Every archive the disk-image vertical plants holds what its fixture
-    /// reads: each written one its `ReadMe`, typed as text, the RAR its two
-    /// members whole and alike, and the DFS disc its `$.README` at its load
-    /// address.
+    /// reads: each written one, the Squash file among them, its `ReadMe`,
+    /// typed as text, the RAR its two members whole and alike, and the DFS
+    /// disc its `$.README` at its load address.
     #[test]
     fn the_disk_image_verticals_archives_hold_what_its_fixture_reads() {
         use tairix_abi::driver::filesystem::{FilesystemAttrs as _, FilesystemRead as _, NodeId};
         use tairix_test_images::{
             ARCHIVE_TEXT, DFS_DISC, DFS_README, FILETYPE, LOAD_ADDRESS, RAR, RAR_MEMBERS,
-            RAR_MEMBER_LEN, README, README_LOAD, TEXT_TYPE, WRITTEN_ARCHIVES,
+            RAR_MEMBER_LEN, README, README_LOAD, SQUASH, TEXT_TYPE, WRITTEN_ARCHIVES,
         };
 
         fn read<F: tairix_abi::driver::filesystem::FilesystemRead>(
@@ -24333,23 +24356,22 @@ mod tests {
             out
         }
 
-        for archive in WRITTEN_ARCHIVES {
-            let bytes = super::written_archive(archive.file).expect("written");
+        let written = WRITTEN_ARCHIVES
+            .iter()
+            .map(|archive| (archive.file, super::written_archive(archive.file)))
+            .chain([(SQUASH.file, super::written_squash())]);
+        for (file, bytes) in written {
+            let bytes = bytes.expect("written");
             let mut fs =
-                tairix_test_archive_image::opened(&bytes, archive.file.as_bytes()).expect("opened");
+                tairix_test_archive_image::opened(&bytes, file.as_bytes()).expect("opened");
             let root = fs.root();
             let readme = fs.lookup(root, README.as_bytes()).expect("a ReadMe");
-            assert_eq!(read(&mut fs, readme), ARCHIVE_TEXT, "{}", archive.file);
+            assert_eq!(read(&mut fs, readme), ARCHIVE_TEXT, "{file}");
             let mut value = [0u8; 8];
             let len = fs
                 .get_attr(readme, FILETYPE.as_bytes(), &mut value)
                 .expect("read");
-            assert_eq!(
-                len.map(|len| &value[..len]),
-                Some(TEXT_TYPE),
-                "{}",
-                archive.file
-            );
+            assert_eq!(len.map(|len| &value[..len]), Some(TEXT_TYPE), "{file}");
         }
         let mut fs = tairix_test_archive_image::opened(
             tairix_test_archive_image::RAR5_BLAKE,

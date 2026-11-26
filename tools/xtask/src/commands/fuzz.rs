@@ -245,6 +245,11 @@ pub const TARGETS: &[Target] = &[
         description: "userland/apps/tairix-bridge/riscos/font Font Manager: guest fonts on Font$Path — metrics, outlines, encodings and bitmap files, whole or damaged — found under hostile identifiers, a sound one measured and painted, then every SWI with hostile registers over salted strings of every control sequence, blocks and matrices, in screens of every depth; every refusal a value, a call asking endless work stopped by its host, every error block readable, the drivers still answering, the module re-initialised holding none of the RMA it took",
     },
     Target {
+        package: "tairix-riscos-clib",
+        test: "fuzz_clib",
+        description: "userland/apps/tairix-bridge/riscos/clib SharedCLibrary: the LibInit SWIs with hostile stub descriptions — chunks held and not, vectors and statics of any size and place, lists without an end — workspaces and stack requests, then guest code calling each library entry through a sound client's vector with hostile registers, SL above a real stack chunk or anywhere and pointers past the application space; every refusal a value, a guest run stopped at its budget, the kernel still answering, the library re-initialised holding none of the RMA it took",
+    },
+    Target {
         package: "tairix-riscos-filing",
         test: "fuzz_hostfs",
         description: "userland/apps/tairix-bridge/riscos/filing HostFS relay: hostile requests from the session worker against the server, over a tree with roots and files beside them, each answered by a reply that answers it and nothing changed outside the writable root; every message that decodes re-encoding to its own bytes; a session whose relay fails or damages its replies still answering",
@@ -258,6 +263,16 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-riscos-filing",
         test: "fuzz_bootcommands",
         description: "userland/apps/tairix-bridge/riscos/filing BootCommands and the boot sequence: every command on hostile parameters (quotation marks, keywords in odd places, sizes past what a size holds, walks that become the application), and the boot over a user's own disc whose !Boot holds hostile Obey files, programs and directories; every refusal a value, every program run to its end and the boot going on after it, every kept failure naming its line, nothing outside the own disc changed, the session still answering",
+    },
+    Target {
+        package: "tairix-riscos-filing",
+        test: "fuzz_mimemap",
+        description: "userland/apps/tairix-bridge/riscos/filing MimeMap: MimeMap_Translate on hostile forms, numbers, unterminated strings and pointers off memory, and *MimeMap on hostile tails; every refusal a value, a string answer written zero-terminated at R3 and nowhere else, the session still answering",
+    },
+    Target {
+        package: "tairix-riscos-filing",
+        test: "fuzz_devices",
+        description: "userland/apps/tairix-bridge/riscos/filing DeviceFS, SystemDevices and PipeFS: DeviceFS's SWIs on hostile device lists, validation strings, handles and characters for a driver that answers nothing, and every device and pipe opened, read, written, asked about, saved, loaded, deleted and listed by hostile names, special fields and handles, *PipeCopy among them, printer: routed into a pipe and into itself; every refusal a value, a pointer's abort the guest's exception, a wait or endless copy stopped by its host, OS_Byte 3 as it was after every call, and the RMA given back once every file is closed and the modules re-initialised",
     },
     Target {
         package: "tairix-softfloat",
@@ -583,6 +598,12 @@ pub const TARGETS: &[Target] = &[
         package: "tairix-compress",
         test: "fuzz_arc",
         description: "ARC family decode (packed, squeezed, crunched, LZW) + dynamic LZW round trip",
+    },
+    Target {
+        package: "tairix-compress",
+        test: "fuzz_squash",
+        description:
+            "Squash stream decode (untrusted streams and guest workspaces) + call-split round trip",
     },
     Target {
         package: "tairix-crc32c",

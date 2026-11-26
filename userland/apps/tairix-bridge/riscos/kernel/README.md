@@ -27,9 +27,17 @@ Stability: `experimental`.
   Supervisor.
 - `vectors`, `error`, `heap`, `input`, `output`, `release`, `corpus` — the
   software vectors, errors and their texts, `OS_Heap`'s heaps, the input
-  events and buffers, character output and the VDU drivers' seam, the release
-  the kernel answers as, and the observation corpus: its scenarios of SWI
-  calls and the fixtures genuine RISC OS left.
+  events and the kernel's own buffers, character output and the VDU drivers'
+  seam, the release the kernel answers as, and the observation corpus: its
+  scenarios of SWI calls and the fixtures genuine RISC OS left.
+- `buffers` — BufferManager: the buffers device drivers and DeviceFS share.
+- `fpemulator`, `vfpsupport` — FPEmulator and VFPSupport: the FPA's and the
+  VFP and Advanced SIMD unit's contexts, and their exception dumps.
+- `squash` — Squash, over `lib/compress`'s codec.
+- `callaswi` — CallASWI, present for the SWIs RISC OS 5's kernel performs
+  itself.
+- `listing` — how `DumpFormat` shows text, for `*Type` and SystemDevices'
+  `vdu:`.
 - `resourcefs`, `resources`, `msgtrans` — ResourceFS, the Messages module
   holding the ROM's files, and MessageTrans.
 - `territory` (the Territory Manager, and `territory::uk`), `international`,

@@ -343,15 +343,15 @@ impl Os<'_> {
             .map_or(0, crate::module::Incarnation::private)
     }
 
-    /// The built-in command `item` is, if a ROM module started from the
-    /// kernel's own holds it.
+    /// The built-in command `item` is, if a built-in's module holds it.
     fn builtin_command(&self, item: &Item) -> Option<&'static Command> {
-        let rom = item
+        let place = item
             .key
             .and_then(|key| self.world.modules.get(key))?
             .shape
-            .rom?;
-        self.world.modules.builtin(rom)?.commands.get(item.index)
+            .origin
+            .builtin()?;
+        self.world.modules.builtin(place)?.commands.get(item.index)
     }
 
     /// Calls the code at `offset` in `item`'s module with `regs`, as its

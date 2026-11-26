@@ -429,7 +429,7 @@ fn file<A: VolumeAccess>(
     id: u64,
     content: &mut Content<'_, A>,
     sink: &mut Sink<'_, A>,
-    work: &mut Vec<u32>,
+    work: &mut Vec<u8>,
     entry: &mut [u8],
     offset: u64,
 ) -> Result<(Data, Vec<u8>), DriverError> {

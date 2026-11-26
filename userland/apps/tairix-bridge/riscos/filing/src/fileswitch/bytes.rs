@@ -16,6 +16,9 @@ use super::{call, error, open};
 pub(crate) fn bget(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let handle = regs.r[1];
     let mut stream = open::stream(os, handle)?;
+    if !stream.readable() {
+        return Err(error::fail(os, error::NOT_FOR_READING, &[]));
+    }
     if stream.has(status::AT_END) {
         return Err(error::fail(os, error::END_OF_FILE, &[]));
     }

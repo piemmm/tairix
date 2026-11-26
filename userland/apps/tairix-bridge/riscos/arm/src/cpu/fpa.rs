@@ -51,6 +51,19 @@ impl Cpu {
         &mut self.fpa
     }
 
+    /// Whether the FPA's instructions execute: the floating point system has
+    /// a current context. Without one each is an undefined instruction, as
+    /// FPEmulator leaves them.
+    #[must_use]
+    pub const fn fpa_active(&self) -> bool {
+        self.fpa_active
+    }
+
+    /// The floating point system given a current context, or left with none.
+    pub const fn set_fpa_active(&mut self, active: bool) {
+        self.fpa_active = active;
+    }
+
     /// `FLT`, `FIX`, `WFS` and `RFS`.
     pub(super) fn fpa_register(
         &mut self,

@@ -20,7 +20,7 @@ use crate::MetadataError;
 
 /// Seconds between the RISC OS epoch (1900-01-01) and the Unix epoch
 /// (1970-01-01). RISC OS counts centiseconds from 1900.
-const RISC_OS_EPOCH_TO_UNIX_SECS: i64 = 2_208_988_800;
+pub const RISC_OS_EPOCH_TO_UNIX_SECS: i64 = 2_208_988_800;
 
 /// Centiseconds in one second.
 const CENTIS_PER_SEC: u64 = 100;
@@ -29,7 +29,7 @@ const CENTIS_PER_SEC: u64 = 100;
 const NANOS_PER_CENTI: u32 = 10_000_000;
 
 /// The RISC OS timestamp is a 40-bit (5-byte) centisecond count.
-const CENTIS_LIMIT: u64 = 1 << 40;
+pub const CENTIS_LIMIT: u64 = 1 << 40;
 
 /// What a RISC OS stamp holds: every centisecond its 40-bit count reaches
 /// from 1900 but the zero, which RISC OS reads as a clock never set.

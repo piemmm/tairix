@@ -8,6 +8,24 @@ use crate::env::EVENT;
 use crate::os::{Entry, Fail, Os, Regs, Target, Unwind};
 use crate::vectors;
 
+/// The events the kernel's own parts raise, by number.
+pub(crate) mod number {
+    /// An output buffer emptied.
+    pub(crate) const OUTPUT_EMPTY: u32 = 0;
+    /// An input buffer full, a byte lost.
+    pub(crate) const INPUT_FULL: u32 = 1;
+    /// A character into the keyboard buffer.
+    pub(crate) const CHAR_INPUT: u32 = 2;
+    /// The interval timer passing zero.
+    pub(crate) const INTERVAL: u32 = 5;
+    /// Escape.
+    pub(crate) const ESCAPE: u32 = 6;
+    /// A mouse button changing.
+    pub(crate) const MOUSE: u32 = 10;
+    /// A key going up or down.
+    pub(crate) const KEYBOARD: u32 = 11;
+}
+
 /// The events that are counted.
 const COUNTED: u32 = 32;
 /// A count that has reached this stays: the event is enabled for good.
@@ -66,14 +84,21 @@ impl Os<'_> {
         if !self.world.events.enabled(regs.r[0]) {
             return Ok(false);
         }
-        let entry = if self.world.processor.cpu().mode() == Mode::Irq {
-            Entry::Irq
-        } else {
-            Entry::SupervisorNoIrq
-        };
+        let entry = self.event_entry();
         let mut call = *regs;
         self.call_vector(vectors::EVENT, &mut call, entry)?;
         Ok(true)
+    }
+
+    /// The entry code an event reaches is called with: IRQ mode's from IRQ
+    /// mode, otherwise Supervisor mode's with interrupts disabled.
+    #[must_use]
+    pub fn event_entry(&mut self) -> Entry {
+        if self.world.processor.cpu().mode() == Mode::Irq {
+            Entry::Irq
+        } else {
+            Entry::SupervisorNoIrq
+        }
     }
 
     /// `OS_GenerateEvent`: the caller's registers and flags come back as
@@ -93,11 +118,7 @@ impl Os<'_> {
         }
         let mut call = *regs;
         call.r[12] = slot.workspace;
-        let entry = if self.world.processor.cpu().mode() == Mode::Irq {
-            Entry::Irq
-        } else {
-            Entry::SupervisorNoIrq
-        };
+        let entry = self.event_entry();
         let target = Target {
             address: slot.address,
             bits: slot.bits,
@@ -133,6 +154,19 @@ impl Os<'_> {
             self.world.callbacks.request_old_style();
         }
         Ok(())
+    }
+
+    /// `UpCall` 6 on the poll word at `word`: whether a task switcher took
+    /// it, to hand control back once the word is not nought.
+    ///
+    /// # Errors
+    ///
+    /// What the `UpCall` vector's claimants give.
+    pub fn sleep_on(&mut self, word: u32) -> Result<bool, Fail> {
+        let mut regs = Regs::default();
+        regs.r[..2].copy_from_slice(&[crate::swi::os::upcall::SLEEP, word]);
+        self.perform(crate::swi::X | crate::swi::os::UPCALL, &mut regs)?;
+        Ok(regs.r[0] == 0)
     }
 
     /// The `UpCall` vector's default claimant: the `UpCall` handler, with the

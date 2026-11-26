@@ -17,8 +17,9 @@ use tairix_icon::{FolderSample, IconKind, IconRequest, SampleCard};
 
 use super::{
     ancestry, canonical_filetype, drag_picture, entry_icon, folder_sample, media_for_document,
-    media_for_entry, media_for_filetype, media_for_name, media_for_named, name_endings,
-    BlankDocument, Ending, Family, MediaType, Site, ALL, EXTENSION_TABLE, FILETYPE_TABLE,
+    media_for_entry, media_for_extension, media_for_filetype, media_for_name, media_for_named,
+    name_endings, BlankDocument, Ending, Family, MediaType, Site, ALL, EXTENSION_TABLE,
+    FILETYPE_TABLE,
 };
 use crate::entry::{Entry, EntryKind, LinkTarget, Occupancy};
 use crate::presentation::Pictures;
@@ -224,6 +225,23 @@ fn every_recognised_extension_has_a_row() {
     }
     // …and no row names an extension the registry does not carry.
     assert_eq!(ROWS.len(), listed);
+}
+
+#[test]
+fn an_extension_alone_names_its_type_however_it_is_cased() {
+    for (media, exts) in EXTENSION_TABLE {
+        for ext in *exts {
+            assert_eq!(media_for_extension(ext), Some(*media), "{ext}");
+            assert_eq!(
+                media_for_extension(&ext.to_ascii_uppercase()),
+                Some(*media),
+                "{ext}"
+            );
+        }
+    }
+    for unknown in ["", ".txt", "txt ", "no-such-extension"] {
+        assert_eq!(media_for_extension(unknown), None, "{unknown:?}");
+    }
 }
 
 #[test]
@@ -1204,7 +1222,7 @@ fn a_layout_names_its_own_files_and_pictures_its_programs_by_kind() {
 
 #[test]
 fn a_disk_image_or_a_served_archive_holds_a_volume_and_nothing_else_does() {
-    const VOLUMES: [MediaType; 12] = [
+    const VOLUMES: [MediaType; 13] = [
         MediaType::RawDiskImage,
         MediaType::CdImage,
         MediaType::RawFloppyDiskImage,
@@ -1216,6 +1234,7 @@ fn a_disk_image_or_a_served_archive_holds_a_volume_and_nothing_else_does() {
         MediaType::ArchiveSpark,
         MediaType::RiscOsArchive,
         MediaType::ArcFs,
+        MediaType::RiscOsSquash,
         MediaType::AcornDfsDisc,
     ];
     for media in VOLUMES {
@@ -1227,8 +1246,8 @@ fn a_disk_image_or_a_served_archive_holds_a_volume_and_nothing_else_does() {
         MediaType::RawFloppyDiskImage.parent(),
         Some(MediaType::RawDiskImage)
     );
-    // A Java archive is a zip, but its own document; xz, Zstandard, 7z and
-    // Squash are no format the system serves as a volume.
+    // A Java archive is a zip, but its own document; xz, Zstandard and 7z are
+    // no format the system serves as a volume.
     for media in ALL.iter().copied().filter(|media| !VOLUMES.contains(media)) {
         assert!(!media.holds_a_volume(), "{media:?}");
     }

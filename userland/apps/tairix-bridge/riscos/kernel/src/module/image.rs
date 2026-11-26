@@ -30,6 +30,15 @@ pub(crate) enum EntryKind {
     Routine(usize),
 }
 
+/// A built-in entry the guest branches to: its built-in's place, what it
+/// enters, and where it lies in the built-in's image.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct BuiltinEntry {
+    pub(crate) place: usize,
+    pub(crate) kind: EntryKind,
+    pub(crate) offset: u32,
+}
+
 /// The kernel's empty environment string, after the chain: a carriage
 /// return.
 const EMPTY: u32 = 0x0D;
@@ -93,18 +102,20 @@ impl Image {
 }
 
 /// `builtin`'s help string: its help name, tabs to the sixteenth column,
-/// then the version of `rom`, its row, and the release's date, which every
-/// built-in shares.
+/// then the version of `rom`, its row, the release's date, which every
+/// built-in shares, and its suffix.
 fn help_string(builtin: &Builtin, rom: &Rom) -> Result<Vec<u8>, MemoryError> {
     let name = builtin.help_name.unwrap_or(builtin.title);
+    let suffix = builtin.help_suffix.unwrap_or("");
     let mut help = Vec::new();
-    help.try_reserve(name.len() + 24)?;
+    help.try_reserve(name.len() + suffix.len() + 24)?;
     help.extend_from_slice(name.as_bytes());
     help.extend_from_slice(if name.len() < 8 { b"\t\t" } else { b"\t" });
     help.extend_from_slice(&version::text(rom.bcd()));
     help.extend_from_slice(b" (");
     help.extend_from_slice(&crate::release::date_text());
     help.push(b')');
+    help.extend_from_slice(suffix.as_bytes());
     Ok(help)
 }
 
@@ -114,6 +125,8 @@ fn help_string(builtin: &Builtin, rom: &Rom) -> Result<Vec<u8>, MemoryError> {
 pub(crate) struct Placed {
     pub(crate) routines: u32,
     pub(crate) code: u32,
+    /// The number of its first routine's entry, the rest following in order.
+    pub(crate) first_routine: usize,
 }
 
 /// `builtin`'s image, row `rom`, whose `n`th entry is the routine
@@ -124,7 +137,7 @@ fn image(
     builtin: &Builtin,
     rom: &Rom,
     place: usize,
-    entries: &mut Vec<(usize, EntryKind)>,
+    entries: &mut Vec<BuiltinEntry>,
     routine: &impl Fn(u32) -> u32,
 ) -> Result<(Vec<u8>, Placed), MemoryError> {
     let mut image = Image { bytes: Vec::new() };
@@ -134,8 +147,13 @@ fn image(
     }
     let mut entry = |image: &mut Image, kind| -> Result<u32, MemoryError> {
         entries.try_reserve(1)?;
-        entries.push((place, kind));
-        image.entry(routine(len32(entries.len() - 1)))
+        let offset = image.entry(routine(len32(entries.len())))?;
+        entries.push(BuiltinEntry {
+            place,
+            kind,
+            offset,
+        });
+        Ok(offset)
     };
     if builtin.start.is_some() {
         header[0] = entry(&mut image, EntryKind::Start)?;
@@ -170,6 +188,7 @@ fn image(
     for index in 0..builtin.routines.len() {
         entry(&mut image, EntryKind::Routine(index))?;
     }
+    let first_routine = entries.len() - builtin.routines.len();
     let code = image.at();
     if let Some(emit) = builtin.code {
         let first = i32::try_from(routines)
@@ -194,7 +213,31 @@ fn image(
     }
     header[4] = image.text(builtin.title.as_bytes())?;
     header[5] = image.text(&help_string(builtin, rom)?)?;
-    for ((command, slots), &(_, code)) in builtin.commands.iter().zip(table).zip(&commands) {
+    command_texts(&mut image, builtin.commands, &table, &commands)?;
+    image.align()?;
+    for (n, word) in (0..).zip(header) {
+        image.patch(4 * n, word);
+    }
+    Ok((
+        image.bytes,
+        Placed {
+            routines,
+            code,
+            first_routine,
+        },
+    ))
+}
+
+/// Each command's syntax and help text laid in `image`, and the command
+/// table's slots `table` gives filled in with them: help that is code is its
+/// entry, from `entries`.
+fn command_texts(
+    image: &mut Image,
+    commands: &[Command],
+    table: &[u32],
+    entries: &[(u32, u32)],
+) -> Result<(), MemoryError> {
+    for ((command, &slots), &(_, code)) in commands.iter().zip(table).zip(entries) {
         let help = match command.help {
             Help::Code(_) => code,
             Help::Text(text) => {
@@ -215,11 +258,7 @@ fn image(
         }
         image.patch(slots + 4, help);
     }
-    image.align()?;
-    for (n, word) in (0..).zip(header) {
-        image.patch(4 * n, word);
-    }
-    Ok((image.bytes, Placed { routines, code }))
+    Ok(())
 }
 
 /// The command table: each command's name, then its entry's offset, its
@@ -265,7 +304,7 @@ fn command_table(
 /// are at `routine(n)`; their entries are added to `entries`.
 pub(crate) fn chain(
     builtins: &[(&Rom, &'static Builtin)],
-    entries: &mut Vec<(usize, EntryKind)>,
+    entries: &mut Vec<BuiltinEntry>,
     routine: impl Fn(u32) -> u32,
 ) -> Result<Chain, MemoryError> {
     let mut words = Vec::new();
@@ -301,16 +340,22 @@ impl Os<'_> {
     /// it stands for: its Rust performed with the caller's registers, which
     /// it answers in, V set with R0 the error if it fails.
     pub(crate) fn builtin_entered(&mut self, entry: u32) -> Result<(), crate::os::Unwind> {
-        let found = self
-            .world
-            .modules
-            .entries
-            .get(entry as usize)
-            .and_then(|&(place, kind)| Some((self.world.modules.builtin(place)?, kind)));
-        let Some((builtin, kind)) = found else {
+        let modules = &self.world.modules;
+        let found = modules.entries.get(entry as usize).and_then(|&entry| {
+            let at = modules
+                .running(entry.place)
+                .map(|module| module.shape.code.wrapping_add(entry.offset));
+            Some((modules.builtin(entry.place)?, entry.kind, at))
+        });
+        let Some((builtin, kind, at)) = found else {
             self.undefined_here();
             return Ok(());
         };
+        // An abort the entry takes is reported at the entry its caller
+        // branched to, in the module, rather than at its host routine.
+        if let Some(at) = at {
+            self.world.swi_at = at;
+        }
         self.as_subroutine(|os, regs| match kind {
             EntryKind::Start => builtin.start.map_or(Ok(()), |code| code(os, regs)),
             EntryKind::Init => builtin.init.map_or(Ok(()), |code| code(os, regs)),

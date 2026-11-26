@@ -88,6 +88,7 @@ const CLIP_WORDS: u32 = 12;
 pub(crate) static DRAW: Builtin = Builtin {
     title: "Draw",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: Some(Swis {
         chunk: chunk::DRAW,

@@ -149,6 +149,7 @@ const WORKSPACE: u32 = TABLES_AT + TABLE * len32(ALPHABETS.len());
 pub(crate) static INTERNATIONAL: Builtin = Builtin {
     title: "International",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: None,
     services: Some(Services {

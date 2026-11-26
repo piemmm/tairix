@@ -7,9 +7,9 @@
 //! device's last block runs past them, and nothing at or past `len` is read.
 //! The archive driver reads each format's opening structures through these
 //! same readers ([`ZipEnd`], [`tar_header_holds`], [`bzip2_level`],
-//! [`rar_version`], [`arcfs_header`], [`arc_entry_holds`], and the gzip
-//! header `tairix_compress::gzip` reads), so the probe and the driver never
-//! disagree about what an archive is.
+//! [`squash_header`], [`rar_version`], [`arcfs_header`], [`arc_entry_holds`],
+//! and the gzip header `tairix_compress::gzip` reads), so the probe and the
+//! driver never disagree about what an archive is.
 //!
 //! Everything read is a stranger's file: every offset, length and count is
 //! checked before it is used, and anything short of a format's own signature
@@ -23,7 +23,7 @@ use tairix_abi::driver::block::Block;
 use tairix_abi::volume::VolumeFsType;
 use tairix_abi::DriverError;
 use tairix_bytedev::ByteDevice;
-use tairix_compress::gzip;
+use tairix_compress::{gzip, squash};
 use tairix_dfs::catalogue::{Catalogue, CATALOGUE_LEN};
 
 use crate::{content_identity, le_u16, le_u32, le_u64, ProbedVolume};
@@ -38,8 +38,8 @@ const IDENTITY_DOMAIN: &[u8] = b"tairix-archive/v1";
 /// The archive the file `dev` holds as its first `len` bytes, recognised in a
 /// fixed order: zip by the end record that closes it, then the formats whose
 /// signature opens the file — RAR, `ArcFS`, the ARC family (Spark), gzip,
-/// bzip2 — then tar, whose header carries only a checksum, and last a DFS
-/// disc, whose catalogue carries none. `None` when nothing matches.
+/// bzip2, Squash — then tar, whose header carries only a checksum, and last
+/// a DFS disc, whose catalogue carries none. `None` when nothing matches.
 ///
 /// # Errors
 ///
@@ -66,6 +66,8 @@ pub fn recognise<B: Block>(
         Some(VolumeFsType::Gzip)
     } else if bzip2_level(&head).is_some() {
         Some(VolumeFsType::Bzip2)
+    } else if squash_header(&head).is_some() {
+        Some(VolumeFsType::Squash)
     } else if head
         .get(..TAR_BLOCK)
         .and_then(|block| <&[u8; TAR_BLOCK]>::try_from(block).ok())
@@ -369,6 +371,15 @@ pub fn tar_header_holds(block: &[u8; TAR_BLOCK]) -> bool {
                 )
             });
     stored == unsigned || i64::try_from(stored).is_ok_and(|stored| stored == signed)
+}
+
+/// The header of the RISC OS Squash file `head` opens: `SQSH` and its words,
+/// then the stream's own header.
+#[must_use]
+pub fn squash_header(head: &[u8]) -> Option<squash::FileHeader> {
+    let header = squash::FileHeader::parse(head)?;
+    let stream = head.get(squash::FILE_HEADER_LEN..)?;
+    stream.starts_with(&squash::STREAM_MAGIC).then_some(header)
 }
 
 /// A bzip2 block's magic, the digits of pi.

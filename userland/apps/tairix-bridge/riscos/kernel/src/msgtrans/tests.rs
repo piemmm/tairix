@@ -137,6 +137,40 @@ fn with_file() -> Session {
 }
 
 #[test]
+fn the_files_held_open_are_listed_with_the_rma_each_holds() {
+    let mut s = session();
+    let listed = |s: &mut Session| s.kernel.os().message_files().expect("listed");
+    let before = listed(&mut s);
+    register(&mut s, BLOCK, &[("Test.Messages", FILE)]);
+    open(&mut s, "Resources:$.Test.Messages").expect("opened");
+    let after = listed(&mut s);
+    assert_eq!(after.len(), before.len() + 1);
+    let (name, bytes) = &after[0];
+    assert_eq!(
+        name.as_slice(),
+        b"Resources:$.Test.Messages",
+        "the newest first"
+    );
+    let descriptor = s.peek(DESCRIPTOR + 8);
+    let block = s
+        .kernel
+        .os()
+        .heap_block_size(crate::kheap::KernelHeap::Rma, descriptor);
+    assert_eq!(
+        Some(*bytes),
+        block,
+        "its descriptor's block, its text in place"
+    );
+    swi(
+        &mut s,
+        CLOSE_FILE,
+        [DESCRIPTOR, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    )
+    .expect("closed");
+    assert_eq!(listed(&mut s), before);
+}
+
+#[test]
 fn a_file_in_resourcefs_is_held_in_place() {
     let mut s = with_file();
     assert_eq!(s.peek(DESCRIPTOR), FAST);

@@ -32,6 +32,7 @@ static SHARED: [Resource; 2] = [
 pub(crate) static MESSAGES: Builtin = Builtin {
     title: "Messages",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: None,
     services: Some(Services {

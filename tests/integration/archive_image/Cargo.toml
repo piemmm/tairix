@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-archive-image"
-description = "Archives laid out for tests: the least archive of each format the archive driver writes, a DFS disc among them, the DEFLATE, gzip and bzip2 streams they are packed in, and archives written back by the driver's own writer, shared by the driver's tests, its fuzz harness and the disk-image vertical."
+description = "Archives laid out for tests: the least archive of each format the archive driver writes, a DFS disc and a Squash file among them, the DEFLATE, gzip, bzip2 and Squash streams they are packed in, and archives written back by the driver's own writer, shared by the driver's tests, its fuzz harness and the disk-image vertical."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

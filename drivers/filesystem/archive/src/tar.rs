@@ -86,6 +86,7 @@ impl Tar {
             Some(packing) => match packing.compression() {
                 Compression::Gzip => FormatName::TarGzip,
                 Compression::Bzip2 => FormatName::TarBzip2,
+                Compression::Squash => FormatName::Squash,
             },
         }
     }

@@ -67,7 +67,7 @@ mod tests {
         let days = tairix_abi::time::days_from_civil(DATE.0, DATE.1, DATE.2)
             .and_then(|days| u64::try_from(days).ok())
             .expect("a day after 1970");
-        let midnight = crate::clock::UNIX_EPOCH + days * crate::clock::CENTISECONDS_PER_DAY;
+        let midnight = crate::os::UNIX_EPOCH + days * crate::clock::CENTISECONDS_PER_DAY;
         let into_day = ROM_STAMP - midnight;
         assert!(
             into_day < crate::clock::CENTISECONDS_PER_DAY,

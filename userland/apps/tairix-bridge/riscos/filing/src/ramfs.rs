@@ -16,7 +16,7 @@ use tairix_riscos_arm::mmu::PAGE_SIZE;
 use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::module::{Builtin, Command, Resource};
 use tairix_riscos_kernel::msgtrans::{Own, OwnFile};
-use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, World};
+use tairix_riscos_kernel::os::{len32, quietly, Fail, Os, Regs, World};
 use tairix_riscos_kernel::ramdisc::{Occupant, AREA};
 use tairix_riscos_kernel::swi::os::{
     fs_control, DYNAMIC_AREA, FS_CONTROL, MODULE, READ_DYNAMIC_AREA,
@@ -67,6 +67,7 @@ const BAD_OP: Error = Error {
 pub static RAM_FS: Builtin = Builtin {
     title: "RamFS",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: None,
     services: None,
@@ -247,10 +248,7 @@ fn finalise(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     });
     os.release_extension::<State>();
     os.rma_free(workspace)?;
-    match killed {
-        Ok(()) | Err(Fail::Error(_)) => Ok(()),
-        Err(unwind) => Err(unwind),
-    }
+    quietly(killed).map_err(Fail::from)
 }
 
 /// `*Ram`: its filing system selected.

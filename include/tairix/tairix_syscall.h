@@ -536,6 +536,7 @@ typedef struct tairix_spawn_attach {
 #define TAIRIX_VOLUME_FS_ARCFS ((uint8_t)12u)
 #define TAIRIX_VOLUME_FS_RAR ((uint8_t)13u)
 #define TAIRIX_VOLUME_FS_DFS ((uint8_t)14u)
+#define TAIRIX_VOLUME_FS_SQUASH ((uint8_t)15u)
 typedef struct tairix_attach_head {
     uint16_t version;
     uint8_t presentation;

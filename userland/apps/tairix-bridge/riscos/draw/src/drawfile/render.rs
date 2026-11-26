@@ -623,10 +623,8 @@ struct Text {
 ///
 /// What unwinds.
 pub(super) fn ask_font_cache(os: &mut Os<'_>) -> Result<(), Fail> {
-    match os.perform(X | font::CACHE_ADDR, &mut Regs::default()) {
-        Ok(()) | Err(Fail::Error(_)) => Ok(()),
-        Err(unwind) => Err(unwind),
-    }
+    os.perform_quietly(X | font::CACHE_ADDR, &mut Regs::default())?;
+    Ok(())
 }
 
 /// A point in draw units in OS units, cut toward nought.

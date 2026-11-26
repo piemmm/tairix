@@ -13,6 +13,7 @@ use crate::os::{Fail, Os, Regs};
 pub(crate) static UTILITY: Builtin = Builtin {
     title: "UtilityModule",
     help_name: None,
+    help_suffix: None,
     bridge: true,
     swis: Some(Swis {
         chunk: 0xF0_0000,

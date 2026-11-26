@@ -22,6 +22,7 @@ design is `plans/ARCHIVES.md`.
 | ArcFS | `arcfs` | stored, packed, crunched, compressed | stored or compressed | load, exec, attributes |
 | RAR 1.5 to 7 | `rar` | every RAR compression: 1.5's, 2's LZ and audio, 3's LZ, PPMd and standard filters, 5's and 7's; solid archives | never | none |
 | Acorn DFS disc, `.ssd` or `.dsd` | `dfs` | each side's catalogue of up to 31 files | in place, as DFS writes | load, exec, lock |
+| RISC OS Squash file | `squash` | the one file it compressed | compressed again whole, as the Squash module compresses a file | load, exec |
 
 The kernel's probe (`lib/fsprobe`) recognises each format by its content,
 never its name, and the driver recognises it again with the same readers, so
@@ -63,16 +64,18 @@ from its start.
   order is decoded once; a read before the cursor starts a fresh one. A few
   cursors are kept, one per reader working through a member.
 - **An archive that is one stream** (a compressed tar, a lone gzip or bzip2
-  file) is decoded through an index of places the decoder can resume at:
-  every bzip2 block, and for gzip a checkpoint of the inflater's window
-  every 4 MiB at first, at most 128 of them, half dropped and the spacing
-  widened each time they fill.
+  file, a Squash file) is decoded through an index of places the decoder can
+  resume at: every bzip2 block and every place a Squash stream's table is
+  cleared, at most 4096 of them, and for gzip a checkpoint of the inflater's
+  window every 4 MiB at first, at most 128 of them; half are dropped and the
+  spacing widened each time they fill.
   A read decodes from the nearest place before it. The opening pass decodes
-  the whole stream once, holding each gzip member to its CRC and length: its
-  cost is the stream's decoded length, which the format bounds (DEFLATE near
-  1032:1, bzip2 near 10⁶:1) and no bound short of that tells from a file of
-  zeros, paid in the volume's own driver process while the attach waiting
-  on it stays killable.
+  the whole stream once, holding each gzip member to its CRC and length, and
+  a Squash stream to its header's length, decoded no further than that: its
+  cost is the stream's decoded length, which a gzip or bzip2 stream records
+  nowhere it can be held to and its format bounds only by its ratio (DEFLATE
+  near 1032:1, bzip2 near 10⁶:1), paid in the volume's own driver process
+  while the attach waiting on it stays killable.
 - **A bzip2 member** is decoded in a workspace no larger than its length
   needs, five quarters of it, rather than its level's block.
 - **A solid RAR archive** codes its members as one stream, each carrying on
@@ -107,7 +110,8 @@ staging file, and a commit writes the next archive into its other work file
 — the bytes of a member nothing has changed copied there by the kernel —
 which the kernel then makes the archive, so a crash leaves the old archive
 or the new one whole. A compressed archive is compressed again whole; a
-rewrite keeps bzip2's level and gzip's recorded name and time.
+rewrite keeps bzip2's level, gzip's recorded name and time, and a Squash
+file's type and date.
 
 A change to a member keeps what its record held that the tree does not: a
 zip member's comment, host attributes (switched to Unix where its mode
@@ -119,8 +123,8 @@ while the owner is unchanged.
 (`Format::member_times`): a zip member's modification time to the second in
 its extended timestamp, a tar member's both times to the nanosecond in pax
 records (the access time recorded from then on), a gzip stream's unsigned
-seconds, a Spark or ArcFS member's typed RISC OS stamp — a Spark one's
-MS-DOS stamp where it is untyped. A time the record does not keep is refused
+seconds, a Spark or ArcFS member's or a Squash file's typed RISC OS stamp —
+a Spark one's MS-DOS stamp where it is untyped. A time the record does not keep is refused
 unless the nearest is asked. A member's clock stamps are held the same way, so
 what a stat reports is what the committed archive reads back.
 
@@ -203,6 +207,21 @@ files alone. The Open Micro emulator locks a disc it may write
 it is in one of the emulator's drives, and a disc already mounted goes into
 a drive write-protected.
 
+## Squash files
+
+A Squash file is one RISC OS file compressed by the Squash module, its
+header (`SQSH`) recording the file's length and its load and execution
+addresses; RISC OS types it `&FCA`. Its one file is named as the Squash
+file is, less any `,fca` ending, and typed and dated by the addresses. A
+stream that decodes to other than the header's length is not the file the
+header describes, and the Squash file is refused. A rewrite compresses the
+file whole, as the Squash module compresses a file given it whole with
+room for all it makes, byte for byte the stream RISC OS writes, its codes
+those of the one compress-style LZW coder `lib/compress` holds. The header
+has no place for attributes, so the file's are those it is read with and
+no other is taken, nor a name, a second file, or more than 4 GiB less a
+byte.
+
 ## Refused archives
 
 - **Encrypted headers** (RAR) — `PermissionDenied`; an encrypted member is
@@ -223,11 +242,15 @@ symbol, filter and solid run. RAR 7's algorithm is decoded as RARLAB
 documents it, but no archive written with it has been found to test against.
 `fuzz_archive_open` mutates a base of every
 format, RAR included, through open, walk, read and commit; the codecs carry
-their own harnesses (`lib/compress`: `fuzz_bzip2`, `fuzz_arc`). The least
-archive of each format, the streams members are packed in, and an archive
-written back by the driver are `tests/integration/archive_image`'s — a DFS
-disc of each layout among them — shared by the unit tests, the fuzz harness
-and the disk-image vertical, which mounts an archive of each format and a DFS
-disc in QEMU with `mount`, reads each with its RISC OS fields, writes a file
-in every one but the RAR and gives it a filetype or a load address, ejects
-it, and reads the file and its field back once it is mounted again.
+their own harnesses (`lib/compress`: `fuzz_bzip2`, `fuzz_arc`,
+`fuzz_squash`). The Squash stream is pinned against streams and traces
+RISC OS 5.30's Squash module was recorded writing. The least archive of each
+format, the streams members are packed in, and an archive written back by
+the driver are `tests/integration/archive_image`'s — a DFS disc of each
+layout and a Squash file among them — shared by the unit tests, the fuzz
+harness and the disk-image vertical, which mounts an archive of each format,
+a DFS disc and a Squash file in QEMU with `mount`, reads each with its RISC
+OS fields, writes a file in every one but the RAR — the Squash file's one
+file rewritten, a second refused — and gives it a filetype or a load
+address, ejects it, and reads the file and its field back once it is
+mounted again.

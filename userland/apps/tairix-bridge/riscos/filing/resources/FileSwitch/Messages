@@ -3,6 +3,9 @@ BadName:Bad name
 PrefixNotPresent:Filing system or path %0: not present
 EndOfFile:End of file
 NotOpenForUpdate:File not open for update
+NotOpenForReading:That file was not opened to be read
+CantOpen:Unable to open '%0'
+NeedsFileName:%0 must be given a file name
 TooManyOpenFiles:Too many open files
 OutsideFile:Outside file
 BadBufferSize:A filing system opened a file with a buffer size it may not use

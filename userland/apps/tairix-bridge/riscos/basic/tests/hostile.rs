@@ -123,18 +123,34 @@ fn a_command_meeting_a_top_below_its_lines_is_a_bad_program() {
     assert_says(&typed("!&8670=-1\rTEXTSAVE \"f\"\r"), "\nNo room\n");
 }
 
+/// What follows the abort `said` reports, where the place it was reported
+/// at lies in BASIC's own module, as an access BASIC makes aborts there.
+fn after_abort_in_basic(said: &str) -> Option<&str> {
+    let (_, at) = said.split_once("Data transfer aborted at &")?;
+    let address = u32::from_str_radix(at.get(..8)?, 16).ok()?;
+    let mut kernel = kernel(SLOT_BYTES, b"");
+    let basic = tairix_riscos_basic::MODULES[0];
+    kernel.os().holds_code_of(basic, address).then(|| &at[8..])
+}
+
 #[test]
 fn new_and_old_with_page_overwritten_abort_their_access() {
     for command in ["NEW", "OLD"] {
         let said = typed(&format!("!&866C=-1\r{command}\r"));
-        assert_says(&said, "\nData transfer aborted at &00000000\n");
+        assert!(
+            after_abort_in_basic(&said).is_some_and(|rest| rest.starts_with('\n')),
+            "{said:?}"
+        );
     }
 }
 
 #[test]
 fn a_variable_chain_overwritten_aborts_its_read() {
     let said = run("10 !&8544=&FFFFFFFC:!&8674=-1\n20 FOR I%=1TO5000:NEXT\n30 Q=1\n");
-    assert_says(&said, "Data transfer aborted at &00000000 at line 30");
+    assert!(
+        after_abort_in_basic(&said).is_some_and(|rest| rest.starts_with(" at line 30")),
+        "{said:?}"
+    );
 }
 
 /// Every statement whose waiting record holds a count, an index or an

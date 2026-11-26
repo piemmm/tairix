@@ -378,6 +378,34 @@ fn every_digit_of_a_long_significand_counts() {
 }
 
 #[test]
+fn a_significand_longer_than_conversion_holds_whole_still_rounds_correctly() {
+    let read = |digits: &[u8], exponent| {
+        round_to(
+            Binary::DOUBLE,
+            exact_digits(false, digits.iter().copied(), exponent).unwrap(),
+        )
+    };
+    // 2^53 + 1, halfway between two doubles, with thousands of noughts after it.
+    let mut tie = digits(9_007_199_254_740_993);
+    tie.extend(core::iter::repeat_n(0, 6000));
+    assert_eq!(
+        read(&tie, -6000),
+        9_007_199_254_740_992f64.to_bits(),
+        "a tie breaks to even"
+    );
+    tie.push(1);
+    assert_eq!(
+        read(&tie, -6001),
+        9_007_199_254_740_994f64.to_bits(),
+        "past the tie rounds up"
+    );
+    let mut one = std::vec![1];
+    one.extend(core::iter::repeat_n(0, 6000));
+    one.push(1);
+    assert_eq!(read(&one, -6001), 1f64.to_bits());
+}
+
+#[test]
 fn plain_integers_read_a_small_value_as_the_general_way_does() {
     let mut rng = Prng::new(0x5EED_5A11);
     for _ in 0..20_000 {

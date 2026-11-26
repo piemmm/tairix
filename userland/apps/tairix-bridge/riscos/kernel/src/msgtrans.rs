@@ -20,6 +20,7 @@ use alloc::vec::Vec;
 
 use crate::error::Error;
 use crate::filing::{filetype, IS_A_DIRECTORY, NOT_FOUND as FILE_NOT_FOUND};
+use crate::kheap::KernelHeap;
 use crate::module::{Builtin, Resource, Services, Swis};
 use crate::os::{len32, Fail, Os, Regs, Unwind, World};
 use crate::resourcefs::{Object, FS_NUMBER};
@@ -143,6 +144,7 @@ const WORKSPACE: u32 = BUFFERS_AT + (FOREGROUND + INTERRUPT) * BUFFER;
 pub(crate) static MESSAGE_TRANS: Builtin = Builtin {
     title: "MessageTrans",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: Some(Swis {
         chunk: CHUNK,
@@ -585,8 +587,8 @@ impl Os<'_> {
             }
             Located::Squashed { block, size: out } => {
                 let mut ask = Regs::default();
-                ask.r[0] = SQUASH_WORKSPACE;
-                self.perform(X | SQUASH_DECOMPRESS, &mut ask)?;
+                ask.r[0] = crate::squash::flags::QUERY;
+                self.perform(X | crate::swi::squash::DECOMPRESS, &mut ask)?;
                 let workspace = self.rma_claim(ask.r[0])?;
                 let inbytes = self.read_word(block)?.wrapping_sub(SQUASH_HEADER + 4);
                 let mut go = Regs::default();
@@ -598,7 +600,7 @@ impl Os<'_> {
                     data,
                     out,
                 ]);
-                let result = self.perform(X | SQUASH_DECOMPRESS, &mut go);
+                let result = self.perform(X | crate::swi::squash::DECOMPRESS, &mut go);
                 self.free_rma_quietly(workspace);
                 result
             }
@@ -1135,12 +1137,9 @@ impl Os<'_> {
     }
 }
 
-/// `Squash_Decompress`, and its flag asking the workspace it needs.
-const SQUASH_DECOMPRESS: u32 = 0x4_2701;
-const SQUASH_WORKSPACE: u32 = 8;
-/// A squashed file's header: its magic and the words after it.
-const SQSH: u32 = u32::from_le_bytes(*b"SQSH");
-const SQUASH_HEADER: u32 = 20;
+/// A squashed file's magic word, and the length of the header it opens.
+const SQSH: u32 = u32::from_le_bytes(tairix_compress::squash::FILE_MAGIC);
+const SQUASH_HEADER: u32 = len32(tairix_compress::squash::FILE_HEADER_LEN);
 
 fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let workspace = os.rma_claim(WORKSPACE)?;
@@ -1649,6 +1648,40 @@ impl Os<'_> {
             self.perform_quietly(X | CLOSE_FILE, &mut close)?;
         }
         Ok(())
+    }
+
+    /// Each file MessageTrans holds open, by its name, and the RMA it holds
+    /// for it: its descriptor's block and, where it claimed one, its text's.
+    /// A module keeps the file it opens at its first error until it dies, so
+    /// a count of what another module holds leaves these out.
+    ///
+    /// # Errors
+    ///
+    /// "Not enough memory" where the host has no room for the list.
+    pub fn message_files(&mut self) -> Result<Vec<(Vec<u8>, u32)>, Fail> {
+        let mut files = Vec::new();
+        if files
+            .try_reserve_exact(self.world.message_trans.open.len())
+            .is_err()
+        {
+            return Err(self.no_memory());
+        }
+        for at in 0..self.world.message_trans.open.len() {
+            let descriptor = self.world.message_trans.open[at];
+            let [held, data, name] = [4, 8, 12].map(|offset| self.peek_word(descriptor + offset));
+            let claimed = data.filter(|_| held.is_some_and(|held| held & flag::CLAIMED != 0));
+            let bytes = [Some(descriptor), claimed]
+                .into_iter()
+                .flatten()
+                .map(|block| self.heap_block_size(KernelHeap::Rma, block).unwrap_or(0))
+                .sum();
+            let name = match name {
+                Some(name) => self.read_until(name, TEXT_MOST as usize, |b| b < b' ')?.0,
+                None => Vec::new(),
+            };
+            files.push((name, bytes));
+        }
+        Ok(files)
     }
 
     /// The error block at `block`: its number and text.

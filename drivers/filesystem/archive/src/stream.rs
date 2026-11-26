@@ -1,16 +1,18 @@
 //! An archive that is one compressed stream — a gzip'd or bzip2'd tar, or a
-//! lone compressed file (`plans/ARCHIVES.md` AR4): its decoded bytes, read by
-//! offset, and the stream of the next archive, written.
+//! lone compressed file, a Squash file among them (`plans/ARCHIVES.md` AR4,
+//! AR13): its decoded bytes, read by offset, and the stream of the next
+//! archive, written.
 //!
 //! The opening pass decodes the stream once from its start, noting where a
-//! reader can resume: every bzip2 block, which decodes alone, and for gzip
-//! every member and, every so many bytes, a block start with its window, as
-//! zlib's `zran` does. A read decodes from the nearest place before it, so a
-//! member deep in a large archive costs a stretch of decoding, never the
-//! whole stream. The places are bounded in number, the stretch between them
-//! widening as the stream grows. A writer notes its own places as it
-//! compresses — a gzip place is a sync flush — so the archive it writes is
-//! read the same way with no second pass.
+//! reader can resume: every bzip2 block, which decodes alone, every place a
+//! Squash stream's table is cleared, and for gzip every member and, every so
+//! many bytes, a block start with its window, as zlib's `zran` does. A read
+//! decodes from the nearest place before it, so a member deep in a large
+//! archive costs a stretch of decoding, never the whole stream. The places
+//! are bounded in number, the stretch between them widening as the stream
+//! grows. A writer notes its own places as it compresses — a gzip place is a
+//! sync flush — so the archive it writes is read the same way with no second
+//! pass.
 //!
 //! A gzip member decoded from its start is held to its CRC and length, as
 //! the opening pass does every member; a bzip2 block is held to its CRC every
@@ -23,6 +25,7 @@ use tairix_compress::bzip2;
 use tairix_compress::deflate::{Deflate, Flush};
 use tairix_compress::gzip::{self, Header as GzipHeader, HEADER_MAX as GZIP_HEADER_MAX};
 use tairix_compress::inflate::{Checkpoint, WINDOW_SIZE};
+use tairix_compress::squash::{self, FileHeader as SquashHeader};
 use tairix_fsserve::VolumeAccess;
 
 use crate::data::Heap;
@@ -33,8 +36,9 @@ use crate::region::{ByteInput, Input, Regions, Sink, SinkOutput};
 /// whatever the stream's size.
 const GZIP_POINTS: usize = 128;
 
-/// The most bzip2 places kept: a block's place is a few words.
-const BZIP2_POINTS: usize = 4096;
+/// The most places kept of a stream whose places hold no window, bzip2's and
+/// Squash's: a place is a few words.
+const WINDOWLESS_POINTS: usize = 4096;
 
 /// The decoded stretch between gzip places a stream starts with.
 const GZIP_SPAN: u64 = 1 << 22;
@@ -49,22 +53,32 @@ pub(crate) enum Compression {
     Gzip,
     /// bzip2, one stream or several.
     Bzip2,
+    /// RISC OS Squash: one stream after the file's header.
+    Squash,
 }
 
 impl Compression {
     const fn max_points(self) -> usize {
         match self {
             Self::Gzip => GZIP_POINTS,
-            Self::Bzip2 => BZIP2_POINTS,
+            Self::Bzip2 | Self::Squash => WINDOWLESS_POINTS,
         }
     }
 
-    /// The stretch between places a stream starts with: none for bzip2,
-    /// whose every block is one.
+    /// The stretch between places a stream starts with: none for bzip2 and
+    /// Squash, whose every block and every clear is one.
     const fn first_span(self) -> u64 {
         match self {
             Self::Gzip => GZIP_SPAN,
-            Self::Bzip2 => 0,
+            Self::Bzip2 | Self::Squash => 0,
+        }
+    }
+
+    /// Where in the archive the stream begins: after a Squash file's header.
+    const fn stream_start(self) -> u64 {
+        match self {
+            Self::Gzip | Self::Bzip2 => 0,
+            Self::Squash => squash::FILE_HEADER_LEN as u64,
         }
     }
 }
@@ -77,6 +91,8 @@ pub(crate) enum Packing {
     Gzip { name: Option<Vec<u8>>, mtime: u32 },
     /// bzip2, in blocks of `level` hundred thousand bytes.
     Bzip2 { level: u8 },
+    /// Squash, the file's header saying what its one file was.
+    Squash(SquashHeader),
 }
 
 impl Packing {
@@ -85,6 +101,7 @@ impl Packing {
         match self {
             Self::Gzip { .. } => Compression::Gzip,
             Self::Bzip2 { .. } => Compression::Bzip2,
+            Self::Squash(_) => Compression::Squash,
         }
     }
 
@@ -124,6 +141,13 @@ impl Packing {
                 }),
                 _ => Err(DriverError::BadMagic),
             },
+            Compression::Squash => {
+                let head = regions
+                    .archive_bytes(0, squash::FILE_HEADER_LEN + squash::STREAM_MAGIC.len())?;
+                tairix_fsprobe::archive::squash_header(&head)
+                    .map(Self::Squash)
+                    .ok_or(DriverError::BadMagic)
+            }
         }
     }
 }
@@ -142,6 +166,9 @@ enum Point {
     /// A bzip2 block, its magic at bit `bit` of the archive, in a stream of
     /// `level`.
     Block { decoded: u64, bit: u64, level: u8 },
+    /// Where a Squash stream's table was cleared: it decodes on from `at` of
+    /// the archive with an empty table.
+    Cleared { decoded: u64, at: u64 },
 }
 
 impl Point {
@@ -149,7 +176,8 @@ impl Point {
         match self {
             Self::Head { decoded, .. }
             | Self::Inside { decoded, .. }
-            | Self::Block { decoded, .. } => *decoded,
+            | Self::Block { decoded, .. }
+            | Self::Cleared { decoded, .. } => *decoded,
         }
     }
 }
@@ -184,6 +212,8 @@ struct Bzip2 {
 enum Decoding {
     Gzip(Gzip),
     Bzip2(Bzip2),
+    /// A Squash reader: its decoder's workspace, which holds its whole state.
+    Squash(Vec<u8>),
 }
 
 /// A reader of the decoded stream, where it stands.
@@ -194,36 +224,36 @@ struct Cursor {
     ended: bool,
 }
 
-/// The index and the reader of an archive's one compressed stream.
-pub(crate) struct Stream {
+/// The places a reader resumes a stream from, in the order it passes them,
+/// the first the stream's start.
+struct Index {
     compression: Compression,
     points: Vec<Point>,
     span: u64,
-    /// The decoded stream's length, once the opening pass has found it.
-    len: Option<u64>,
-    cursor: Option<Cursor>,
 }
 
-impl Stream {
-    /// The stream of an archive compressed as `compression` says, to be read
-    /// from its start: the opening pass, noting its places as it goes.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::OutOfMemory`].
-    pub(crate) fn new(compression: Compression) -> Result<Self, DriverError> {
+impl Index {
+    /// The index of a stream compressed as `compression` says, holding only
+    /// its start.
+    fn new(compression: Compression) -> Result<Self, DriverError> {
         let mut points = Vec::new();
         points
             .try_reserve(1)
             .map_err(|_| DriverError::OutOfMemory)?;
-        points.push(Point::Head { decoded: 0, at: 0 });
+        points.push(Point::Head {
+            decoded: 0,
+            at: compression.stream_start(),
+        });
         Ok(Self {
             compression,
             points,
             span: compression.first_span(),
-            len: None,
-            cursor: None,
         })
+    }
+
+    /// Where the last place noted resumes the decoded stream.
+    fn last_decoded(&self) -> u64 {
+        self.points.last().map_or(0, Point::decoded)
     }
 
     /// Note a place: in the order a reader passes them, no nearer than the
@@ -244,8 +274,7 @@ impl Stream {
                 keep = !keep;
                 keep
             });
-            let reach = self.points.last().map_or(0, Point::decoded);
-            let between = reach / self.points.len().max(1) as u64;
+            let between = self.last_decoded() / self.points.len().max(1) as u64;
             self.span = self.span.saturating_mul(2).max(between);
         }
         self.points
@@ -253,6 +282,30 @@ impl Stream {
             .map_err(|_| DriverError::OutOfMemory)?;
         self.points.push(point);
         Ok(())
+    }
+}
+
+/// The index and the reader of an archive's one compressed stream.
+pub(crate) struct Stream {
+    index: Index,
+    /// The decoded stream's length, once the opening pass has found it.
+    len: Option<u64>,
+    cursor: Option<Cursor>,
+}
+
+impl Stream {
+    /// The stream of an archive compressed as `compression` says, to be read
+    /// from its start: the opening pass, noting its places as it goes.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfMemory`].
+    pub(crate) fn new(compression: Compression) -> Result<Self, DriverError> {
+        Ok(Self {
+            index: Index::new(compression)?,
+            len: None,
+            cursor: None,
+        })
     }
 
     /// Read up to `buf.len()` bytes at `at` of the decoded stream, answering
@@ -270,10 +323,11 @@ impl Stream {
         at: u64,
         buf: &mut [u8],
     ) -> Result<usize, DriverError> {
-        let nearest = self.points.partition_point(|point| point.decoded() <= at);
+        let points = &self.index.points;
+        let nearest = points.partition_point(|point| point.decoded() <= at);
         let point = nearest
             .checked_sub(1)
-            .and_then(|index| self.points.get(index))
+            .and_then(|index| points.get(index))
             .ok_or(DriverError::DeviceFault)?;
         // The opening pass keeps its one cursor whatever it skips, so every
         // member is checked and every place noted; a later read keeps it
@@ -283,7 +337,7 @@ impl Stream {
             cursor.decoded <= at && (noting || cursor.decoded >= point.decoded())
         });
         if !reuse {
-            self.cursor = Some(resume(self.compression, regions, point)?);
+            self.cursor = Some(resume(self.index.compression, regions, point)?);
         }
         let mut skip = [0u8; 16 * 1024];
         while let Some(cursor) = self.cursor.as_ref() {
@@ -314,11 +368,9 @@ impl Stream {
         regions: &Regions<A>,
         out: &mut [u8],
     ) -> Result<usize, DriverError> {
-        let noting = self.len.is_none();
-        let last_noted = self.points.last().map_or(0, Point::decoded);
-        let wants_point = noting && self.compression == Compression::Gzip;
-        let span = self.span;
-        let Some(cursor) = self.cursor.as_mut() else {
+        let Self { index, len, cursor } = self;
+        let noting = len.is_none();
+        let Some(cursor) = cursor.as_mut() else {
             return Err(DriverError::DeviceFault);
         };
         if cursor.ended || out.is_empty() {
@@ -328,7 +380,8 @@ impl Stream {
         let decoded = cursor.decoded;
         let got = match &mut cursor.decoding {
             Decoding::Gzip(gzip) => {
-                let wants_point = wants_point && decoded >= last_noted.saturating_add(span);
+                let wants_point =
+                    noting && decoded >= index.last_decoded().saturating_add(index.span);
                 gzip_step(
                     gzip,
                     &mut cursor.input,
@@ -342,16 +395,20 @@ impl Stream {
             Decoding::Bzip2(bz) => {
                 bzip2_step(bz, &mut cursor.input, regions, out, decoded, &mut noted)?
             }
+            Decoding::Squash(work) => {
+                let index = noting.then_some(&mut *index);
+                squash_step(work, &mut cursor.input, regions, out, decoded, index)?
+            }
         };
         cursor.decoded += got as u64;
         if got == 0 {
             cursor.ended = true;
             if noting {
-                self.len = Some(cursor.decoded);
+                *len = Some(cursor.decoded);
             }
         }
         if let (true, Some(point)) = (noting, noted) {
-            self.push(point)?;
+            index.push(point)?;
         }
         Ok(got)
     }
@@ -366,17 +423,41 @@ impl Stream {
         &mut self,
         regions: &Regions<A>,
     ) -> Result<u64, DriverError> {
-        if let Some(len) = self.len {
-            return Ok(len);
-        }
-        if self.cursor.is_none() {
-            self.read(regions, 0, &mut [])?;
-        }
-        let mut buf = tairix_util::fallible::filled(CHUNK, 0u8).ok_or(DriverError::OutOfMemory)?;
-        loop {
-            if self.step(regions, &mut buf)? == 0 {
-                return self.len.ok_or(DriverError::DeviceFault);
+        self.measure_within(regions, u64::MAX)
+    }
+
+    /// As [`Self::measure`], refused as [`DriverError::MediumError`] once the
+    /// stream decodes past `most` bytes: a stream whose container records
+    /// its length is decoded no further than the length promises.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read`]; [`DriverError::MediumError`] past `most`.
+    pub(crate) fn measure_within<A: VolumeAccess>(
+        &mut self,
+        regions: &Regions<A>,
+        most: u64,
+    ) -> Result<u64, DriverError> {
+        if self.len.is_none() {
+            if self.cursor.is_none() {
+                self.read(regions, 0, &mut [])?;
             }
+            let mut buf =
+                tairix_util::fallible::filled(CHUNK, 0u8).ok_or(DriverError::OutOfMemory)?;
+            while self.step(regions, &mut buf)? != 0 {
+                if self
+                    .cursor
+                    .as_ref()
+                    .is_some_and(|cursor| cursor.decoded > most)
+                {
+                    return Err(DriverError::MediumError);
+                }
+            }
+        }
+        match self.len {
+            Some(len) if len > most => Err(DriverError::MediumError),
+            Some(len) => Ok(len),
+            None => Err(DriverError::DeviceFault),
         }
     }
 }
@@ -428,6 +509,17 @@ fn resume<A: VolumeAccess>(
                 in_block: false,
             };
             (Decoding::Bzip2(bz), bit / 8)
+        }
+        (Compression::Squash, Point::Head { at, .. } | Point::Cleared { at, .. }) => {
+            let mut work = tairix_util::fallible::filled(squash::DECOMPRESS_WORK, 0u8)
+                .ok_or(DriverError::OutOfMemory)?;
+            let started = if matches!(point, Point::Head { .. }) {
+                squash::start_decompression(&mut work)
+            } else {
+                squash::start_decompression_at_place(&mut work)
+            };
+            started.map_err(|_| DriverError::DeviceFault)?;
+            (Decoding::Squash(work), *at)
         }
         _ => return Err(DriverError::DeviceFault),
     };
@@ -622,12 +714,52 @@ fn bzip2_step<A: VolumeAccess>(
     }
 }
 
+/// One step of a Squash reader: its decoder fed a group or more of the
+/// archive at a time, decoding into `out`, each clear of its table noted in
+/// `index` where there is one.
+fn squash_step<A: VolumeAccess>(
+    work: &mut [u8],
+    input: &mut Input,
+    regions: &Regions<A>,
+    out: &mut [u8],
+    decoded: u64,
+    mut index: Option<&mut Index>,
+) -> Result<usize, DriverError> {
+    loop {
+        let at = input.position();
+        let left = input.left();
+        let src = input.fill_to(regions, squash::GROUP_MOST)?;
+        let more = (src.len() as u64) < left;
+        let mut noting = Ok(());
+        let progress = squash::decompress(work, src, more, out, &mut |place| {
+            if let (Some(index), true) = (index.as_deref_mut(), noting.is_ok()) {
+                noting = index.push(cleared_at(place, decoded, at));
+            }
+        })
+        .map_err(|_| DriverError::MediumError)?;
+        noting?;
+        input.consume(progress.consumed);
+        if progress.produced > 0 || progress.status != squash::Status::Input {
+            return Ok(progress.produced);
+        }
+    }
+}
+
+/// The place a Squash coder told of, its call's plaintext from `plain` of
+/// the decoded stream and its stream from `at` of the archive.
+fn cleared_at(place: squash::Place, plain: u64, at: u64) -> Point {
+    Point::Cleared {
+        decoded: plain + place.plain as u64,
+        at: at + place.packed as u64,
+    }
+}
+
 /// The next archive's one stream, compressed as a writer puts its
 /// plaintext, its places noted as it goes for the reader of the archive it
 /// becomes.
 pub(crate) struct Writer<'s, 'r, A> {
     sink: &'s mut Sink<'r, A>,
-    index: Stream,
+    index: Index,
     plain: u64,
     coder: Coder,
     /// What a copy is read through.
@@ -637,6 +769,47 @@ pub(crate) struct Writer<'s, 'r, A> {
 enum Coder {
     Gzip(GzipCoder),
     Bzip2(Bzip2Coder),
+    Squash(SquashCoder),
+}
+
+/// A Squash writer's compressing: the encoder's workspace, which holds its
+/// whole state, and what a call writes before the sink takes it.
+struct SquashCoder {
+    work: Vec<u8>,
+    out: Vec<u8>,
+}
+
+impl SquashCoder {
+    /// Compress `bytes`, ending the stream where none follow, onto `sink`,
+    /// each clear noted in `index` against `plain`, the plaintext before
+    /// `bytes`.
+    fn code<A: VolumeAccess>(
+        &mut self,
+        sink: &mut Sink<'_, A>,
+        index: &mut Index,
+        mut plain: u64,
+        mut bytes: &[u8],
+        more: bool,
+    ) -> Result<(), DriverError> {
+        loop {
+            let at = sink.position();
+            let mut noting = Ok(());
+            let progress =
+                squash::compress(&mut self.work, bytes, more, &mut self.out, &mut |place| {
+                    if noting.is_ok() {
+                        noting = index.push(cleared_at(place, plain, at));
+                    }
+                })
+                .map_err(|_| DriverError::DeviceFault)?;
+            noting?;
+            sink.put(&self.out[..progress.produced])?;
+            bytes = &bytes[progress.consumed..];
+            plain += progress.consumed as u64;
+            if progress.status != squash::Status::Output {
+                return Ok(());
+            }
+        }
+    }
 }
 
 /// A gzip writer's compressing.
@@ -706,10 +879,24 @@ impl<'s, 'r, A: VolumeAccess> Writer<'s, 'r, A> {
                     level: *level,
                 })
             }
+            Packing::Squash(header) => {
+                sink.put(&header.to_bytes())?;
+                let mut work = tairix_util::fallible::filled(squash::COMPRESS_WORK, 0u8)
+                    .ok_or(DriverError::OutOfMemory)?;
+                // The stream the module writes for a file given it whole with
+                // room for its largest output, as the PRM recommends calling it.
+                squash::start_compression(&mut work, squash::Clearing::AtOnce)
+                    .map_err(|_| DriverError::DeviceFault)?;
+                Coder::Squash(SquashCoder {
+                    work,
+                    out: tairix_util::fallible::filled(CHUNK, 0u8)
+                        .ok_or(DriverError::OutOfMemory)?,
+                })
+            }
         };
         Ok(Self {
             sink,
-            index: Stream::new(packing.compression())?,
+            index: Index::new(packing.compression())?,
             plain: 0,
             coder,
             scratch: tairix_util::fallible::filled(CHUNK, 0u8).ok_or(DriverError::OutOfMemory)?,
@@ -731,8 +918,7 @@ impl<'s, 'r, A: VolumeAccess> Writer<'s, 'r, A> {
                         gzip.compress(self.sink, Flush::None)?;
                     }
                 }
-                let last = self.index.points.last().map_or(0, Point::decoded);
-                if self.plain >= last.saturating_add(self.index.span) {
+                if self.plain >= self.index.last_decoded().saturating_add(self.index.span) {
                     // A sync flush leaves the stream byte-aligned at a block's
                     // start, which a reader resumes from with the window.
                     gzip.compress(self.sink, Flush::Sync)?;
@@ -755,6 +941,11 @@ impl<'s, 'r, A: VolumeAccess> Writer<'s, 'r, A> {
                 };
                 let wrote = bz.encoder.get()?.write(bytes, &mut out, &mut places);
                 settle(wrote, out.fault(), places.fault)?;
+                self.plain += bytes.len() as u64;
+                Ok(())
+            }
+            Coder::Squash(sq) => {
+                sq.code(self.sink, &mut self.index, self.plain, bytes, true)?;
                 self.plain += bytes.len() as u64;
                 Ok(())
             }
@@ -786,9 +977,13 @@ impl<'s, 'r, A: VolumeAccess> Writer<'s, 'r, A> {
                 let finished = bz.encoder.get()?.finish(&mut out, &mut places);
                 settle(finished, out.fault(), places.fault)?;
             }
+            Coder::Squash(sq) => sq.code(self.sink, &mut self.index, self.plain, &[], false)?,
         }
-        self.index.len = Some(self.plain);
-        Ok(self.index)
+        Ok(Stream {
+            index: self.index,
+            len: Some(self.plain),
+            cursor: None,
+        })
     }
 }
 
@@ -824,7 +1019,7 @@ impl GzipCoder {
 
 /// A bzip2 encoder's blocks, noted as a stream's places.
 struct Places<'i> {
-    index: &'i mut Stream,
+    index: &'i mut Index,
     level: u8,
     fault: Option<DriverError>,
 }

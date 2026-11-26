@@ -24,6 +24,7 @@ const NAMES: &[&str] = &["Calculate", "SpriteTable"];
 pub(crate) static INVERSE_TABLE: Builtin = Builtin {
     title: "InverseTable",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: Some(Swis {
         chunk: chunk::INVERSE_TABLE,

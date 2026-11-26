@@ -44,8 +44,8 @@ impl Os<'_> {
     /// How a module of `shape` is offered services; none for one with no
     /// service entry.
     pub(crate) fn service_handler(&self, shape: &Shape) -> Option<Handler> {
-        if let Some(rom) = shape.rom {
-            let services = self.world.modules.builtin(rom)?.services.as_ref()?;
+        if let Some(place) = shape.origin.builtin() {
+            let services = self.world.modules.builtin(place)?.services.as_ref()?;
             return Some(Handler::Builtin {
                 code: services.handler,
                 numbers: services.numbers,

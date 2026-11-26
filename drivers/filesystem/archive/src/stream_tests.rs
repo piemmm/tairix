@@ -12,6 +12,7 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::volume::FormatName;
 use tairix_abi::DriverError;
+use tairix_fuzzseed::Prng;
 
 use super::*;
 use crate::test_support::{contents, names, open, try_open, walk, MemoryAccess, MemoryAttachment};
@@ -101,14 +102,11 @@ fn prose(len: usize) -> Vec<u8> {
         b"tar\n",
         b"zip ",
     ];
-    let mut state = 0x2545_f491_4f6c_dd1du64;
+    let mut rng = Prng::new(0x2545_f491_4f6c_dd1d);
     let mut out = Vec::with_capacity(len + 8);
     while out.len() < len {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        out.extend_from_slice(WORDS[(state % 8) as usize]);
-        out.extend_from_slice(&state.to_le_bytes()[..1]);
+        out.extend_from_slice(WORDS[rng.below(WORDS.len())]);
+        out.push(rng.next_u8());
     }
     out.truncate(len);
     out
@@ -184,10 +182,10 @@ fn written(packing: &Packing, plain: &[u8]) -> (Regions<MemoryAccess>, Stream) {
     for piece in plain.chunks(7919) {
         writer.write(piece).unwrap();
     }
-    let index = writer.finish().unwrap();
+    let noted = writer.finish().unwrap();
     let len = sink.finish().unwrap();
     regions.commit(len).unwrap();
-    (regions, index)
+    (regions, noted)
 }
 
 /// Read `plain` back through `stream` from scattered offsets, last first.
@@ -214,33 +212,36 @@ fn a_long_stream_reads_anywhere_through_the_places_its_writer_noted() {
         name: None,
         mtime: 0,
     };
-    let (regions, mut index) = written(&gzip, &plain);
-    assert!(index.points.len() >= 3, "a place every four megabytes");
-    reads_anywhere(&regions, &mut index, &plain);
+    let (regions, mut noted) = written(&gzip, &plain);
+    assert!(
+        noted.index.points.len() >= 3,
+        "a place every four megabytes"
+    );
+    reads_anywhere(&regions, &mut noted, &plain);
     // A reader opening the same archive notes its own places as it decodes.
     let mut opened = Stream::new(Compression::Gzip).unwrap();
     assert_eq!(opened.measure(&regions).unwrap(), plain.len() as u64);
-    assert!(opened.points.len() >= 3);
+    assert!(opened.index.points.len() >= 3);
     reads_anywhere(&regions, &mut opened, &plain);
 }
 
 #[test]
 fn a_bzip2_stream_reads_anywhere_from_each_block() {
     let plain = prose(1 << 20);
-    let (regions, mut index) = written(&Packing::Bzip2 { level: 1 }, &plain);
-    assert!(index.points.len() >= 10, "every block is a place");
-    reads_anywhere(&regions, &mut index, &plain);
+    let (regions, mut noted) = written(&Packing::Bzip2 { level: 1 }, &plain);
+    assert!(noted.index.points.len() >= 10, "every block is a place");
+    reads_anywhere(&regions, &mut noted, &plain);
     let mut opened = Stream::new(Compression::Bzip2).unwrap();
     assert_eq!(opened.measure(&regions).unwrap(), plain.len() as u64);
-    assert_eq!(opened.points.len(), index.points.len());
+    assert_eq!(opened.index.points.len(), noted.index.points.len());
     reads_anywhere(&regions, &mut opened, &plain);
 }
 
 #[test]
 fn a_bounded_index_lets_every_other_place_go_and_widens_the_stretch() {
-    let mut stream = Stream::new(Compression::Bzip2).unwrap();
-    for block in 1..=(BZIP2_POINTS as u64 * 2) {
-        stream
+    let mut index = Index::new(Compression::Bzip2).unwrap();
+    for block in 1..=(WINDOWLESS_POINTS as u64 * 2) {
+        index
             .push(Point::Block {
                 decoded: block * 1000,
                 bit: block * 8000,
@@ -248,21 +249,21 @@ fn a_bounded_index_lets_every_other_place_go_and_widens_the_stretch() {
             })
             .unwrap();
     }
-    assert!(stream.points.len() <= BZIP2_POINTS);
-    assert!(stream.span >= 1000);
+    assert!(index.points.len() <= WINDOWLESS_POINTS);
+    assert!(index.span >= 1000);
     assert_eq!(
-        stream.points[0].decoded(),
+        index.points[0].decoded(),
         0,
         "the stream's start is always a place"
     );
-    assert!(stream
+    assert!(index
         .points
         .windows(2)
         .all(|pair| pair[0].decoded() < pair[1].decoded()));
     // A place no further on than the last is passed over.
-    let count = stream.points.len();
-    stream.push(Point::Head { decoded: 0, at: 0 }).unwrap();
-    assert_eq!(stream.points.len(), count);
+    let count = index.points.len();
+    index.push(Point::Head { decoded: 0, at: 0 }).unwrap();
+    assert_eq!(index.points.len(), count);
 }
 
 #[test]
@@ -414,4 +415,196 @@ fn a_lone_files_archive_holds_that_file_and_no_more() {
         contents(&mut reopened, file),
         [&b"JUST"[..], &NOTES[4..]].concat()
     );
+}
+
+/// Text typed, its stamp 2021-06-01 12:00:00 UTC in RISC OS's centiseconds.
+fn text_words() -> (u32, u32) {
+    let stamp = tairix_fsmeta::preset::acorn::time64_to_centiseconds(
+        tairix_abi::time::Time64::from_secs(1_622_548_800),
+    )
+    .unwrap();
+    tairix_fsmeta::preset::acorn::encode_typed(tairix_abi::fs::Filetype::new(0xFFF).unwrap(), stamp)
+        .unwrap()
+}
+
+/// [`NOTES`] as a Squash file of [`text_words`].
+fn squashed_notes() -> Vec<u8> {
+    let (load, exec) = text_words();
+    tairix_test_archive_image::squash(NOTES, load, exec).unwrap()
+}
+
+#[test]
+fn a_squash_file_is_its_one_file_typed_and_dated_as_its_header_says() {
+    let archive = squashed_notes();
+    for (attached, file) in [
+        (&b"Notes,fca"[..], &b"Notes"[..]),
+        (b"NOTES,FCA", b"NOTES"),
+        (b"Plain", b"Plain"),
+    ] {
+        let mut fs = open(&MemoryAttachment::new(&archive, false, attached));
+        assert_eq!(fs.format_name(), FormatName::Squash);
+        let root = fs.root();
+        assert_eq!(names(&mut fs, root), [file.to_vec()]);
+        let node = walk(&mut fs, &[file]);
+        assert_eq!(contents(&mut fs, node), NOTES);
+        assert_eq!(
+            fs.node_info(node).unwrap().times.modified.secs(),
+            1_622_548_800
+        );
+        let mut value = [0u8; 16];
+        let len = fs.get_attr(node, b"acorn.filetype", &mut value).unwrap();
+        assert_eq!(&value[..len.expect("typed")], b"fff");
+    }
+}
+
+#[test]
+fn a_squash_file_whose_stream_is_not_its_headers_length_is_refused() {
+    let mut archive = squashed_notes();
+    archive[4] ^= 1;
+    assert_eq!(
+        try_open(&MemoryAttachment::new(&archive, false, b"Notes,fca")).err(),
+        Some(DriverError::MediumError)
+    );
+}
+
+#[test]
+fn a_squash_file_is_written_back_squashed_whole_with_its_words() {
+    let attachment = MemoryAttachment::new(&squashed_notes(), true, b"Notes,fca");
+    let mut fs = open(&attachment);
+    let file = walk(&mut fs, &[b"Notes"]);
+    let plain = prose(150_000);
+    fs.truncate(file, 0).unwrap();
+    fs.write_all(file, 0, &plain).unwrap();
+    fs.set_attr(file, b"acorn.filetype", b"ffd").unwrap();
+    fs.flush().unwrap();
+    let written = attachment.archive();
+    let header = SquashHeader::parse(&written).unwrap();
+    assert_eq!(header.length, u32::try_from(plain.len()).unwrap());
+    let info = fs.node_info(file).unwrap();
+    let stamp = tairix_fsmeta::preset::acorn::time64_to_centiseconds(info.times.modified).unwrap();
+    let expected = tairix_fsmeta::preset::acorn::encode_typed(
+        tairix_abi::fs::Filetype::new(0xFFD).unwrap(),
+        stamp,
+    )
+    .unwrap();
+    assert_eq!((header.load, header.exec), expected);
+    assert_eq!(
+        written,
+        tairix_test_archive_image::squash(&plain, header.load, header.exec).unwrap(),
+        "the module's own stream"
+    );
+    let mut reopened = open(&MemoryAttachment::new(&written, false, b"Notes,fca"));
+    let file = walk(&mut reopened, &[b"Notes"]);
+    assert_eq!(contents(&mut reopened, file), plain);
+}
+
+#[test]
+fn a_squash_file_emptied_is_written_back_and_opens_again_empty() {
+    let attachment = MemoryAttachment::new(&squashed_notes(), true, b"Notes,fca");
+    let mut fs = open(&attachment);
+    let file = walk(&mut fs, &[b"Notes"]);
+    fs.truncate(file, 0).unwrap();
+    fs.flush().unwrap();
+    let written = attachment.archive();
+    assert_eq!(
+        &written[squash::FILE_HEADER_LEN..],
+        squash::STREAM_MAGIC,
+        "the stream's header alone"
+    );
+    let mut reopened = open(&MemoryAttachment::new(&written, false, b"Notes,fca"));
+    let file = walk(&mut reopened, &[b"Notes"]);
+    assert_eq!(contents(&mut reopened, file), b"");
+}
+
+#[test]
+fn a_squash_file_keeps_only_what_its_header_records() {
+    let attachment = MemoryAttachment::new(&squashed_notes(), true, b"Notes,fca");
+    let mut fs = open(&attachment);
+    let root = fs.root();
+    let file = walk(&mut fs, &[b"Notes"]);
+    assert_eq!(
+        fs.rename(root, b"Notes", root, b"Other"),
+        Err(DriverError::Unsupported)
+    );
+    assert_eq!(
+        fs.create(root, b"more", NodeKind::RegularFile, &file_record()),
+        Err(DriverError::Unsupported)
+    );
+    let mut attr = [0u8; 16];
+    let len = fs
+        .get_attr(file, b"acorn.attr", &mut attr)
+        .unwrap()
+        .expect("attributes");
+    assert_eq!(&attr[..len], b"RW/");
+    assert_eq!(
+        fs.set_attr(file, b"acorn.attr", b"RWL/"),
+        Err(DriverError::OutOfRange),
+        "a Squash file records no attributes"
+    );
+    fs.set_attr(file, b"acorn.attr", &attr[..len]).unwrap();
+}
+
+#[test]
+fn a_long_squash_file_reads_anywhere_from_each_clear_of_its_table() {
+    let mut plain = prose(200_000);
+    plain.extend(noise(100_000));
+    let (load, exec) = text_words();
+    let header = SquashHeader {
+        length: u32::try_from(plain.len()).unwrap(),
+        load,
+        exec,
+    };
+    let (regions, mut noted) = written(&Packing::Squash(header), &plain);
+    let clears = |stream: &Stream| -> Vec<(u64, u64)> {
+        stream
+            .index
+            .points
+            .iter()
+            .filter_map(|point| match point {
+                Point::Cleared { decoded, at } => Some((*decoded, *at)),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(clears(&noted).len() >= 10, "every clear is a place");
+    reads_anywhere(&regions, &mut noted, &plain);
+    let mut opened = Stream::new(Compression::Squash).unwrap();
+    assert_eq!(opened.measure(&regions).unwrap(), plain.len() as u64);
+    assert_eq!(
+        clears(&opened),
+        clears(&noted),
+        "a reader notes the writer's places"
+    );
+    reads_anywhere(&regions, &mut opened, &plain);
+}
+
+#[test]
+fn a_stream_held_to_a_length_is_decoded_no_further_than_past_it() {
+    let plain = vec![b'A'; 4 << 20];
+    let header = SquashHeader {
+        length: u32::try_from(plain.len()).unwrap(),
+        load: 0,
+        exec: 0,
+    };
+    let (regions, _) = written(&Packing::Squash(header), &plain);
+    let mut opened = Stream::new(Compression::Squash).unwrap();
+    assert_eq!(
+        opened.measure_within(&regions, 1000).err(),
+        Some(DriverError::MediumError)
+    );
+    let decoded = opened.cursor.as_ref().map_or(0, |cursor| cursor.decoded);
+    assert!(decoded <= 1000 + CHUNK as u64, "stopped at {decoded}");
+    let mut whole = Stream::new(Compression::Squash).unwrap();
+    assert_eq!(
+        whole.measure_within(&regions, plain.len() as u64),
+        Ok(plain.len() as u64),
+        "a stream its length holds"
+    );
+}
+
+/// Bytes with no structure to find: a fixed generator's.
+fn noise(len: usize) -> Vec<u8> {
+    let mut noise = vec![0; len];
+    Prng::new(0x9E37_79B9_7F4A_7C15).fill(&mut noise);
+    noise
 }

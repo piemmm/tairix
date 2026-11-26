@@ -421,4 +421,17 @@ impl Fpa {
     pub const fn store_multiple(&self, fd: u8) -> [u32; 3] {
         self.register(fd).words()
     }
+
+    /// `fd` as `STFE` stores it, nothing raised and the status left as it is:
+    /// what FPEmulator's context calls save.
+    #[must_use]
+    pub fn extended(&self, fd: u8) -> [u32; 3] {
+        let value = self.register(fd);
+        let mut unit = arith::Unit::new(
+            self.fpsr & !fpsr::ENABLES,
+            Precision::Extended,
+            Rounding::Nearest,
+        );
+        unit.store_extended(value).unwrap_or_else(|_| value.words())
+    }
 }

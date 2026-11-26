@@ -123,7 +123,7 @@ for filesystems, the feature section below.
 | USB optical drives (multimedia units, sessions, removal) | ▢ | ✓ qemu-xhci | ▢ | — |
 | Removable-media filesystems served from user space (`fsserve-v1`: ARXFS, ext2/3/4, FAT32, ADFS, AmigaDOS, ISO 9660, UDF) | ▢ | ✓ | ▢ | — |
 | Disk images mounted for their owner (ISO 9660, UDF, FAT32, ADFS, AmigaDOS; double-click or `mount`; private; ejected, or gone with the session) | ▢ | ✓ | ▢ | — |
-| Archives mounted for their owner (zip, tar plain or gzip'd or bzip2'd, gzip, bzip2, Spark, ArcFS read and written; RAR read; RISC OS attributes carried) | ▢ | ✓ | ▢ | — |
+| Archives mounted for their owner (zip, tar plain or gzip'd or bzip2'd, gzip, bzip2, Spark, ArcFS, Acorn DFS discs, RISC OS Squash files read and written; RAR read; RISC OS attributes carried) | ▢ | ✓ | ▢ | — |
 | Input devices | ✓ virtio + ◐ ps2 | ✓ virtio + ◐ USB HID | ✓ virtio | ✓ host |
 | Touch input (multitouch frames; tap, scroll and pinch gestures) | ◐ virtio | ◐ virtio + ◐ USB HID | ◐ virtio | ▢ |
 | Audio playback and capture (`audiod` mixer, one path, no bypass) | ◐ virtio + USB + HD Audio | ◐ virtio + USB + HD Audio + Pi jack, I²S, HDMI | ◐ virtio + USB + HD Audio | ▢ |
@@ -183,8 +183,9 @@ AmigaDOS (OFS and FFS), ISO 9660 (read-only but for its label: Joliet, Rock
 Ridge, High Sierra) and UDF 1.02–2.60 as interoperability drivers for foreign
 volumes; on removable media and in disk images each runs in user space,
 reaching only its own volume's blocks. Archives mount as volumes through the
-same path: zip, tar (plain, gzip'd or bzip2'd), Spark and ArcFS read and
-written, RAR read, each member's RISC OS fields carried. A copy onto ARXFS
+same path: zip, tar (plain, gzip'd or bzip2'd), Spark, ArcFS, Acorn DFS discs
+and RISC OS Squash files read and written, RAR read, each member's RISC OS
+fields carried. A copy onto ARXFS
 keeps a file's RISC OS filetype, Mac type and creator, Amiga comment and
 holes.
 

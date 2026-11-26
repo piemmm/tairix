@@ -39,6 +39,7 @@ const IF_THERE_SYNTAX: &str = "Syntax: *IfThere <object> Then <command> [Else <c
 pub static BOOT_COMMANDS: Builtin = Builtin {
     title: TITLE,
     help_name: Some("Boot Commands"),
+    help_suffix: None,
     bridge: false,
     swis: None,
     services: None,

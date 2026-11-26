@@ -12,10 +12,12 @@ use crate::memory::{Bits, MemoryError};
 use crate::os::{Entry, Fail, Os, Outcome, Regs, Target};
 use crate::testkit::{asm, boot_with, Session, CODE};
 
-/// A built-in in the inventory's Squash's row, which no crate provides yet.
+/// A built-in in the inventory's row for Draw, which another crate provides,
+/// so a session of the kernel's own modules leaves it free.
 static CODED: Builtin = Builtin {
-    title: "Squash",
+    title: "Draw",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: None,
     services: None,
@@ -23,7 +25,7 @@ static CODED: Builtin = Builtin {
     init: None,
     finalise: None,
     start: None,
-    routines: &[answers, leaves, works],
+    routines: &[answers, leaves, works, stays, resumes],
     vectors: &[],
     resources: &[],
     code: Some(branches),
@@ -37,8 +39,8 @@ const STEPS: u32 = 1000;
 /// A branch to each routine, then [`MARK`].
 fn branches(first: i32) -> Result<Vec<u32>, MemoryError> {
     let mut words = Vec::new();
-    words.try_reserve(4)?;
-    for k in 0..3 {
+    words.try_reserve(6)?;
+    for k in 0..5 {
         words.push(asm::b(4 * k, first.cast_unsigned().wrapping_add(8 * k)));
     }
     words.push(MARK);
@@ -58,6 +60,30 @@ fn leaves(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     registers[2] = 7;
     let bits = os.caller_bits();
     Err(os.continue_in_user(bits, regs.r[1], registers, psr::Z))
+}
+
+/// Leaves for R1's address, or where it returns to if R1 is nought, with R2
+/// nine, SP eight lower and C set, without unwinding the call it is in.
+#[expect(clippy::unnecessary_wraps, reason = "a routine's signature")]
+fn stays(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
+    let mut registers = os.registers();
+    registers.r[2] = 9;
+    registers.r[13] = registers.r[13].wrapping_sub(8);
+    if regs.r[1] != 0 {
+        registers.r[15] = regs.r[1];
+    }
+    registers.flags = psr::C;
+    os.leave_with(registers);
+    Ok(())
+}
+
+/// Resumes User mode at R1's address with R2 eleven and N set, from
+/// whatever mode it was entered in.
+fn resumes(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
+    let mut registers = [0; 15];
+    registers[..13].copy_from_slice(&regs.r);
+    registers[2] = 11;
+    Err(os.resume_in_user(Bits::Bit32, regs.r[1], registers, psr::N))
 }
 
 fn works(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
@@ -99,7 +125,7 @@ fn jumping_to(to: u32) -> [u32; 13] {
 #[test]
 fn the_code_lies_after_the_routines_and_reaches_each_through_its_entry() {
     let (mut s, code) = coded();
-    assert_eq!(s.peek(code + 12), MARK, "the words emitted");
+    assert_eq!(s.peek(code + 20), MARK, "the words emitted");
     calls(&mut s, &[asm::b(CODE + 8, CODE + 8)]);
     s.enter(Bits::Bit32, CODE, jumping_to(code));
     assert_eq!(s.run(1000), Outcome::Budget);
@@ -122,6 +148,46 @@ fn a_routine_entered_from_user_mode_leaves_for_code_of_its_choosing() {
     assert_eq!(state.user[2], 7);
     assert_ne!(state.cpsr & psr::Z, 0, "its flags");
     assert!(!psr::Mode::from_bits(state.cpsr).is_some_and(psr::Mode::privileged));
+}
+
+#[test]
+fn a_routine_entered_in_supervisor_mode_resumes_user_mode_code_of_its_choosing() {
+    let (mut s, code) = coded();
+    let to = u32::try_from(TO).expect("a register's number");
+    s.poke(
+        CODE,
+        &[
+            asm::swi(crate::swi::os::ENTER_OS),
+            asm::add(14, 15, 0),
+            asm::mov_reg(15, to),
+        ],
+    );
+    let target = CODE + 0x40;
+    s.poke(target, &[asm::b(target, target)]);
+    let mut registers = jumping_to(code + 16);
+    registers[1] = target;
+    s.enter(Bits::Bit32, CODE, registers);
+    assert_eq!(s.run(1000), Outcome::Budget);
+    let state = s.kernel.state();
+    assert_eq!(state.pc, target);
+    assert_eq!(state.user[2], 11);
+    assert_ne!(state.cpsr & psr::N, 0, "its flags");
+    assert!(!psr::Mode::from_bits(state.cpsr).is_some_and(psr::Mode::privileged));
+}
+
+#[test]
+fn a_routine_called_within_a_call_cannot_resume_user_mode_and_fails_instead() {
+    let (mut s, code) = coded();
+    let mut os = s.kernel.os();
+    let mut regs = Regs::default();
+    regs.r[1] = CODE;
+    let target = Target {
+        address: code + 16,
+        bits: Bits::Bit32,
+    };
+    os.call(target, &mut regs, Entry::Supervisor)
+        .expect("came back");
+    assert_ne!(regs.flags & psr::V, 0, "refused");
 }
 
 #[test]
@@ -149,4 +215,36 @@ fn a_routine_s_host_work_is_taken_from_the_run_s_instructions() {
     assert_eq!(s.regs().r[5], 0);
     assert_eq!(s.run(100), Outcome::Budget);
     assert_eq!(s.regs().r[5], 1, "the next run goes on");
+}
+
+#[test]
+fn a_routine_leaves_with_whole_registers_of_its_choosing() {
+    let (mut s, code) = coded();
+    calls(&mut s, &[]);
+    let target = CODE + 0x40;
+    s.poke(target, &[asm::b(target, target)]);
+    let mut registers = jumping_to(code + 12);
+    registers[1] = target;
+    s.enter(Bits::Bit32, CODE, registers);
+    let sp = s.kernel.state().user[13];
+    assert_eq!(s.run(1000), Outcome::Budget);
+    let state = s.kernel.state();
+    assert_eq!(state.pc, target);
+    assert_eq!((state.user[2], state.user[13]), (9, sp.wrapping_sub(8)));
+    assert_ne!(state.cpsr & psr::C, 0, "its flags");
+}
+
+#[test]
+fn a_routine_called_within_a_call_leaves_without_unwinding_it() {
+    let (mut s, code) = coded();
+    let mut os = s.kernel.os();
+    let mut regs = Regs::default();
+    let target = Target {
+        address: code + 12,
+        bits: Bits::Bit32,
+    };
+    let returned = os.call(target, &mut regs, Entry::Supervisor);
+    assert!(returned.is_ok(), "the call came back: {returned:?}");
+    assert_eq!(regs.r[2], 9, "with the registers it left with");
+    assert_eq!(regs.flags & psr::C, psr::C);
 }

@@ -3,13 +3,13 @@
 //! rounded unless the true value lies within 2^-120 of a rounding boundary.
 //!
 //! The constants come from exact integer series: π from Machin's formula,
-//! ln 2 and ln 10 from atanh, and the 256 bits of 2/π that reduce any
-//! operand below 2^63 by its nearest multiple of π/2 with no loss however
+//! ln 2 and ln 10 from atanh, and the 1280 bits of 2/π that reduce any
+//! operand below 2^1024 by its nearest multiple of π/2 with no loss however
 //! close it lies to one.
 
 use core::cmp::Ordering;
 
-use crate::exact::{Exact, Parts};
+use crate::exact::{low_word, Exact, Parts};
 
 /// A working number of 128 significant bits: `sig × 2^(exp − 127)`, `sig`'s
 /// top bit set unless the number is zero.
@@ -26,13 +26,36 @@ const PI: Wide = Wide::constant(1, 0xC90F_DAA2_2168_C234_C4C6_628B_80DC_1CD1);
 const LN2: Wide = Wide::constant(-1, 0xB172_17F7_D1CF_79AB_C9E3_B398_03F2_F6AF);
 /// ln 10, from 3 ln 2 + 2 atanh(1/9).
 const LN10: Wide = Wide::constant(1, 0x935D_8DDD_AAA8_AC16_EA56_D62B_82D3_0A28);
-/// The first 256 bits of 2/π below the point, most significant word first.
-const TWO_OVER_PI: [u64; 4] = [
+/// The first 1280 bits of 2/π below the point, most significant word first:
+/// a reduction's window of them lies within these for every operand below
+/// 2^1024, binary64's whole range.
+const TWO_OVER_PI: [u64; 20] = [
     0xA2F9_836E_4E44_1529,
     0xFC27_57D1_F534_DDC0,
     0xDB62_9599_3C43_9041,
     0xFE51_63AB_DEBB_C561,
+    0xB724_6E3A_424D_D2E0,
+    0x0649_2EEA_09D1_921C,
+    0xFE1D_EB1C_B129_A73E,
+    0xE882_35F5_2EBB_4484,
+    0xE99C_7026_B45F_7E41,
+    0x3991_D639_8353_39F4,
+    0x9C84_5F8B_BDF9_283B,
+    0x1FF8_97FF_DE05_980F,
+    0xEF2F_118B_5A0A_6D1F,
+    0x6D36_7ECF_27CB_09B7,
+    0x4F46_3F66_9E5F_EA2D,
+    0x7527_BAC7_EBE5_F17B,
+    0x3D07_39F7_8A52_92EA,
+    0x6BFB_5FB1_1F8D_5D08,
+    0x5603_3046_FC7B_6BAB,
+    0xF0CF_BC20_9AF4_361D,
 ];
+/// The words of 2/π one reduction multiplies by: enough that the bits past
+/// them move the remainder less than 2^-250 below its point.
+const WINDOW: usize = 6;
+/// The words of the operand's significand times the window.
+const PRODUCT: usize = WINDOW + 1;
 
 /// The series stop once a term falls this many places below the sum.
 const NEGLIGIBLE: i32 = 130;
@@ -345,13 +368,14 @@ fn sin_cos(r: Wide) -> (Wide, Wide) {
     (series(r, 2), series(Wide::ONE, 1))
 }
 
-/// `|x|`, finite and below 2^63, less its nearest multiple k of π/2: the
-/// remainder r, |r| ≤ π/4, and k modulo 4. Past 2^63 the answer is defined
+/// `|x|`, finite and below 2^1024, less its nearest multiple k of π/2: the
+/// remainder r, |r| ≤ π/4, and k modulo 4. Past 2^1024 the answer is defined
 /// but meaningless.
 ///
-/// |x| × 2/π is taken from 256 bits of 2/π in exact integer arithmetic, so
-/// its fraction keeps 128 bits however small it is, and r is that fraction
-/// times π/2.
+/// |x| × 2/π is taken from a window of 2/π's bits in exact integer
+/// arithmetic, so its fraction keeps 128 bits however small it is, and r is
+/// that fraction times π/2. The bits before the window add only multiples of
+/// four to the product, which the quadrant ignores.
 fn reduced(x: Parts) -> (Wide, u32) {
     let x = Parts {
         negative: false,
@@ -361,15 +385,26 @@ fn reduced(x: Parts) -> (Wide, u32) {
     if x.is_zero() || Wide::of(x).cmp_magnitude(PI.scaled(-2)) != Ordering::Greater {
         return (Wide::of(x), 0);
     }
-    // x × 2/π = sig × 2^(exp − 63) × F × 2^-256, F the four words: the
-    // product of sig and F holds it with its point 319 − exp places up.
-    let mut product = [0u64; 5];
-    for (n, &word) in TWO_OVER_PI.iter().rev().enumerate() {
+    // Word n of 2/π weighs 2^-64(n+1): its share, sig × it × 2^(exp − 63 −
+    // 64(n+1)), is a multiple of four wherever 64(n+1) ≤ exp − 65.
+    let skipped = usize::try_from((x.exp - 65).max(0) / 64)
+        .unwrap_or(usize::MAX)
+        .min(TWO_OVER_PI.len() - WINDOW);
+    let exp = x.exp - 64 * i32::try_from(skipped).unwrap_or(0);
+    // x × the window = sig × 2^(exp − 63) × F × 2^-384, F the window's six
+    // words: the product of sig and F holds it with its point 447 − exp
+    // places up.
+    let mut product = [0u64; PRODUCT];
+    for (n, &word) in TWO_OVER_PI[skipped..skipped + WINDOW]
+        .iter()
+        .rev()
+        .enumerate()
+    {
         let wide = u128::from(x.sig) * u128::from(word) + u128::from(product[n]);
         product[n] = low_word(wide);
         product[n + 1] = low_word(wide >> 64);
     }
-    let point = u32::try_from(319 - x.exp.min(254)).unwrap_or(65);
+    let point = u32::try_from(447 - exp.min(382)).unwrap_or(65);
     let quotient = bits_above(&product, point);
     let half = bit(&product, point - 1);
     let (k, fraction) = if half {
@@ -393,16 +428,8 @@ fn reduced(x: Parts) -> (Wide, u32) {
     )
 }
 
-/// The low 64 bits of `x`.
-const fn low_word(x: u128) -> u64 {
-    let bytes = x.to_le_bytes();
-    u64::from_le_bytes([
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-    ])
-}
-
 /// Word `index` of the little-endian `words`, zero past them.
-fn word_at(words: &[u64; 5], index: u32) -> u64 {
+fn word_at(words: &[u64; PRODUCT], index: u32) -> u64 {
     usize::try_from(index)
         .ok()
         .and_then(|index| words.get(index))
@@ -411,12 +438,12 @@ fn word_at(words: &[u64; 5], index: u32) -> u64 {
 }
 
 /// Bit `n` of the little-endian `words`.
-fn bit(words: &[u64; 5], n: u32) -> bool {
+fn bit(words: &[u64; PRODUCT], n: u32) -> bool {
     (word_at(words, n / 64) >> (n % 64)) & 1 != 0
 }
 
 /// The 64 bits of `words` from bit `n` up.
-fn bits_above(words: &[u64; 5], n: u32) -> u64 {
+fn bits_above(words: &[u64; PRODUCT], n: u32) -> u64 {
     let (word, place) = (n / 64, n % 64);
     let low = word_at(words, word) >> place;
     let high = if place == 0 {
@@ -428,7 +455,7 @@ fn bits_above(words: &[u64; 5], n: u32) -> u64 {
 }
 
 /// `words` with every bit from `n` up cleared.
-fn below(words: &[u64; 5], n: u32) -> [u64; 5] {
+fn below(words: &[u64; PRODUCT], n: u32) -> [u64; PRODUCT] {
     let mut out = *words;
     for (start, word) in (0u32..).step_by(64).zip(&mut out) {
         if start >= n {
@@ -442,9 +469,9 @@ fn below(words: &[u64; 5], n: u32) -> [u64; 5] {
 
 /// 2^n less `words` below bit `n`: the distance from the bits below `n` up
 /// to the next multiple of 2^n.
-fn negated_below(words: &[u64; 5], n: u32) -> [u64; 5] {
+fn negated_below(words: &[u64; PRODUCT], n: u32) -> [u64; PRODUCT] {
     let low = below(words, n);
-    let mut out = [0u64; 5];
+    let mut out = [0u64; PRODUCT];
     let mut borrow = false;
     for (&word, slot) in low.iter().zip(&mut out) {
         let (value, under) = 0u64.overflowing_sub(word);
@@ -457,7 +484,7 @@ fn negated_below(words: &[u64; 5], n: u32) -> [u64; 5] {
 
 /// The top 128 bits of `words`, which are not all zero, and the place just
 /// above the top bit.
-fn top_bits(words: &[u64; 5]) -> (u128, u32) {
+fn top_bits(words: &[u64; PRODUCT]) -> (u128, u32) {
     let Some((start, word)) = (0u32..)
         .step_by(64)
         .zip(words)
@@ -481,7 +508,7 @@ pub fn quarter_pis(quarters: u32) -> Exact {
     PI.mul(Wide::small(quarters)).scaled(-2).exact()
 }
 
-/// sin x for finite nonzero `x`, |x| < 2^63.
+/// sin x for finite nonzero `x`, |x| < 2^1024.
 #[must_use]
 pub fn sin(x: Parts) -> Exact {
     if x.exp < TINY {
@@ -503,7 +530,7 @@ pub fn sin(x: Parts) -> Exact {
     }
 }
 
-/// cos x for finite `x`, |x| < 2^63.
+/// cos x for finite `x`, |x| < 2^1024.
 #[must_use]
 pub fn cos(x: Parts) -> Exact {
     if x.exp < TINY {
@@ -521,7 +548,7 @@ pub fn cos(x: Parts) -> Exact {
     .exact()
 }
 
-/// tan x for finite nonzero `x`, |x| < 2^63.
+/// tan x for finite nonzero `x`, |x| < 2^1024.
 #[must_use]
 pub fn tan(x: Parts) -> Exact {
     if x.exp < TINY {
@@ -797,7 +824,7 @@ pub fn y_log2_1p_x(y: Parts, x: Parts) -> Exact {
 }
 
 /// x^y for positive finite `x` other than one and finite nonzero `y`: e^(y
-/// ln x), exact where `y` is an integer and the power is.
+/// ln x), exact wherever the power is.
 #[must_use]
 pub fn pow(x: Parts, y: Parts) -> Exact {
     if let Some(exact) = exact_power(x, y) {
@@ -806,36 +833,81 @@ pub fn pow(x: Parts, y: Parts) -> Exact {
     exp_wide(Wide::of(y).mul(ln_wide(Wide::of(x)))).exact()
 }
 
-/// x^y where `y` is an integer, |y| < 2^31, and the power fits a 64-bit
-/// significand: an odd significand's power that does, times the power of
-/// two the rest is.
+/// x^y where it is exact. Every finite `y` is m/2^k, and the power is exact
+/// only where x's 2^k-th root is and that root's mth power fits an exact
+/// value's 127-bit significand.
 fn exact_power(x: Parts, y: Parts) -> Option<Exact> {
-    let n = integer(y)?;
+    let (m, k) = dyadic(y)?;
+    integer_power(exact_root(x, k)?, m)
+}
+
+/// `y` as m/2^k: m an integer below 2^31 in magnitude, odd unless k is
+/// nought.
+fn dyadic(y: Parts) -> Option<(i32, u32)> {
+    let y = y.normalized();
+    if y.is_zero() {
+        return None;
+    }
+    let zeros = y.sig.trailing_zeros();
+    let scale = y.exp - 63 + i32::try_from(zeros).ok()?;
+    if scale >= 0 {
+        return Some((integer(y)?, 0));
+    }
+    let odd = i32::try_from(y.sig >> zeros).ok()?;
+    Some((if y.negative { -odd } else { odd }, scale.unsigned_abs()))
+}
+
+/// The 2^`k`-th root of positive `x`, where it is exact: each halving takes
+/// an even power of two and a square odd part.
+fn exact_root(x: Parts, k: u32) -> Option<Parts> {
     let x = x.normalized();
     let zeros = x.sig.trailing_zeros();
-    let odd = x.sig >> zeros;
+    let mut odd = x.sig >> zeros;
+    let mut scale = x.exp - 63 + i32::try_from(zeros).ok()?;
+    for _ in 0..k {
+        let root = odd.isqrt();
+        if scale % 2 != 0 || root * root != odd {
+            return None;
+        }
+        odd = root;
+        scale /= 2;
+    }
+    let lead = odd.leading_zeros();
+    Some(Parts {
+        negative: false,
+        exp: scale + 63 - i32::try_from(lead).ok()?,
+        sig: odd << lead,
+    })
+}
+
+/// x^n where the power fits an exact value's significand, below its carry
+/// bit: an odd significand's power that does, times the power of two the
+/// rest is.
+fn integer_power(x: Parts, n: i32) -> Option<Exact> {
+    const CARRY: u128 = 1 << 127;
+    let x = x.normalized();
+    let zeros = x.sig.trailing_zeros();
+    let odd = u128::from(x.sig >> zeros);
     if n < 0 && odd != 1 {
         return None;
     }
-    let mut power: u64 = 1;
+    let mut power: u128 = 1;
     if odd != 1 {
         for _ in 0..n.unsigned_abs() {
-            power = power.checked_mul(odd)?;
+            power = power.checked_mul(odd).filter(|&power| power < CARRY)?;
         }
     }
     // x = odd × 2^(exp − 63 + zeros), so x^n carries n times that exponent.
     let scale = i64::from(x.exp) - 63 + i64::from(zeros);
-    let lead = 63 - i64::from(power.leading_zeros());
+    let lead = 127 - i64::from(power.leading_zeros());
     let exp =
         (i64::from(n) * scale + lead).clamp(-i64::from(EXPONENT_REACH), i64::from(EXPONENT_REACH));
-    Some(Exact::of(
-        Parts {
-            negative: false,
-            exp: i32::try_from(exp).ok()?,
-            sig: power << power.leading_zeros(),
-        }
-        .normalized(),
-    ))
+    Some(Exact {
+        negative: false,
+        exp: i32::try_from(exp).ok()?,
+        sig: power << (power.leading_zeros() - 1),
+        sticky: false,
+    })
 }
 
 /// `y` as an integer, where it is one below 2^31 in magnitude.

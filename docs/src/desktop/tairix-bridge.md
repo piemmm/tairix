@@ -146,7 +146,8 @@ when the first ends one. A run stops for:
 - `WFI` or `WFE` with nothing to wake it: an exception return is an event, as
   `SEV` and `Cpu::signal_event` are;
 - an FPA instruction meeting an exception whose trap the FPSR enables, past
-  it, for the session to raise FPEmulator's error;
+  it, for the session to raise FPEmulator's error; with no floating point
+  context current, every FPA instruction is undefined instead;
 - a CP15 register the processor does not model, before it executes.
 
 An A32 instruction in the unconditional space executes; its condition field
@@ -300,7 +301,8 @@ every feature the profile has, short vectors among them.
   FPEXC.EN enable the unit; otherwise the instruction takes the undefined
   instruction exception, as hardware does for RISC OS's lazy context switch.
   Privileged code reaches the identification registers and FPEXC with
-  FPEXC.EN clear, though never past CPACR.
+  FPEXC.EN clear, though never past CPACR. `Cpu::grant_simdfp` sets the grant
+  as a privileged `MCR` writing both fields would, for VFPSupport.
 - **Arithmetic** is `lib/softfloat`'s under ARM's rules: tininess before
   rounding; flush-to-zero flushing a denormal operand (raising `IDC`) and a
   tiny single or double result (raising underflow alone), never a half's; the
@@ -573,7 +575,8 @@ caches its modules keep give way to and record their decisions in.
 A SWI's results come back with V clear, N, Z and C as it set them. An error
 comes back with V set and R0 at its block if the SWI's X bit is set;
 otherwise it is offered as `Service_Error`, then to `ErrorV`, whose default
-enters the error handler. A block that cannot be one is replaced with "SWI &n
+enters the error handler in User mode, R0 its workspace and R1 to R14 as the
+failing code had them. A block that cannot be one is replaced with "SWI &n
 returned an invalid error pointer", but for `XOS_GenerateError`'s. A SWI below
 `&200` the kernel has not is "SWI &n not known"; above, no module having it,
 it goes to `UKSWIV`. `OS_CallASWI` and `OS_CallASWIR12` perform the SWI they
@@ -838,8 +841,12 @@ postfix, as on RISC OS. `OS_Module` performs every reason RISC OS 5 has, and
 - **Built-in modules** are Rust behind a module image in the host pages:
   header, title, help string, command table, SWI decoding table and flags, the
   images one ROM chain. Each entry jumps to a host routine that enters the
-  module's Rust, so a copy, as `*RMFaster` makes one, enters the same Rust; the
-  kernel itself calls a built-in's Rust directly. A session's built-ins are the
+  module's Rust, so a whole copy of an image, as `*RMFaster` makes one, is the
+  same built-in, freed as a module of the RMA is; the kernel itself calls a
+  built-in's Rust directly. Rust acting for code that branched to an entry
+  reaches what that code hands it with the rights of the code's mode, and a
+  SWI's work with a privileged mode's; an access refused aborts as the entry's
+  own instruction would, reported at the entry. A session's built-ins are the
   kernel's own and those its other crates pass in `Config::modules`, each a
   provided module of the inventory. They start at reset in ROM order, but for
   those CMOS unplugs. The `UtilityModule` comes first: it holds the module
@@ -954,8 +961,8 @@ with.
 | FSLock | 1.26 | absent | — |
 | FontManager | 3.80 | bridged | RO25 |
 | FPEmulator | 4.39 | provided | RO26 |
-| Free | 0.42 | provided | RO26 |
-| Hourglass | 2.19 | bridged | RO26 |
+| Free | 0.42 | provided | RO63 |
+| Hourglass | 2.19 | bridged | RO61 |
 | IIC | 0.18 | absent | — |
 | International | 1.70 | provided | RO18 |
 | InternationalKeyboard | 1.00 | provided | RO18 |
@@ -1039,8 +1046,14 @@ with.
 | UnSqueezeAIF | 0.10 | provided | RO17 |
 
 After the ROM, `OS_Module` 20 goes on into section 0, an expansion card's ROM,
-as it does for RPCEmu's own HostFS on RISC OS 5: there the emulator lists its
-HostFS (1.00, bridged, RO19.4), which no CMOS bit unplugs.
+as it does for RPCEmu's own HostFS on RISC OS 5. There the emulator lists its
+HostFS (1.00, bridged, RO19.4), then VFPSupport (0.18) and CallASWI (0.15),
+which RISC OS 5 loads from disc for a processor its ROM does not serve (RO26.7).
+No CMOS bit unplugs them. R5 gives each one's chunk number, from 1 in the
+card's order, as genuine RISC OS 5 numbers RPCEmu's. `*ROMModules` and
+`*Unplug` walk the whole enumeration, the card after the ROM, and
+`*ROMModules` lists the card's modules as `Podule 0`, numbered from 1 again,
+as the PRM's example lists a card's.
 
 ### The command line
 
@@ -1174,13 +1187,19 @@ shares with the vectors' defaults are the kernel's.
   takes none is refused, `&40F`, at the call that would hand it over, so a
   name that needs no call is still made canonical; an empty one roots its
   path at `$` without asking for the disc. A name ends at its first space.
-  FileSwitch refuses (`&CC`) a name with no path, and one whose part past the
+  FileSwitch refuses (`&CC`) a name with no path — but on a filing system that
+  takes an empty name, as `kbd:` does, which is handed one — and one whose part past the
   first is a directory's sign, begins with one, `:` or `|` — the parent `^`
   apart — or holds `$`, `:` or `|`, and a disc's name holding a colon, as RISC
   OS 5 refuses them; whatever else
   a filing system cannot hold is its own to refuse. A disc's operation
   (`OS_FSControl` 41 to 57) alone takes no path as the current directory.
-- **Open files.** Handles are the highest free from 255 down. A buffered file
+- **Open files.** Handles are the highest free from 255 down, the one an
+  open takes held while its filing system works, so a file that filing
+  system opens meanwhile takes the next, as on RISC OS 5. `FSEntry_Open` is
+  given the `OS_Find` mode in R7, `&CC` for FileSwitch's own opens to update
+  and `&4C` to read. An open the filing system answers with no handle is
+  "unable to open", `&D6`, where the mode asks for an error. A buffered file
   has one buffer of its natural block size in the RMA; FileSwitch keeps its
   pointer, extent and allocation, moves whole blocks within the extent
   straight between the filing system and the caller's memory and the rest
@@ -1189,8 +1208,14 @@ shares with the vectors' defaults are the kernel's.
   and on closing a file written to sets its extent and renews its stamp. An
   unbuffered file's pointer and extent are its filing system's, which is told
   of each flush. The first read at a file's end answers with C set; the next is
-  "End of file", from FileSwitch's own flag. `OS_Args` 254's status word says
-  read, written, modified, at its end, unbuffered or unallocated. A buffered
+  "End of file", from FileSwitch's own flag; a read of a file not opened to be
+  read is `&413`. `OS_Args` 254's status word says read, written, modified, at
+  its end, unbuffered or unallocated, and interactive and served by its filing
+  system's own `FSEntry_GBPB` as the open's answer said. A close the filing
+  system refuses leaves the file open; `*Shut` and `OS_FSControl` 22 close
+  every file from the highest handle down, each still open when its turn
+  comes, every one tried though one refuses and the first refusal answered,
+  as RISC OS 5 closes them. A buffered
   file opened for update has its extent set as it closes. A file opened for
   update is written only where its filing system's answer permits it, which
   FileCore's for a locked file does not. A file is restamped only if modified
@@ -1198,9 +1223,11 @@ shares with the vectors' defaults are the kernel's.
   change. An ensure is not one. An openout of a missing file makes it by
   `FSEntry_File` 7 first; a make the filing system refuses goes unreported,
   the open after it answering, so one in a missing directory is FileSwitch's
-  "not found", `&D6`, as on RISC OS 5.
+  "unable to open", `&D6`, as on RISC OS 5.
 - **Whole files.** Every reason of `OS_File` reads its object first: a missing
-  one is never handed to the filing system. Reasons 2 to 4 write through
+  one is never handed to the filing system, but by reasons 1 to 4 to a filing
+  system always called to open a file, which is asked all the same, as RISC
+  OS 5 asks `null:` and `pipe:`. Reasons 2 to 4 write through
   `FSEntry_File` 1 with the object's other information. Loads and saves go
   through `FSEntry_Open` and the buffer where the filing system's information
   word asks, `FSEntry_File` 255 and 0 otherwise. An empty file made over a
@@ -1230,7 +1257,9 @@ shares with the vectors' defaults are the kernel's.
   change of medium are taken and change nothing: no copy uses application
   space, and no medium changes.
 - **Directory reads.** `OS_GBPB` 9 to 11 hand the caller's buffer to the
-  filing system. Reason 12 does as RISC OS 5 does: the filing system's
+  filing system; an empty name, on a filing system that takes one, is that
+  filing system's own directory, as RISC OS 5 lists `null:`. Reason 12 does
+  as RISC OS 5 does: the filing system's
   records are read a word in for each record the buffer could hold, then each
   is moved down with its type added, the padding after its name left as it
   was.
@@ -1594,6 +1623,125 @@ id or a name a ROM holds, and replayed byte for byte. `open-files.scenarios`
 holds open files and paths that reach nothing to it too. `fuzz_ramfs`
 scribbles on the disc's map, root and pages and drives the filing calls over
 it.
+
+### DeviceFS
+
+DeviceFS 0.73 is `devices:`, filing system `&35`: every registered driver's
+devices as files of type `&FCC` in `$`, and the streams opened on them, held
+to RISC OS 5's module as recorded.
+
+- **Drivers.** `DeviceFS_Register` takes a device list, the driver's entry,
+  private word and workspace, a validation string and the streams it takes
+  each way (none, one, or any for -1); its handle is a block of the RMA. A
+  block device is refused, `&13509`. Each device gets `DeviceFS$<name>$Options`,
+  and with the list's bit 1 the macro `<name>$Path`, `devices#:$.<name>.`; a
+  name registered again replaces its device. `DeviceFS_Deregister` closes the
+  driver's streams and tells it with `Finalise` R2 0; the option variables are
+  kept. `RegisterObjects` and `DeregisterObjects` add and remove devices,
+  `CallDevice` reaches a driver by handle, by a path's device (R1 its name
+  within the path) or every driver for nought, and the services
+  (`DeviceFSStarting` on a callback at its start, `DeviceFSDying`,
+  `DeviceDead`, `DeviceFSCloseRequest`) are issued as RISC OS 5 issues them.
+- **Streams.** An open calls `Initialise` with the stream's handle — a
+  block of the RMA, its poll word at `&34` — its flags, the file's handle,
+  the special block and the open's mode; then, for a buffered device,
+  `CreateBufferTX`/`RX` and a BufferManager buffer, a `bufferN` special field
+  naming one to use; then `StreamCreated` and `UpCall` 10. A refused open
+  gives `UpCall` 11 for the stream it tried. A close drains what it sends,
+  then `EndOfData`, `UpCall` 7, `Finalise` — a driver's refusal answered and
+  the stream left open — the buffer let go and `UpCall` 11.
+- **Special fields.** A validation string's commands follow one another,
+  each its keywords and one escape a word (`N` a number, `S` a switch, the
+  keyword's place): the special field's `;`-separated items are matched
+  without case, a keyword whole, then `DeviceFS$<name>$Options`, the first
+  match winning. A number is read decimal past an `=`.
+- **Bytes.** An unbuffered stream sends a byte through a one-byte slot,
+  `WakeupTX` asked to take it with `TransmitCharacter`; one receives the
+  last `ReceivedCharacter` gave. A buffered one moves bytes through its
+  buffer, `TX`'s wake-up routine entered with interrupts off. Reads wait
+  without `UpCall` 6 unless the stream's sleeping I/O is set; writes into a
+  full buffer issue it each round; Escape
+  ends a wait, acknowledged, with "Escape", a write's buffer emptied.
+  `OS_Args` 9's I/O controls set a stream's non-blocking and sleeping I/O
+  and timeout, or go to the driver; a driver whose register flag asks is
+  called to monitor each stream as it waits.
+
+Known differences from RISC OS 5, each deliberate:
+
+- a stream whose device has gone answers "device not found" where RISC OS 5
+  hangs, and still closes;
+- `TransmitCharacter`, `ReceivedCharacter` and `Threshold` refuse a handle no
+  stream has, and `Threshold` an unbuffered stream, where RISC OS 5 aborts;
+- Escape during a write is "Escape", and a directory read of a device
+  FileSwitch's "is a file", `&41C`, where RISC OS 5 answers each with a
+  bogus error pointer;
+- a stream that waits is monitored each second; a byte write is never cut
+  short by its I/O controls; an I/O control of DeviceFS's own reason it does
+  not know is "bad operation".
+
+### SystemDevices
+
+SystemDevices 1.34 is six filing systems, every one interactive, taking an
+empty name and called to open whatever is not there: `null:` (`&D`),
+`printer:` (`&E`), `vdu:` (`&11`), `rawvdu:` (`&12`), `kbd:` (`&13`) and
+`rawkbd:` (`&14`). No device has files: every name reads as nothing there,
+a load is "not found", a directory made or a deletion taken, and each
+refuses what it cannot do, `&112`.
+
+- **`null:`** opens every way, gives nothing — its reads at their end — and
+  takes everything.
+- **`vdu:` and `rawvdu:`** write each byte through `OS_WriteC` with
+  `OS_Byte` 3 set to `&14`, the screen alone, put back after: `rawvdu:` as it
+  is, `vdu:` as `*Type` shows it in the `DumpFormat` SystemDevices read at its
+  start, tabs never expanded, a CR LF pair one newline across streams.
+- **`kbd:`** opens once: a second open answers no handle. It reads a line by
+  `OS_ReadLine` — 255 characters, every control character kept, its editing
+  and echo `OS_ReadLine`'s — and gives it, then its Return; a Ctrl-D is its
+  end, and what is left of a line goes with its close. **`rawkbd:`** opens
+  any number of times and reads each key by `OS_ReadC`, unechoed. Escape
+  during either is "Escape", acknowledged.
+- **`printer:`** opens to write the file `PrinterType$n` names for the
+  printer type its special field gives — `sink`/`null` 0, `parallel`/
+  `centronics` 1, `serial`/`rs423` 2, `user` 3, or a number to 255 — or the
+  configured type without one; a type no file is set for takes everything.
+  A name it does not know is `&10E02`. Opens within opens stop at eight
+  deep, so a `PrinterType$n` naming `printer:` itself cannot run away.
+
+Known differences from RISC OS 5, each deliberate:
+
+- RISC OS 5 on RPCEmu does not route `printer:` by its special field as the
+  PRM describes; the PRM's routing is followed;
+- a `printer:` stream whose file was closed under it still closes.
+
+### PipeFS
+
+PipeFS 0.25 is `pipe:`, filing system `&2F`: named pipes, each opened once
+to read and once to write, which keep what is written until it is read.
+A dotted name makes directories of its parts.
+
+- **A pipe** is a ring of 256 bytes in the RMA, which grows by 256 when a
+  write finds it full, and three poll words: the reader's, the writer's and
+  one nought while a writer has it. A reader's pointer is the bytes taken
+  since the pipe was made and its extent those left once no writer has it;
+  a writer's pointer and extent are the bytes written, an extent set further
+  written as noughts. A pipe stays with what it holds when both close, its
+  writer appending; a reader that leaves it empty with no writer takes it
+  away. Its catalogue length is what is left to read; `OS_File` 5's what was
+  written. A save makes it afresh; a load takes it.
+- **Waits.** A read of an empty pipe that a writer may still fill issues
+  `UpCall` 6 on the reader's poll word; with no task switcher to take it, the
+  read fails, `&12F00`. A write to a full pipe issues it on the writer's;
+  untaken, the pipe grows. A reader's extent and `OS_File` 5 wait on the
+  third while a writer has the pipe, the latter "pipe open", `&12FC2`, untaken.
+  Each close and deletion issues `UpCall` 7 for the poll words it ends.
+- **`*PipeCopy`** copies a file a byte at a time to one or two others.
+
+Known differences from RISC OS 5, each deliberate:
+
+- a poll word is non-zero exactly when its waiter may go on;
+- a pipe past its first 256 bytes takes room in the RMA twice as fast as it
+  grows, so a large one costs no more than its bytes to grow;
+- `*PipeCopy` stops at Escape.
 
 ## BASIC
 
@@ -2337,6 +2485,458 @@ Known differences from RISC OS 5, each deliberate and accepted:
 - `ColourTrans_SetFontColours` reaches the Font Manager directly, where RISC
   OS 5.30's ColourTrans calls its own SWIs through `ColourV` and reads the
   palette through `PaletteV` on the way, which a claimant of either sees.
+
+## SharedCLibrary
+
+The `userland/apps/tairix-bridge/riscos/clib` crate is RISC OS 5.30's
+SharedCLibrary 6.23: its SWIs, the library kernel — chunk 1, its 48 entries —
+the C library — chunk 2, the PRM's 183 and RISC OS 5's `_swi`, `_swix`,
+`_vswi` and `_vswix` — and RISC OS 5's C99 chunks 4 to 9, as host routines a
+client's vector reaches. The library answers as a release holding only the
+chunks built: a stub naming one it does not hold is refused (&800E81).
+
+- **Rights.** A routine reaches its client's memory with the client's mode's
+  rights, as its code running in that mode would: a User mode client's
+  `memset` of zero page, or a copy from a stack, aborts, reported at the
+  library's entry the client called.
+- **LibInit.** `LibInitAPCS_32` and `LibInitModuleAPCS_32` lay a client's
+  vectors — `LDR PC` through a table after them — its statics and its root
+  stack chunk, each chunk whole before the next is checked. APCS-A always,
+  and APCS-R and the 26-bit module form from a 32-bit caller, are refused
+  (&800E86).
+- **Starting.** `_kernel_init` lays the statics, the root chunk, the command
+  line's copy at its top and the 159-word extension stack above it, sets the
+  ten handlers — the four exceptions' through trampolines in the statics —
+  and enters each language's initialisation procedure, then the run
+  procedure the first one offered: "no main program" (&800E02) where none
+  did. `_kernel_entermodule` starts a module run as an application, its root
+  chunk at &8000; `_kernel_moduleinit` readies a module's library to be
+  called in Supervisor mode.
+- **Traps** — a divisor of nought (&80000020), an exception, an error from a
+  SWI without its X bit (its number) — are searched for among the languages
+  by the PC, R14 and each frame's link, the register set 68 bytes below the
+  SP: the trap procedures, then the uncaught ones. Past them the handlers in
+  force before `_kernel_init` are put back and "uncaught trap" (&800E01) goes
+  to the parent. A procedure is entered as a continuation, never a nested
+  call, so one that never returns leaves nothing of the library behind.
+- **Escapes and events.** An escape is acknowledged and searched for at the
+  callback the library's escape handler asks for, among the event
+  procedures then the unhandled ones, as a trap is; where SL names no stack
+  chunk no procedure is entered. A real event reaches every language's fast
+  event procedure at once, then the first event procedure found at the
+  callback; no event is handed on. A new application's upcall runs the
+  finalisation procedures on the root chunk's top and puts the handlers back;
+  every upcall is passed on. Handlers are put back through
+  `OS_ChangeEnvironment`, which leaves a word it is given as nought as it
+  stands, so one whose R12 or buffer was nought keeps the library's, as on
+  RISC OS 5.30.
+- **The stack** is a chain of chunks. Extension takes a chunk of at least
+  4 KiB — for a big frame, just the frame and SL's distance — the one kept in
+  hand where it is big enough, else one through the client's allocator, run
+  on the extension stack, or the heap's own, which never gives a chunk back.
+  The frame that overflowed returns through the library, its real return kept
+  in a frame record of the library's 104 bytes below it, so a backtrace walks
+  through the extension; on that return the chunks past the one kept in hand
+  are freed through the freer each remembers. A chunk that cannot be had is a
+  trap (&80000021).
+- **Unwinding** follows the APCS: R4 to R9 and F4 to F7 restored as the
+  instructions that stored a frame saved them. A language's unwind and name
+  procedures, where it gives them, are entered in `_kernel_unwind`'s and
+  `_kernel_procname`'s place; without a name procedure no procedure is named.
+- **The heap.** `_kernel_alloc` takes at least 2048 words from the heap above
+  the extension stack, or what is left. Outside the desktop the heap ends
+  where `_kernel_init` was told the workspace does, and the slot-extension
+  procedure is never asked.
+- **Sub-programs.** `_kernel_system` runs a command with the caller copied to
+  the top of memory under a lowered memory limit, the library's own exit,
+  error and upcall handlers taking the sub-program's end and copying the
+  caller back; the current active object is left pointing into the library.
+  Chained, the command replaces the program, which is not finalised.
+
+### The C library
+
+- **Starting.** `_clib_initialise` lays `errno`, `HUGE_VAL` (the largest
+  double), the clock's start, the C locale, every signal's default, the
+  random number generator seeded with one, the heap's first arena of 2048
+  words — which the library kernel's stack chunks are then claimed from — and
+  the sixteen streams: `stdin` to read, `stdout` and `stderr` to write, each
+  with its extra block, the sixteen blocks the heap's first.
+- **`_main`** reads the command line: words parted by spaces, a double quote
+  turning quoting on or off anywhere, and a word starting with `<`, `0<`,
+  `>`, `1>`, `>>`, `1>>`, `2>`, `2>>`, `>&` or `2>&1` a redirection, its
+  file name in the same word or the next. The redirections are made in turn:
+  `stderr` sent to a file of its own is buffered as any file is, and sent
+  where `stdout` goes to a file the two share it, each line-buffered in a
+  small buffer of its own so their lines reach it in the order they are
+  delivered. `main` is entered with `argc` and `argv` as a continuation,
+  its return going on into `exit`. A line that cannot be read, or a
+  redirection that cannot be made, is reported on `stderr` and the program
+  ends with return code 1.
+- **Ending.** A language named C takes the C library's `Finalise` as its
+  finalisation procedure where it gives none in its code, as the PRM's
+  example language does: the functions `atexit` registered are called, the
+  last first, then every stream is closed — delivered, its file closed, a
+  temporary file removed. `_clib_finalisemodule` does the same for a module,
+  then gives its heap and its workspace back to the RMA, clearing the private
+  word so the kernel frees nothing again.
+- **Streams.** Each `FILE` block, and the extra block beside it, is laid as
+  the headers and RISC OS 5.30 lay them, so the `getc` and `putc` macros a
+  program was compiled with work on it too. A file's 4 KiB buffer is taken
+  at its first transfer; the console's output is unbuffered, each newline
+  written by `OS_NewLine`, and its input read a line at a time by
+  `OS_ReadLine32`, a line-buffered output stream delivered first. One
+  character can be pushed back. An append stream's first transfer goes to
+  the file's end; after it bytes go at the stream's position, so a
+  positioning is honoured and a file grown behind its back is not followed.
+  A stream in error refuses input until
+  `clearerr` or `rewind`. `fclose` of anything but an open stream of the library's
+  answers `EOF`; `system` delivers every stream before the command runs.
+- **Formatted I/O.** `printf`'s family writes C99's conversions as RISC OS
+  5.30 writes them: a floating-point value's seventeen significant digits
+  correctly rounded, then rounded half to even to the precision, noughts past
+  them; an unknown conversion its letter alone; the `_printf` family's float
+  conversion the string at address nought. A width or precision is at most
+  `INT_MAX`, and `%s` reads no further into a string than its precision.
+  `scanf`'s family reads C99's
+  directives with RISC OS 5.30's: a scanset of single characters with no
+  ranges, `%u` refusing a sign, an integer kept to its low bits, one
+  character of lookahead — so what a failed conversion took is lost — and a
+  floating-point number read as `strtod` reads one.
+- **`strtod`** reads C99's forms — decimal, hexadecimal, infinity and NaN —
+  rounded correctly; a subnormal or out-of-range answer is a range error,
+  but an exponent marker with no digit after it leaves the number unread.
+- **`math.h`** is worked on an FPA: the elementary functions as its
+  double-precision instructions, the hyperbolic ones by Cody and Waite's
+  algorithms (*Software Manual for the Elementary Functions*, 1980). The
+  errors are the exceptions the working raised: an invalid operation a
+  domain error, `-HUGE_VAL` with `EDOM`; a division by nought, an overflow
+  or an underflow to nought a range error, `±HUGE_VAL` or nought with
+  `ERANGE`. A NaN argument answers a NaN, but `modf`'s fraction of one is
+  +0; an infinity from an infinite argument is no error, but `pow`'s, which
+  the FPA's power flags. `acos`, `asin`, `cos`, `sin`, `tan`, `exp`, `pow`,
+  `fmod`, `fabs`, `frexp`, `modf`, and `atan2` of a nought or an infinity
+  leave the client's flags as they were; the rest leave the flags their
+  working raised but for an invalid operation, a division by nought or an
+  overflow, which never trap, where an underflow or an inexact result traps
+  as the client enables it.
+- **`time.h`** keeps an unsigned word of seconds since 1970, every fourth
+  year a leap year; `localtime` takes the zone from CMOS, `strftime` a
+  territory's names and forms through the Territory Manager in its locale.
+
+### The C99 library
+
+- **Chunk 4** is the part the compiler calls: storage for variable length
+  arrays, and 64-bit arithmetic and conversions. Arithmetic wraps; division
+  truncates toward nought, a divisor of nought a trap; a shift's count is
+  unsigned. A conversion to an integer truncates, the FPA's invalid
+  operation where the value has no place in the type; the comparisons answer
+  in the flags.
+- **Chunk 5** is the C99 library: classification, `fenv.h` over the FPA's
+  status, rounding and remainders, `snprintf`, `vsnprintf` and the `vscanf`
+  family, the `long long` functions, the float and C99 elementary functions,
+  the gamma and error functions, `fma` — its exact sum rounded to the FPA's
+  extended precision, then to the answer's, as RISC OS 5.30's is — the
+  complex arithmetic, 64-bit file positions, `aligned_alloc`, `quick_exit`
+  and `timespec_get`. Chunks 7, 8 and 9 give its mathematics, its complex
+  arithmetic and the rest again under their own numbers, each entry chunk
+  5's very routine; chunk 9 adds an `atexit` of its own.
+- **Chunk 6** is the atomic operations on objects of one, two, four and
+  eight bytes — store, load, exchange, compare-and-exchange, the fetches, a
+  fence, and the flag's test-and-set and clear — a memory order changing
+  nothing.
+- **Values and flags** are RISC OS 5.30's. A float function is the FPA's
+  single-precision instruction where it has one — the circular functions,
+  `expf`, `logf`, `log10f`, `sqrtf`, `powf` and `atan2f` — and otherwise
+  works its double's form and narrows it, an exception it traps, or an
+  overflow in the narrowing, raised with the client's flags as they were on
+  entry; `tgammaf`'s overflow traps with its work's inexact flag raised.
+  `llroundf` steps only its truncation's low word, so a value from −1 to −½
+  answers 2³² − 1, and `log2f` of a power of two answers its exponent field
+  less a double's bias, `log2f(1)` −896, as RISC OS 5.30's do.
+- **Complex arithmetic** works a finite argument by its function's formula —
+  Kahan's `CTANH` and his definitions of `cacos` and `cacosh` (W. Kahan,
+  "Branch Cuts for Complex Elementary Functions", 1987) among them — and
+  takes any other's special value from C99's Annex G, raising only the
+  invalid operation the annex names. The compiler's multiply and divide
+  helpers work the textbook forms at extended precision, each part rounded
+  once. As RISC OS 5.30's do, `catanh` answers `casinh` for a real part whose
+  sign bit is set, so `catan` answers `casin` where the imaginary part's is
+  clear, and `cacosh` of a NaN over an infinite imaginary part answers that
+  infinity as its own.
+
+The crate's tests run the probe programs that recorded RISC OS 5.30 — BBC
+BASIC V assembling a C client — or replay their records through the
+library's own entries, and hold the library to what they found.
+
+Known differences from RISC OS 5.30, each deliberate:
+
+- `_kernel_escape_seen` answers 1 after an escape, as the PRM says; RISC OS
+  5.30 answered 0 after every escape recorded;
+- `_kernel_stkovf_copyargs` and `_kernel_stkovf_copy0args` move the frame and
+  its arguments as the PRM describes and return; RISC OS 5.30 moves them,
+  then corrupts R4 to R9 and branches through zero;
+- stack extension asked for in a privileged mode is an uncaught trap error at
+  once; RISC OS 5.30 hangs;
+- unwinding back across an extension puts SL in the chunk before, as the PRM
+  says; RISC OS 5.30 leaves it as it was given;
+- a trap the library raises itself dumps R0 to R3 as the caller had them,
+  where RISC OS 5.30's hold its own;
+- the kernel's and the C library's statics, past what a client is told of,
+  are laid out as TAIRiX Bridge's own;
+- `LibInit` refuses a vector whose limit lies below its base as out of date,
+  where RISC OS 5.30's writes on until it faults, and reads at most 1024
+  descriptions, a list not ended by then naming an unknown chunk;
+- `sinh` and `cosh` of an argument between 1 and 19 in magnitude are within
+  one place of RISC OS 5.30's, whose evaluation there is not known; the
+  complex circular and hyperbolic functions are within two places of its
+  where their hyperbolic argument lies there;
+- `acosh` and `asinh` at a few arguments are a place or two from RISC OS
+  5.30's, which inherit a square root FPEmulator gives places off;
+- `lgamma`, `tgamma`, `erf` and `erfc` are within a small part of RISC OS
+  5.30's, whose approximations are not known: 2·10⁻¹² for `lgamma`,
+  5·10⁻¹⁰ for `tgamma`, 10⁻¹³ for `erf` and `erfc`, 10⁻⁵ for the float gamma
+  functions and two places for `erfcf` — a part of one rather than of the
+  answer for `lgamma` and `lgammaf` below one, a logarithm erring absolutely
+  by its Γ's relative error;
+- a complex inverse function's part that is the logarithm of a magnitude
+  within a rounding of one, as near a branch point, is within 2⁻⁶² of RISC
+  OS 5.30's, which rests on FPEmulator's extended arithmetic;
+- `cpow`'s parts are within 2⁻⁶⁰ of the answer's larger part of RISC OS
+  5.30's, whose sines and cosines near a multiple of π/2 are FPEmulator's;
+- `cacosh(±0 ± i0)` answers `+0 ± iπ/2` as C99 gives, where RISC OS 5.30's
+  real part is 1.37·10⁻¹⁶;
+- `cproj` answers the projection C99 gives, where RISC OS 5.30's returns
+  without answering;
+- the complex division helpers answer NaN parts for a NaN operand, where
+  RISC OS 5.30's real part is one or nought;
+- `ctanh` and `ctan` flag an underflow where a square they work underflows,
+  where RISC OS 5.30's flag none if both parts are nonzero;
+- a NaN answer's sign, which C leaves unspecified, can differ;
+- `%a` writes a double's hexadecimal digits exactly, rounded half to even to
+  a precision, where RISC OS 5.30's often add one to the thirteenth;
+- `strftime`'s `%Z` names the host's zone;
+- `asctime` and `strftime` write `???` for a weekday or month out of range;
+- `strerror`'s texts and the library's own reports are in TAIRiX Bridge's
+  words;
+- a write straight after a read on an update stream, which C leaves
+  undefined, is written, where RISC OS 5.30 refuses it;
+- `aligned_alloc` of no size asks for a block of the least size, four
+  bytes, where RISC OS 5.30's can leave an aligned block of no size, which
+  `free` has no list for;
+- `qsort` given a comparison that orders inconsistently sorts no further a
+  range its scan ran out of, where RISC OS 5.30's sorts on past the array.
+
+## Support modules
+
+### FPEmulator
+
+FPEmulator 4.39, the multiple-context emulator its help string's `(1.13M)`
+names, as its ten SWIs answer on RISC OS 5.30. The FPA is the processor's;
+the module keeps the floating point contexts its state is switched between.
+
+- **Contexts.** A context is a block of 136 bytes, `FPEmulator_ContextLength`'s
+  answer, laid out as FPEmulator lays one: each register's three words in its
+  internal format and a nought, then the FPSR and a nought. While a context is
+  current its state is the FPA's; `DeactivateContext` keeps it in the block,
+  `ActivateContext` loads one, and `ChangeContext` does both, answering the
+  context it replaced. −1 names the default context, the module's own and
+  current from the start; −2 the current context, where a call takes it; 0
+  none, under which every FPA instruction is an undefined instruction on
+  either profile's processor.
+- **A fresh context**, as `InitContext` lays one and the default starts, has
+  every register nought and its invalid operation, division by zero and
+  overflow traps enabled.
+- **Saving and loading.** `SaveContext` writes a context's FPSR, then each
+  register as `STFE` stores it, raising nothing; `LoadContext` reads the same
+  form, the FPSR's system ID kept as `WFS` keeps it.
+- **A trap** an enabled exception takes writes the registers as the
+  instruction left them, R15 past it, into the exception register dump, and
+  the FPA's in `SaveContext`'s form into the dump `ExceptionDump` answers,
+  then raises FPEmulator's error, &80000200 onward.
+
+Known differences from RISC OS 5.30, each deliberate:
+
+- the processor executes each FPA instruction whole, so `FPEmulator_Abort`
+  finds nothing to abandon and answers nought, and `SaveContext` never has a
+  pending exception to report.
+
+### VFPSupport
+
+VFPSupport 0.18, the interface the ROOL wiki documents: its eleven SWIs, its
+contexts, the lazy context switch and the elementary functions. RPCEmu has no
+VFP, so nothing of it could be recorded; where the wiki leaves a value open,
+TAIRiX Bridge chooses it. The unit is the 32-bit profile's processor's,
+whichever profile is running.
+
+- **Contexts.** `CheckContext` sizes one: 20 bytes and 8 a doubleword, for 1
+  to 32 doublewords and the user-mode and application-space flags.
+  `CreateContext` lays one in the caller's word-aligned buffer, or in the RMA
+  where R2 is nought, with R3 as its FPSCR, as `VMSR` writes it, and FPEXC.EN
+  clear, so its first activation loads no data registers. The layout is VFPSupport's own, as the
+  wiki allows: a mark, the flags and the register count, then the FPSCR,
+  FPEXC and each doubleword low word first, which `ExamineContext`'s
+  descriptor gives (fields 0, 1 and 5).
+- **Activation.** While a context is active its state is the unit's, loaded
+  with FPEXC.EN set, and CPACR grants the unit to the privileged modes, or to
+  every mode for a context made with the user-mode flag. `ChangeContext` saves the
+  context the unit holds and loads the new one, or with the lazy flag only
+  denies the unit; changing application space saves a context there at once.
+  With no context active, or one awaiting lazy activation, CPACR grants the
+  unit to no mode.
+- **The lazy switch.** VFPSupport claims the undefined instruction vector.
+  Where a context awaits activation and the instruction the processor found
+  undefined is one of the unit's (A32 or T32), it saves the context the unit
+  held, loads the awaited one, and runs the instruction again. Lazily back to
+  the context the unit still holds saves and loads nothing. Anything else is
+  passed on to the vector's owner before it. An access of the switch that
+  aborts aborts the instruction, reported at its address; an awaited context
+  no longer there leaves the null context active and the instruction
+  undefined.
+- **The rest.** `DestroyContext` activates the replacement where the context
+  was active and frees one VFPSupport made. `FastAPI` answers the four
+  routines, which behave as their SWIs. `Features` answers the unit's FPSID,
+  MVFR0, MVFR1 and MVFR2, no trapped exceptions, and short vectors in
+  hardware. `ExceptionDump` keeps the copy a caller makes until it is
+  cleared. `ElementaryFunctions` answers the two tables of twelve; each entry
+  executes one of the unit's instructions, so the unit's gate stands before a
+  function as before any instruction, then computes from the first registers
+  into the first under the FPSCR's controls, gathering its flags. Every value
+  is correctly rounded, through `lib/softfloat`'s IEEE 754 functions.
+- **Killing it** saves the context the unit holds into its area, frees any
+  exception dump and gives the vector back; while a later claimant holds the
+  vector, VFPSupport refuses to die.
+
+Known differences from RISC OS 5's VFPSupport, each deliberate:
+
+- the version, the context layout, its mark, and the error numbers are TAIRiX
+  Bridge's. A malformed call gives "Invalid parameters" (&1EA) and an unknown
+  `Features` reason the heap's "No such reason code" (&180), the kernel's own
+  errors of the same meaning;
+- the unit traps no exception, so `Features` 1 answers nought and the dump
+  holds only what a caller made;
+- the unit's gate is CPACR, so with no context active, or one awaiting
+  activation, privileged code reaches neither FPSID nor FPEXC, where FPEXC.EN
+  clear would leave both reachable;
+- `ExamineContext`'s serialisation leaves the context's state in its area
+  alone, the unit holding none of it, so a debugger's change to the area is
+  what the next activation loads;
+- `CreateContext` checks its flags and register count even with a buffer
+  given;
+- `FastAPI`'s workspace pointer is nought: the routines need none.
+
+### CallASWI
+
+CallASWI 0.15, the version whose SWIs the ROOL wiki lists as newest, is
+present for an `*RMEnsure` to find. RISC OS 5's kernel performs `OS_CallASWI`
+and every other SWI the module brings to older systems itself, so the module
+provides nothing of its own.
+
+### Squash
+
+Squash 0.31's `Squash_Compress` and `Squash_Decompress` are `lib/compress`'s
+Squash ([`tairix-compress`](../lib/compress.md)), which writes and reads the
+stream as RISC OS 5.30's module does: byte for byte, and call by call the
+input taken, output made and status answered, held to the streams and call
+traces the module was recorded making.
+
+- **The stream** is Unix `compress`'s with 12-bit codes, after its
+  three-byte header, written and read a group of eight codes at a time: a
+  call takes input only in whole groups while more follows, and holds a
+  finished group its output has no room for until the next.
+- **Two compressors.** A stream's first call decides how its table is
+  cleared once full: a call given the whole input and room for half as much
+  again and the header clears at once; any other clears every 32 KiB of
+  input. Later calls keep the first one's way.
+- **The workspace** holds the whole of a stream, &7C00 bytes to compress
+  and &4400 to decompress, as the query (R0 bit 3) answers; a compression's
+  R1 answers the most R1 bytes compress to, half as much again and twelve,
+  −1 staying −1, and a decompression's −1. A call carrying on (bit 0) finds
+  its stream there, its state checked before it is believed, since a
+  program may have written over it.
+- **Errors** are the module's numbers: &921 for memory the call cannot
+  reach, &922 for input that is no Squash stream, &923 for a workspace
+  holding nothing to carry on, &924 for flags out of shape.
+
+A Squash file — `SQSH`, the file's length, load and execution addresses,
+then the stream — opens on the desktop as a volume of its one file
+([Archive driver](../filesystem/archive.md)), so a file a program squashes
+is the user's to open.
+
+Known differences from RISC OS 5.30, each deliberate:
+
+- an empty input compresses to the stream's header alone, which decompresses
+  to nothing, where the module aborts; and a header alone at the end of
+  input is a finished stream, where the module asks for more;
+- a first call that writes nothing — no input with more to come, or no room
+  for the header — loses nothing: the header is written with the first byte
+  taken, where the module's stream then holds its header alone;
+- a code no table could hold is refused (&922) rather than decoded as
+  whatever the table holds;
+- bit 2, "the output fits", changes nothing a call makes, so a call never
+  writes past the room it is given, where the module overruns it;
+- an unaligned workspace is refused (&923) where the module hangs.
+
+### BufferManager
+
+BufferManager 0.39 holds the buffers device drivers and DeviceFS share,
+reached through `InsV`, `RemV` and `CnpV`, whose default it is while it is
+active; a buffer it does not know goes to the kernel's own, the keyboard's
+and the five of buffers 4 to 8. A buffer is a ring in guest memory holding a
+byte fewer than its size, its record charged 44 bytes of the RMA, its
+internal ID its record's place, as RISC OS 5 numbers them.
+
+- **Its SWIs** (`&42940` to `&42949`) make a buffer in the RMA or register
+  the caller's memory, from handle `&100` or the one asked for; remove,
+  deregister, read and change flags and information, link and unlink a
+  device's wake-up routine and owner, set a threshold, and hand out
+  `Buffer_InternalInfo`'s service routine, whose reasons 0 to 9 insert,
+  remove, examine and count bytes and blocks, purge, and find the next
+  filled run.
+- **At its start** it makes the mouse (9), serial input (1) and output (2)
+  and printer (3) buffers, in that order, the printer's as large as
+  `*Configure PrinterBufferSize` says.
+- **Its flags** wake a dormant buffer's device as data comes, raise
+  `Event_OutputEmpty` and `Event_InputFull`, and issue `UpCall` 8 and 9 as
+  its free space crosses its threshold.
+
+Known differences from RISC OS 5, each deliberate:
+
+- the kernel's serial, printer and mouse buffers are BufferManager's, in the
+  RMA, where RISC OS 5's lie in kernel workspace;
+- a reason past 9 of the service routine is refused where RISC OS 5's jumps
+  out of its table, and a block insertion into the kernel's own buffers is
+  taken where RISC OS 5's aborts.
+
+### MimeMap
+
+MimeMap 0.19's `MimeMap_Translate` and `*MimeMap` answer from TAIRiX's own
+type registry: `lib/browse`'s media types, each with its MIME type, its
+extensions and the RISC OS file type a file of it is given, and FileSwitch's
+names for file types. The guest and the desktop therefore give a type one
+meaning.
+
+- **`MimeMap_Translate`** translates R1, in the form R0 names, into the
+  form R2 names: 0 a file type, 1 a file type's name, 2 a MIME type, 3 an
+  extension. A file type is answered in R3; the others are written at R3 and
+  ended with a zero, as RISC OS 5.30 writes them, with no length given.
+  Names are the system's, an unnamed type's `&xxx`. A MIME type is read to
+  its first control character or space, an extension only to its zero, its
+  leading dot optional, and both, like a name, without regard to case. A
+  form R0 does not know is refused (&B00001); one R2 does not know answers
+  nothing; a value nothing maps is refused (&B00002).
+- **`*MimeMap`** shows the mapping a file type (`&xxx`), extension (`.ext`),
+  MIME type or file type name has — its MIME type, its file type and name,
+  then its extensions — or with nothing given, every mapping.
+  `*ReadMimeMap` succeeds: the mappings are built in.
+
+Known differences from RISC OS 5.30, each deliberate:
+
+- the mappings are TAIRiX's, not those of the file `Inet$MimeMappings`
+  names, so `*ReadMimeMap` has nothing to read and no file is missed;
+- each answer is the one mapping's that matches, where the module takes
+  each field from the first line of its file holding one;
+- a type number past &FFF maps nothing, where a file's `*` line maps every
+  number.
 
 ## The reference harness
 

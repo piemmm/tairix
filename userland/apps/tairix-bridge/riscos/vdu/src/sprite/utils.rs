@@ -22,6 +22,7 @@ const TAIL_MOST: usize = 1024;
 pub(crate) static SPRITE_UTILS: Builtin = Builtin {
     title: "SpriteUtils",
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: None,
     services: None,

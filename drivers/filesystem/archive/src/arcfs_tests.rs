@@ -97,9 +97,8 @@ fn compressed(plain: &[u8], bits: u8) -> (Vec<u8>, u32) {
             true
         }
     }
-    let mut encoder =
-        tairix_compress::arc::Encoder::new(vec![0u32; tairix_compress::arc::ENCODER_WORK], bits)
-            .unwrap();
+    let work = vec![0u8; tairix_compress::arc::encoder_work(bits, u64::MAX)];
+    let mut encoder = tairix_compress::arc::Encoder::new(work, bits).unwrap();
     let mut out = Gathered(Vec::new());
     encoder.write(plain, &mut out).unwrap();
     encoder.finish(&mut out).unwrap();

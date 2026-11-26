@@ -582,7 +582,7 @@ struct Writer<'w, 'c, 's, 'r, A> {
     sink: &'s mut Sink<'r, A>,
     placed: &'w mut Vec<Placed>,
     /// The compressor's dictionary, kept from member to member.
-    work: &'w mut Vec<u32>,
+    work: &'w mut Vec<u8>,
 }
 
 impl<A: VolumeAccess> Writer<'_, '_, '_, '_, A> {
@@ -763,12 +763,12 @@ impl<A: VolumeAccess> Writer<'_, '_, '_, '_, A> {
 pub(crate) fn compress_into<A: VolumeAccess>(
     content: &mut Content<'_, A>,
     sink: &mut Sink<'_, A>,
-    work: &mut Vec<u32>,
+    work: &mut Vec<u8>,
     node: (u64, u64),
     data: &Data,
 ) -> Result<u16, DriverError> {
     let len = data.len();
-    let need = arc::encoder_work(len);
+    let need = arc::encoder_work(WRITE_BITS, len);
     if work.len() < need {
         work.try_reserve(need - work.len())
             .map_err(|_| DriverError::OutOfMemory)?;

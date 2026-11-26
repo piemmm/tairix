@@ -193,6 +193,9 @@ pub struct Cpu {
     it_written: bool,
     cp15: Cp15,
     fpa: Fpa,
+    /// Whether the floating point system has a context for the FPA's
+    /// instructions to work in.
+    fpa_active: bool,
     vfp: Vfp,
     memo: Memo<u32, 2>,
     thumb: Memo<Thumb, 1>,
@@ -223,6 +226,7 @@ impl Cpu {
             it_written: false,
             cp15: Cp15::new(profile.system, profile.isa),
             fpa: Fpa::new(),
+            fpa_active: true,
             vfp: Vfp::new(),
             memo: Memo::new(memo_pages, 0, Decoded::arm(0, profile)),
             thumb: Memo::new(memo_pages, thumb_zero, Decoded::thumb(thumb_zero, profile)),
@@ -527,6 +531,13 @@ impl Cpu {
         &mut self.vfp
     }
 
+    /// CPACR's grant of VFP and Advanced SIMD made `access`, as a privileged
+    /// `MCR` writing both their fields makes it; a processor without them
+    /// grants nothing.
+    pub const fn grant_simdfp(&mut self, access: crate::vfp::Access) {
+        self.cp15.set_simdfp_access(access.field());
+    }
+
     /// Replaces the CPSR, switching banks if its mode changes, and holds the
     /// PC and IT state to what its state can hold; refused if it names a
     /// mode the profile does not have.
@@ -784,7 +795,7 @@ impl Cpu {
     }
 
     const fn itstate(&self) -> u8 {
-        itstate_of(self.cpsr)
+        psr::itstate(self.cpsr)
     }
 
     /// Moves the IT state on to the block's next instruction, or out of the
@@ -825,17 +836,10 @@ impl Cpu {
     }
 }
 
-/// The IT state `cpsr` holds: the condition and mask of the block in
-/// progress, zero outside one.
-const fn itstate_of(cpsr: u32) -> u8 {
-    let bits = ((cpsr >> 25) & 3) | (((cpsr >> 10) & 0x3F) << 2);
-    bits.to_le_bytes()[0]
-}
-
 /// Whether an exception return may restore the IT state `cpsr` holds: never
 /// to ARM state, nor a reserved value, as ARMv8 defines it.
 const fn restorable_itstate(cpsr: u32) -> bool {
-    let itstate = itstate_of(cpsr);
+    let itstate = psr::itstate(cpsr);
     // A condition with no block left to give it.
     let reserved = itstate != 0 && itstate.trailing_zeros() >= 4;
     !reserved && (cpsr & psr::T != 0 || itstate == 0)

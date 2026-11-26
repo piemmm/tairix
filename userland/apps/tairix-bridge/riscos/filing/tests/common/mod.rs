@@ -5,6 +5,7 @@
     reason = "each test crate including this uses the helpers its own tests need"
 )]
 
+pub mod programs;
 pub mod served;
 
 use tairix_riscos_filing::filecore::{code, numbered};

@@ -115,15 +115,21 @@ impl Decimal {
     }
 }
 
+/// The significant digits [`exact_digits`] reads in full; past them a digit
+/// counts only as nought or not. Every binary format up to double precision
+/// rounds the value read either way alike, as none has a rounding boundary
+/// with more significant digits: double precision's longest has 768.
+pub const KEPT_DIGITS: u32 = 800;
+
 /// The value `digits` (each 0 to 9, the most significant first) times ten
 /// to `exponent` read as [`Decimal::exact`] reads one, however many digits
-/// there are: every one of them counts, so a value lying exactly on a tie
-/// is read as one.
+/// there are: the first [`KEPT_DIGITS`] significant ones count in full, so a
+/// value lying exactly on a tie is read as one, and those past them stand as
+/// one digit, nought or one as they are all nought or not.
 ///
 /// # Errors
 ///
-/// [`Beyond`] for a value past double-extended's range, or with more
-/// digits than conversion has room for, which no value in its range needs.
+/// [`Beyond`] for a value past double-extended's range.
 pub fn exact_digits(
     negative: bool,
     digits: impl IntoIterator<Item = u8>,
@@ -156,10 +162,16 @@ pub fn exact_digits(
     }
     let mut big = Big::from_u128(significand);
     let (mut chunk, mut place) = (0, 1);
+    let (mut past, mut past_nonzero) = (0u64, false);
     for digit in digits {
+        if count == KEPT_DIGITS {
+            past = past.saturating_add(1);
+            past_nonzero |= digit != 0;
+            continue;
+        }
         chunk = chunk * 10 + u32::from(digit.min(9));
         place *= 10;
-        count = count.checked_add(1).ok_or(Beyond::Above)?;
+        count += 1;
         if place == CHUNK {
             if !big.mul(CHUNK) || !big.add(chunk) {
                 return Err(Beyond::Above);
@@ -170,7 +182,21 @@ pub fn exact_digits(
     if place > 1 && (!big.mul(place) || !big.add(chunk)) {
         return Err(Beyond::Above);
     }
-    scaled(negative, big, count, exponent)
+    let mut exponent = i64::from(exponent);
+    if past > 0 {
+        if !big.mul(10) || !big.add(u32::from(past_nonzero)) {
+            return Err(Beyond::Above);
+        }
+        count += 1;
+        exponent = exponent.saturating_add(i64::try_from(past - 1).unwrap_or(i64::MAX));
+    }
+    // An exponent past `i32`'s puts the value past every format's range too.
+    scaled(
+        negative,
+        big,
+        count,
+        i32::try_from(exponent).unwrap_or(i32::MAX),
+    )
 }
 
 /// `n × 10^exponent`, `n` not zero, exactly enough to round and positive,

@@ -86,6 +86,12 @@ impl Stream {
         self.status & bit != 0
     }
 
+    /// Whether its filing system opened it with read access.
+    #[must_use]
+    pub const fn readable(&self) -> bool {
+        self.info & file_info::READ != 0
+    }
+
     /// Its [`status`] `bit` set or cleared.
     pub fn mark(&mut self, bit: u32, set: bool) {
         if set {
@@ -111,10 +117,24 @@ fn index(handle: u32) -> Option<usize> {
     usize::try_from(handle.checked_sub(1)?).ok()
 }
 
+/// What a handle has: nothing, a hold for the file being opened on it, or
+/// the file open on it.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the table of every handle's slot is claimed whole and fallibly once; a boxed open file would be an allocation at each open that could not fail as a value"
+)]
+enum Slot {
+    #[default]
+    Free,
+    Held,
+    Open(Open),
+}
+
 /// The open files, by handle.
 #[derive(Debug, Default)]
 pub struct Files {
-    open: Vec<Option<Open>>,
+    open: Vec<Slot>,
 }
 
 impl Files {
@@ -125,12 +145,22 @@ impl Files {
     }
 
     fn slot(&self, handle: u32) -> Option<&Open> {
-        self.open.get(index(handle)?)?.as_ref()
+        match self.open.get(index(handle)?)? {
+            Slot::Open(open) => Some(open),
+            Slot::Free | Slot::Held => None,
+        }
     }
 
     /// The file on `handle` taken out of the table.
     fn take(&mut self, handle: u32) -> Option<Open> {
-        self.open.get_mut(index(handle)?)?.take()
+        let slot = self.open.get_mut(index(handle)?)?;
+        match core::mem::take(slot) {
+            Slot::Open(open) => Some(open),
+            other => {
+                *slot = other;
+                None
+            }
+        }
     }
 
     /// The file open on `handle`.
@@ -141,16 +171,38 @@ impl Files {
 
     /// `stream` written back to `handle`, where a file is still open on it.
     pub fn put(&mut self, handle: u32, stream: Stream) {
-        if let Some(Some(open)) = index(handle).and_then(|i| self.open.get_mut(i)) {
+        if let Some(Slot::Open(open)) = index(handle).and_then(|i| self.open.get_mut(i)) {
             open.stream = stream;
         }
     }
 
-    /// The highest handle no file is open on.
-    fn free(&self) -> Option<u32> {
-        (1..=HANDLES)
-            .rev()
-            .find(|&handle| self.slot(handle).is_none())
+    /// The highest handle neither open nor held, held for a file being
+    /// opened; none where every handle is taken, or the table has no room.
+    fn hold(&mut self) -> Result<Option<u32>, ()> {
+        if self.open.is_empty() {
+            self.open
+                .try_reserve_exact(HANDLES as usize)
+                .map_err(drop)?;
+            self.open.resize(HANDLES as usize, Slot::Free);
+        }
+        let free = (1..=HANDLES).rev().find(|&handle| {
+            index(handle)
+                .and_then(|i| self.open.get(i))
+                .is_some_and(|slot| *slot == Slot::Free)
+        });
+        if let Some(slot) = free.and_then(index).and_then(|i| self.open.get_mut(i)) {
+            *slot = Slot::Held;
+        }
+        Ok(free)
+    }
+
+    /// The hold on `handle` let go, where no file was opened on it.
+    fn release(&mut self, handle: u32) {
+        if let Some(slot) = index(handle).and_then(|i| self.open.get_mut(i)) {
+            if *slot == Slot::Held {
+                *slot = Slot::Free;
+            }
+        }
     }
 
     /// The name the file on `handle` was opened by: its filing system's
@@ -193,9 +245,10 @@ pub(crate) fn put(os: &mut Os<'_>, handle: u32, stream: Stream) -> Result<(), Fa
     with(os, |state| state.files.put(handle, stream))
 }
 
-/// Records on `handle` a file the filing system opened as `opened`, by the
-/// name `resolved`: the handle. A buffer size the protocol does not allow,
-/// or one there is no room for, is refused, the file closed again.
+/// Records on `handle`, which [`holding`] holds, a file the filing system
+/// opened as `opened`, by the name `resolved`: the handle. A buffer size the
+/// protocol does not allow, or one there is no room for, is refused, the
+/// file closed again.
 pub(crate) fn record(
     os: &mut Os<'_>,
     resolved: Resolved,
@@ -249,16 +302,9 @@ pub(crate) fn record(
         special,
     };
     let placed = with(os, |state| {
-        let files = &mut state.files;
-        if files.open.is_empty() {
-            if files.open.try_reserve_exact(HANDLES as usize).is_err() {
-                return false;
-            }
-            files.open.resize(HANDLES as usize, None);
-        }
-        match index(handle).and_then(|i| files.open.get_mut(i)) {
-            Some(slot @ None) => {
-                *slot = Some(open);
+        match index(handle).and_then(|i| state.files.open.get_mut(i)) {
+            Some(slot @ Slot::Held) => {
+                *slot = Slot::Open(open);
                 true
             }
             _ => false,
@@ -274,12 +320,22 @@ pub(crate) fn record(
     Ok(handle)
 }
 
-/// The handle the next file opened takes, or "too many open files".
-pub(crate) fn next_handle(os: &mut Os<'_>) -> Result<u32, Fail> {
-    match with(os, |state| state.files.free())? {
-        Some(handle) => Ok(handle),
-        None => Err(error::fail(os, error::TOO_MANY_OPEN, &[])),
-    }
+/// `open` given the handle the file it opens takes, which [`record`] it is
+/// recorded on: the handle is held while `open` works, so a file a filing
+/// system opens meanwhile takes another, as on RISC OS 5, and let go after
+/// whatever `open` comes to. "Too many open files" where none is free.
+pub(crate) fn holding<T>(
+    os: &mut Os<'_>,
+    open: impl FnOnce(&mut Os<'_>, u32) -> Result<T, Fail>,
+) -> Result<T, Fail> {
+    let handle = match with(os, |state| state.files.hold())? {
+        Ok(Some(handle)) => handle,
+        Ok(None) => return Err(error::fail(os, error::TOO_MANY_OPEN, &[])),
+        Err(()) => return Err(os.no_memory()),
+    };
+    let opened = open(os, handle);
+    with(os, |state| state.files.release(handle))?;
+    opened
 }
 
 /// The held block written back, if it was written to.
@@ -615,7 +671,8 @@ fn new_stamp((load, exec): (u32, u32), now: u64) -> (u32, u32) {
 /// Closes the file on `handle`: its held block written back, a writable
 /// one's extent set, and, if it was written to, its stamp renewed and
 /// `UpCall_ModifyingFile` told, before the filing system closes it; its
-/// handle and buffer let go of.
+/// handle and buffer let go of, unless the filing system refuses the close,
+/// which leaves the file open, as RISC OS 5 leaves it.
 pub(crate) fn close(os: &mut Os<'_>, handle: u32) -> Result<(), Fail> {
     close_stamped(os, handle, true)
 }
@@ -658,15 +715,14 @@ pub(crate) fn close_stamped(os: &mut Os<'_>, handle: u32, restamp: bool) -> Resu
             stamp.1,
         )?;
     }
-    let closed = call::close(os, &stream.calls, stream.handle, stamp.0, stamp.1);
+    call::close(os, &stream.calls, stream.handle, stamp.0, stamp.1)?;
     let taken = with(os, |state| state.files.take(handle))?;
     let Some(taken) = taken else {
-        return closed;
+        return Ok(());
     };
     if let Some(buffer) = taken.stream.buffer {
         os.rma_free(buffer.at)?;
     }
-    closed?;
     if stream.created {
         let made = Info {
             kind: call::FILE,
@@ -720,7 +776,10 @@ pub(crate) fn close_beneath(os: &mut Os<'_>, at: u32) -> Result<u32, Fail> {
 }
 
 /// Closes every open file, or every one on the filing system `number`: the
-/// images among them first, their image filing systems told.
+/// images among them first, their image filing systems told; then the rest
+/// from the highest handle down, as RISC OS 5 closes them, each still open
+/// when its turn comes — a filing system may close another file itself — and
+/// every one tried though one refuses, the first refusal answered.
 pub(crate) fn close_all(os: &mut Os<'_>, number: Option<u8>) -> Result<(), Fail> {
     if os.extension::<super::State>().is_none() {
         return Ok(());
@@ -733,10 +792,20 @@ pub(crate) fn close_all(os: &mut Os<'_>, number: Option<u8>) -> Result<(), Fail>
         Some(state) => state.files.handles(number),
         None => return Ok(()),
     };
-    for handle in handles {
-        close(os, handle)?;
+    let mut refused = None;
+    for handle in handles.into_iter().rev() {
+        if with(os, |state| state.files.stream(handle).is_none())? {
+            continue;
+        }
+        match close(os, handle) {
+            Ok(()) => {}
+            Err(Fail::Error(error)) => {
+                refused.get_or_insert(Fail::Error(error));
+            }
+            Err(unwind) => return Err(unwind),
+        }
     }
-    Ok(())
+    refused.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]

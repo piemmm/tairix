@@ -18,11 +18,20 @@ Stability: `experimental`.
     and the path made absolute against the filing system's directories, its
     wildcards matched, as RISC OS 5's FileSwitch does before a filing system
     sees it; path variables.
-  - `open` — open files: handles from 255 down, one buffer a file of its
-    natural block size, whole blocks moved straight to and from the caller's
-    memory.
+  - `open` — open files: handles from 255 down, each held while its filing
+    system opens it, one buffer a file of its natural block size, whole
+    blocks moved straight to and from the caller's memory.
   - `OS_File`, `OS_Find`, `OS_Args`, `OS_BGet`, `OS_BPut`, `OS_GBPB` and
     `OS_FSControl`, each in its own module.
+- `devicefs` — DeviceFS, `devices:`: the devices drivers register and the
+  streams opened on them, a byte at a time or through BufferManager.
+- `systemdevices` — SystemDevices: `null:`, `printer:`, `vdu:`, `rawvdu:`,
+  `kbd:` and `rawkbd:`.
+- `pipefs` — PipeFS, `pipe:`: named pipes between a reader and a writer, and
+  `*PipeCopy`.
+- `hostfs`, `filecore`, `ramfs`, `obey`, `bootcommands`, `boot`, `mimemap` —
+  the session's files, FileCore and the RAM disc, Obey files, the boot
+  sequence and its commands, and MIME type mappings.
 
 What FileSwitch hands a filing system — a path, a special field, a block to be
 filled — is built below the supervisor stack, so a filing system calling

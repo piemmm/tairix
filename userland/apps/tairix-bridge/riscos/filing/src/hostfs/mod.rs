@@ -23,15 +23,16 @@ use alloc::vec::Vec;
 
 use tairix_fscopy::tree::Dir as _;
 use tairix_riscos_kernel::error::Error;
-use tairix_riscos_kernel::filing::fs::{block, info, Declaration};
+use tairix_riscos_kernel::filing::fs::info;
 use tairix_riscos_kernel::filing::UNSUPPORTED;
 use tairix_riscos_kernel::module::{Builtin, Command, Resource, Services};
 use tairix_riscos_kernel::msgtrans::{Own, OwnFile};
-use tairix_riscos_kernel::os::{len32, Fail, Os, Regs, Unwind, World};
+use tairix_riscos_kernel::os::{quietly, Fail, Os, Regs, Unwind, World};
 use tairix_riscos_kernel::service::FS_REDECLARE;
 use tairix_riscos_kernel::swi::os::{fs_control, FS_CONTROL};
 use tairix_riscos_kernel::swi::X;
 
+use crate::declared::Declared;
 use crate::filecore::{code, numbered};
 use protocol::{Refusal, Reply, Request};
 
@@ -45,26 +46,29 @@ const INFO: u32 =
 
 /// Its messages, in the emulator's own words.
 const MESSAGES: &[u8] = include_bytes!("../../resources/HostFS/Messages");
-/// Its messages' file, kept at its workspace's start.
-const MESSAGES_FILE: OwnFile = OwnFile::named(b"Resources:$.Resources.HostFS.Messages\0");
 /// The filing system's name, its module's title and the command that
 /// selects it.
 pub const NAME: &str = "HostFS";
 
-/// Where its workspace keeps, after its messages' file, the information
-/// block and the name.
-const BLOCK_AT: u32 = MESSAGES_FILE.room();
-const NAME_AT: u32 = BLOCK_AT + 4 * len32(block::WORDS);
-const EMPTY_AT: u32 = (NAME_AT + len32(NAME.len() + 1)).next_multiple_of(4);
-const WORKSPACE: u32 = EMPTY_AT + 4;
-
 /// The first of its routines that are its entries, which are all it has.
 const ENTRIES: usize = 0;
+
+/// Its filing system.
+static DECLARED: Declared = Declared {
+    module: &HOST_FS,
+    messages: OwnFile::named(b"Resources:$.Resources.HostFS.Messages\0"),
+    name: NAME.as_bytes(),
+    first_entry: ENTRIES,
+    gbpb: false,
+    info: INFO,
+    extra: 0,
+};
 
 /// HostFS.
 pub static HOST_FS: Builtin = Builtin {
     title: NAME,
     help_name: None,
+    help_suffix: None,
     bridge: false,
     swis: None,
     services: Some(Services {
@@ -200,11 +204,7 @@ fn with<T>(os: &mut Os<'_>, work: impl FnOnce(&mut State) -> T) -> Result<T, Fai
 /// Its initialisation: its workspace, the roots the relay gives and `Scrap`
 /// as its discs, and the filing system registered.
 fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    let workspace = os.rma_claim(WORKSPACE)?;
-    os.write_word(regs.r[12], workspace)?;
-    let messages = MESSAGES_FILE.place(os, workspace)?;
-    os.write_terminated(workspace + NAME_AT, NAME.as_bytes(), 0, NAME.len() + 1)?;
-    os.write_word(workspace + EMPTY_AT, 0)?;
+    let (workspace, messages) = DECLARED.made(os, regs.r[12])?;
     let Roots {
         seed,
         own,
@@ -259,7 +259,7 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         cache,
         next_key: 0,
     })?;
-    declare(os, workspace)?;
+    DECLARED.declare(os, workspace)?;
     os.set_string_variable(SCRAP_DIR, &scrap_dir)
 }
 
@@ -310,32 +310,12 @@ fn discs(os: &mut Os<'_>) -> Roots {
     }
 }
 
-/// HostFS registered with FileSwitch from its information block, built in
-/// its workspace.
-fn declare(os: &mut Os<'_>, workspace: u32) -> Result<(), Fail> {
-    os.declare_filing_system(Declaration {
-        module: &HOST_FS,
-        first_entry: ENTRIES,
-        block: workspace + BLOCK_AT,
-        name: workspace + NAME_AT,
-        startup: workspace + EMPTY_AT,
-        info: INFO,
-        workspace,
-    })
-}
-
 /// Its service handler: `Service_FSRedeclare`, HostFS registered again.
 fn service(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Unwind> {
     if regs.r[1] != FS_REDECLARE {
         return Ok(());
     }
-    let Ok(workspace) = with(os, |state| state.workspace) else {
-        return Ok(());
-    };
-    match declare(os, workspace) {
-        Ok(()) | Err(Fail::Error(_)) => Ok(()),
-        Err(Fail::Unwind(unwind)) => Err(unwind),
-    }
+    quietly(with(os, |state| state.workspace).and_then(|at| DECLARED.declare(os, at)))
 }
 
 /// `*HostFS`: the filing system selected.
@@ -343,7 +323,7 @@ fn select(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     let workspace = with(os, |state| state.workspace)?;
     let mut regs = Regs::default();
     regs.r[0] = fs_control::SELECT;
-    regs.r[1] = workspace + NAME_AT;
+    regs.r[1] = workspace + DECLARED.name_at();
     os.perform(X | FS_CONTROL, &mut regs)
 }
 
@@ -351,13 +331,10 @@ fn select(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
 /// let go with its state.
 fn finalise(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     let workspace = with(os, |state| state.workspace)?;
-    let mut regs = Regs::default();
-    regs.r[0] = fs_control::REMOVE;
-    regs.r[1] = workspace + NAME_AT;
-    let removed = os.perform(X | FS_CONTROL, &mut regs);
+    DECLARED.remove(os, workspace)?;
     os.close_own(own)?;
     os.release_extension::<State>();
-    removed
+    Ok(())
 }
 
 /// `request` answered for the disc `place`: its reply, read from the bytes

@@ -272,13 +272,15 @@ pub(crate) fn set_font_colours(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), F
         if font != 0 {
             state.current.font = font;
         }
-        state.choose(low_byte(regs.r[1]), low_byte(regs.r[2]), offset, false);
+        let (background, foreground) = colour_numbers(regs);
+        state.choose(background, foreground, offset, false);
     })
 }
 
-/// A colour number as the Font Manager keeps one: its low byte.
-fn low_byte(given: u32) -> u32 {
-    u32::from(given.to_le_bytes()[0])
+/// The background and foreground colour numbers R1 and R2 give, as the Font
+/// Manager keeps them: their low bytes.
+fn colour_numbers(regs: &Regs) -> (u32, u32) {
+    (u32::from(regs.byte(1)), u32::from(regs.byte(2)))
 }
 
 /// `Font_SetPalette`: the colours set as `Font_SetFontColours` sets them,
@@ -289,7 +291,7 @@ fn low_byte(given: u32) -> u32 {
 /// with no entry is refused once the colours are set.
 pub(crate) fn set_palette(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let offset = offset_of(os, regs)?;
-    let (background, foreground) = (low_byte(regs.r[1]), low_byte(regs.r[2]));
+    let (background, foreground) = colour_numbers(regs);
     let [from, to] = if regs.r[6] == TRUE_COLOURS {
         [regs.r[4], regs.r[5]]
     } else {
