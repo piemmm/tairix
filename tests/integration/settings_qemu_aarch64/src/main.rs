@@ -70,7 +70,7 @@
 #[cfg(itest_aarch64)]
 mod kernel {
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use core::sync::atomic::{AtomicU32, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink};
     use tairix_itest_desktop_witness::{window_shown, ShownWindows};
@@ -102,9 +102,8 @@ mod kernel {
     /// The gate both sinks are handed: it latches the PASS witnesses described
     /// in the module docs and replays the whole trail to serial.
     struct SettingsGate {
-        /// The settings bundle was loaded.
-        launched: AtomicBool,
-        /// The windows first shown after that: the settings window.
+        /// Armed when the settings bundle loads, then the windows first shown:
+        /// the settings window.
         windows: ShownWindows<1>,
         /// Commits of the desktop's published document after that.
         committed: AtomicU32,
@@ -114,7 +113,6 @@ mod kernel {
         /// A gate with no witness latched.
         const fn new() -> Self {
             Self {
-                launched: AtomicBool::new(false),
                 windows: ShownWindows::new(),
                 committed: AtomicU32::new(0),
             }
@@ -130,7 +128,6 @@ mod kernel {
                     SETTINGS_APP_NAME,
                 )
             }) {
-                self.launched.store(true, Ordering::Release);
                 self.windows.arm();
             }
         }

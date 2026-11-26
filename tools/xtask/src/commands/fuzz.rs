@@ -285,6 +285,11 @@ pub const TARGETS: &[Target] = &[
         description: "lib/spirv decoder and validator over mutated shader modules (bits, boundary words, insertions, deletions, truncations, either byte order): both total, refusals within the module, accepted modules re-encoding exactly, validation deterministic, admitted entry points agreeing with their own layout; and the builder over random structured programs, every one admitted and built the same twice",
     },
     Target {
+        package: "tairix-wgsl",
+        test: "fuzz_wgsl",
+        description: "lib/wgsl front end over mutated sources (lines deleted, duplicated and swapped, names, numbers and operators replaced, bytes, spans and tokens of the language inserted, nesting deepened) and override values: total, every refusal a typed error within the source at the line and column it reports, never an internal failure, every module compiled admitted again, deterministic; and random integer programs under nested selections and loops run on the software device to exactly WGSL's values",
+    },
+    Target {
         package: "tairix-fontface",
         test: "fuzz_face",
         description: "lib/fontface TrueType parser + outline rasteriser",

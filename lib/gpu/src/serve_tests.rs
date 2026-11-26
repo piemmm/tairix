@@ -25,8 +25,8 @@ use crate::wire::ops::{self, ExportToken};
 use crate::wire::{Reader, Wire, Writer};
 use crate::{
     AllocationDesc, BufferDesc, BufferImageCopy, BufferUsage, ContextDesc, CopyRegion, Device,
-    Error, Extent3d, Format, ImageDesc, ImageDimension, ImageSubresource, ImageUsage, Origin3d,
-    SoftwareDesc, Submission, SubmitError, DEFAULT_SUBGROUP_SIZE, MAX_UPDATE_BYTES,
+    Error, Extent3d, Format, ImageDesc, ImageDimension, ImageSubresource, ImageUsage, Loss,
+    Origin3d, SoftwareDesc, Submission, SubmitError, DEFAULT_SUBGROUP_SIZE, MAX_UPDATE_BYTES,
 };
 
 /// The host's own clock, so a wait's timeout passes for real.
@@ -60,11 +60,14 @@ impl Channel for TestChannel {
         self.answered.notify_all();
     }
 
-    fn map(&self, client: ProcId, grant: u64) -> Result<Arc<dyn Region>, Errno> {
+    fn map(&self, client: ProcId, grant: u64, min_len: usize) -> Result<Arc<dyn Region>, Errno> {
         let grants = self.grants.lock().expect("unpoisoned");
         let (owner, bytes) = grants.get(&grant).ok_or(Errno::NotFound)?;
         if *owner != client {
             return Err(Errno::PermissionDenied);
+        }
+        if bytes.len() < min_len {
+            return Err(Errno::LengthOutOfRange);
         }
         Ok(Arc::clone(bytes) as Arc<dyn Region>)
     }
@@ -126,11 +129,17 @@ impl Served {
             subgroup_size: DEFAULT_SUBGROUP_SIZE,
         })
         .expect("a software device");
+        Self::serving(device, workers, true)
+    }
+
+    /// `device` served, its requests run on `workers` workers; its loop on a
+    /// thread of its own when `looped`, and otherwise turned by the test.
+    fn serving(device: Device, workers: usize, looped: bool) -> Arc<Self> {
         let channel = Arc::new(TestChannel::default());
         let local = device.served.clone().expect("in this process");
         let server = Server::new(Arc::clone(&local), Arc::clone(&channel) as Arc<dyn Channel>);
         let stop = Arc::new(AtomicBool::new(false));
-        let looping = {
+        let looping = looped.then(|| {
             let (server, channel, stop) =
                 (Arc::clone(&server), Arc::clone(&channel), Arc::clone(&stop));
             std::thread::spawn(move || {
@@ -158,7 +167,7 @@ impl Served {
                     server.expire(local.now());
                 }
             })
-        };
+        });
         let threads = crate::device_tests::HostThreads::default();
         let workers = server.start_workers(&threads, workers);
         Arc::new(Self {
@@ -170,7 +179,7 @@ impl Served {
             tickets: AtomicU64::new(0),
             grants: AtomicU64::new(0),
             stop,
-            looping: Mutex::new(Some(looping)),
+            looping: Mutex::new(looping),
         })
     }
 
@@ -258,6 +267,10 @@ impl Link for TestLink {
 
     fn read_region(&self, at: usize, out: &mut [u8]) {
         self.bytes.read(at, out);
+    }
+
+    fn grant(&self, region: u64) -> Result<u64, Errno> {
+        Ok(region)
     }
 }
 
@@ -672,6 +685,36 @@ fn a_wait_is_answered_as_its_value_lands_its_context_ends_or_its_timeout_passes(
     );
     drop(context);
     assert_eq!(ending.join().expect("the waiter"), Err(Error::Destroyed));
+}
+
+#[test]
+fn a_wait_on_work_an_overrun_lost_is_answered_lost_however_late_the_loop_looks() {
+    let clock = Arc::new(crate::device_tests::Clock::default());
+    let (device, _log) = crate::hardware::tests::device(&clock);
+    let served = Served::serving(device, 0, false);
+    let client = served.connect(1, REGION).expect("connected");
+    let context = context(&client);
+    let (_target_memory, target) = buffer(&context, 16);
+    let mut commands = context.command_buffer();
+    commands.fill_buffer(&target, 0, 16, 1).expect("recorded");
+    let fence = submit(&queue(&context), &commands).expect("admitted");
+    // Past the job's deadline, so it overruns first.
+    let timeout = Duration64::from_secs(2);
+    assert!(timeout > crate::device_tests::SECOND);
+    let waiting = std::thread::spawn(move || fence.wait(timeout));
+    assert!(
+        crate::device_tests::until(|| served.server.waiting() == 1),
+        "the wait is held"
+    );
+    // The loop looks first once both are past, the loss the overrun makes
+    // not yet looked at.
+    let late = timeout.saturating_total_nanos();
+    clock.now.store(late, Ordering::SeqCst);
+    served.server.expire(late);
+    assert_eq!(
+        waiting.join().expect("the waiter"),
+        Err(Error::Lost(Loss::Overran))
+    );
 }
 
 /// `body` framed as a request for `op`.

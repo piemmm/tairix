@@ -18,7 +18,10 @@ use tairix_gpu::{
 };
 use tairix_shaders::SET;
 
-use super::{compare, family, reference, work, Answer, Difference, Refusal, Rendered, PAST_COUNTS};
+use super::{
+    command, compare, family, reference, work, Answer, Command, CommandError, Difference, Refusal,
+    Rendered, DEFAULT_WORDS, MAX_WORDS, PAST_COUNTS,
+};
 
 struct Still;
 
@@ -751,9 +754,81 @@ fn help_documents_the_parser_switches() {
         let path = alloc::format!("{help_root}/{locale}/gpucheck.md");
         let text =
             std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {path}: {err}"));
+        for switch in ["`-h, -?`", "`--present`", "`--shader FILE`", "`--words N`"] {
+            assert!(
+                text.contains(switch),
+                "{locale}/gpucheck.md must document {switch}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_command_line_takes_present_and_the_help_switches_and_nothing_else() {
+    assert_eq!(command(&[]), Ok(Command::Check));
+    assert_eq!(command(&["--present"]), Ok(Command::Present));
+    assert_eq!(command(&["--pres"]), Ok(Command::Present), "abbreviated");
+    for help in ["-h", "-?", "--help"] {
+        assert_eq!(command(&[help]), Ok(Command::Help), "{help}");
+        assert_eq!(command(&["--present", help]), Ok(Command::Help), "{help}");
+        assert_eq!(command(&[help, "now"]), Ok(Command::Help), "{help}");
+    }
+    for refused in [&["-x"][..], &["--present=yes"], &["--check"]] {
         assert!(
-            text.contains("`-h, -?`"),
-            "{locale}/gpucheck.md must document `-h, -?`"
+            matches!(command(refused), Err(CommandError::Option(_))),
+            "{refused:?}"
         );
     }
+    assert_eq!(
+        command(&["--present", "now"])
+            .map_err(|refused| alloc::string::ToString::to_string(&refused)),
+        Err(alloc::string::String::from("extra operand 'now'"))
+    );
+}
+
+#[test]
+fn the_command_line_takes_a_kernel_and_the_length_of_its_buffer() {
+    let shader = |file, words| Ok(Command::Shader { file, words });
+    assert_eq!(
+        command(&["--shader", "k.wgsl"]),
+        shader("k.wgsl", DEFAULT_WORDS)
+    );
+    assert_eq!(
+        command(&["--shader=k.spv", "--words", "64"]),
+        shader("k.spv", 64)
+    );
+    assert_eq!(
+        command(&["--words=1", "--shader", "a", "--shader", "b"]),
+        shader("b", 1),
+        "the last kernel named"
+    );
+    let most = alloc::format!("{MAX_WORDS}");
+    assert_eq!(
+        command(&["--shader", "k", "--words", &most]),
+        shader("k", MAX_WORDS)
+    );
+    let past = alloc::format!("{}", MAX_WORDS + 1);
+    for count in ["0", "-1", "x", "1.5", "", past.as_str()] {
+        assert_eq!(
+            command(&["--shader", "k", "--words", count]),
+            Err(CommandError::Words(count.into())),
+            "{count:?}"
+        );
+    }
+    assert_eq!(
+        command(&["--words", "4"]),
+        Err(CommandError::WordsWithoutShader)
+    );
+    assert_eq!(
+        command(&["--present", "--shader", "k"]),
+        Err(CommandError::PresentAndShader)
+    );
+    assert!(matches!(
+        command(&["--shader"]),
+        Err(CommandError::Option(_))
+    ));
+    assert!(matches!(
+        command(&["--shader", "k", "extra"]),
+        Err(CommandError::ExtraOperand(_))
+    ));
 }

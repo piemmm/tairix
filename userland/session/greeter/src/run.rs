@@ -61,8 +61,8 @@ mod program {
     use tairix_abi::NoticeTopic;
     use tairix_abi::{Errno, WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
     use tairix_display::{
-        establish_display, DisplayClient, FramesRefused, Presenter, RtDisplay, RtDisplayTransport,
-        SwitchedOff,
+        establish_display, DisplayClient, FrameRing, FramesRefused, Presenter, RtDisplay,
+        RtDisplayTransport, SwitchedOff,
     };
     use tairix_geometry::Scale;
     use tairix_greeter::{Courier, Ticket, Verdict};

@@ -35,7 +35,7 @@ use tairix_spirv::enumerant::{
 use tairix_spirv::{Admitted, Arg, BuildError, Builder, Function, Id, Op, Version};
 
 use super::images::{packed, placed, read_back, whole_view};
-use super::{buffer, bytes_of, family, submit, Rendered};
+use super::{buffer, bytes_of, family, states_uses, submit, Rendered};
 
 /// The colour target's format.
 const COLOUR: Format = Format::Rgba8Unorm;
@@ -357,7 +357,11 @@ const UNTESTED: Option<DepthStencilState> = Some(DepthStencilState {
     stencil: None,
 });
 
-const fn target(format: Format, blend: Option<Blend>, write_mask: ColourMask) -> ColourTarget {
+pub(crate) const fn target(
+    format: Format,
+    blend: Option<Blend>,
+    write_mask: ColourMask,
+) -> ColourTarget {
     ColourTarget {
         format,
         blend,
@@ -402,7 +406,7 @@ const RESOLVED_TARGET: [ColourTarget; 1] = [target(RESOLVED_COLOUR, None, Colour
 const FLOATED: [ColourTarget; 1] = [target(FLOATS, None, ColourMask::RED)];
 
 /// One sample, every one covered.
-const ONE_SAMPLE: Multisample = Multisample {
+pub(crate) const ONE_SAMPLE: Multisample = Multisample {
     samples: 1,
     mask: u32::MAX,
     alpha_to_coverage: false,
@@ -428,7 +432,7 @@ fn flat(b: &mut Builder, typed: (StorageClass, Id), location: u32) -> Result<Id,
 }
 
 /// The built-in variable `built_in`, of `ty` in `class`.
-fn built_in(
+pub(crate) fn built_in(
     b: &mut Builder,
     (class, ty): (StorageClass, Id),
     built_in: BuiltIn,
@@ -826,10 +830,7 @@ pub(crate) fn work(device: &Device, near: u32) -> Result<Option<Rendered>, Error
     let Ok(graphics) = family(device, QueueCapabilities::GRAPHICS) else {
         return Ok(None);
     };
-    if !USES
-        .iter()
-        .all(|&(format, uses)| info.formats.get(format).contains(uses))
-    {
+    if !states_uses(device, &USES) {
         return Ok(None);
     }
     let queues = (near, family(device, QueueCapabilities::TRANSFER)?, graphics);

@@ -101,6 +101,11 @@
 //!   anything is reserved for it; the caller-side
 //!   [`moviedecode::MovieDecodeClient`] holds every answer to the request it
 //!   answers.
+//! * [`wgsl`] — WGSL source compiled to SPIR-V (`tairix-wgsl`) inside the
+//!   worker, and the caller-side [`wgsl::compile`] admitting the answered
+//!   module through `lib/spirv`'s validator and believing a diagnostic only
+//!   within its own source, so the validator, not the process, is the trust
+//!   boundary.
 //! * `rt` (feature `program`, freestanding only; not compiled on hosted
 //!   targets) — the production transport: the parent spawns its own binary
 //!   in the worker role over a pipe pair wired through
@@ -142,6 +147,7 @@ mod testing;
 static ALLOCATOR: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 pub mod textsyntax;
 pub mod timesync;
+pub mod wgsl;
 pub mod wire;
 pub mod worker;
 

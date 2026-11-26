@@ -17,7 +17,10 @@ use tairix_geometry::{Rect, Region};
 use tairix_parallel::{JobRunner, Reversed, SERIAL};
 use tairix_raster::{Color, Pixel, Surface};
 
-use super::{decode, decode_list, encode, lay_opaque, lay_opaque_into, lay_opaque_region};
+use super::{
+    decode, decode_list, decode_region, encode, holds, lay_judged_into, lay_opaque,
+    lay_opaque_into, lay_opaque_region,
+};
 use crate::scanout::ChannelOrder;
 
 const WIDTH: u32 = 40;
@@ -303,6 +306,97 @@ fn a_region_laid_into_a_display_frame_matches_a_lay_then_an_encode() {
     assert!(narrow.iter().all(|byte| *byte == 0x11), "nothing written");
 }
 
+/// A judged lay writes into the display's frame what an opaque one writes
+/// where every pixel it lays is opaque, and says so; one pixel short of opaque
+/// within the damage fails it, one outside does not; and it refuses as the
+/// opaque lay does, writing nothing.
+#[test]
+fn a_judged_lay_writes_what_an_opaque_one_does_and_says_whether_it_was_opaque() {
+    let (width, height) = (120u32, 80u32);
+    let mode = DisplayMode {
+        width_px: width,
+        height_px: height,
+        stride_bytes: width * 4,
+        format: DisplayFormat::Rgba8888,
+    };
+    let mut frame: Vec<u8> = (0..width * height * 4)
+        .map(|at| u8::try_from(at * 29 % 253).unwrap_or(0))
+        .collect();
+    for pixel in frame.as_chunks_mut::<4>().0 {
+        pixel[3] = 0xFF;
+    }
+    let mut damage = Region::new();
+    for (x, y, w, h) in [(0, 0, 40, 30), (60, 10, 50, 60)] {
+        damage.add(Rect::new(x, y, w, h));
+    }
+    let stride = usize::try_from(width).expect("small") * 4 + 8;
+    let len = stride * usize::try_from(height).expect("small");
+    let mut expected = vec![0x11u8; len];
+    lay_opaque_into(
+        &frame,
+        &mode,
+        (&mut expected, stride, ChannelOrder::Bgra),
+        &damage,
+        &SERIAL,
+    )
+    .expect("laid");
+    for runner in [&SERIAL as &dyn JobRunner, &Reversed::new(8)] {
+        let mut target = vec![0x11u8; len];
+        let passed = lay_judged_into(
+            &frame,
+            &mode,
+            (&mut target, stride, ChannelOrder::Bgra),
+            &damage,
+            runner,
+        )
+        .expect("laid");
+        assert!(passed, "every pixel laid is opaque");
+        assert!(target == expected, "the display frame differs");
+    }
+    let outside = (79 * width + 119) as usize * 4 + 3;
+    frame[outside] = 0x40;
+    let mut target = vec![0x11u8; len];
+    assert_eq!(
+        lay_judged_into(
+            &frame,
+            &mode,
+            (&mut target, stride, ChannelOrder::Bgra),
+            &damage,
+            &SERIAL
+        ),
+        Ok(true),
+        "a pixel no rectangle names is not judged"
+    );
+    let inside = (20 * width + 70) as usize * 4 + 3;
+    frame[inside] = 0x80;
+    for runner in [&SERIAL as &dyn JobRunner, &Reversed::new(8)] {
+        assert_eq!(
+            lay_judged_into(
+                &frame,
+                &mode,
+                (&mut target, stride, ChannelOrder::Bgra),
+                &damage,
+                runner
+            ),
+            Ok(false),
+            "one pixel short of opaque fails the lay"
+        );
+    }
+    let mut short = vec![0x11u8; stride * 40];
+    assert_eq!(
+        lay_judged_into(
+            &frame,
+            &mode,
+            (&mut short, stride, ChannelOrder::Bgra),
+            &damage,
+            &SERIAL
+        ),
+        Err(Errno::OutOfRange),
+        "rows past the frame's end"
+    );
+    assert!(short.iter().all(|byte| *byte == 0x11), "nothing written");
+}
+
 #[test]
 fn a_channel_a_client_wrote_above_its_alpha_decodes_clamped_to_it() {
     let mode = packed(DisplayFormat::Rgba8888);
@@ -508,6 +602,84 @@ fn a_list_converts_each_part_and_refused_anywhere_writes_nothing() {
     );
     assert_eq!(untouched.pixels(), blank().pixels(), "nothing was written");
     assert!(reported.is_empty());
+}
+
+/// A region converts what of it lies inside the surface, rectangle by
+/// rectangle, as a list naming the same rectangles does; one the frame cannot
+/// hold refuses it all.
+#[test]
+fn a_region_converts_as_the_list_of_its_rectangles_and_refused_anywhere_writes_nothing() {
+    let mode = packed(DisplayFormat::Bgra8888);
+    let source = painted();
+    let mut frame = frame_for(&mode);
+    encode(&source, &mut frame, &mode, whole(), &splitting()).expect("encode");
+    let mut region = Region::from(Rect::new(0, 0, 4, 2));
+    region.add(Rect::new(6, 3, 2, 2));
+    region.add(Rect::new(
+        i32::try_from(WIDTH).expect("small") - 3,
+        10,
+        9,
+        4,
+    ));
+    let mut by_region = blank();
+    let mut reported = Vec::new();
+    decode_region(
+        &frame,
+        &mut by_region,
+        &mode,
+        &region,
+        &splitting(),
+        |rect| {
+            reported.push(rect);
+        },
+    )
+    .expect("decode");
+    let list = DamageList::new(&[
+        DamageRect {
+            x: 0,
+            y: 0,
+            width_px: 4,
+            height_px: 2,
+        },
+        DamageRect {
+            x: 6,
+            y: 3,
+            width_px: 2,
+            height_px: 2,
+        },
+        DamageRect {
+            x: WIDTH - 3,
+            y: 10,
+            width_px: 3,
+            height_px: 4,
+        },
+    ])
+    .expect("a list");
+    let mut by_list = blank();
+    decode_list(&frame, &mut by_list, &mode, &list, &splitting(), |_| {}).expect("decode");
+    assert_eq!(by_region.pixels(), by_list.pixels());
+    assert_eq!(reported.len(), 3, "{reported:?}");
+
+    let mut untouched = blank();
+    let short = &frame[..(mode.stride_bytes as usize) * 12];
+    assert_eq!(
+        decode_region(short, &mut untouched, &mode, &region, &splitting(), |_| {}),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(untouched.pixels(), blank().pixels(), "nothing was written");
+}
+
+#[test]
+fn a_frame_holds_its_surface_only_with_every_row_whole() {
+    let good = packed(DisplayFormat::Rgba8888);
+    let len = frame_for(&good).len();
+    assert_eq!(holds(&good, len), Ok(()));
+    assert_eq!(holds(&good, len - 1), Err(Errno::OutOfRange), "a row short");
+    assert_eq!(
+        holds(&mode(DisplayFormat::Rgba8888, WIDTH * 4 - 4), len),
+        Err(Errno::OutOfRange),
+        "a stride narrower than a row"
+    );
 }
 
 /// Every refusal shape, asserted to leave the target exactly as it was: a

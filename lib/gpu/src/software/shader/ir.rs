@@ -485,8 +485,15 @@ pub(crate) enum Order {
 pub(crate) enum Step {
     /// `bytes` further on.
     Bytes(u32),
-    /// `index` (a scalar of `num`, signed) times `stride` bytes further on.
-    Index { index: Reg, num: Num, stride: u32 },
+    /// `index` (a scalar of `num`, signed) times `stride` bytes further on,
+    /// past its object where it is not below `length`, the count of the
+    /// level it steps through where its root is bounded level by level.
+    Index {
+        index: Reg,
+        num: Num,
+        stride: u32,
+        length: Option<u32>,
+    },
     /// The descriptor `index` names, of an arrayed binding.
     Element { index: Reg, num: Num },
 }
@@ -1011,6 +1018,8 @@ pub(crate) enum Fixed {
     FrontFacing,
     PointCoord,
     SampleMask,
+    SampleId,
+    SamplePosition,
     FragDepth,
 }
 

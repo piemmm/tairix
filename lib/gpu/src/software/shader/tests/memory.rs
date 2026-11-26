@@ -169,6 +169,61 @@ OpCopyMemory %dst %src
 OpReturnValue %sum
 OpFunctionEnd";
 
+/// The constants and memory the cases bounding dynamic indexes share: a
+/// private array of four words and another, a workgroup one, and a private
+/// array of four vectors.
+const BOUNDED: &str = "%g2 = OpConstant %uint 2\n%g4 = OpConstant %uint 4\n%g5 = OpConstant %uint 5\n%g6 = OpConstant %uint 6\n%g9 = OpConstant %uint 9\n%g10 = OpConstant %uint 10\n%g_wg_scope = OpConstant %uint 2\n%g_relaxed = OpConstant %uint 0\n%g_wg_sem = OpConstant %uint 264\n%g_words = OpTypeArray %uint %g4\n%g_priv = OpTypePointer Private %g_words\n%g_word = OpTypePointer Private %uint\n%g_wg = OpTypePointer Workgroup %g_words\n%g_wg_word = OpTypePointer Workgroup %uint\n%g_vecs = OpTypeArray %v4uint %g4\n%g_pvecs = OpTypePointer Private %g_vecs\n%g_pvec = OpTypePointer Private %v4uint\n%g_held = OpVariable %g_priv Private\n%g_other = OpVariable %g_priv Private\n%g_shared = OpVariable %g_wg Workgroup\n%g_vv = OpVariable %g_pvecs Private";
+
+/// Accesses through dynamic indexes, within their arrays and past them, in
+/// every place the guard pass splits a block: the entry, a loop's header,
+/// a single-block loop, a workgroup atomic, a copy, and a vector's component
+/// through an element's pointer.
+fn bounded() -> Vec<Case> {
+    let loop_head = "%g_first = OpAccessChain %g_word %g_held %a\nOpStore %g_first %g6\nOpBranch %g_loop\n%g_loop = OpLabel\n%g_n = OpPhi %uint %zero %entry %g_n1 %g_cont\n%g_at = OpIAdd %uint %g_n %g2\n%g_slot = OpAccessChain %g_word %g_held %g_at\n%g_ten = OpIMul %uint %g_n %g10\nOpStore %g_slot %g_ten\n%g_go = OpULessThan %bool %g_n %g5\nOpLoopMerge %g_exit %g_cont None\nOpBranchConditional %g_go %g_body %g_exit\n%g_body = OpLabel\nOpBranch %g_cont\n%g_cont = OpLabel\n%g_n1 = OpIAdd %uint %g_n %one\nOpBranch %g_loop\n%g_exit = OpLabel\n%g_back = OpAccessChain %g_word %g_held %b\n%r = OpLoad %uint %g_back";
+    let single = "OpBranch %g_spin\n%g_spin = OpLabel\n%g_k = OpPhi %uint %zero %entry %g_k1 %g_spin\n%g_kp = OpAccessChain %g_word %g_held %g_k\n%g_was = OpLoad %uint %g_kp\n%g_now = OpIAdd %uint %g_was %g_k\nOpStore %g_kp %g_now\n%g_k1 = OpIAdd %uint %g_k %one\n%g_more = OpULessThan %bool %g_k1 %g6\nOpLoopMerge %g_spun %g_spin None\nOpBranchConditional %g_more %g_spin %g_spun\n%g_spun = OpLabel\n%g_rp = OpAccessChain %g_word %g_held %a\n%r = OpLoad %uint %g_rp";
+    let atomic = "%g_mine = OpAccessChain %g_wg_word %g_shared %lane\nOpStore %g_mine %zero\nOpControlBarrier %g_wg_scope %g_wg_scope %g_wg_sem\n%g_wp = OpAccessChain %g_wg_word %g_shared %a\n%g_old = OpAtomicIAdd %uint %g_wp %g_wg_scope %g_relaxed %one\nOpControlBarrier %g_wg_scope %g_wg_scope %g_wg_sem\n%g_seen = OpAtomicLoad %uint %g_wp %g_wg_scope %g_relaxed\n%r = OpIAdd %uint %g_seen %g_old";
+    let copy = "%g_src = OpAccessChain %g_word %g_held %a\nOpStore %g_src %g6\n%g_fixed = OpAccessChain %g_word %g_other %g2\nOpStore %g_fixed %g9\n%g_dst = OpAccessChain %g_word %g_other %b\nOpCopyMemory %g_dst %g_src\n%r = OpLoad %uint %g_fixed";
+    let component = "%g_e = OpAccessChain %g_pvec %g_vv %a\n%g_init = OpCompositeConstruct %v4uint %g2 %g4 %g6 %g9\nOpStore %g_e %g_init\n%g_c = OpAccessChain %g_word %g_e %b\n%r = OpLoad %uint %g_c";
+    let pair = [Ty::U32, Ty::U32];
+    alloc::vec![
+        Case::new(&pair, Ty::U32, loop_head)
+            .decls(BOUNDED)
+            .interface("%g_held")
+            .lane(&[0, 0], &[6])
+            .lane(&[5, 3], &[10])
+            .lane(&[1, 9], &[0])
+            .lane(&[3, 3], &[10])
+            .lane(&[1, 1], &[6])
+            .lane(&[u32::MAX, 1], &[0]),
+        Case::new(&[Ty::U32], Ty::U32, single)
+            .decls(BOUNDED)
+            .interface("%g_held")
+            .lane(&[1], &[1])
+            .lane(&[3], &[3])
+            .lane(&[4], &[0])
+            .lane(&[7], &[0]),
+        Case::new(&[Ty::U32], Ty::U32, atomic)
+            .decls(BOUNDED)
+            .interface("%g_shared")
+            .lane(&[1], &[1])
+            .lane(&[9], &[0])
+            .lane(&[2], &[1]),
+        Case::new(&pair, Ty::U32, copy)
+            .decls(BOUNDED)
+            .interface("%g_held %g_other")
+            .lane(&[1, 2], &[6])
+            .lane(&[7, 2], &[0])
+            .lane(&[1, 8], &[9])
+            .lane(&[7, 8], &[9]),
+        Case::new(&pair, Ty::U32, component)
+            .decls(BOUNDED)
+            .interface("%g_vv")
+            .lane(&[1, 2], &[6])
+            .lane(&[1, 4], &[0])
+            .lane(&[4, 1], &[0]),
+    ]
+}
+
 pub(super) fn cases() -> Vec<Case> {
     let mut cases: Vec<Case> = ATOMICS
         .iter()
@@ -185,6 +240,7 @@ pub(super) fn cases() -> Vec<Case> {
         |c, lane| c.lane(&[lane * 3 + 1], &[((lane + 1) % 128) * 3 + 1]),
     );
     cases.push(shared);
+    cases.extend(bounded());
     cases.extend([
         // Every lane stores, then every lane loads what the last one stored.
         (0..8u32).fold(
@@ -412,4 +468,135 @@ fn a_chain_of_no_indexes_keeps_pointing_at_a_whole_array_of_buffers() {
         [12],
         "the third buffer, through the whole array's pointer"
     );
+}
+
+/// Bounded accesses in a module of SPIR-V 1.3, whose `OpSelect` takes no
+/// composite and chooses a vector a component at a time: each lane indexes
+/// private arrays of three pairs and three vectors and a workgroup array of
+/// four by `5 * lane % 7`, and writes the pair it loads, a vector's last
+/// component, a word it stored, and the workgroup word it added to.
+const BEFORE_1_4: &str = r#"OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %gid
+OpExecutionMode %main LocalSize 4 1 1
+OpDecorate %gid BuiltIn GlobalInvocationId
+OpDecorate %out DescriptorSet 0
+OpDecorate %out Binding 0
+OpDecorate %block Block
+OpMemberDecorate %block 0 Offset 0
+OpDecorate %words ArrayStride 4
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%v3uint = OpTypeVector %uint 3
+%v4uint = OpTypeVector %uint 4
+%c0 = OpConstant %uint 0
+%c1 = OpConstant %uint 1
+%c2 = OpConstant %uint 2
+%c3 = OpConstant %uint 3
+%c4 = OpConstant %uint 4
+%c5 = OpConstant %uint 5
+%c7 = OpConstant %uint 7
+%c10 = OpConstant %uint 10
+%c11 = OpConstant %uint 11
+%c20 = OpConstant %uint 20
+%c21 = OpConstant %uint 21
+%c77 = OpConstant %uint 77
+%c100 = OpConstant %uint 100
+%c101 = OpConstant %uint 101
+%c102 = OpConstant %uint 102
+%workgroup = OpConstant %uint 2
+%relaxed = OpConstant %uint 0
+%wg_sem = OpConstant %uint 264
+%pair = OpTypeArray %uint %c2
+%pairs = OpTypeArray %pair %c3
+%vecs = OpTypeArray %v4uint %c3
+%arr4 = OpTypeArray %uint %c4
+%words = OpTypeRuntimeArray %uint
+%block = OpTypeStruct %words
+%out_ptr = OpTypePointer StorageBuffer %block
+%word_ptr = OpTypePointer StorageBuffer %uint
+%gid_ptr = OpTypePointer Input %v3uint
+%priv_pairs = OpTypePointer Private %pairs
+%priv_pair = OpTypePointer Private %pair
+%priv_word = OpTypePointer Private %uint
+%priv_vecs = OpTypePointer Private %vecs
+%priv_vec = OpTypePointer Private %v4uint
+%wg_arr4 = OpTypePointer Workgroup %arr4
+%wg_word = OpTypePointer Workgroup %uint
+%pair0 = OpConstantComposite %pair %c0 %c1
+%pair1 = OpConstantComposite %pair %c10 %c11
+%pair2 = OpConstantComposite %pair %c20 %c21
+%pairs_init = OpConstantComposite %pairs %pair0 %pair1 %pair2
+%vec0 = OpConstantComposite %v4uint %c100 %c100 %c100 %c100
+%vec1 = OpConstantComposite %v4uint %c101 %c101 %c101 %c101
+%vec2 = OpConstantComposite %v4uint %c102 %c102 %c102 %c102
+%vecs_init = OpConstantComposite %vecs %vec0 %vec1 %vec2
+%gid = OpVariable %gid_ptr Input
+%out = OpVariable %out_ptr StorageBuffer
+%held_pairs = OpVariable %priv_pairs Private %pairs_init
+%held_vecs = OpVariable %priv_vecs Private %vecs_init
+%shared = OpVariable %wg_arr4 Workgroup
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%g = OpLoad %v3uint %gid
+%lane = OpCompositeExtract %uint %g 0
+%times = OpIMul %uint %lane %c5
+%index = OpUMod %uint %times %c7
+%mine = OpAccessChain %wg_word %shared %lane
+OpStore %mine %c0
+OpControlBarrier %workgroup %workgroup %wg_sem
+%pp = OpAccessChain %priv_pair %held_pairs %index
+%pair_v = OpLoad %pair %pp
+%p0 = OpCompositeExtract %uint %pair_v 0
+%p1 = OpCompositeExtract %uint %pair_v 1
+%vp = OpAccessChain %priv_vec %held_vecs %index
+%vec = OpLoad %v4uint %vp
+%v3 = OpCompositeExtract %uint %vec 3
+%sp = OpAccessChain %priv_word %held_pairs %index %c1
+OpStore %sp %c77
+%after = OpLoad %uint %sp
+%wp = OpAccessChain %wg_word %shared %index
+%old = OpAtomicIAdd %uint %wp %workgroup %relaxed %c1
+OpControlBarrier %workgroup %workgroup %wg_sem
+%seen = OpLoad %uint %wp
+%base = OpIMul %uint %lane %c5
+%o0 = OpAccessChain %word_ptr %out %c0 %base
+OpStore %o0 %p0
+%a1 = OpIAdd %uint %base %c1
+%o1 = OpAccessChain %word_ptr %out %c0 %a1
+OpStore %o1 %p1
+%a2 = OpIAdd %uint %base %c2
+%o2 = OpAccessChain %word_ptr %out %c0 %a2
+OpStore %o2 %v3
+%a3 = OpIAdd %uint %base %c3
+%o3 = OpAccessChain %word_ptr %out %c0 %a3
+OpStore %o3 %after
+%a4 = OpIAdd %uint %base %c4
+%o4 = OpAccessChain %word_ptr %out %c0 %a4
+OpStore %o4 %seen
+OpReturn
+OpFunctionEnd
+"#;
+
+#[test]
+fn before_1_4_a_guarded_module_reads_and_writes_as_its_source() {
+    use super::image::dispatch_module;
+    let old = tairix_spirv::Version { major: 1, minor: 3 };
+    let module = || {
+        tairix_spirv::assemble::admit_version(BEFORE_1_4, old)
+            .unwrap_or_else(|refusal| panic!("{refusal:?}"))
+    };
+    let (device, _) = device();
+    let context = context(&device);
+    let expected = [
+        [0, 1, 100, 77, 1],
+        [0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 1],
+        [10, 11, 101, 77, 1],
+    ]
+    .concat();
+    assert_eq!(dispatch_module(&context, module(), &[], &[], 20), expected);
+    let guarded = super::guarded(module());
+    assert_eq!(dispatch_module(&context, guarded, &[], &[], 20), expected);
 }

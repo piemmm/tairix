@@ -74,6 +74,8 @@ pub mod menu;
 pub mod notices;
 pub mod park;
 pub mod server;
+#[cfg(all(feature = "gpu", any(test, freestanding)))]
+pub mod swapchain;
 
 pub use appbar::{
     declaration, declare_app_bar, info_and_quit, is_quit, AppBarRefused, DESKTOP_ROLE_SWITCH,
@@ -92,10 +94,10 @@ pub use frames::WindowFrames;
 pub use mailbox::EventMailbox;
 pub use server::{
     client_frame_budget_bytes, Activation, AlertOpen, AuthoriseFor, CallerIdentity, ClientRegion,
-    CursorSetName, DialogSpec, DragConclusion, DragReport, EventSink, FrameHost, HandOverDesk,
-    LayerSpec, OpenEntry, PickedFile, PlacedFile, Placement, PopupSpec, PreviewSize, Served,
-    ToolSpec, TransientSpec, WallpaperName, WindowHost, WindowServer, WindowSizing,
-    WINDOW_REPLY_MAX,
+    CursorSetName, DialogSpec, DragConclusion, DragReport, EventSink, FrameHost, FrameUse,
+    HandOverDesk, LayerSpec, OpenEntry, PickedFile, PlacedFile, Placement, PopupSpec, PreviewSize,
+    ReleasedFrames, Served, ToolSpec, TransientSpec, WallpaperName, WindowHost, WindowServer,
+    WindowSizing, WINDOW_REPLY_MAX,
 };
 pub use tairix_display::winframe::damage_in;
 pub use tairix_input::wire::{held_modifiers, key_input_event};

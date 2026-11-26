@@ -25,20 +25,25 @@ server and every app's client can never drift apart.
   `WindowView`, the picture's rows after them through `view_presented`, a
   rectangle lying in neither refused — so a client presenting faster
   than the desktop draws costs one conversion a frame, and the desktop's frame
-  work never waits on a present. A present to a window holding no unshown
-  frame is answered as it is served; one replacing a frame not yet shown is
+  work never waits on a present. A present's answer hands the client back
+  every frame but the one it named, so it is answered as it is served only
+  while the session reads no other — none unshown, none the host kept
+  (`FrameUse::Kept`). One replacing a frame not yet shown is
   `Served::Withheld` until that frame is shown or refused, or a resize, a
   release or a close supersedes it, so a client is held to the desktop's
-  frames. A window holds at most one such answer, every call is answered once,
+  frames; one behind a kept frame waits for the latch to show its own, and an
+  answer going with its frame unshown first has the host give a kept frame
+  back (`FrameHost::frame_reclaimed`). A window holds at most one such answer,
+  every call is answered once,
   and the answers queue in an outbox reserved at window create — a latch never
   allocates — which the session drains with `send_answers`, each reply landing
   in the room its call was posted with, so none waits for kernel memory;
   `release_answers` answers them with no frame while none can reach the
   screen. A resize or a
-  release drops what it supersedes, and a frame the host cannot show is
-  reported to it once until the window next shows one and is tried again
-  with the next frame the desktop composes, never asking for one of its own;
-  a later present carries its change as well. A
+  release drops what it supersedes, and a present the host cannot show is
+  reported to it once — the first since the window showed a frame marked —
+  and its frame tried again with the next frame the desktop composes, never
+  asking for one of its own; a later present carries its change as well. A
   `SetBackdropBlur` takes the same owner check and reaches the same
   bridge (`WindowHost::backdrop_blur_set`), so an app frosts the backdrop
   of its own window and of no other. A `Present`, `SetBackdropBlur`, or

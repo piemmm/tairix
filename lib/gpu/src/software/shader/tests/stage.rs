@@ -148,6 +148,7 @@ fn fragment(interface: &str, decorations: &str, declarations: &str, body: &str) 
     format!(
         r#"OpCapability Shader
 OpCapability ImageQuery
+OpCapability DerivativeControl
 OpCapability GroupNonUniform
 OpCapability GroupNonUniformArithmetic
 %glsl = OpExtInstImport "GLSL.std.450"
@@ -202,12 +203,22 @@ const V: Carries = Carries::Located {
     index: 0,
 };
 
+/// Every derivative instruction, the stated precisions after the unstated.
+const DERIVATIVES: [&str; 9] = [
+    "OpDPdx",
+    "OpDPdy",
+    "OpFwidth",
+    "OpDPdxFine",
+    "OpDPdyFine",
+    "OpFwidthFine",
+    "OpDPdxCoarse",
+    "OpDPdyCoarse",
+    "OpFwidthCoarse",
+];
+
 /// The bodies the cases run, for the coverage test.
 pub(crate) fn bodies() -> Vec<String> {
-    let mut bodies: Vec<String> = ["OpDPdx", "OpDPdy", "OpFwidth"]
-        .iter()
-        .map(|op| derivative(op))
-        .collect();
+    let mut bodies: Vec<String> = DERIVATIVES.iter().map(|op| derivative(op)).collect();
     bodies.push(discarding("OpKill"));
     bodies.push(discarding("OpTerminateInvocation"));
     for form in SAMPLES {
@@ -230,10 +241,21 @@ fn a_derivative_is_taken_across_its_quads_row_or_column() {
     let along_x: fn(u32, u32) -> f32 = |_, y| real(y as usize + 1);
     let along_y: fn(u32, u32) -> f32 = |x, _| real(x as usize);
     let width: fn(u32, u32) -> f32 = |x, y| real((x + y + 1) as usize);
+    // A coarse derivative is the quad's first row's or column's for every
+    // lane: its top row's y and its left column's x.
+    let coarse_x: fn(u32, u32) -> f32 = |_, y| real((y & !1) as usize + 1);
+    let coarse_y: fn(u32, u32) -> f32 = |x, _| real((x & !1) as usize);
+    let coarse_width: fn(u32, u32) -> f32 = |x, y| real(((x & !1) + (y & !1) + 1) as usize);
     for (op, expected) in [
         ("OpDPdx", along_x),
         ("OpDPdy", along_y),
         ("OpFwidth", width),
+        ("OpDPdxFine", along_x),
+        ("OpDPdyFine", along_y),
+        ("OpFwidthFine", width),
+        ("OpDPdxCoarse", coarse_x),
+        ("OpDPdyCoarse", coarse_y),
+        ("OpFwidthCoarse", coarse_width),
     ] {
         let shaded = run(
             &lowered(&derivative(op), Stage::Fragment),

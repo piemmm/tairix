@@ -121,9 +121,19 @@ pub(in crate::software::shader::tests) fn dispatch(
     push: &[u8],
     words: usize,
 ) -> Vec<u32> {
-    let module = context
-        .create_shader_module(admit(text).unwrap_or_else(|r| panic!("{r:?} in\n{text}")))
-        .expect("a module");
+    let module = admit(text).unwrap_or_else(|r| panic!("{r:?} in\n{text}"));
+    dispatch_module(context, module, bound, push, words)
+}
+
+/// Run `module` as [`dispatch`] runs a module's text.
+pub(in crate::software::shader::tests) fn dispatch_module(
+    context: &Context,
+    module: tairix_spirv::Admitted,
+    bound: &[Bound<'_>],
+    push: &[u8],
+    words: usize,
+) -> Vec<u32> {
+    let module = context.create_shader_module(module).expect("a module");
     let mut bindings = alloc::vec![LayoutBinding {
         binding: 0,
         kind: DescriptorType::StorageBuffer,

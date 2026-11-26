@@ -480,6 +480,12 @@ fn state_edges_of_different_kinds_are_each_owed() {
             window_id: WINDOW,
             shown: false,
         },
+        WindowEvent::FramePresented {
+            window_id: WINDOW,
+            serial: 1,
+            at_ns: 1,
+            shown: true,
+        },
     ];
     for edge in edges {
         let _ = hold(&mut held, edge);
@@ -511,6 +517,25 @@ fn a_held_shown_edge_is_owed_as_it_last_stood() {
             shown: true,
         }]
     );
+}
+
+/// A window behind on its events is owed one frame's fate however many frames
+/// were finished meanwhile: the newest serial, which answers for the rest.
+#[test]
+fn a_held_frame_fate_is_owed_as_the_newest() {
+    let mut held = HoldBack::new();
+    let fate = |serial, shown| WindowEvent::FramePresented {
+        window_id: WINDOW,
+        serial,
+        at_ns: serial * 16,
+        shown,
+    };
+    assert!(hold(&mut held, fate(1, true)));
+    assert!(!hold(&mut held, typed(WINDOW)));
+    for serial in 2..=5 {
+        assert!(!hold(&mut held, fate(serial, serial % 2 == 0)));
+    }
+    assert_eq!(drain_events(&mut held), vec![fate(5, false), typed(WINDOW)]);
 }
 
 /// A position is level-triggered and a wheel tick is additive, so a run of

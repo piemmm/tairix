@@ -1,6 +1,7 @@
 //! The session's fades: the whole screen up from black when it starts and
-//! back down to black when it hands the screen on ([`ScreenFade`]), and the
-//! desktop's backdrop dissolving into the next one ([`BackdropFade`]).
+//! back down to black when it hands the screen on ([`ScreenFade`], the way
+//! down played out by [`fade_to_black`]), and the desktop's backdrop
+//! dissolving into the next one ([`BackdropFade`]).
 //!
 //! The login screen fades to black and exits, so the screen a session
 //! inherits is already dark. [`ScreenFade`] drives the compositor's screen
@@ -28,11 +29,14 @@
 //! ([`ScreenFade::set_awaiting_backdrop`]).
 
 use tairix_abi::driver::display::RefreshRate;
+use tairix_abi::WAITSET_TIMEOUT_NONE;
+use tairix_display::{FrameRing, Presenter};
 use tairix_log::{log, Event, EventId, Level, Sink};
 use tairix_theme::{Fade, MotionInteraction};
 use tairix_wm::{Compositor, Surface};
 
 use crate::switchuser::park_within;
+use crate::windows::SessionWindows;
 
 /// Range start (inclusive) reserved for the desktop session's event
 /// identifiers. Per `lib/log` convention every subsystem owns a 1 000-wide
@@ -218,6 +222,33 @@ impl ScreenFade {
             self.fade.settle();
         }
         compositor.set_reveal(strength)
+    }
+}
+
+/// Dissolve the screen to black on `ring`, presenting every frame of `fade`'s
+/// departure, and return once it is dark.
+///
+/// Each frame takes the ring's latches first, so a window's present that
+/// reaches the screen meanwhile is still finished as shown. Paced by `now`
+/// and `park`, a timed sleep, rather than a wait-set whose unserved sources
+/// would report ready on every re-park. A refused present stops the dim where
+/// it got to: the seat is handed on cleared either way.
+pub fn fade_to_black<R: Presenter + FrameRing>(
+    fade: &mut ScreenFade,
+    compositor: &mut Compositor,
+    ring: &mut R,
+    windows: &mut SessionWindows,
+    mut now: impl FnMut() -> u64,
+    mut park: impl FnMut(u64),
+) {
+    fade.depart(now(), compositor);
+    loop {
+        windows.take_latches(ring);
+        if compositor.present(ring).is_err() || fade.settled() {
+            return;
+        }
+        park(fade.park_deadline_ns(now(), WAITSET_TIMEOUT_NONE, compositor.refresh_rate()));
+        fade.advance(now(), compositor);
     }
 }
 

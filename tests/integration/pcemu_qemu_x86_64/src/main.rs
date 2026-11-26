@@ -24,15 +24,12 @@ mod kernel {
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use tairix_log::{Event, EventId, Sink};
+    use tairix_log::{Event, Sink};
     use tairix_test_pcemu::COMMAND;
-
-    /// `SyscallInvoked`, the audited record [`END`] reads.
-    const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
     /// The run's end: the shell's exit after the fixture's, whose machine
     /// worker and compiler run as the fixture too.
-    static END: FixtureExit = FixtureExit::new(&[COMMAND], SYSCALL_INVOKED_EVENT_ID);
+    static END: FixtureExit = FixtureExit::new(&[COMMAND]);
 
     /// Replays every event to the serial console and ends the run at [`END`].
     struct EndSink;

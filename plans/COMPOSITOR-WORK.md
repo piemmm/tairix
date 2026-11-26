@@ -658,26 +658,30 @@ What it guarantees:
   can never still be pressed. The *declaration* outlives the furniture
   (`window_declared_resizable`), so an app may restate its resize range while
   fullscreen and be held to it when it returns.
-- **Promoted to a single layer on the layer path, through the one display
-  path.** `Compositor::fullscreen_cover` reads every condition from the
-  compositor's own state, never from a client claim: visible, fullscreen,
-  exactly the scan-out rectangle, wholly opaque, cut to no shape, and holding
-  presented pixels for all of it. `encode_layers` then emits that surface
-  alone — no background fill, no window beneath — which is where the
-  tear-free flip comes from. The last condition is what makes dropping the
-  background sound: a window is resized before its app presents at the new
-  extent, and the margin between samples transparent, so the promotion waits
-  for the frame that genuinely covers and the scene composites normally until
-  then. The **software path needs no promotion**: an opaque run covering a
-  row already skips the desktop, the background fill and every window below
-  it, and a second occlusion mechanism beside that one is forbidden (§2.2,
+- **Promoted to the scan-out alone, through the one display path.**
+  `Compositor::fullscreen_cover` reads every condition from the compositor's
+  own state, never from a client claim: visible, fullscreen, exactly the
+  scan-out rectangle, wholly opaque, cut to no shape, and holding presented
+  pixels for all of it. On a layer engine the window is then the stack's one
+  layer — no background fill, no window beneath — which is where the
+  tear-free flip comes from; on a display drawing its own frames the frame is
+  that window alone. Either way its presents are laid straight from the app's
+  frame into the buffer the display scans (`plans/GPU.md` GP6.4). The last
+  condition is what makes dropping the background sound: a window is resized
+  before its app presents at the new extent, and the margin between samples
+  transparent, so the promotion waits for the frame that genuinely covers and
+  the scene composites normally until then. The software composite needs no
+  occlusion mechanism of its own: an opaque run covering a row already skips
+  the desktop, the background fill and every window below it, and a second
+  occlusion mechanism beside that one is forbidden (§2.2,
   `plans/FIX-DESKTOP-SPEEDUP.md` Stage B).
-- **Promotion is reached where the display has a layer engine** (the Pi 4's
-  HVS, `plans/FIX-DISPLAY-ACCELERATION.md`); on one without (virtio-gpu, a
-  framebuffer) every frame is composited. What the compositor did with each frame
-  is its own record (`Compositor::presentation`: composited, layered, or the
-  one window promoted), which the session's `WINDOW_SIZED` witness states, so
-  a vertical holds the path to the frame rather than assuming it.
+- **Promotion is reached on every display that composites layers or draws its
+  own frames** (the Pi 4's HVS, `plans/FIX-DISPLAY-ACCELERATION.md`; virtio-gpu
+  and the framebuffers); a display that only takes a copied frame composites
+  every frame. What the compositor did with each frame is its own record
+  (`Compositor::presentation`: composited, layered, or the one window
+  promoted), which the session's `WINDOW_SIZED` witness states, so a vertical
+  holds the path to the frame rather than assuming it.
 - **Tests** cover: fullscreen takes the screen and withdraws every furniture
   reader; leaving lands exactly where it started; a maximized window round
   trips through fullscreen and still restores to its pre-maximize geometry;

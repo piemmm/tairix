@@ -62,6 +62,7 @@ mod kernel {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_riscv64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_itest_witness::SYSCALL_INVOKED;
     use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel::riscv64::boot as boot_riscv64;
     use tairix_log::{Event, EventId, Sink};
@@ -84,11 +85,6 @@ mod kernel {
     /// `event_ids_are_unique` test in `kernel/core/src/audit.rs`.
     const PROCESS_SPAWNED_EVENT_ID: EventId = EventId(4030);
 
-    /// `EventId` emitted by the syscall dispatcher for an audited syscall —
-    /// `init`'s first audited syscall is the `spawn` that launches its
-    /// session. Pinned by the audit-id test in `kernel/syscall/src/audit.rs`.
-    const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
-
     /// Set once `ProcessSpawned` has been observed, so a `SyscallInvoked`
     /// only reports PASS *after* PID 1 entered U-mode — proving the order
     /// (spawn → user-mode syscall), not merely that some syscall ran.
@@ -106,7 +102,7 @@ mod kernel {
             SerialSink::new().write_event(event);
             if event.id == PROCESS_SPAWNED_EVENT_ID {
                 INIT_SPAWNED.store(true, Ordering::Release);
-            } else if event.id == SYSCALL_INVOKED_EVENT_ID && INIT_SPAWNED.load(Ordering::Acquire) {
+            } else if event.id == SYSCALL_INVOKED && INIT_SPAWNED.load(Ordering::Acquire) {
                 qemu_exit::exit_success();
             }
         }

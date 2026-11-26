@@ -20,8 +20,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::gpu::{
-    encode_reply, GpuError, GpuOp, GpuRequest, GpuStatus, RegionSpan, GPU_MAX_BODY, GPU_MAX_REPLY,
-    GPU_REGION_MAX, GPU_REGION_MIN, MAX_CLIENT_CONTEXTS, MAX_CLIENT_EXPORTS,
+    encode_reply, GpuError, GpuOp, GpuRequest, GpuStatus, RegionSpan, GPU_ATTACHED_MAX,
+    GPU_MAX_BODY, GPU_MAX_REPLY, GPU_REGION_MAX, GPU_REGION_MIN, MAX_CLIENT_ATTACHMENTS,
+    MAX_CLIENT_CONTEXTS, MAX_CLIENT_EXPORTS,
 };
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::{Errno, ProcId};
@@ -51,8 +52,9 @@ use crate::{
 pub(crate) trait Channel: Send + Sync {
     /// Answer the call `ticket`; a caller gone meanwhile is no one to answer.
     fn reply(&self, ticket: u64, frame: &[u8]);
-    /// Map the region `client` granted as `grant`.
-    fn map(&self, client: ProcId, grant: u64) -> Result<Arc<dyn Region>, Errno>;
+    /// Map the region `client` granted as `grant`, refused where it is
+    /// shorter than `min_len`.
+    fn map(&self, client: ProcId, grant: u64, min_len: usize) -> Result<Arc<dyn Region>, Errno>;
     /// Be told when `client` exits.
     fn watch(&self, client: ProcId) -> Result<(), Errno>;
     /// Be told no longer.
@@ -65,13 +67,36 @@ pub(crate) trait Channel: Send + Sync {
 }
 
 /// A client's region, as the runtime maps it: shared with the client, which
-/// may change it at any time, so the runtime copies out what it reads.
+/// may change it at any time, so the runtime copies out what it reads as a
+/// description, and lends bytes only to a copy into or out of memory.
 pub(crate) trait Region: Send + Sync {
     fn len(&self) -> usize;
     /// Copy `out.len()` bytes at `at` out of the region.
     fn read(&self, at: usize, out: &mut [u8]);
     /// Copy `data` into the region at `at`.
     fn write(&self, at: usize, data: &[u8]);
+    /// Lend `len` bytes at `at` to `copy`, which reads them.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::OutOfRange`] past the region's end, and `copy`'s.
+    fn lend(
+        &self,
+        at: usize,
+        len: usize,
+        copy: &mut dyn FnMut(&[u8]) -> Result<(), Error>,
+    ) -> Result<(), Error>;
+    /// Lend `len` bytes at `at` to `copy`, which writes them.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::lend`].
+    fn lend_mut(
+        &self,
+        at: usize,
+        len: usize,
+        copy: &mut dyn FnMut(&mut [u8]) -> Result<(), Error>,
+    ) -> Result<(), Error>;
 }
 
 /// A client with its region open.
@@ -80,6 +105,27 @@ struct Client {
     region: Arc<dyn Region>,
     contexts: Vec<ContextKey>,
     exports: usize,
+    /// Its attachments, at most [`MAX_CLIENT_ATTACHMENTS`].
+    attachments: Vec<Attached>,
+    /// The id its next attachment takes.
+    next_attachment: u32,
+}
+
+impl Client {
+    /// The bytes its attachments make the server map.
+    fn attached_bytes(&self) -> u64 {
+        self.attachments
+            .iter()
+            .map(|attached| attached.len as u64)
+            .sum()
+    }
+}
+
+/// A region of a client's own it attached, and how many of its bytes.
+struct Attached {
+    id: u32,
+    region: Arc<dyn Region>,
+    len: usize,
 }
 
 /// A wait the runtime holds for a client.
@@ -188,6 +234,13 @@ enum Outcome {
     Done(Vec<u8>),
     Refused(Error),
     SubmitRefused(SubmitError),
+}
+
+impl Outcome {
+    /// What a wait answered `answer` sends.
+    fn waited(answer: Result<(), Error>) -> Self {
+        answer.map_or_else(Self::Refused, |()| none())
+    }
 }
 
 impl Server {
@@ -307,7 +360,7 @@ impl Server {
         if self.client_region(caller).is_some() {
             return refuse(Errno::Busy);
         }
-        let region = match self.channel.map(caller, open.grant) {
+        let region = match self.channel.map(caller, open.grant, GPU_REGION_MIN) {
             Ok(region) => region,
             Err(errno) => return refuse(errno),
         };
@@ -339,6 +392,8 @@ impl Server {
                 region,
                 contexts: Vec::new(),
                 exports: 0,
+                attachments: Vec::new(),
+                next_attachment: 1,
             },
         );
         drop(state);
@@ -401,7 +456,10 @@ impl Server {
         }
     }
 
-    /// Answer what fell due by `now`: overrunning jobs and timed-out waits.
+    /// Answer what fell due by `now`: overrunning jobs, then timed-out waits.
+    /// A wait whose value has landed or whose context has ended is answered
+    /// with that, never as timed out, though the change that settled it is
+    /// still to be looked at: the loss an overrun makes lands first.
     pub(crate) fn expire(&self, now: u64) {
         self.host.expire(now);
         let mut due = Vec::new();
@@ -412,6 +470,7 @@ impl Server {
             }
             let mut earliest = None::<u64>;
             for held in state.held.iter_mut().flatten() {
+                let context = held.key;
                 held.waits.retain(|waiter| {
                     // Without room to note it, it is answered next time.
                     if waiter.deadline > now || due.try_reserve(1).is_err() {
@@ -419,14 +478,18 @@ impl Server {
                             Some(earliest.map_or(waiter.deadline, |e| e.min(waiter.deadline)));
                         return true;
                     }
-                    due.push(waiter.ticket);
+                    let answer = match self.host.reached(context, waiter.timeline, waiter.value) {
+                        Ok(false) => Err(Error::TimedOut),
+                        reached => reached.map(drop),
+                    };
+                    due.push((waiter.ticket, answer));
                     false
                 });
             }
             state.earliest = earliest;
         }
-        for ticket in due {
-            self.answer(ticket, GpuOp::Wait, Outcome::Refused(Error::TimedOut));
+        for (ticket, answer) in due {
+            self.answer(ticket, GpuOp::Wait, Outcome::waited(answer));
         }
     }
 
@@ -470,11 +533,7 @@ impl Server {
             }
         }
         for (ticket, answer) in settled {
-            let outcome = match answer {
-                Ok(()) => Outcome::Done(Vec::new()),
-                Err(error) => Outcome::Refused(error),
-            };
-            self.answer(ticket, GpuOp::Wait, outcome);
+            self.answer(ticket, GpuOp::Wait, Outcome::waited(answer));
         }
     }
 
@@ -556,6 +615,9 @@ impl Server {
             | GpuOp::CreateShaderModule
             | GpuOp::CreateComputePipeline
             | GpuOp::CreateRenderPipeline => self.run_described(job),
+            GpuOp::Attach | GpuOp::Detach | GpuOp::ReadInto | GpuOp::WriteFrom => {
+                self.run_attachment(job)
+            }
             GpuOp::Open | GpuOp::Close | GpuOp::Wait => Err(Error::Malformed),
             _ => self.run_object(job),
         }
@@ -620,19 +682,28 @@ impl Server {
             GpuOp::Write => {
                 let access: ops::HostAccess = decode(body)?;
                 let key = self.context(caller, access.context)?;
-                let bytes = self.read_region(caller, access.span)?;
-                self.host
-                    .write(key, access.allocation, access.offset, &bytes)?;
+                let region = self.client_region(caller).ok_or(Error::Stale)?;
+                let range = access
+                    .span
+                    .within(region.len())
+                    .map_err(|_| Error::OutOfRange)?;
+                region.lend(range.start, range.len(), &mut |bytes| {
+                    self.host
+                        .write(key, access.allocation, access.offset, bytes)
+                })?;
                 none()
             }
             GpuOp::Read => {
                 let access: ops::HostAccess = decode(body)?;
                 let key = self.context(caller, access.context)?;
-                let len = usize::try_from(access.span.len).map_err(|_| Error::TooLarge)?;
-                let mut bytes = tairix_util::fallible::zeroed(len).ok_or(Error::OutOfMemory)?;
-                self.host
-                    .read(key, access.allocation, access.offset, &mut bytes)?;
-                self.write_region(caller, access.span, &bytes)?;
+                let region = self.client_region(caller).ok_or(Error::Stale)?;
+                let range = access
+                    .span
+                    .within(region.len())
+                    .map_err(|_| Error::OutOfRange)?;
+                region.lend_mut(range.start, range.len(), &mut |bytes| {
+                    self.host.read(key, access.allocation, access.offset, bytes)
+                })?;
                 none()
             }
             GpuOp::Export => {
@@ -919,6 +990,116 @@ impl Server {
         if let Ok(len) = encode_reply(op, GpuStatus::Refused(errno), &[], &mut frame) {
             self.channel.reply(ticket, &frame[..len]);
         }
+    }
+
+    /// Run a request for a region of the client's own: attach it, let it
+    /// go, or copy host-visible memory into or out of it.
+    fn run_attachment(&self, job: &Job) -> Result<Outcome, Error> {
+        let caller = job.caller;
+        let body = &job.body[..];
+        Ok(match job.op {
+            GpuOp::Attach => {
+                let ops::Attach { grant, len } = decode(body)?;
+                done(&ops::Attached {
+                    attachment: self.attach(caller, grant, len)?,
+                })?
+            }
+            GpuOp::Detach => {
+                let ops::Attached { attachment } = decode(body)?;
+                self.detach(caller, attachment)?;
+                none()
+            }
+            GpuOp::ReadInto | GpuOp::WriteFrom => {
+                let transfer: ops::Transfer = decode(body)?;
+                let key = self.context(caller, transfer.context)?;
+                let (region, extent) = self.attachment(caller, transfer.attachment)?;
+                let at = usize::try_from(transfer.at).map_err(|_| Error::OutOfRange)?;
+                let len = usize::try_from(transfer.len).map_err(|_| Error::OutOfRange)?;
+                if at.checked_add(len).is_none_or(|end| end > extent) {
+                    return Err(Error::OutOfRange);
+                }
+                let (allocation, offset) = (transfer.allocation, transfer.offset);
+                if job.op == GpuOp::ReadInto {
+                    region.lend_mut(at, len, &mut |bytes| {
+                        self.host.read(key, allocation, offset, bytes)
+                    })?;
+                } else {
+                    region.lend(at, len, &mut |bytes| {
+                        self.host.write(key, allocation, offset, bytes)
+                    })?;
+                }
+                none()
+            }
+            _ => return Err(Error::Malformed),
+        })
+    }
+
+    /// Map `len` bytes of the region `caller` granted as `grant`, within its
+    /// bounds, answering the attachment's id.
+    fn attach(&self, caller: ProcId, grant: u64, len: u64) -> Result<u32, Error> {
+        if len == 0 {
+            return Err(Error::Empty);
+        }
+        let extent = usize::try_from(len).map_err(|_| Error::TooLarge)?;
+        let fits = |client: &Client| {
+            if client.attachments.len() >= MAX_CLIENT_ATTACHMENTS {
+                return Err(Error::TooMany);
+            }
+            match client.attached_bytes().checked_add(len) {
+                Some(total) if total <= GPU_ATTACHED_MAX => Ok(()),
+                _ => Err(Error::TooLarge),
+            }
+        };
+        {
+            let state = self.state.lock();
+            fits(client_of(&state, caller).ok_or(Error::Stale)?)?;
+        }
+        let region = self
+            .channel
+            .map(caller, grant, extent)
+            .map_err(attach_refusal)?;
+        let mut state = self.state.lock();
+        let client = client_of_mut(&mut state, caller).ok_or(Error::Stale)?;
+        // Another worker may have attached for it while the grant was mapped.
+        fits(client)?;
+        client
+            .attachments
+            .try_reserve(1)
+            .map_err(|_| Error::OutOfMemory)?;
+        let mut id = client.next_attachment;
+        while id == 0 || client.attachments.iter().any(|held| held.id == id) {
+            id = id.wrapping_add(1);
+        }
+        client.next_attachment = id.wrapping_add(1);
+        client.attachments.push(Attached {
+            id,
+            region,
+            len: extent,
+        });
+        Ok(id)
+    }
+
+    /// Let `caller`'s attachment `id` go: its mapping goes once no copy holds
+    /// it.
+    fn detach(&self, caller: ProcId, id: u32) -> Result<(), Error> {
+        let mut state = self.state.lock();
+        let client = client_of_mut(&mut state, caller).ok_or(Error::Stale)?;
+        let at = client
+            .attachments
+            .iter()
+            .position(|held| held.id == id)
+            .ok_or(Error::Stale)?;
+        drop(client.attachments.swap_remove(at));
+        Ok(())
+    }
+
+    /// `caller`'s attachment `id` and how many of its bytes it attached.
+    fn attachment(&self, caller: ProcId, id: u32) -> Result<(Arc<dyn Region>, usize), Error> {
+        let state = self.state.lock();
+        client_of(&state, caller)
+            .and_then(|client| client.attachments.iter().find(|held| held.id == id))
+            .map(|held| (Arc::clone(&held.region), held.len))
+            .ok_or(Error::Stale)
     }
 
     fn client_region(&self, caller: ProcId) -> Option<Arc<dyn Region>> {
@@ -1260,6 +1441,36 @@ fn held_mut(state: &mut State, caller: ProcId, id: ContextId) -> Option<&mut Hel
     let slot = tairix_collections::SlotKey::from_bits(id)?;
     let held = state.held.get_mut(slot.index())?.as_mut()?;
     (held.key.slot() == slot && held.client == caller).then_some(held)
+}
+
+/// `caller`'s record, if its region is open.
+fn client_of(state: &State, caller: ProcId) -> Option<&Client> {
+    let at = state
+        .clients
+        .binary_search_by_key(&caller, |client| client.proc)
+        .ok()?;
+    state.clients.get(at)
+}
+
+/// `caller`'s record, to change, if its region is open.
+fn client_of_mut(state: &mut State, caller: ProcId) -> Option<&mut Client> {
+    let at = state
+        .clients
+        .binary_search_by_key(&caller, |client| client.proc)
+        .ok()?;
+    state.clients.get_mut(at)
+}
+
+/// What a refusal to map an attachment's grant answers: a grant not there is
+/// stale, one of another process's foreign, one short of what is attached out
+/// of range, and the kernel's want of memory is the host's.
+const fn attach_refusal(errno: Errno) -> Error {
+    match errno {
+        Errno::NotFound => Error::Stale,
+        Errno::PermissionDenied => Error::Foreign,
+        Errno::OutOfMemory => Error::OutOfMemory,
+        _ => Error::OutOfRange,
+    }
 }
 
 /// A body read whole.

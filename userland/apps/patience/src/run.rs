@@ -434,6 +434,7 @@ mod program {
                 | WindowEvent::LayerPointer { .. }
                 | WindowEvent::PointerMotion { .. }
                 | WindowEvent::PointerLock { .. }
+                | WindowEvent::FramePresented { .. }
                 | WindowEvent::ToolMoved { .. } => {}
             }
             concluded

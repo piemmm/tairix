@@ -26,6 +26,9 @@
 //! 9. Every specialization of an admitted module folds into a module the
 //!    validator admits, holding no specialization constant and specializing
 //!    to the same workgroup sizes, or is refused as too large.
+//! 10. Every admitted module, and every module a specialization of one folds
+//!     into, guards into a module the validator admits and the guard's
+//!     independent check confirms, or is refused as too large.
 //!
 //! Runs the fixed smoke sweep under plain `cargo test`; keeps drawing from the
 //! same seeded stream until `TAIRIX_FUZZ_BUDGET_SECS` elapses under
@@ -38,7 +41,8 @@ use tairix_spirv::enumerant::{
 };
 use tairix_spirv::{
     Admitted, Arg, BuildError, Builder, Disagreement, EncodeError, Encoder, FoldError, Function,
-    GlslStd450, Id, Layout, Module, Op, SpecError, SpecValue, Specialized, Type, Version,
+    GlslStd450, GuardError, Id, Layout, Module, Op, SpecError, SpecValue, Specialized, Type,
+    Version,
 };
 
 /// Rounds per sweep. Miri interprets every operation, so it drives a handful.
@@ -365,6 +369,158 @@ OpFunctionEnd
     )
 }
 
+/// A compute shader reaching function, private, workgroup and push-constant
+/// memory through dynamic indexes in every place the guard splits a block:
+/// the entry, a loop's header and continue target, a single-block loop, a
+/// selection header, a switch header and a case falling through; and copying,
+/// aliasing and selecting vector components. `{interface}` stands for the
+/// globals its entry point lists from 1.4.
+const BOUNDED: &str = r#"OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %gid {interface}
+OpExecutionMode %main LocalSize 4 1 1
+OpDecorate %gid BuiltIn GlobalInvocationId
+OpDecorate %out DescriptorSet 0
+OpDecorate %out Binding 0
+OpDecorate %block Block
+OpMemberDecorate %block 0 Offset 0
+OpDecorate %words ArrayStride 4
+OpDecorate %push Block
+OpMemberDecorate %push 0 Offset 0
+OpDecorate %pc_words ArrayStride 4
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%bool = OpTypeBool
+%uint = OpTypeInt 32 0
+%float = OpTypeFloat 32
+%v4float = OpTypeVector %float 4
+%v3uint = OpTypeVector %uint 3
+%c0 = OpConstant %uint 0
+%c1 = OpConstant %uint 1
+%c2 = OpConstant %uint 2
+%c3 = OpConstant %uint 3
+%c4 = OpConstant %uint 4
+%c8 = OpConstant %uint 8
+%workgroup = OpConstant %uint 2
+%relaxed = OpConstant %uint 0
+%arr4 = OpTypeArray %uint %c4
+%arr8 = OpTypeArray %uint %c8
+%vecs = OpTypeArray %v4float %c3
+%pair = OpTypeArray %uint %c2
+%pairs = OpTypeArray %pair %c3
+%mat = OpTypeMatrix %v4float 4
+%pc_words = OpTypeArray %uint %c4
+%push = OpTypeStruct %pc_words
+%words = OpTypeRuntimeArray %uint
+%block = OpTypeStruct %words
+%out_ptr = OpTypePointer StorageBuffer %block
+%word_ptr = OpTypePointer StorageBuffer %uint
+%gid_ptr = OpTypePointer Input %v3uint
+%fn_arr4 = OpTypePointer Function %arr4
+%fn_uint = OpTypePointer Function %uint
+%priv_vecs = OpTypePointer Private %vecs
+%priv_v4 = OpTypePointer Private %v4float
+%priv_float = OpTypePointer Private %float
+%wg_arr8 = OpTypePointer Workgroup %arr8
+%wg_uint = OpTypePointer Workgroup %uint
+%fn_pairs = OpTypePointer Function %pairs
+%fn_pair = OpTypePointer Function %pair
+%fn_mat = OpTypePointer Function %mat
+%fn_v4 = OpTypePointer Function %v4float
+%pc_ptr = OpTypePointer PushConstant %push
+%pc_uint = OpTypePointer PushConstant %uint
+%gid = OpVariable %gid_ptr Input
+%out = OpVariable %out_ptr StorageBuffer
+%pc = OpVariable %pc_ptr PushConstant
+%shared = OpVariable %wg_arr8 Workgroup
+%private = OpVariable %priv_vecs Private
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%local = OpVariable %fn_arr4 Function
+%pairs_var = OpVariable %fn_pairs Function
+%mat_var = OpVariable %fn_mat Function
+%gidv = OpLoad %v3uint %gid
+%i = OpCompositeExtract %uint %gidv 0
+%lp = OpAccessChain %fn_uint %local %i
+OpStore %lp %c3
+%pv = OpAccessChain %priv_v4 %private %i
+%v = OpLoad %v4float %pv
+%pf = OpAccessChain %priv_float %pv %i
+%pf2 = OpCopyObject %priv_float %pf
+%f = OpLoad %float %pf2
+%pp = OpAccessChain %fn_pair %pairs_var %i
+%pair_v = OpLoad %pair %pp
+%mc = OpAccessChain %fn_v4 %mat_var %i
+%col = OpLoad %v4float %mc
+%wp = OpAccessChain %wg_uint %shared %i
+%old = OpAtomicIAdd %uint %wp %workgroup %relaxed %c1
+%pcp = OpAccessChain %pc_uint %pc %c0 %i
+OpCopyMemory %lp %pcp
+%e = OpVectorExtractDynamic %float %col %i
+%w = OpVectorInsertDynamic %v4float %v %e %i
+OpBranch %loop
+%loop = OpLabel
+%n = OpPhi %uint %c0 %entry %next %continue
+%hp = OpAccessChain %fn_uint %local %n
+OpStore %hp %n
+%more = OpULessThan %bool %n %c8
+OpLoopMerge %after %continue None
+OpBranchConditional %more %body %after
+%body = OpLabel
+OpBranch %continue
+%continue = OpLabel
+%cp = OpAccessChain %fn_uint %local %n
+OpStore %cp %old
+%next = OpIAdd %uint %n %c1
+OpBranch %loop
+%after = OpLabel
+OpBranch %single
+%single = OpLabel
+%m = OpPhi %uint %c0 %after %m1 %single
+%sp = OpAccessChain %fn_uint %local %m
+OpStore %sp %m
+%m1 = OpIAdd %uint %m %c1
+%again = OpULessThan %bool %m1 %c8
+OpLoopMerge %done %single None
+OpBranchConditional %again %single %done
+%done = OpLabel
+%sel_p = OpAccessChain %fn_uint %local %i
+OpStore %sel_p %c1
+%odd = OpULessThan %bool %i %c2
+OpSelectionMerge %joined None
+OpBranchConditional %odd %then %joined
+%then = OpLabel
+OpBranch %joined
+%joined = OpLabel
+%which = OpPhi %uint %c1 %then %c2 %done
+%sw_p = OpAccessChain %fn_uint %local %which
+OpStore %sw_p %c3
+OpSelectionMerge %switched None
+OpSwitch %i %switched 0 %case0 1 %case1
+%case0 = OpLabel
+%c0p = OpAccessChain %fn_uint %local %i
+OpStore %c0p %c0
+OpBranch %case1
+%case1 = OpLabel
+OpBranch %switched
+%switched = OpLabel
+%lv = OpLoad %uint %lp
+%op = OpAccessChain %word_ptr %out %c0 %i
+OpStore %op %lv
+OpReturn
+OpFunctionEnd
+"#;
+
+/// [`BOUNDED`] at `version`.
+fn bounded(version: Version) -> Vec<u8> {
+    let interface = if version.minor >= 4 {
+        "%out %pc %shared %private"
+    } else {
+        ""
+    };
+    tairix_spirv::assemble::assemble(&BOUNDED.replacen("{interface}", interface, 1), version)
+}
+
 fn words(bytes: &[u8]) -> Vec<u32> {
     bytes
         .as_chunks::<4>()
@@ -461,7 +617,16 @@ fn check_accepted(module: &Module) {
     assert_eq!(other_order.instructions(), module.instructions());
 }
 
-/// Hold a decoded module to the fifth and sixth invariants.
+/// Invariant 10: `admitted` guards into a module the validator admits and the
+/// guard's independent check confirms, or is refused as too large.
+fn check_guarded(admitted: Admitted) {
+    match admitted.guarded() {
+        Ok(_) | Err(GuardError::TooLarge | GuardError::OutOfMemory) => {}
+        Err(refused) => panic!("an admitted module guards: {refused:?}"),
+    }
+}
+
+/// Hold a decoded module to the fifth to tenth invariants.
 fn check_validated(input: &[u8], module: Module) {
     let words = module.bytes().len() / 4;
     let first = Admitted::new(module);
@@ -556,6 +721,9 @@ fn check_validated(input: &[u8], module: Module) {
             );
         }
     }
+    if let Ok(again) = again {
+        check_guarded(again);
+    }
 }
 
 /// Invariant 9: `specialized`, of `admitted`, folds into a module the
@@ -584,6 +752,7 @@ fn check_folded(
     assert!(!left, "a folded module holds no specialization constant");
     let again = folded.specialize(&[]).expect("a folded module specializes");
     assert_eq!(sizes(again), sizes(specialized), "its workgroup sizes stay");
+    check_guarded(folded);
 }
 
 fn run_round(rng: &mut Prng, corpus: &[Vec<u8>]) {
@@ -615,12 +784,14 @@ fn the_decoder_is_total_over_mutated_modules() {
         compute().expect("encoded"),
         texture().expect("encoded"),
         specialized(),
+        bounded(Version { major: 1, minor: 3 }),
+        bounded(Version::NEWEST),
         strings().expect("encoded"),
     ];
     for module in &corpus {
         check_accepted(&Module::decode(module).expect("the corpus is valid"));
     }
-    for module in &corpus[..4] {
+    for module in &corpus[..6] {
         Admitted::new(Module::decode(module).expect("decoded")).expect("the shaders are admitted");
     }
     let seed = Admitted::new(Module::decode(&corpus[3]).expect("decoded")).expect("admitted");

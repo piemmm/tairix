@@ -40,7 +40,6 @@ mod kernel {
     use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
-    use tairix_kernel_syscall::AuditEvent;
     use tairix_log::{Event, Sink};
     use tairix_test_twins::COMMAND;
 
@@ -62,7 +61,7 @@ mod kernel {
 
     /// The run's end: the fixture's exit, which only a pass lets it make,
     /// then the shell's.
-    static END: FixtureExit = FixtureExit::new(&[COMMAND], AuditEvent::SyscallInvoked.id());
+    static END: FixtureExit = FixtureExit::new(&[COMMAND]);
 
     /// Replays every event to the serial console and ends the run on the
     /// shell's exit after the fixture's.

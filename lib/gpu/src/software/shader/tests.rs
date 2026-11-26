@@ -22,7 +22,7 @@ use alloc::vec::Vec;
 use core::fmt::Write;
 
 use tairix_spirv::assemble::{admit, admitted_body_ops, admitted_glsl, glsl_number};
-use tairix_spirv::{Access, Op, Stages};
+use tairix_spirv::{Access, Admitted, Module, Op, Stages};
 
 use crate::DescriptorType;
 
@@ -422,10 +422,22 @@ fn write_out(t: &mut String, name: &str, ty: Ty, word: &mut u32) {
 /// atomics work on.
 pub(crate) const SCRATCH_WORDS: usize = 16;
 
-/// Run `case`, answering each lane's output words.
-pub(crate) fn run_case(context: &Context, case: &Case) -> Vec<Vec<u32>> {
+/// The module `case` runs as, admitted.
+fn admitted(case: &Case) -> Admitted {
     let text = text(case);
-    let module = admit(&text).unwrap_or_else(|refusal| panic!("{refusal:?} in\n{text}"));
+    admit(&text).unwrap_or_else(|refusal| panic!("{refusal:?} in\n{text}"))
+}
+
+/// `module` guarded, and admitted again as the device it was guarded for is
+/// handed it.
+pub(crate) fn guarded(module: Admitted) -> Admitted {
+    let guarded = module.guarded().expect("guarded");
+    let module = Module::decode(guarded.admitted().module().bytes()).expect("decoded");
+    Admitted::new(module).expect("admitted")
+}
+
+/// Run `case` as `module`, answering each lane's output words.
+fn run_module(context: &Context, module: Admitted, case: &Case) -> Vec<Vec<u32>> {
     let module = context.create_shader_module(module).expect("a module");
     let storage = |binding| LayoutBinding {
         binding,
@@ -510,9 +522,14 @@ pub(crate) fn run_case(context: &Context, case: &Case) -> Vec<Vec<u32>> {
 
 /// Run `case` and hold each lane to its expected words.
 pub(crate) fn check(case: &Case) {
+    check_as(case, admitted(case));
+}
+
+/// Run `case` as `module` and hold each lane to its expected words.
+fn check_as(case: &Case, module: Admitted) {
     let (device, _) = device();
     let context = context(&device);
-    let got = run_case(&context, case);
+    let got = run_module(&context, module, case);
     for (lane, ((input, expected), got)) in case.lanes.iter().zip(&got).enumerate() {
         if case.ulps == 0 {
             assert_eq!(
@@ -565,6 +582,13 @@ fn all_cases() -> Vec<Case> {
     cases.extend(group::cases());
     cases.extend(memory::cases());
     cases
+}
+
+#[test]
+fn every_case_runs_alike_guarded() {
+    for case in all_cases() {
+        check_as(&case, guarded(admitted(&case)));
+    }
 }
 
 #[test]

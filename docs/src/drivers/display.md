@@ -55,9 +55,14 @@ frame answers `Shown`: every buffer it replaced is free on return. One whose
 device reads the frame where it lies answers `Queued`: the buffer it replaces
 is read until the device latches the new one at its next frame start, which
 `service_events` reports. The display service posts the latch to the
-configuration's event port as `DisplayEvent::Presented { seq }`; a present
-before it is refused `Busy`, by the client without a call and by the service
-if one arrives. A latch the port refuses for room, or for the service's own
+configuration's event port as `DisplayEvent::Presented { seq, at_ns }`; a
+present before it is refused `Busy`, by the client without a call and by the
+service if one arrives. The service times what it shows on the monotonic
+clock: a shown present when the driver's call returned (the reply's `at_ns`),
+a queued one when its latch was taken from the driver's events or its deadline
+abandoned it, and a latch posted late keeps the moment it happened.
+`RemoteDisplay::on_screen` is the newest present known on screen, with that
+moment. A latch the port refuses for room, or for the service's own
 IPC budget, is owed and posted on the port's room wake, and one the kernel
 had no memory for after `IPC_MEMORY_RETRY_NS`; only the latest is owed, since
 a present latching answers for every one before it, and one refused for good
@@ -265,7 +270,10 @@ names no source.
 
 Clients configure one way, `tairix_display::establish_display` (feature
 `rt`): the event port bound and admitted to the endpoint, the configure, and
-the `RtDisplay` that maps the granted frames and owns the port.
+the `RtDisplay` that maps the granted frames and owns the port. What a
+presenter tracks of it — the port, the present on screen and the one queued,
+and the latches posted — is the `FrameRing` trait, which the desktop
+session's frame bookkeeping is written over rather than over `RtDisplay`.
 
 Lifecycle: the signed-bundle load gate clears `CAP_DRV_LOAD`;
 `Framebuffer::open` maps the surface; dropping the `Framebuffer`
@@ -545,8 +553,14 @@ the first marked `ConsoleHost`.
   its module, its sets' layouts and its pipeline layout, the module and the
   sets' layouts let go once it is made. Each module is folded before it is
   sent (`Admitted::fold`): specialized as the seam specialized it, and every
-  value it could read unwritten defined, so the host compiles the one
-  meaning the seam admitted. A dispatch binds its pipeline, sets and push
+  value it could read unwritten defined. It is then guarded
+  (`Admitted::guarded`): every dynamic index into push constants, private,
+  function, workgroup or interface memory, which Vulkan's robustness does not
+  bound, is held within the level it steps into, a read past it zero and a
+  write past it nothing, so the host compiles the one meaning the seam
+  admitted. The pinned modules are guarded alike. The guarded module, not its
+  source, is held to what the host states (`runs_module`): one whose guard
+  needed a capability the host lacks is refused as `Error::Unsupported`. A dispatch binds its pipeline, sets and push
   constants after the barrier before it. An indirect dispatch's three counts
   are copied into the job's slot of the feedback buffer and held to the
   device's by the pinned `indirect_counts` pass, then dispatched from there:

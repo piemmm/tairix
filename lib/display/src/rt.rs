@@ -21,7 +21,9 @@ use tairix_rt::PrivatePort;
 use tairix_abi::driver::display::{DamageRect, DisplayPower};
 use tairix_geometry::Region;
 
-use crate::client::{BufferMapper, DisplayClient, DisplayTransport, RemoteDisplay};
+use crate::client::{
+    BufferMapper, DisplayClient, DisplayTransport, FrameRing, OnScreen, RemoteDisplay,
+};
 use crate::memory::{BufferMemory, DeviceBuffer, SharedBuffer};
 use crate::presenter::{CursorPlane, DrawInPlace, LayerPresenter, Presenter};
 use crate::region::{FrameRegion, ShmMapper};
@@ -190,17 +192,20 @@ pub struct RtDisplay<T: DisplayTransport> {
     port: PrivatePort,
 }
 
-impl<T: DisplayTransport> RtDisplay<T> {
-    /// The port to wait on beside the presenter's other sources: it fires
-    /// when the driver posts a latch.
-    #[must_use]
-    pub const fn events_port(&self) -> u64 {
+impl<T: DisplayTransport> FrameRing for RtDisplay<T> {
+    fn events_port(&self) -> u64 {
         self.port.id()
     }
 
-    /// Take every event the driver posted, answering whether a present that
-    /// waited on one may now go.
-    pub fn take_events(&mut self) -> bool {
+    fn on_screen(&self) -> Option<OnScreen> {
+        self.display.on_screen()
+    }
+
+    fn queued(&self) -> Option<u64> {
+        self.display.queued()
+    }
+
+    fn take_events(&mut self) -> bool {
         let mut released = false;
         let mut event = [0u8; DisplayEvent::WIRE_LEN];
         let mut sender = [0u8; ORIGIN_WIRE_LEN];

@@ -8,8 +8,8 @@ use crate::enumerant::{AddressingModel, Capability, Dim, ImageFormat};
 use crate::grammar;
 use crate::tables::{GLSL_STD_450, INSTRUCTIONS};
 use crate::{
-    Access, Binding, BindingKind, Component, Disagreement, ImageShape, Interpolation, Layout, Rule,
-    Stage, Varying, Version, WorkgroupSize,
+    Access, Binding, BindingKind, Component, Disagreement, ImageShape, Interpolation,
+    InterpolationSampling, Layout, Rule, Stage, Varying, Version, WorkgroupSize,
 };
 use crate::{Kind, Module, Op, Stages};
 
@@ -177,7 +177,7 @@ fn a_fragment_shader_is_admitted_with_its_texture_and_locations() {
         variable,
         offset: 0,
         interpolation: Interpolation::Smooth,
-        centroid: false,
+        sampling: InterpolationSampling::Centre,
     };
     let (input, output) = (entry.inputs()[0].variable, entry.outputs()[0].variable);
     assert_ne!(input, output);

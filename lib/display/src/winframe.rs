@@ -357,16 +357,66 @@ pub fn decode_list(
     mode: &DisplayMode,
     damage: &DamageList,
     runner: &dyn JobRunner,
+    changed: impl FnMut(Rect),
+) -> Result<(), Errno> {
+    let rects = damage.rects().iter().copied();
+    decode_rects(frame, surface, mode, rects, runner, changed)
+}
+
+/// [`decode_list`] for every pixel of `damage` inside `mode`'s surface.
+///
+/// # Errors
+///
+/// As [`decode_list`].
+pub fn decode_region(
+    frame: &[u8],
+    surface: &mut Surface,
+    mode: &DisplayMode,
+    damage: &Region,
+    runner: &dyn JobRunner,
+    changed: impl FnMut(Rect),
+) -> Result<(), Errno> {
+    let rects = damage
+        .rects()
+        .iter()
+        .filter_map(|rect| damage_in(mode, *rect));
+    decode_rects(frame, surface, mode, rects, runner, changed)
+}
+
+/// Decode every one of `rects`, all checked before a pixel is written.
+fn decode_rects(
+    frame: &[u8],
+    surface: &mut Surface,
+    mode: &DisplayMode,
+    rects: impl Iterator<Item = DamageRect> + Clone,
+    runner: &dyn JobRunner,
     mut changed: impl FnMut(Rect),
 ) -> Result<(), Errno> {
     let size = (surface.width(), surface.height());
-    for rect in damage.rects() {
-        Shape::resolve(mode, size, *rect, frame.len())?;
+    for rect in rects.clone() {
+        Shape::resolve(mode, size, rect, frame.len())?;
     }
-    for rect in damage.rects() {
-        changed(decode(frame, surface, mode, *rect, runner)?);
+    for rect in rects {
+        changed(decode(frame, surface, mode, rect, runner)?);
     }
     Ok(())
+}
+
+/// Whether a frame of `frame_len` bytes holds every row of `mode`'s surface in
+/// a format this module converts, so no conversion of a part of it is refused
+/// for its shape.
+///
+/// # Errors
+///
+/// What [`decode`] refuses the whole surface for.
+pub fn holds(mode: &DisplayMode, frame_len: usize) -> Result<(), Errno> {
+    let whole = DamageRect {
+        x: 0,
+        y: 0,
+        width_px: mode.width_px,
+        height_px: mode.height_px,
+    };
+    Shape::resolve(mode, (mode.width_px, mode.height_px), whole, frame_len).map(|_| ())
 }
 
 /// Lay `damage`'s pixels of `frame` (laid out per `mode`) into `surface`, every
@@ -453,6 +503,61 @@ pub fn lay_opaque_into(
     damage: &Region,
     runner: &dyn JobRunner,
 ) -> Result<(), Errno> {
+    lay_rows_into(
+        frame,
+        mode,
+        (target, stride),
+        damage,
+        runner,
+        &|from, source, row| {
+            let _ = order.transcode_opaque_run(from, source, row);
+            true
+        },
+    )
+    .map(|_| ())
+}
+
+/// [`lay_opaque_into`] with every pixel laid as it is, answering whether every
+/// one laid is opaque: for a picture the display shows alone, which may not be
+/// shown at all where it is not. Each pixel's value is judged as it is
+/// written, so a frame its client changes meanwhile cannot pass a pixel that
+/// was not laid.
+///
+/// # Errors
+///
+/// As [`lay_opaque_into`].
+pub fn lay_judged_into(
+    frame: &[u8],
+    mode: &DisplayMode,
+    (target, stride, order): (&mut [u8], usize, ChannelOrder),
+    damage: &Region,
+    runner: &dyn JobRunner,
+) -> Result<bool, Errno> {
+    lay_rows_into(
+        frame,
+        mode,
+        (target, stride),
+        damage,
+        runner,
+        &|from, source, row| order.transcode_judged_run(from, source, row).1,
+    )
+}
+
+/// How one row of a frame is laid into a target row, answering whether it
+/// passed.
+type LayRow<'a> = dyn Fn(ChannelOrder, &[u8], &mut [u8]) -> bool + Sync + 'a;
+
+/// Lay `damage`'s rows of `frame` into `target`, `stride` bytes a row, through
+/// `lay_row`, in bands across `runner`, every rectangle checked before a pixel
+/// is written: answering whether `lay_row` passed every row.
+fn lay_rows_into(
+    frame: &[u8],
+    mode: &DisplayMode,
+    (target, stride): (&mut [u8], usize),
+    damage: &Region,
+    runner: &dyn JobRunner,
+    lay_row: &LayRow<'_>,
+) -> Result<bool, Errno> {
     let size = (mode.width_px, mode.height_px);
     let held = target.len();
     let fits = |shape: &Shape| {
@@ -467,7 +572,7 @@ pub fn lay_opaque_into(
         Ok(())
     };
     let Some(lay) = RegionLay::plan((mode, size, frame.len()), damage, runner, fits)? else {
-        return Ok(());
+        return Ok(true);
     };
     let band_bytes = usize::try_from(lay.per_band)
         .ok()
@@ -484,25 +589,33 @@ pub fn lay_opaque_into(
             .clone()
             .step_by(usize::try_from(lay.per_band).unwrap_or(usize::MAX)),
     );
-    tairix_parallel::for_each_drawn(runner, bands, &|(bytes, first)| {
-        let within = first..first.saturating_add(lay.per_band).min(lay.rows.end);
-        for shape in lay.reaching(&within) {
-            for y in shape.top.max(within.start)..shape.bottom.min(within.end) {
-                let local = usize::try_from(y - first).unwrap_or(usize::MAX);
-                let at = local
-                    .saturating_mul(stride)
-                    .saturating_add(shape.first_byte);
-                let (Some(source), Some(row)) = (
-                    shape.frame_span(0, y).and_then(|span| frame.get(span)),
-                    bytes.get_mut(at..at.saturating_add(shape.row_bytes)),
-                ) else {
-                    continue;
-                };
-                let _ = order.transcode_opaque_run(shape.order, source, row);
+    let passed = tairix_parallel::fold_drawn(
+        runner,
+        bands,
+        true,
+        &|(bytes, first)| {
+            let mut passed = true;
+            let within = first..first.saturating_add(lay.per_band).min(lay.rows.end);
+            for shape in lay.reaching(&within) {
+                for y in shape.top.max(within.start)..shape.bottom.min(within.end) {
+                    let local = usize::try_from(y - first).unwrap_or(usize::MAX);
+                    let at = local
+                        .saturating_mul(stride)
+                        .saturating_add(shape.first_byte);
+                    let (Some(source), Some(row)) = (
+                        shape.frame_span(0, y).and_then(|span| frame.get(span)),
+                        bytes.get_mut(at..at.saturating_add(shape.row_bytes)),
+                    ) else {
+                        continue;
+                    };
+                    passed &= lay_row(shape.order, source, row);
+                }
             }
-        }
-    });
-    Ok(())
+            passed
+        },
+        &|joined, band| joined && band,
+    );
+    Ok(passed)
 }
 
 /// A region's rectangles validated for one lay before any pixel is written:

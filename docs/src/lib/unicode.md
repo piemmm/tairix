@@ -36,6 +36,10 @@ SASLprep.
   Greek, among other mixtures — is what the file manager's network view marks (`lib/browse`'s `NetworkEndpoint::mixes_scripts`). Levels 5
   and 6 coincide, as no identifier profile applies to a name that is shown
   rather than parsed.
+- **`is_xid_start(ch)`, `is_xid_continue(ch)`** — UAX #31's identifier
+  properties, `XID_Start` and `XID_Continue`: what an identifier may begin
+  and go on with. `lib/wgsl`'s lexer reads WGSL's identifiers by them, as its
+  grammar defines them; an ASCII character is answered without the tables.
 
 ## Normalization
 

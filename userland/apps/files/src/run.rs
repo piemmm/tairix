@@ -9878,6 +9878,7 @@ mod program {
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::Shown { .. }
+            | WindowEvent::FramePresented { .. }
             | WindowEvent::RedrawRequested { .. }
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::Resized { .. }

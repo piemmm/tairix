@@ -2376,6 +2376,7 @@ mod program {
                 | WindowEvent::Focus { .. }
                 | WindowEvent::Minimized { .. }
                 | WindowEvent::Shown { .. }
+                | WindowEvent::FramePresented { .. }
                 | WindowEvent::OpenRequested
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
@@ -2470,6 +2471,7 @@ mod program {
             WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::Shown { .. }
+            | WindowEvent::FramePresented { .. }
             | WindowEvent::AlternateCloseRequested { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }

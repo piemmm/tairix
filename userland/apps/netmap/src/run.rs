@@ -1164,6 +1164,7 @@ mod program {
                 | WindowEvent::Focus { .. }
                 | WindowEvent::Minimized { .. }
                 | WindowEvent::Shown { .. }
+                | WindowEvent::FramePresented { .. }
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
                 | WindowEvent::FolderPicked { .. }

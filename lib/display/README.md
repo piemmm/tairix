@@ -75,7 +75,11 @@ and the client can never drift apart.
   display's own frame, at its stride and in its byte order) copy a frame whose
   every pixel is to be shown opaque — a screensaver's — straight into the
   window surface with each alpha forced to 255, no clamp or compare, about four
-  times the decode's speed. It lives beside
+  times the decode's speed. `lay_judged_into` lays a frame into a display's
+  own frame as it stands, answering whether every pixel it wrote is opaque —
+  what a window shown alone is laid by — and `decode_region` decodes a region
+  as `decode_list` does a list; `holds` says whether a frame holds every row of
+  its surface in a format this codec converts. It lives beside
   the scan-out encode because the channel-order decision is the same one, and no
   program may hold a second opinion about which byte is red. Both directions are
   row-independent and are expressed over `lib/parallel`'s `JobRunner`: the
@@ -84,6 +88,11 @@ and the client can never drift apart.
   should present only what it changed. Every index is validated before the first
   write, so a hostile geometry refuses the whole conversion rather than leaving a
   window half-converted.
+- **Frame regions** (`region`): the map-once seam a window server reads an
+  application's granted frames through (`ShmMapper`, `FrameRegion`), and
+  `SharedFrame`, one frame of a mapped region whose holders keep it mapped, so
+  a compositor that lays a promoted window straight from its frame reads a
+  region nothing has let go.
 - **Service loop** (`service`, feature `service`): the one bring-up and
   serve loop every display driver's `Run` binary hosts — the reserved
   endpoint bind, one wait-set holding it, the kernel's display-lease notice
@@ -107,7 +116,11 @@ and the client can never drift apart.
   present's base is drawn the same way (`BaseFrame::Drawn`) or copied in
   (`BaseFrame::Copied`), beneath the layers at the base's own opacity, and
   a base with nothing new names the frame on screen again, so a change of
-  its opacity alone moves no pixel.
+  its opacity alone moves no pixel. `FrameRing` is what a presenter tracks
+  of a display whose driver posts each queued present's latch to a port:
+  the port, the present on screen and the one queued, and the latches
+  taken. The runtime's `RtDisplay` (feature `rt`) implements it, and the
+  desktop session's frame bookkeeping is written over it.
 
 Every input is validated fail-closed on both halves; the error
 vocabulary crosses the wire as typed `Errno` status frames, converted

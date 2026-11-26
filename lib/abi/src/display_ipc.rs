@@ -908,14 +908,17 @@ pub fn decode_buffer_reply(bytes: &[u8]) -> Result<GrantedBuffer, Errno> {
 }
 
 /// What a `Present` or `PresentLayers` answered: whether the frame is shown or
-/// queued, and the present's sequence number within its configuration, which
-/// a queued present's [`DisplayEvent::Presented`] carries.
+/// queued, the present's sequence number within its configuration, which a
+/// queued present's [`DisplayEvent::Presented`] carries, and when.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct PresentReply {
     /// Whether the frame is on screen or waits for the device's next frame.
     pub presented: Presented,
     /// The present's number within its configuration.
     pub seq: u64,
+    /// On the monotonic clock: when a shown frame reached the screen, or when
+    /// a queued one was queued.
+    pub at_ns: u64,
 }
 
 /// A present's wire byte for [`Presented::Shown`].
@@ -924,9 +927,9 @@ const PRESENTED_SHOWN: u8 = 1;
 const PRESENTED_QUEUED: u8 = 2;
 
 /// Reply length, in bytes, of a `Present` or `PresentLayers`: the status
-/// word, how the present ended (1), a reserved tail (3) and the sequence
-/// number (8).
-pub const DISPLAY_PRESENT_REPLY_LEN: usize = 16;
+/// word, how the present ended (1), a reserved tail (3), the sequence number
+/// (8) and its moment (8).
+pub const DISPLAY_PRESENT_REPLY_LEN: usize = 24;
 
 /// Encode a present's outcome; a refusal is the zero-padded status word.
 #[must_use]
@@ -941,6 +944,7 @@ pub fn encode_present_reply(
                 Presented::Queued => PRESENTED_QUEUED,
             };
             put_u64(&mut out, 8, reply.seq);
+            put_u64(&mut out, 16, reply.at_ns);
         }
         Err(err) => put_status(&mut out, Err(err)),
     }
@@ -970,6 +974,7 @@ pub fn decode_present_reply(bytes: &[u8]) -> Result<PresentReply, Errno> {
     Ok(PresentReply {
         presented,
         seq: read_u64(bytes, 8),
+        at_ns: read_u64(bytes, 16),
     })
 }
 
@@ -1104,10 +1109,14 @@ pub fn decode_planes_reply(bytes: &[u8]) -> Result<Planes, Errno> {
 /// What the service posts to a configuration's port.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DisplayEvent {
-    /// Queued present `seq` latched: the frame it replaced is free.
+    /// Queued present `seq` latched: its frame is on screen and the frame it
+    /// replaced is free.
     Presented {
         /// The present's sequence number, as its reply named it.
         seq: u64,
+        /// When it latched, on the monotonic clock: the moment the service
+        /// took the latch from the device, or abandoned waiting for one.
+        at_ns: u64,
     },
 }
 
@@ -1115,8 +1124,9 @@ pub enum DisplayEvent {
 const EVENT_PRESENTED: u16 = 1;
 
 impl DisplayEvent {
-    /// Encoded size: magic (4), version (2), kind (2), sequence number (8).
-    pub const WIRE_LEN: usize = 16;
+    /// Encoded size: magic (4), version (2), kind (2), sequence number (8),
+    /// moment (8).
+    pub const WIRE_LEN: usize = 24;
 
     /// Encode `self` little-endian.
     #[must_use]
@@ -1125,9 +1135,10 @@ impl DisplayEvent {
         put_u32(&mut out, 0, DISPLAY_EVENT_MAGIC);
         put_u16(&mut out, 4, DISPLAY_VERSION_V1);
         match *self {
-            Self::Presented { seq } => {
+            Self::Presented { seq, at_ns } => {
                 put_u16(&mut out, 6, EVENT_PRESENTED);
                 put_u64(&mut out, 8, seq);
+                put_u64(&mut out, 16, at_ns);
             }
         }
         out
@@ -1153,6 +1164,7 @@ impl DisplayEvent {
         match read_u16(bytes, 6) {
             EVENT_PRESENTED => Ok(Self::Presented {
                 seq: read_u64(bytes, 8),
+                at_ns: read_u64(bytes, 16),
             }),
             _ => Err(Errno::OutOfRange),
         }

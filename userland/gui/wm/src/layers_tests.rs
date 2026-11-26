@@ -20,8 +20,8 @@ use crate::geometry::{Point, Rect, Region};
 use crate::pointer::{Ghost, Halo, HaloRing};
 use crate::surface::Surface;
 use crate::tests::{
-    captured, decorated, mode, new_compositor, opaque, solid_cursor, unbudgeted_compositor,
-    whole_tap, DrawnFrames, MockDisplay, SETTLED_NS,
+    captured, client_frame, decorated, fullscreenable, mode, new_compositor, opaque, solid_cursor,
+    unbudgeted_compositor, whole_tap, DrawnFrames, MockDisplay, SETTLED_NS,
 };
 use crate::window::Window;
 use crate::{Compositor, Presentation, WindowFrame, WindowId, WindowSizeState};
@@ -2043,24 +2043,6 @@ fn without_a_plane_the_pointer_moves_as_a_layer_without_a_bake() {
     assert_eq!(c.frame_stats().damaged_px, 0);
 }
 
-/// A decorated window whose surface is the screen's size, windowed.
-fn fullscreenable(output: DisplayMode) -> (Compositor, WindowId) {
-    let mut c = new_compositor(output, BLUE).expect("compositor");
-    let id = c.add_window(
-        Point::new(20, 20),
-        opaque(output.width_px, output.height_px, RED),
-    );
-    let state = crate::WindowFurnitureState {
-        activation: crate::WindowActivationState::Active,
-        size: WindowSizeState::Restored,
-        movable: true,
-        resizable: true,
-    };
-    assert!(c.set_window_frame(id, WindowFrame::new(state)));
-    assert!(c.resize_window_client(id, 40, 30));
-    (c, id)
-}
-
 #[test]
 fn a_fullscreen_window_is_promoted_and_what_lies_under_it_settles() {
     let output = mode(80, 60);
@@ -2107,6 +2089,79 @@ fn a_fullscreen_window_is_promoted_and_what_lies_under_it_settles() {
         [0, 255, 0, 255],
         "what moved while hidden is shown once it can be"
     );
+}
+
+/// A promoted window's presents are laid straight into its layer from its
+/// client's frame, its content owed them until something reads it.
+#[test]
+fn a_promoted_windows_frame_is_laid_straight_into_its_layer() {
+    let output = mode(80, 60);
+    let (mut c, id) = fullscreenable(output);
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
+        .expect("fullscreen");
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    assert_eq!(c.presentation(), Some(Presentation::Promoted(id)));
+    let whole = DamageList::new(&[DamageRect::full(&output)]).expect("one rectangle");
+    let (frame, _) = client_frame(&opaque(80, 60, GREEN), &output);
+    assert!(c.owe_window_content(id, &frame, &output, &whole));
+    c.present(&mut engine).expect("presents");
+    assert_eq!(c.presentation(), Some(Presentation::Promoted(id)));
+    let (based, stack) = engine.stacks.last().expect("a stack");
+    assert!(!based && stack.len() == 1, "the window alone");
+    assert_eq!(pixel(&engine.screen, output, 40, 30), [0, 255, 0, 255]);
+    assert_eq!(
+        c.window(id)
+            .and_then(Window::content)
+            .and_then(|content| content.get(40, 30)),
+        Some(RED.premultiply()),
+        "owed, not decoded"
+    );
+    let tap = whole_tap(&c, false);
+    let picture = captured(&mut c, tap);
+    assert_eq!(picture.get(40, 30), Some(GREEN.premultiply()));
+    let mut composed = vec![0; (output.stride_bytes * output.height_px) as usize];
+    tairix_display::winframe::encode(
+        &picture,
+        &mut composed,
+        &output,
+        DamageRect::full(&output),
+        &tairix_parallel::SERIAL,
+    )
+    .expect("encoded");
+    assert_eq!(engine.screen, composed, "the scene's software composite");
+}
+
+/// A promoted window's frame found short of opaque as it is laid leaves the
+/// frame to carry the scene, composed from its content, and the next frame
+/// is planned knowing it.
+#[test]
+fn a_promoted_windows_frame_short_of_opaque_is_composed_over_what_lies_beneath() {
+    let output = mode(80, 60);
+    let (mut c, id) = fullscreenable(output);
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, c.screen_rect())
+        .expect("fullscreen");
+    let mut engine = MockEngine::new(output);
+    c.present(&mut engine).expect("presents");
+    let whole = DamageList::new(&[DamageRect::full(&output)]).expect("one rectangle");
+    let mut picture = opaque(80, 60, GREEN);
+    picture.fill_rect(40, 30, 4, 4, Color::rgba(0, 0, 0, 0));
+    let (frame, _) = client_frame(&picture, &output);
+    assert!(c.owe_window_content(id, &frame, &output, &whole));
+    c.present(&mut engine).expect("presents");
+    assert_eq!(c.presentation(), Some(Presentation::Composited));
+    assert_eq!(pixel(&engine.screen, output, 41, 31), [0, 0, 255, 255]);
+    assert_eq!(pixel(&engine.screen, output, 10, 10), [0, 255, 0, 255]);
+    assert!(!c.presents_directly(id));
+    let decoded = c.present_window_content(id, 80, 60, |content, changed| {
+        content.fill_rect(0, 0, 1, 1, RED);
+        changed.add(Rect::new(0, 0, 1, 1));
+    });
+    assert!(decoded.is_some(), "the next present decoded");
+    c.present(&mut engine).expect("presents");
+    assert_eq!(c.presentation(), Some(Presentation::Layered));
+    assert_eq!(pixel(&engine.screen, output, 41, 31), [0, 0, 255, 255]);
+    assert_eq!(pixel(&engine.screen, output, 0, 0), [255, 0, 0, 255]);
 }
 
 /// A solid black window over the whole screen is the engine's own black: no

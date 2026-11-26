@@ -25,6 +25,7 @@ program = [
     "dep:tairix-gpucheck",
     "dep:tairix-inline",
     "dep:tairix-rt",
+    "dep:tairix-spirv",
     "dep:tairix-virtio",
 ]
 
@@ -49,6 +50,8 @@ tairix-gpu = { path = "../../../lib/gpu", version = "=0.0.0", optional = true }
 tairix-gpucheck = { path = "../../../userland/apps/gpucheck", version = "=0.0.0", default-features = false, optional = true }
 tairix-inline = { path = "../../../lib/inline", version = "=0.0.0", optional = true }
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+# The capabilities a corpus kernel declares, read against what Venus states.
+tairix-spirv = { path = "../../../lib/spirv", version = "=0.0.0", optional = true }
 tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0", optional = true }
 
 [build-dependencies]

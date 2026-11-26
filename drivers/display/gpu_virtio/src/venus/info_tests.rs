@@ -381,6 +381,46 @@ fn the_limits_are_the_host_s_held_to_the_seam_s_bounds() {
 }
 
 #[test]
+fn sample_shading_is_stated_and_enabled_where_the_host_shades_each_sample() {
+    for offered in [true, false] {
+        let mut host = Host::every();
+        host.core[6] = offered;
+        let statement = host.narrowed().expect("stated");
+        assert_eq!(
+            statement
+                .info
+                .capabilities
+                .contains(&Capability::SAMPLE_RATE_SHADING),
+            offered
+        );
+        assert_eq!(statement.enables.core[6], offered, "sampleRateShading");
+    }
+}
+
+#[test]
+fn a_capability_every_vulkan_device_runs_is_stated_whatever_the_host_offers() {
+    let mut host = Host::every();
+    host.core.fill(false);
+    host.core[0] = true;
+    let statement = host.narrowed().expect("stated");
+    for capability in [
+        Capability::MATRIX,
+        Capability::SHADER,
+        Capability::SAMPLED1D,
+        Capability::IMAGE1D,
+        Capability::SAMPLED_BUFFER,
+        Capability::IMAGE_BUFFER,
+        Capability::IMAGE_QUERY,
+        Capability::DERIVATIVE_CONTROL,
+    ] {
+        assert!(
+            statement.info.capabilities.contains(&capability),
+            "{capability:?} needs no device feature"
+        );
+    }
+}
+
+#[test]
 fn a_capability_is_stated_where_the_host_runs_it_and_its_feature_enabled() {
     let mut host = Host::every();
     host.core[40] = false;

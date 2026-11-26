@@ -16,7 +16,7 @@
 //! indexes fail-closed and refuses rather than guesses when a record and
 //! its frame disagree.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -34,14 +34,14 @@ use tairix_abi::window_ipc::{
 use tairix_abi::{AppIdentity as AttestedApp, BundleId, Errno, ProcId};
 use tairix_browse::DirectorySource;
 use tairix_controls::{ChainModel, PlatePlacement, RowIcon, WindowSizeState};
-use tairix_display::winframe;
+use tairix_display::{winframe, FrameRing, OnScreen, SharedFrame};
 use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
 use tairix_log::{EventId, Field, FieldValue};
 use tairix_theme::CursorKind;
 use tairix_wallpaper::DesktopSettings;
 use tairix_window::{
-    Activation, AlertOpen, AuthoriseFor, ClientRegion, CursorSetName, DialogSpec, HandOverDesk,
-    OpenEntry, PlacedFile, PreviewSize, ToolSpec, WallpaperName, WindowHost,
+    Activation, AlertOpen, AuthoriseFor, ClientRegion, CursorSetName, DialogSpec, FrameUse,
+    HandOverDesk, OpenEntry, PlacedFile, PreviewSize, ToolSpec, WallpaperName, WindowHost,
 };
 
 use crate::documents::{self, before, DocumentsAsk, DocumentsFolders};
@@ -375,6 +375,15 @@ struct WindowRecord {
     /// Whether it was told the desktop stopped showing it, and not yet told
     /// the desktop shows it again.
     covered: bool,
+    /// The serial of the present the desktop frame being composed carries.
+    latched: Option<u64>,
+    /// The serial of the present the desktop frame queued on the display
+    /// carries, and whether the window's pixels are in that frame, until the
+    /// display reports it on screen.
+    queued: Option<(u64, bool)>,
+    /// The newest serial whose fate the window was told: fates go in serial
+    /// order, so none names a present older than one already finished.
+    told: u64,
 }
 
 impl WindowRecord {
@@ -452,11 +461,14 @@ pub struct SessionWindows {
     /// app the new extent — on the one `Resized` path every other extent
     /// change takes, so the hold-back and the client's folding treat it
     /// identically.
-    owed: Vec<WindowEvent>,
+    owed: VecDeque<WindowEvent>,
     /// Window-channel ids closed since the last take, whose previews the serve
     /// loop has yet to withdraw: a teardown bridge cannot reach the preview
     /// desk, and every close reaches this table.
     closed: Vec<u64>,
+    /// Presents set aside unshown since the last take, by window and serial,
+    /// whose fates the serve loop has yet to time: a bridge reads no clock.
+    unseen: Vec<(u64, u64)>,
     /// Applications whose icon-bar slot went since the last take, whose
     /// question the serve loop has yet to take down: a teardown bridge cannot
     /// reach the prompt, and every exit of an application holding a slot
@@ -484,6 +496,71 @@ pub struct SessionWindows {
     /// Whether the served windows were last told that nobody can see the
     /// desktop.
     desktop_covered: bool,
+    /// The display present the queued serials wait on: its configuration's
+    /// event port and the present's number.
+    awaiting: Option<(u64, u64)>,
+    /// Whether a record may hold a latched serial, so a frame carrying none
+    /// walks no window.
+    latched_any: bool,
+}
+
+/// How the display took a desktop frame ([`SessionWindows::frame_handed`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameOutcome {
+    /// On screen when the present returned, at `at_ns`.
+    Shown {
+        /// When, on the monotonic clock.
+        at_ns: u64,
+    },
+    /// Queued as present `seq` of the display configuration whose events
+    /// arrive at `port`, to be on screen at its latch.
+    Queued {
+        /// The configuration's event port.
+        port: u64,
+        /// The present's number within it.
+        seq: u64,
+    },
+    /// The frame changed nothing on the screen of the configuration whose
+    /// events arrive at `port`, so what was latched is on it as it stands, or
+    /// as the present it has queued stands.
+    Unchanged {
+        /// The configuration's event port.
+        port: u64,
+    },
+    /// The display could not take the frame yet, so what was latched goes
+    /// with a later one.
+    Deferred,
+    /// Nothing can reach the display.
+    Unsent,
+}
+
+impl FrameOutcome {
+    /// How `ring`, the one a frame can reach if any, took the desktop frame
+    /// just handed to it, given what it held on screen and queued `before`:
+    /// shown, queued for its latch, put off while the compositor still owes
+    /// it `damaged` work, changing nothing on screen, or with nowhere to go.
+    #[must_use]
+    pub fn of(
+        ring: Option<&impl FrameRing>,
+        before: Option<(Option<OnScreen>, Option<u64>)>,
+        damaged: bool,
+    ) -> Self {
+        let Some(ring) = ring else {
+            return Self::Unsent;
+        };
+        let (shown, queued) = before.unwrap_or_default();
+        match (ring.on_screen(), ring.queued()) {
+            (Some(now), _) if Some(now) != shown => Self::Shown { at_ns: now.at_ns },
+            (_, Some(seq)) if Some(seq) != queued => Self::Queued {
+                port: ring.events_port(),
+                seq,
+            },
+            _ if damaged => Self::Deferred,
+            _ => Self::Unchanged {
+                port: ring.events_port(),
+            },
+        }
+    }
 }
 
 /// The reports that move apps told the keyboard rests on `told` to where it
@@ -668,7 +745,7 @@ impl SessionWindows {
                 continue;
             };
             self.note_sized(window_id, state, (client.width, client.height));
-            self.owed.push(WindowEvent::Resized {
+            self.owed.push_back(WindowEvent::Resized {
                 window_id,
                 width_px: client.width,
                 height_px: client.height,
@@ -683,10 +760,22 @@ impl SessionWindows {
         core::mem::take(&mut self.presented)
     }
 
-    /// The app-ward events the host owes since the last take, clearing the
-    /// queue so each is delivered once.
+    /// Hand `deliver` each app-ward event owed when called, oldest first,
+    /// with the windows, so each is delivered once; what delivering one owes
+    /// waits for the next call.
+    pub fn deliver_owed(&mut self, mut deliver: impl FnMut(&mut Self, WindowEvent)) {
+        for _ in 0..self.owed.len() {
+            let Some(event) = self.owed.pop_front() else {
+                return;
+            };
+            deliver(self, event);
+        }
+    }
+
+    /// The app-ward events owed, taken so each is seen once.
+    #[cfg(test)]
     pub fn take_owed_events(&mut self) -> Vec<WindowEvent> {
-        core::mem::take(&mut self.owed)
+        self.owed.drain(..).collect()
     }
 
     /// The window-channel ids closed since the last take, clearing the list so
@@ -781,6 +870,183 @@ impl SessionWindows {
                 record.sized = None;
                 sized(ipc, state, extent);
             }
+        }
+    }
+
+    /// Window `ipc`'s present `serial` is what the desktop frame being
+    /// composed shows of it. A window the session serves no application for
+    /// is told nothing.
+    pub fn frame_latched(&mut self, ipc: u64, serial: u64) {
+        if let Some(record) = self.records.get_mut(&ipc) {
+            record.latched = Some(serial);
+            self.latched_any = true;
+        }
+    }
+
+    /// The desktop frame carrying every latched present went to the display at
+    /// `now_ns`, which answered `outcome`. A present it showed and one whose
+    /// frame can reach no display are finished now, one queued waits for the
+    /// latch, and one deferred goes with a later frame. One that changed
+    /// nothing on screen is finished now, or with the present queued before it
+    /// on the same configuration. `on_display` says whether a window's pixels
+    /// are in the frame just handed.
+    ///
+    /// Presents waiting on another configuration's latch, or on a display no
+    /// frame can reach, are finished unseen: one present is in flight at a
+    /// time, so the display that replaced theirs will never report it.
+    pub fn frame_handed(
+        &mut self,
+        outcome: FrameOutcome,
+        now_ns: u64,
+        on_display: impl Fn(WindowId) -> bool,
+    ) {
+        match outcome {
+            FrameOutcome::Shown { at_ns } => {
+                self.drop_awaited(now_ns);
+                self.finish_latched(at_ns, on_display);
+            }
+            FrameOutcome::Queued { port, seq } => {
+                self.drop_awaited(now_ns);
+                self.queue_latched((port, seq), on_display);
+            }
+            FrameOutcome::Unchanged { port } => match self.awaiting {
+                Some(awaited) if awaited.0 == port => self.queue_latched(awaited, on_display),
+                _ => {
+                    self.drop_awaited(now_ns);
+                    self.finish_latched(now_ns, on_display);
+                }
+            },
+            FrameOutcome::Deferred => {}
+            FrameOutcome::Unsent => {
+                self.drop_awaited(now_ns);
+                self.finish_latched(now_ns, |_| false);
+            }
+        }
+    }
+
+    /// Finish unseen, at `now_ns`, every present waiting on a latch that will
+    /// never be reported.
+    fn drop_awaited(&mut self, now_ns: u64) {
+        if self.awaiting.take().is_some() {
+            let unseen =
+                |record: &mut WindowRecord| record.queued.take().map(|(serial, _)| (serial, false));
+            self.finish(unseen, now_ns);
+        }
+    }
+
+    /// Finish every latched present at `at_ns`, shown where `shown` says the
+    /// window's pixels are in the frame.
+    fn finish_latched(&mut self, at_ns: u64, shown: impl Fn(WindowId) -> bool) {
+        if core::mem::take(&mut self.latched_any) {
+            let latched = |record: &mut WindowRecord| {
+                let wm = record.wm;
+                record.latched.take().map(|serial| (serial, shown(wm)))
+            };
+            self.finish(latched, at_ns);
+        }
+    }
+
+    /// Every latched present waits for `awaited`, the display present carrying
+    /// it — its configuration's event port and the present's number — shown
+    /// where `shown` says the window's pixels are in that frame.
+    fn queue_latched(&mut self, awaited: (u64, u64), shown: impl Fn(WindowId) -> bool) {
+        if !core::mem::take(&mut self.latched_any) {
+            return;
+        }
+        let mut any = false;
+        for record in self.records.values_mut() {
+            if let Some(serial) = record.latched.take() {
+                record.queued = Some((serial, shown(record.wm)));
+                any = true;
+            }
+        }
+        if any {
+            self.awaiting = Some(awaited);
+        }
+    }
+
+    /// Take `ring`'s latches, finishing the presents the newest put on
+    /// screen. Answers whether a present that waited on one may now go.
+    ///
+    /// Every path that drains a ring drains it here, since a latch taken and
+    /// not reported leaves its presents to be finished unseen.
+    pub fn take_latches(&mut self, ring: &mut impl FrameRing) -> bool {
+        let released = ring.take_events();
+        if let Some(latch) = ring.on_screen() {
+            self.frame_on_screen(ring.events_port(), latch);
+        }
+        released
+    }
+
+    /// The display configuration whose events arrive at `port` reports
+    /// `latch` on screen: the presents its queued frame carried are finished
+    /// at the latch's moment, if that frame is the one or one before it,
+    /// shown as that frame shows each window.
+    fn frame_on_screen(&mut self, port: u64, latch: OnScreen) {
+        if self
+            .awaiting
+            .is_some_and(|(awaited, seq)| awaited == port && latch.seq >= seq)
+        {
+            self.awaiting = None;
+            self.finish(|record| record.queued.take(), latch.at_ns);
+        }
+    }
+
+    /// Window `ipc`'s presents up to `serial` were set aside unshown — their
+    /// frames dropped by a resize or a release, or refused — their fates owed
+    /// once [`Self::time_unseen`] times them.
+    pub fn frames_unseen(&mut self, ipc: u64, serial: u64) {
+        if self.records.contains_key(&ipc) {
+            self.unseen.push((ipc, serial));
+        }
+    }
+
+    /// Owe every present set aside since the last call its fate, unseen at
+    /// `now_ns`, for a window still open.
+    pub fn time_unseen(&mut self, now_ns: u64) {
+        let Self {
+            unseen,
+            records,
+            owed,
+            ..
+        } = self;
+        for (window_id, serial) in unseen.drain(..) {
+            if let Some(record) = records.get_mut(&window_id) {
+                Self::tell(owed, window_id, record, (serial, now_ns, false));
+            }
+        }
+    }
+
+    /// Owe every window whose record `take` yields a present its fate, at
+    /// `at_ns`: the serial, and whether the window's pixels are on screen.
+    fn finish(
+        &mut self,
+        mut take: impl FnMut(&mut WindowRecord) -> Option<(u64, bool)>,
+        at_ns: u64,
+    ) {
+        for (&window_id, record) in &mut self.records {
+            if let Some((serial, shown)) = take(record) {
+                Self::tell(&mut self.owed, window_id, record, (serial, at_ns, shown));
+            }
+        }
+    }
+
+    /// Owe window `window_id`, whose record is `record`, the fate of present
+    /// `serial` at `at_ns`, unless it was told of a later one.
+    fn tell(
+        owed: &mut VecDeque<WindowEvent>,
+        window_id: u64,
+        record: &mut WindowRecord,
+        (serial, at_ns, shown): (u64, u64, bool),
+    ) {
+        if serial > record.told {
+            record.told = serial;
+            owed.push_back(WindowEvent::FramePresented {
+                window_id,
+                serial,
+                at_ns,
+                shown,
+            });
         }
     }
 
@@ -882,13 +1148,16 @@ impl SessionWindows {
                     Standing::TopLevel | Standing::Popup(_) | Standing::Tool(_) => Armed::Always,
                 },
                 covered: self.desktop_covered,
+                latched: None,
+                queued: None,
+                told: 0,
             },
         );
         self.by_wm.insert(wm, ipc);
         // One opened while nobody can see the desktop is told so before its
         // first frame, so it need draw nothing until it can be seen.
         if self.desktop_covered {
-            self.owed.push(WindowEvent::Shown {
+            self.owed.push_back(WindowEvent::Shown {
                 window_id: ipc,
                 shown: false,
             });
@@ -1328,14 +1597,15 @@ pub struct FrameShow<'a> {
 
 #[cfg(test)]
 impl ShellWindowHost<'_> {
-    /// Show a frame through this bridge's own parts, as the latch shows one.
+    /// Show a frame of `frame`'s bytes through this bridge's own parts, as the
+    /// latch shows one.
     pub(crate) fn window_presented(
         &mut self,
         window_id: u64,
         surface: &DisplayMode,
         frame: &[u8],
         damage: &DamageList,
-    ) -> Result<(), Errno> {
+    ) -> Result<FrameUse, Errno> {
         tairix_window::FrameHost::window_presented(
             &mut FrameShow {
                 shell: &mut *self.shell,
@@ -1345,7 +1615,7 @@ impl ShellWindowHost<'_> {
             },
             window_id,
             surface,
-            frame,
+            &tests::shared_frame(frame),
             damage,
         )
     }
@@ -1356,33 +1626,44 @@ impl tairix_window::FrameHost for FrameShow<'_> {
         &mut self,
         window_id: u64,
         surface: &DisplayMode,
-        frame: &[u8],
+        frame: &SharedFrame,
         damage: &DamageList,
-    ) -> Result<(), Errno> {
+    ) -> Result<FrameUse, Errno> {
         let Some(record) = self.windows.records.get(&window_id) else {
             return Err(Errno::NotFound);
         };
         let wm = record.wm;
-        // Only the damaged pixels are converted, into the compositor's one
-        // copy, and only those the conversion changed are marked dirty. The
-        // frame's own mode sizes that copy, so a frame drawn at a geometry the
-        // window manager has since left still lands. The rows go across the
-        // machine's cores: the app declares the damage, so this is the one
-        // pass the session cannot bound.
-        let runner = self.compositor.job_runner();
-        let Some(result) = self.compositor.present_window_content(
-            wm,
-            surface.width_px,
-            surface.height_px,
-            |content, changed| {
-                winframe::decode_list(frame, content, surface, damage, runner, |rect| {
-                    changed.add(rect);
-                })
-            },
-        ) else {
-            return Err(Errno::NotFound);
+        // A window promoted to the screen alone is laid straight from its
+        // frame into the buffer the display scans: its content is owed the
+        // frame, not given it.
+        let used = if self
+            .compositor
+            .owe_window_content(wm, frame, surface, damage)
+        {
+            FrameUse::Kept
+        } else {
+            // Only the damaged pixels are converted, into the compositor's
+            // one copy, and only those the conversion changed are marked
+            // dirty. The frame's own mode sizes that copy, so a frame drawn at
+            // a geometry the window manager has since left still lands. The
+            // rows go across the machine's cores: the app declares the damage,
+            // so this is the one pass the session cannot bound.
+            let runner = self.compositor.job_runner();
+            let Some(result) = self.compositor.present_window_content(
+                wm,
+                surface.width_px,
+                surface.height_px,
+                |content, changed| {
+                    winframe::decode_list(frame.bytes(), content, surface, damage, runner, |rect| {
+                        changed.add(rect);
+                    })
+                },
+            ) else {
+                return Err(Errno::NotFound);
+            };
+            result?;
+            FrameUse::Read
         };
-        result?;
         // A shown frame is what the frame-report gate classifies.
         if !self.windows.presented.contains(&window_id) {
             self.windows.presented.push(window_id);
@@ -1414,7 +1695,7 @@ impl tairix_window::FrameHost for FrameShow<'_> {
                 self.shell.map_window(self.compositor, wm);
             }
         }
-        Ok(())
+        Ok(used)
     }
 
     fn view_presented(
@@ -1434,7 +1715,11 @@ impl tairix_window::FrameHost for FrameShow<'_> {
             .present_window_view(record.wm, surface, frame, damage)
     }
 
-    fn frame_refused(&mut self, window_id: u64, errno: Errno) {
+    fn frame_refused(&mut self, window_id: u64, serial: u64, errno: Errno, first: bool) {
+        self.windows.frames_unseen(window_id, serial);
+        if !first {
+            return;
+        }
         tairix_log::log(
             self.shell.audit(),
             &tairix_log::Event {
@@ -1453,6 +1738,16 @@ impl tairix_window::FrameHost for FrameShow<'_> {
                 ],
             },
         );
+    }
+
+    fn frame_latched(&mut self, window_id: u64, serial: u64) {
+        self.windows.frame_latched(window_id, serial);
+    }
+
+    fn frame_reclaimed(&mut self, window_id: u64) {
+        if let Some(record) = self.windows.records.get(&window_id) {
+            self.compositor.end_direct(record.wm);
+        }
     }
 }
 
@@ -2235,7 +2530,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // Larger than the screen holds, it is fitted to it and told so; its
         // content then scrolls inside it.
         if (width, height) != asked {
-            self.windows.owed.push(WindowEvent::Resized {
+            self.windows.owed.push_back(WindowEvent::Resized {
                 window_id,
                 width_px: width,
                 height_px: height,
@@ -2291,7 +2586,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
                     .move_window(wm, bounds.clamped_onto(area).origin);
             }
             if (width, height) != asked {
-                self.windows.owed.push(WindowEvent::Resized {
+                self.windows.owed.push_back(WindowEvent::Resized {
                     window_id,
                     width_px: width,
                     height_px: height,
@@ -2381,13 +2676,13 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             if let Some(event) =
                 resize_drag_event(wm, ended, self.shell, self.compositor, self.windows)
             {
-                self.windows.owed.push(event);
+                self.windows.owed.push_back(event);
             }
             return Ok(());
         }
         let work_area = self.shell.work_area(self.compositor);
         if let Some((state, client)) = self.compositor.hold_window_in_size_range(wm, work_area) {
-            self.windows.owed.push(WindowEvent::Resized {
+            self.windows.owed.push_back(WindowEvent::Resized {
                 window_id,
                 width_px: client.width,
                 height_px: client.height,
@@ -2417,7 +2712,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         };
         self.windows
             .note_sized(window_id, applied, (client.width, client.height));
-        self.windows.owed.push(WindowEvent::Resized {
+        self.windows.owed.push_back(WindowEvent::Resized {
             window_id,
             width_px: client.width,
             height_px: client.height,
@@ -2508,6 +2803,10 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         self.shell.lock_pointer(wm, self.compositor)
     }
 
+    fn frames_dropped(&mut self, window_id: u64, serial: u64) {
+        self.windows.frames_unseen(window_id, serial);
+    }
+
     fn window_closed(&mut self, window_id: u64) {
         self.windows.closed.push(window_id);
         // Nothing a dead window declared can still be true.
@@ -2530,7 +2829,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // it; a window another save was offered to hears the offer end once
         // the engine lets go.
         if let Some(end) = self.shell.abort_drag_for(self.compositor, window_id) {
-            self.windows.owed.push(end);
+            self.windows.owed.push_back(end);
         }
         // Retiring a layer surface is an ordinary close, so the feeds stop
         // here rather than needing a teardown path of their own.
@@ -3318,8 +3617,11 @@ pub fn desktop_info(compositor: &Compositor, shell: &DesktopShell) -> Result<Des
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tairix_abi::driver::display::{DamageList, DamageRect, DisplayFormat, DisplayMode};
+    use tairix_abi::driver::display::{
+        DamageList, DamageRect, DisplayFormat, DisplayMode, DisplayPower,
+    };
     use tairix_abi::window_ipc::{DocumentName, HandOverDocument};
+    use tairix_abi::DriverError;
     use tairix_reclaim::{PressureBand, ReportedPressure};
     use tairix_taskbar::TaskbarConfig;
     use tairix_window::WindowHost;
@@ -4607,22 +4909,30 @@ mod tests {
         assert_eq!(shell.router().focused(), Some(wm), "and gives it focus");
     }
 
-    /// A frame region an engine under test maps: zeroes, of the length asked.
-    struct Zeroed(Vec<u8>);
+    /// A frame region: what an engine under test maps, zeroes of the length
+    /// asked, or the frame a test shows.
+    struct MappedRegion(Vec<u8>);
 
-    impl tairix_display::FrameRegion for Zeroed {
+    impl tairix_display::FrameRegion for MappedRegion {
         fn bytes(&self) -> &[u8] {
             &self.0
         }
     }
 
-    /// A mapper handing an engine under test [`Zeroed`] regions.
+    /// A frame holding `bytes`, as the latch shares one.
+    pub(super) fn shared_frame(bytes: &[u8]) -> SharedFrame {
+        let region: alloc::rc::Rc<dyn tairix_display::FrameRegion> =
+            alloc::rc::Rc::new(MappedRegion(bytes.to_vec()));
+        SharedFrame::new(region, 0, bytes.len()).expect("the whole region")
+    }
+
+    /// A mapper handing an engine under test zeroed regions.
     struct Mapper;
 
     impl tairix_display::ShmMapper for Mapper {
-        type Region = Zeroed;
-        fn map(&mut self, _: ProcId, _: u64, min_len: usize) -> Result<Zeroed, Errno> {
-            Ok(Zeroed(vec![0; min_len]))
+        type Region = MappedRegion;
+        fn map(&mut self, _: ProcId, _: u64, min_len: usize) -> Result<MappedRegion, Errno> {
+            Ok(MappedRegion(vec![0; min_len]))
         }
     }
 
@@ -4835,6 +5145,7 @@ mod tests {
             let present = tairix_abi::window_ipc::WindowRequest::Present {
                 window_id: id,
                 frame_index: 1,
+                serial: 1,
                 damage: whole(&m),
             };
             let recorded = served(&mut server, &mut host, &mut Caller(None), &present);
@@ -4856,6 +5167,497 @@ mod tests {
             compositor.window(wm).expect("live").is_visible(),
             "the latch that shows it maps the window"
         );
+    }
+
+    /// A session serving two windows, for the frame-fate tests: what one
+    /// serve pass borrows, the engine, and the windows' frame shape.
+    struct FateRig {
+        shell: DesktopShell,
+        compositor: Compositor,
+        windows: SessionWindows,
+        picker: RecordingSlot,
+        server: tairix_window::WindowServer<Mapper>,
+        mode: DisplayMode,
+    }
+
+    impl FateRig {
+        /// The rig, connected, with windows `a` and `b` open.
+        fn opened() -> (Self, u64, u64) {
+            let (shell, compositor) = desktop();
+            let mut rig = Self {
+                shell,
+                compositor,
+                windows: SessionWindows::new(),
+                picker: RecordingSlot::default(),
+                server: tairix_window::WindowServer::new(Mapper, window_owner(0x5D), u64::MAX),
+                mode: mode(4, 4, DisplayFormat::Rgba8888),
+            };
+            let connected = rig.serve(&tairix_abi::window_ipc::WindowRequest::Connect);
+            let mut ids = tairix_abi::window_ipc::decode_connect_reply(&connected)
+                .expect("connected")
+                .ids;
+            let (a, b) = (ids.mint().expect("a"), ids.mint().expect("b"));
+            for window_id in [a, b] {
+                let create = tairix_abi::window_ipc::WindowRequest::Create {
+                    window_id,
+                    shm_handle: 7,
+                    event_endpoint: tairix_abi::window_ipc::event_endpoint_for(1),
+                    frame_count: 2,
+                    width_px: rig.mode.width_px,
+                    height_px: rig.mode.height_px,
+                    stride_bytes: rig.mode.stride_bytes,
+                    format: rig.mode.format,
+                    title: tairix_abi::window_ipc::WindowTitle::new("w").expect("a title"),
+                    sizing: WindowSizing::default(),
+                };
+                let opened = rig.serve(&create);
+                assert_eq!(tairix_abi::reply::decode_status_reply(&opened), Ok(()));
+            }
+            (rig, a, b)
+        }
+
+        /// `request`'s reply, served over a bridge of the rig's parts.
+        fn serve(&mut self, request: &tairix_abi::window_ipc::WindowRequest) -> Vec<u8> {
+            let mut host = ShellWindowHost {
+                shell: &mut self.shell,
+                compositor: &mut self.compositor,
+                windows: &mut self.windows,
+                picker: &mut self.picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+                screensaver: None,
+                relay: &mut RefusingRelay,
+                wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
+                authorise: None,
+                documents: &mut crate::documents::NoDocuments,
+            };
+            served(&mut self.server, &mut host, &mut Caller(None), request)
+        }
+
+        /// Window `window_id` presents `serial`, and the desktop's next frame
+        /// latches it.
+        fn present(&mut self, window_id: u64, serial: u64) {
+            let request = tairix_abi::window_ipc::WindowRequest::Present {
+                window_id,
+                frame_index: u32::try_from(serial % 2).expect("one bit"),
+                serial,
+                damage: whole(&self.mode),
+            };
+            tairix_abi::reply::decode_status_reply(&self.serve(&request)).expect("recorded");
+            self.server.latch(&mut FrameShow {
+                shell: &mut self.shell,
+                compositor: &mut self.compositor,
+                windows: &mut self.windows,
+                seat_held: false,
+            });
+        }
+
+        /// Whether window `a`'s pixels are what is on screen.
+        fn shows(&self, a: u64) -> impl Fn(WindowId) -> bool {
+            let wm = self.windows.wm_id(a).expect("open");
+            move |shown| shown == wm
+        }
+    }
+
+    /// Window `window_id`'s fate: `serial` finished at `at_ns`, shown or not.
+    fn fate(window_id: u64, serial: u64, at_ns: u64, shown: bool) -> WindowEvent {
+        WindowEvent::FramePresented {
+            window_id,
+            serial,
+            at_ns,
+            shown,
+        }
+    }
+
+    /// A present a queued desktop frame carried is finished at the latch of
+    /// the display configuration that queued it, once, and not by another
+    /// configuration's latch or an earlier present's.
+    #[test]
+    fn a_queued_frames_presents_are_finished_at_its_latch() {
+        let (mut rig, a, b) = FateRig::opened();
+        let shows_a = rig.shows(a);
+        rig.present(a, 3);
+        rig.present(b, 5);
+        rig.windows
+            .frame_handed(FrameOutcome::Queued { port: 9, seq: 2 }, 100, &shows_a);
+        assert!(
+            rig.windows.take_owed_events().is_empty(),
+            "waiting on the latch"
+        );
+        let latch = |seq, at_ns| OnScreen { seq, at_ns };
+        rig.windows.frame_on_screen(8, latch(2, 150));
+        rig.windows.frame_on_screen(9, latch(1, 150));
+        assert!(
+            rig.windows.take_owed_events().is_empty(),
+            "another configuration's latch, and an earlier present's, finish nothing"
+        );
+        rig.windows.frame_on_screen(9, latch(2, 160));
+        assert_eq!(
+            rig.windows.take_owed_events(),
+            [fate(a, 3, 160, true), fate(b, 5, 160, false)],
+            "finished at the latch's moment, shown where the window is on screen"
+        );
+        rig.windows.frame_on_screen(9, latch(3, 170));
+        assert!(rig.windows.take_owed_events().is_empty(), "and only once");
+    }
+
+    /// A display ring on event port 9 whose every present queues, latching
+    /// at `latch_at_ns` when the ring is next drained.
+    struct LatchingRing {
+        mode: DisplayMode,
+        queued: Option<u64>,
+        on_screen: Option<OnScreen>,
+        next_seq: u64,
+        latch_at_ns: u64,
+    }
+
+    impl LatchingRing {
+        /// A ring for `screen` with present `queued` in flight and nothing
+        /// yet on screen.
+        fn queuing(screen: tairix_wm::Rect, queued: u64, latch_at_ns: u64) -> Self {
+            Self {
+                mode: mode(screen.width, screen.height, DisplayFormat::Rgba8888),
+                queued: Some(queued),
+                on_screen: None,
+                next_seq: queued,
+                latch_at_ns,
+            }
+        }
+    }
+
+    impl FrameRing for LatchingRing {
+        fn events_port(&self) -> u64 {
+            9
+        }
+
+        fn on_screen(&self) -> Option<OnScreen> {
+            self.on_screen
+        }
+
+        fn queued(&self) -> Option<u64> {
+            self.queued
+        }
+
+        fn take_events(&mut self) -> bool {
+            let Some(seq) = self.queued.take() else {
+                return false;
+            };
+            self.on_screen = Some(OnScreen {
+                seq,
+                at_ns: self.latch_at_ns,
+            });
+            true
+        }
+    }
+
+    impl tairix_display::Presenter for LatchingRing {
+        fn mode(&self) -> DisplayMode {
+            self.mode
+        }
+
+        fn ready(&self) -> bool {
+            self.queued.is_none()
+        }
+
+        fn present(&mut self, _: &[u8], _: &[DamageRect]) -> Result<(), DriverError> {
+            self.next_seq += 1;
+            self.queued = Some(self.next_seq);
+            Ok(())
+        }
+
+        fn set_power(&mut self, _: DisplayPower) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
+
+    /// How a ring took a frame is read from what changed on it: a newer
+    /// present on screen is shown, a newer one queued awaits its latch, and
+    /// with neither the frame was put off while damage is owed, or changed
+    /// nothing; with no ring it went nowhere.
+    #[test]
+    fn a_frames_outcome_is_what_changed_on_the_ring_it_went_to() {
+        let screen = tairix_wm::Rect::new(0, 0, 4, 4);
+        let mut ring = LatchingRing::queuing(screen, 2, 150);
+        let latched = Some(OnScreen { seq: 1, at_ns: 90 });
+        ring.on_screen = latched;
+        let none: Option<&LatchingRing> = None;
+        assert_eq!(FrameOutcome::of(none, None, true), FrameOutcome::Unsent);
+        assert_eq!(
+            FrameOutcome::of(Some(&ring), Some((latched, None)), false),
+            FrameOutcome::Queued { port: 9, seq: 2 }
+        );
+        assert_eq!(
+            FrameOutcome::of(Some(&ring), Some((None, Some(2))), false),
+            FrameOutcome::Shown { at_ns: 90 }
+        );
+        assert_eq!(
+            FrameOutcome::of(Some(&ring), Some((latched, Some(2))), true),
+            FrameOutcome::Deferred
+        );
+        assert_eq!(
+            FrameOutcome::of(Some(&ring), Some((latched, Some(2))), false),
+            FrameOutcome::Unchanged { port: 9 }
+        );
+    }
+
+    /// Draining a ring reports the latch it takes, finishing the presents
+    /// its queued frame carried once, and a drain that takes nothing
+    /// releases nothing.
+    #[test]
+    fn a_latch_taken_from_the_ring_finishes_the_presents_it_showed() {
+        let (mut rig, a, _) = FateRig::opened();
+        let shows_a = rig.shows(a);
+        rig.present(a, 3);
+        rig.windows
+            .frame_handed(FrameOutcome::Queued { port: 9, seq: 1 }, 100, &shows_a);
+        let mut display = LatchingRing::queuing(rig.compositor.screen_rect(), 1, 150);
+        assert!(
+            rig.windows.take_latches(&mut display),
+            "the latch frees a frame"
+        );
+        assert_eq!(rig.windows.take_owed_events(), [fate(a, 3, 150, true)]);
+        assert!(
+            !rig.windows.take_latches(&mut display),
+            "nothing more posted"
+        );
+        assert!(rig.windows.take_owed_events().is_empty(), "and told once");
+    }
+
+    /// A latch the screen's fade to black takes still finishes the presents
+    /// its frame showed, as shown, so the dark that follows finds nothing
+    /// left awaiting it to finish unseen.
+    #[test]
+    fn a_latch_taken_while_the_screen_fades_to_black_finishes_the_presents_it_showed() {
+        let (mut rig, a, _) = FateRig::opened();
+        let shows_a = rig.shows(a);
+        rig.present(a, 3);
+        rig.windows
+            .frame_handed(FrameOutcome::Queued { port: 9, seq: 1 }, 100, &shows_a);
+        let mut display = LatchingRing::queuing(rig.compositor.screen_rect(), 1, 150);
+        let clock = core::cell::Cell::new(200);
+        let mut fade = crate::fade::ScreenFade::begin(clock.get(), &mut rig.compositor);
+        crate::fade::fade_to_black(
+            &mut fade,
+            &mut rig.compositor,
+            &mut display,
+            &mut rig.windows,
+            || clock.get(),
+            |ns| clock.set(clock.get().saturating_add(ns)),
+        );
+        assert!(fade.settled(), "the fade ran to black");
+        assert_eq!(rig.windows.take_owed_events(), [fate(a, 3, 150, true)]);
+        rig.windows
+            .frame_handed(FrameOutcome::Unsent, 900, |_| false);
+        assert!(
+            rig.windows.take_owed_events().is_empty(),
+            "the dark finds nothing awaiting"
+        );
+    }
+
+    /// A present the display showed, one whose frame changed nothing on
+    /// screen and one whose frame can reach no display are finished at once;
+    /// one a frame handed over still waits on is finished unseen; a dropped
+    /// present is finished unseen once timed; an unknown window is told
+    /// nothing.
+    #[test]
+    fn a_shown_unsent_superseded_or_dropped_present_is_finished_at_once() {
+        let (mut rig, a, b) = FateRig::opened();
+        let shows_a = rig.shows(a);
+        rig.present(a, 7);
+        rig.windows
+            .frame_handed(FrameOutcome::Queued { port: 9, seq: 4 }, 200, &shows_a);
+        rig.present(b, 8);
+        rig.windows
+            .frame_handed(FrameOutcome::Shown { at_ns: 300 }, 310, |_| true);
+        assert_eq!(
+            rig.windows.take_owed_events(),
+            [fate(a, 7, 310, false), fate(b, 8, 300, true)],
+            "a frame handed while a latch is awaited finishes what waited, unseen"
+        );
+        rig.present(a, 9);
+        rig.windows
+            .frame_handed(FrameOutcome::Unsent, 400, |_| true);
+        assert_eq!(rig.windows.take_owed_events(), [fate(a, 9, 400, false)]);
+        rig.windows
+            .frame_handed(FrameOutcome::Unsent, 410, |_| true);
+        assert!(rig.windows.take_owed_events().is_empty(), "nothing latched");
+        rig.present(a, 10);
+        rig.present(b, 11);
+        rig.windows
+            .frame_handed(FrameOutcome::Unchanged { port: 9 }, 420, &shows_a);
+        assert_eq!(
+            rig.windows.take_owed_events(),
+            [fate(a, 10, 420, true), fate(b, 11, 420, false)],
+            "a frame that changed nothing leaves each window shown as it stands"
+        );
+
+        rig.windows.frames_unseen(b, 12);
+        rig.windows.frames_unseen(0xDEAD, 1);
+        assert!(
+            rig.windows.take_owed_events().is_empty(),
+            "untimed until taken"
+        );
+        rig.windows.time_unseen(500);
+        assert_eq!(rig.windows.take_owed_events(), [fate(b, 12, 500, false)]);
+        rig.windows.time_unseen(510);
+        assert!(rig.windows.take_owed_events().is_empty(), "each told once");
+    }
+
+    /// A frame the display could not take yet, and one that changed nothing on
+    /// the configuration a queued present waits on, finish nothing: the
+    /// queued present is still the display's to report, and what was latched
+    /// goes with a later frame or with the queued one. An undamaged wake
+    /// finished both unseen.
+    #[test]
+    fn a_frame_put_off_or_unchanged_leaves_a_queued_present_to_its_latch() {
+        let (mut rig, a, b) = FateRig::opened();
+        let shows_a = rig.shows(a);
+        let latch = |seq, at_ns| OnScreen { seq, at_ns };
+        rig.present(a, 3);
+        rig.windows
+            .frame_handed(FrameOutcome::Queued { port: 9, seq: 2 }, 100, &shows_a);
+        rig.windows
+            .frame_handed(FrameOutcome::Unchanged { port: 9 }, 110, &shows_a);
+        rig.windows
+            .frame_handed(FrameOutcome::Deferred, 120, &shows_a);
+        assert!(
+            rig.windows.take_owed_events().is_empty(),
+            "the queued present still waits on its latch"
+        );
+        rig.present(b, 5);
+        rig.windows
+            .frame_handed(FrameOutcome::Unchanged { port: 9 }, 130, &shows_a);
+        assert!(
+            rig.windows.take_owed_events().is_empty(),
+            "what changed nothing joins the present queued before it"
+        );
+        rig.windows.frame_on_screen(9, latch(2, 150));
+        assert_eq!(
+            rig.windows.take_owed_events(),
+            [fate(a, 3, 150, true), fate(b, 5, 150, false)]
+        );
+
+        rig.present(a, 7);
+        rig.windows
+            .frame_handed(FrameOutcome::Deferred, 200, &shows_a);
+        assert!(
+            rig.windows.take_owed_events().is_empty(),
+            "put off, the latched present goes with a later frame"
+        );
+        rig.windows
+            .frame_handed(FrameOutcome::Shown { at_ns: 300 }, 310, &shows_a);
+        assert_eq!(rig.windows.take_owed_events(), [fate(a, 7, 300, true)]);
+
+        rig.present(a, 9);
+        rig.windows
+            .frame_handed(FrameOutcome::Queued { port: 9, seq: 4 }, 400, &shows_a);
+        rig.present(b, 11);
+        rig.windows
+            .frame_handed(FrameOutcome::Unchanged { port: 10 }, 410, &shows_a);
+        assert_eq!(
+            rig.windows.take_owed_events(),
+            [fate(a, 9, 410, false), fate(b, 11, 410, false)],
+            "another configuration answered, so the one waited on never will"
+        );
+    }
+
+    /// A window is told its presents' fates in serial order: a present dropped
+    /// unshown after an earlier one was queued is told first, and the queued
+    /// one's latch then tells nothing, the later fate having finished it.
+    #[test]
+    fn fates_are_told_in_serial_order() {
+        let (mut rig, a, _) = FateRig::opened();
+        let shows_a = rig.shows(a);
+        rig.present(a, 3);
+        rig.windows
+            .frame_handed(FrameOutcome::Queued { port: 9, seq: 2 }, 100, &shows_a);
+        rig.windows.frames_unseen(a, 4);
+        rig.windows.time_unseen(120);
+        assert_eq!(rig.windows.take_owed_events(), [fate(a, 4, 120, false)]);
+        rig.windows
+            .frame_on_screen(9, OnScreen { seq: 2, at_ns: 150 });
+        assert!(
+            rig.windows.take_owed_events().is_empty(),
+            "present 3 was finished with present 4"
+        );
+    }
+
+    /// A present the latch cannot show is finished unseen, once, though its
+    /// frame is tried again: a client paced by its fates is never left waiting
+    /// on a refusal that lasts, and the frame shown later tells nothing more.
+    #[test]
+    fn a_refused_present_is_finished_unseen_once() {
+        let (mut rig, a, _) = FateRig::opened();
+        let refuse = |rig: &mut FateRig, serial, first| {
+            tairix_window::FrameHost::frame_refused(
+                &mut FrameShow {
+                    shell: &mut rig.shell,
+                    compositor: &mut rig.compositor,
+                    windows: &mut rig.windows,
+                    seat_held: false,
+                },
+                a,
+                serial,
+                Errno::OutOfMemory,
+                first,
+            );
+        };
+        refuse(&mut rig, 3, true);
+        rig.windows.time_unseen(200);
+        assert_eq!(rig.windows.take_owed_events(), [fate(a, 3, 200, false)]);
+        refuse(&mut rig, 4, false);
+        rig.windows.time_unseen(210);
+        assert_eq!(rig.windows.take_owed_events(), [fate(a, 4, 210, false)]);
+        rig.windows.frame_latched(a, 4);
+        rig.windows
+            .frame_handed(FrameOutcome::Shown { at_ns: 220 }, 230, |_| true);
+        assert!(
+            rig.windows.take_owed_events().is_empty(),
+            "shown at last, it was already told"
+        );
+    }
+
+    /// Whether a queued present is shown is what the frame queued showed of
+    /// its window, not what the screen shows by the time that frame latches.
+    #[test]
+    fn a_queued_present_is_shown_as_the_frame_queued_showed_it() {
+        let (mut rig, a, b) = FateRig::opened();
+        rig.present(a, 3);
+        rig.present(b, 5);
+        rig.windows
+            .frame_handed(FrameOutcome::Queued { port: 9, seq: 2 }, 100, |_| true);
+        rig.windows
+            .frame_on_screen(9, OnScreen { seq: 2, at_ns: 150 });
+        assert_eq!(
+            rig.windows.take_owed_events(),
+            [fate(a, 3, 150, true), fate(b, 5, 150, true)]
+        );
+    }
+
+    /// Each owed event is delivered once, oldest first, and what delivering
+    /// one owes waits for the next pass rather than running on in this one.
+    #[test]
+    fn owed_events_are_delivered_once_and_what_delivery_owes_waits() {
+        let (mut rig, a, _) = FateRig::opened();
+        let _ = rig.windows.take_owed_events();
+        rig.windows.frames_unseen(a, 1);
+        rig.windows.frames_unseen(a, 2);
+        rig.windows.time_unseen(10);
+        let mut delivered = Vec::new();
+        rig.windows.deliver_owed(|windows, event| {
+            delivered.push(event);
+            windows.frames_unseen(a, 3);
+            windows.time_unseen(20);
+        });
+        assert_eq!(
+            delivered,
+            [fate(a, 1, 10, false), fate(a, 2, 10, false)],
+            "what was owed when the pass began"
+        );
+        assert_eq!(rig.windows.take_owed_events(), [fate(a, 3, 20, false)]);
     }
 
     /// A present maps a window that has never been on screen, and only that
@@ -5694,6 +6496,118 @@ mod tests {
         assert_eq!(
             on_screen(&mut windows, visible).2,
             [(3, WindowSizeState::Restored, restored)]
+        );
+    }
+
+    /// A display holding one frame of its own, which every present is drawn
+    /// into where it changed.
+    struct DrawnDisplay {
+        mode: DisplayMode,
+        frame: Vec<u8>,
+    }
+
+    impl tairix_display::Presenter for DrawnDisplay {
+        fn mode(&self) -> DisplayMode {
+            self.mode
+        }
+
+        fn ready(&self) -> bool {
+            true
+        }
+
+        fn present(&mut self, _: &[u8], _: &[DamageRect]) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+
+        fn present_drawn(
+            &mut self,
+            damage: &tairix_geometry::Region,
+            draw: &mut tairix_display::DrawInPlace<'_>,
+        ) -> Result<(), DriverError> {
+            draw(&mut self.frame, self.mode.stride_bytes, damage)
+        }
+
+        fn set_power(&mut self, _: DisplayPower) -> Result<(), DriverError> {
+            Ok(())
+        }
+    }
+
+    /// The latch owes a present of a window promoted to the screen alone
+    /// rather than decoding it: the frame is laid straight onto the display,
+    /// and the window's content is brought up to it only when read.
+    #[test]
+    fn a_promoted_windows_present_is_owed_and_laid_straight_onto_the_display() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let screen = hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            open_one_sized(host, 3, RESIZABLE);
+            host.window_size_state_changed(3, WindowSizeState::Fullscreen)
+                .expect("a resizable window may go fullscreen");
+            host.compositor.screen_rect()
+        });
+        let m = mode(screen.width, screen.height, DisplayFormat::Rgba8888);
+        let painted = |pixel: [u8; 4]| pixel.repeat((screen.width * screen.height) as usize);
+        let first = hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            host.window_presented(3, &m, &painted([10, 20, 30, 255]), &whole(&m))
+        });
+        assert_eq!(first, Ok(FrameUse::Read), "decoded before it is promoted");
+        let mut display = DrawnDisplay {
+            mode: m,
+            frame: vec![0; (m.stride_bytes * m.height_px) as usize],
+        };
+        compositor.present(&mut display).expect("presents");
+        let wm = windows.records.get(&3).expect("live").wm;
+        assert_eq!(
+            compositor.presentation(),
+            Some(tairix_wm::Presentation::Promoted(wm))
+        );
+
+        let owed = hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            host.window_presented(3, &m, &painted([200, 100, 50, 255]), &whole(&m))
+        });
+        assert_eq!(owed, Ok(FrameUse::Kept), "the frame is read again later");
+        let held = |compositor: &Compositor| {
+            compositor
+                .window(wm)
+                .and_then(Window::content)
+                .and_then(|content| content.get(7, 5))
+        };
+        assert_eq!(
+            held(&compositor),
+            Some(tairix_wm::Color::rgb(10, 20, 30).premultiply()),
+            "owed, not decoded"
+        );
+        compositor.present(&mut display).expect("presents");
+        assert_eq!(display.frame[..4], [200, 100, 50, 255]);
+        assert_eq!(
+            compositor.presentation(),
+            Some(tairix_wm::Presentation::Promoted(wm))
+        );
+        assert_eq!(
+            compositor
+                .window_picture(wm)
+                .and_then(|picture| picture.get(7, 5)),
+            Some(tairix_wm::Color::rgb(200, 100, 50).premultiply()),
+            "brought up to date to be read"
+        );
+
+        let kept = hosted(&mut shell, &mut compositor, &mut windows, |host| {
+            host.window_presented(3, &m, &painted([1, 2, 3, 255]), &whole(&m))
+        });
+        assert_eq!(kept, Ok(FrameUse::Kept));
+        tairix_window::FrameHost::frame_reclaimed(
+            &mut FrameShow {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                seat_held: false,
+            },
+            3,
+        );
+        assert_eq!(
+            held(&compositor),
+            Some(tairix_wm::Color::rgb(1, 2, 3).premultiply()),
+            "given back, the frame is read into the content first"
         );
     }
 

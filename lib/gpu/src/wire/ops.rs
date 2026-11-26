@@ -191,6 +191,30 @@ body!(
     }
 );
 body!(
+    /// [`GpuOp::Attach`](tairix_abi::gpu::GpuOp::Attach): the grant of a
+    /// region of the client's own, and how many of its bytes it attaches.
+    Attach { grant: u64, len: u64 }
+);
+body!(
+    /// [`GpuOp::Attach`](tairix_abi::gpu::GpuOp::Attach)'s answer and
+    /// [`GpuOp::Detach`](tairix_abi::gpu::GpuOp::Detach): an attachment of
+    /// the client's.
+    Attached { attachment: u32 }
+);
+body!(
+    /// [`GpuOp::ReadInto`](tairix_abi::gpu::GpuOp::ReadInto) and
+    /// [`GpuOp::WriteFrom`](tairix_abi::gpu::GpuOp::WriteFrom): `len` bytes,
+    /// at `offset` into the allocation and `at` into the attachment.
+    Transfer {
+        context: ContextId,
+        allocation: AllocationKey,
+        offset: u64,
+        attachment: u32,
+        at: u64,
+        len: u64
+    }
+);
+body!(
     /// [`GpuOp::Export`](tairix_abi::gpu::GpuOp::Export).
     Export {
         context: ContextId,

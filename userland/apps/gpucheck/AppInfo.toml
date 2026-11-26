@@ -4,14 +4,20 @@
 # all within the session baseline:
 #
 #   CAP_GPU            calling each served GPU's device channel.
-#   CAP_SHM            the region each GPU's bytes cross through.
+#   CAP_SHM            the region each GPU's bytes cross through, and the
+#                      pipe pair its compile worker is reached over.
 #   CAP_CONSOLE_WRITE  what it found, and why it stopped.
-#   CAP_FS_ACCESS      the short help read from its own Help/ tree.
+#   CAP_FS_ACCESS      the short help read from its own Help/ tree, and the
+#                      kernel file `--shader` names.
+#   CAP_SANDBOX_SPAWN  its own binary re-entered as the capability-empty
+#                      worker a WGSL kernel is compiled in, the only child
+#                      it starts.
+#   CAP_LOG_EMIT       a compile worker replaced after a crash, recorded.
 id = "os.tairix.gpucheck"
 name = "gpucheck"
 title = "GPU check"
 version = "0.1.0"
 kind = "command"
-capabilities = ["CAP_GPU", "CAP_SHM", "CAP_CONSOLE_WRITE", "CAP_FS_ACCESS"]
+capabilities = ["CAP_GPU", "CAP_SHM", "CAP_CONSOLE_WRITE", "CAP_FS_ACCESS", "CAP_SANDBOX_SPAWN", "CAP_LOG_EMIT"]
 # This bundle's own 256x256 icon master in its Resources/ (plans/ICONS.md).
 library-icon = "gpucheck.png"

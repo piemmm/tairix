@@ -1,0 +1,15 @@
+# Signed-AppInfo manifest source for the `shadercheck` fixture
+# (plans/GPU.md GP8, MG3). Composed and planted ONLY on the x86_64 Venus
+# shader QEMU vertical's disk image by tools/xtask — the crate lives outside
+# the userland discovery walk, so no production image ever ships it.
+#
+# CAP_PROC_SPAWN starts `gpucheck`, which runs under its own manifest's
+# authority, never this one's. CAP_FS_ACCESS is not asked: the fixture reads
+# no file, `gpucheck` reads the kernels. CAP_LOG_EMIT puts the verdict where
+# the vertical's guest gate reads it, and CAP_CONSOLE_WRITE carries the
+# fail-loud stderr reason.
+id = "os.tairix.test.shadercheck"
+name = "shadercheck"
+version = "0.1.0"
+kind = "command"
+capabilities = ["CAP_PROC_SPAWN", "CAP_LOG_EMIT", "CAP_CONSOLE_WRITE"]

@@ -154,6 +154,31 @@ impl ChannelOrder {
         count
     }
 
+    /// Lay a run of four-byte pixels written in `from`'s order into `out` in
+    /// this order as they are, answering how many it wrote and whether every
+    /// one is opaque: each pixel is read once, and that one value is both
+    /// written and judged, so a source changed meanwhile cannot have a pixel
+    /// judged it did not write.
+    #[must_use]
+    pub fn transcode_judged_run(self, from: Self, bytes: &[u8], out: &mut [u8]) -> (usize, bool) {
+        let (groups, _trailing) = bytes.as_chunks::<4>();
+        let (slots, _) = out.as_chunks_mut::<4>();
+        let count = groups.len().min(slots.len());
+        let swap = from != self;
+        let mut alpha = 0xFF;
+        for (&bytes, slot) in groups[..count].iter().zip(&mut slots[..count]) {
+            let word = u32::from_le_bytes(bytes);
+            let word = if swap {
+                (word & 0xFF00_FF00) | (word << 16 & 0xFF_0000) | (word >> 16 & 0xFF)
+            } else {
+                word
+            };
+            alpha &= word >> 24;
+            *slot = word.to_le_bytes();
+        }
+        (count, alpha == 0xFF)
+    }
+
     /// [`decode`](Self::decode) with alpha taken as full.
     #[inline]
     fn decode_opaque(self, [b0, b1, b2, _]: [u8; 4]) -> Pixel {

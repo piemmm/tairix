@@ -161,7 +161,7 @@ type SetSeen = (u32, Vec<u32>, Vec<(u64, u64)>);
 
 /// What reached the probe.
 #[derive(Default)]
-struct Log {
+pub(crate) struct Log {
     made: AtomicU32,
     alive: Arc<AtomicU32>,
     started: Mutex<Vec<Job<Probe>>>,
@@ -466,7 +466,9 @@ fn passed(
     }
 }
 
-fn device(clock: &Arc<Clock>) -> (Device, Arc<Log>) {
+/// A device over the probe, its deadlines read from `clock`, and the log of
+/// what reaches it.
+pub(crate) fn device(clock: &Arc<Clock>) -> (Device, Arc<Log>) {
     let log = Arc::new(Log::default());
     let device = Device::hardware(
         Probe(Arc::clone(&log)),

@@ -116,8 +116,8 @@ pub use binding::{
 };
 pub use command::{CopyRegion, CopySpan};
 pub use device::{
-    Allocation, AllocationDesc, Buffer, BufferDesc, CommandBuffer, Context, ContextDesc, Device,
-    Export, Fence, Queue, Submission, Timeline,
+    Allocation, AllocationDesc, Attachable, Attachment, Buffer, BufferDesc, CommandBuffer, Context,
+    ContextDesc, Device, Export, Fence, Queue, Submission, Timeline,
 };
 pub use error::{Error, Loss, SubmitError};
 pub use format::{Aspects, Format, FormatFeatures};
@@ -175,6 +175,10 @@ pub const MAX_UPDATE_BYTES: usize = 65_536;
 pub(crate) fn shared<T>(value: T) -> Result<alloc::sync::Arc<T>, Error> {
     alloc::sync::Arc::try_new(value).map_err(|_| Error::OutOfMemory)
 }
+
+#[cfg(test)]
+#[path = "attach_tests.rs"]
+mod attach_tests;
 
 #[cfg(test)]
 #[path = "device_tests.rs"]

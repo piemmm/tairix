@@ -21,9 +21,6 @@ path = "src/main.rs"
 [target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
 tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
-# The syscall audit vocabulary: the `SyscallInvoked` event id the exits are
-# read off.
-tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
 tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The audit-record reading every guest sink shares.

@@ -21,14 +21,17 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_collections::OrderedMap;
 use tairix_util::fallible;
 
+use crate::encode::{encode, Operands, Trail};
 use crate::enumerant::{
     AddressingModel, Capability, Decoration, ExecutionMode, ExecutionModel, FunctionControl,
     LoopControl, MemoryModel, SelectionControl, StorageClass,
 };
 use crate::{
-    Admitted, Arg, DecodeError, EncodeError, Encoder, GlslStd450, Id, Module, Op, Refusal, Version,
+    Admitted, Arg, DecodeError, EncodeError, Encoder, GlslStd450, Id, ImageType, Module, Op,
+    Refusal, Version, MAX_INSTRUCTIONS, MAX_MODULE_BYTES,
 };
 
 /// Why a module could not be built.
@@ -70,63 +73,34 @@ impl From<EncodeError> for BuildError {
     }
 }
 
-/// An operand as a section holds it until the module is laid out.
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum Word {
-    Id(Id),
-    One(u32),
-    Wide(u64),
-    Text(String),
+/// Where an instruction is written: a section of the module, held as its
+/// encoded bytes until the module is laid out.
+#[derive(Copy, Clone, Debug)]
+enum Section {
+    Entries,
+    Modes,
+    Annotations,
+    Globals,
 }
 
-impl Word {
-    fn of(arg: &Arg<'_>) -> Result<Self, BuildError> {
-        Ok(match *arg {
-            Arg::Id(id) => Self::Id(id),
-            Arg::Word(word) => Self::One(word),
-            Arg::Wide(wide) => Self::Wide(wide),
-            Arg::Text(text) => {
-                Self::Text(fallible::concatenated(&[text]).ok_or(BuildError::OutOfMemory)?)
-            }
-        })
-    }
-
-    fn arg(&self) -> Arg<'_> {
-        match self {
-            Self::Id(id) => Arg::Id(*id),
-            Self::One(word) => Arg::Word(*word),
-            Self::Wide(wide) => Arg::Wide(*wide),
-            Self::Text(text) => Arg::Text(text),
-        }
-    }
-}
-
-/// One instruction a section holds: its opcode and operands in the grammar's
-/// order.
-#[derive(Debug)]
-struct Record {
+/// Encode `op` over `operands` onto `section`, counting its bytes against
+/// the module's.
+fn put(
+    section: &mut Vec<u8>,
+    written: &mut usize,
+    bound: u32,
     op: Op,
-    words: Vec<Word>,
+    operands: Operands<'_>,
+) -> Result<(), BuildError> {
+    let before = section.len();
+    let limit = before.saturating_add(MAX_MODULE_BYTES.saturating_sub(*written));
+    encode(section, op, operands, bound, limit)?;
+    *written += section.len() - before;
+    Ok(())
 }
 
-impl Record {
-    fn new(op: Op, lead: &[Id], args: &[Arg<'_>]) -> Result<Self, BuildError> {
-        let mut words = Vec::new();
-        if !fallible::reserve(&mut words, lead.len() + args.len()) {
-            return Err(BuildError::OutOfMemory);
-        }
-        words.extend(lead.iter().map(|&id| Word::Id(id)));
-        for arg in args {
-            words.push(Word::of(arg)?);
-        }
-        Ok(Self { op, words })
-    }
-}
-
-/// Push `record` onto `section`.
-fn place(section: &mut Vec<Record>, record: Record) -> Result<(), BuildError> {
-    fallible::try_push(section, record).map_err(|_| BuildError::OutOfMemory)
-}
+/// The bytes of a block's label: an `OpLabel`, two words.
+const LABEL_BYTES: usize = 8;
 
 /// An interned type or constant: its opcode and every word after its result.
 type Key = (u16, Vec<u32>);
@@ -166,13 +140,15 @@ pub struct Builder {
     capabilities: Vec<Capability>,
     extensions: Vec<String>,
     glsl: Option<Id>,
-    entries: Vec<Record>,
-    modes: Vec<Record>,
-    annotations: Vec<Record>,
-    globals: Vec<Record>,
-    functions: Vec<Record>,
-    /// Each interned type and constant and its id, by ascending key.
-    interned: Vec<(Key, Id)>,
+    entries: Vec<u8>,
+    modes: Vec<u8>,
+    annotations: Vec<u8>,
+    globals: Vec<u8>,
+    functions: Vec<u8>,
+    /// The bytes every section holds, together.
+    written: usize,
+    /// Each interned type and constant and its id.
+    interned: OrderedMap<Key, Id>,
 }
 
 impl Builder {
@@ -192,7 +168,8 @@ impl Builder {
             annotations: Vec::new(),
             globals: Vec::new(),
             functions: Vec::new(),
-            interned: Vec::new(),
+            written: 0,
+            interned: OrderedMap::new(),
         })
     }
 
@@ -258,18 +235,15 @@ impl Builder {
         name: &str,
         interface: &[Id],
     ) -> Result<(), BuildError> {
-        let mut record = Record::new(
+        self.write(
+            Section::Entries,
             Op::ENTRY_POINT,
-            &[],
-            &[Arg::Word(model.0), Arg::Id(function), Arg::Text(name)],
-        )?;
-        if !fallible::reserve(&mut record.words, interface.len()) {
-            return Err(BuildError::OutOfMemory);
-        }
-        record
-            .words
-            .extend(interface.iter().map(|&id| Word::Id(id)));
-        place(&mut self.entries, record)
+            (
+                &[],
+                &[Arg::Word(model.0), Arg::Id(function), Arg::Text(name)],
+                Trail::Ids(interface),
+            ),
+        )
     }
 
     /// Set `mode`, with its `literals`, on the entry point `function`.
@@ -283,11 +257,11 @@ impl Builder {
         mode: ExecutionMode,
         literals: &[u32],
     ) -> Result<(), BuildError> {
-        let record = with_literals(
-            Record::new(Op::EXECUTION_MODE, &[function], &[Arg::Word(mode.0)])?,
-            literals,
-        )?;
-        place(&mut self.modes, record)
+        self.write(
+            Section::Modes,
+            Op::EXECUTION_MODE,
+            (&[function], &[Arg::Word(mode.0)], Trail::Words(literals)),
+        )
     }
 
     /// Decorate `target` with `decoration` and its `literals`.
@@ -301,11 +275,15 @@ impl Builder {
         decoration: Decoration,
         literals: &[u32],
     ) -> Result<(), BuildError> {
-        let record = with_literals(
-            Record::new(Op::DECORATE, &[target], &[Arg::Word(decoration.0)])?,
-            literals,
-        )?;
-        place(&mut self.annotations, record)
+        self.write(
+            Section::Annotations,
+            Op::DECORATE,
+            (
+                &[target],
+                &[Arg::Word(decoration.0)],
+                Trail::Words(literals),
+            ),
+        )
     }
 
     /// Decorate member `member` of `structure` with `decoration` and its
@@ -321,15 +299,39 @@ impl Builder {
         decoration: Decoration,
         literals: &[u32],
     ) -> Result<(), BuildError> {
-        let record = with_literals(
-            Record::new(
-                Op::MEMBER_DECORATE,
+        self.write(
+            Section::Annotations,
+            Op::MEMBER_DECORATE,
+            (
                 &[structure],
                 &[Arg::Word(member), Arg::Word(decoration.0)],
-            )?,
-            literals,
-        )?;
-        place(&mut self.annotations, record)
+                Trail::Words(literals),
+            ),
+        )
+    }
+
+    /// Write `op` over `operands` to `section`.
+    fn write(
+        &mut self,
+        section: Section,
+        op: Op,
+        operands: Operands<'_>,
+    ) -> Result<(), BuildError> {
+        let bound = self.encoder.bound();
+        let target = match section {
+            Section::Entries => &mut self.entries,
+            Section::Modes => &mut self.modes,
+            Section::Annotations => &mut self.annotations,
+            Section::Globals => &mut self.globals,
+        };
+        put(target, &mut self.written, bound, op, operands)
+    }
+
+    /// The bytes of the instructions written so far, the module's header and
+    /// its capabilities, extensions, imports and memory model aside.
+    #[must_use]
+    pub const fn written(&self) -> usize {
+        self.written
     }
 
     /// The type or constant `op` declares with `args`, interned: the id it
@@ -344,18 +346,13 @@ impl Builder {
             op.code(),
             key_words(result_type, args).ok_or(BuildError::OutOfMemory)?,
         );
-        let at = match self.interned.binary_search_by(|(held, _)| held.cmp(&key)) {
-            Ok(found) => match self.interned.get(found) {
-                Some(&(_, id)) => return Ok(id),
-                None => found,
-            },
-            Err(at) => at,
-        };
-        if !fallible::reserve(&mut self.interned, 1) {
-            return Err(BuildError::OutOfMemory);
+        if let Some(&id) = self.interned.get(&key) {
+            return Ok(id);
         }
         let id = self.declare(op, result_type, args)?;
-        self.interned.insert(at, (key, id));
+        self.interned
+            .try_insert(key, id)
+            .map_err(|_| BuildError::OutOfMemory)?;
         Ok(id)
     }
 
@@ -374,11 +371,13 @@ impl Builder {
         args: &[Arg<'_>],
     ) -> Result<Id, BuildError> {
         let id = self.id()?;
-        let record = match result_type {
-            Some(result_type) => Record::new(op, &[result_type, id], args)?,
-            None => Record::new(op, &[id], args)?,
+        let typed = [result_type.unwrap_or(id), id];
+        let lead = if result_type.is_some() {
+            &typed[..]
+        } else {
+            &typed[1..]
         };
-        place(&mut self.globals, record)?;
+        self.write(Section::Globals, op, (lead, args, Trail::None))?;
         Ok(id)
     }
 
@@ -442,6 +441,46 @@ impl Builder {
     /// As [`Self::declare`].
     pub fn matrix(&mut self, column: Id, count: u32) -> Result<Id, BuildError> {
         self.intern(Op::TYPE_MATRIX, None, &[Arg::Id(column), Arg::Word(count)])
+    }
+
+    /// The sampler type.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::declare`].
+    pub fn sampler(&mut self) -> Result<Id, BuildError> {
+        self.intern(Op::TYPE_SAMPLER, None, &[])
+    }
+
+    /// The image type `image` describes.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::declare`].
+    pub fn image(&mut self, image: &ImageType<Id>) -> Result<Id, BuildError> {
+        let sampling = if image.storage { 2 } else { 1 };
+        self.intern(
+            Op::TYPE_IMAGE,
+            None,
+            &[
+                Arg::Id(image.sampled),
+                Arg::Word(image.dim.0),
+                Arg::Word(image.depth),
+                Arg::Word(u32::from(image.arrayed)),
+                Arg::Word(u32::from(image.multisampled)),
+                Arg::Word(sampling),
+                Arg::Word(image.format.0),
+            ],
+        )
+    }
+
+    /// The sampled image type over `image`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::declare`].
+    pub fn sampled_image(&mut self, image: Id) -> Result<Id, BuildError> {
+        self.intern(Op::TYPE_SAMPLED_IMAGE, None, &[Arg::Id(image)])
     }
 
     /// The pointer to `pointee` in `class`.
@@ -603,39 +642,49 @@ impl Builder {
     /// Define `function`, an id from [`Self::id`], answering `result` from
     /// parameters of the types `params`: `write` writes it, from its first
     /// block on, given the parameters' ids, and must end every block it
-    /// opens.
+    /// opens. Its error is its own, a builder's among what it holds.
     ///
     /// # Errors
     ///
     /// Whatever `write` answered; [`BuildError::Unterminated`] where it left
     /// its last block open; as [`Self::declare`].
-    pub fn define<F>(
+    pub fn define<F, E>(
         &mut self,
         function: Id,
         result: Id,
         params: &[Id],
         write: F,
-    ) -> Result<(), BuildError>
+    ) -> Result<(), E>
     where
-        F: FnOnce(&mut Function<'_>, &[Id]) -> Result<(), BuildError>,
+        F: FnOnce(&mut Function<'_>, &[Id]) -> Result<(), E>,
+        E: From<BuildError>,
     {
         let ty = self.function_type(result, params)?;
         let mut head = Vec::new();
-        if !fallible::reserve(&mut head, params.len() + 1) {
-            return Err(BuildError::OutOfMemory);
-        }
-        head.push(Record::new(
+        put(
+            &mut head,
+            &mut self.written,
+            self.encoder.bound(),
             Op::FUNCTION,
-            &[result, function],
-            &[Arg::Word(FunctionControl::NONE.0), Arg::Id(ty)],
-        )?);
+            (
+                &[result, function],
+                &[Arg::Word(FunctionControl::NONE.0), Arg::Id(ty)],
+                Trail::None,
+            ),
+        )?;
         let mut values = Vec::new();
         if !fallible::reserve(&mut values, params.len()) {
-            return Err(BuildError::OutOfMemory);
+            return Err(BuildError::OutOfMemory.into());
         }
         for &param in params {
             let value = self.id()?;
-            head.push(Record::new(Op::FUNCTION_PARAMETER, &[param, value], &[])?);
+            put(
+                &mut head,
+                &mut self.written,
+                self.encoder.bound(),
+                Op::FUNCTION_PARAMETER,
+                (&[param, value], &[], Trail::None),
+            )?;
             values.push(value);
         }
         let entry = self.id()?;
@@ -643,26 +692,29 @@ impl Builder {
             builder: self,
             body: Vec::new(),
             locals: Vec::new(),
-            open: false,
+            open: None,
         };
         writing.begin(entry)?;
         write(&mut writing, &values)?;
-        if writing.open {
-            return Err(BuildError::Unterminated);
+        if writing.open.is_some() {
+            return Err(BuildError::Unterminated.into());
         }
         let Function { body, locals, .. } = writing;
-        let total = head.len() + locals.len() + body.len() + 1;
-        if !fallible::reserve(&mut self.functions, total) {
-            return Err(BuildError::OutOfMemory);
+        if !fallible::reserve(&mut self.functions, head.len() + locals.len() + body.len()) {
+            return Err(BuildError::OutOfMemory.into());
         }
-        self.functions.extend(head);
-        let mut body = body.into_iter();
         // The first block's label, then its variables, then the rest.
-        self.functions.extend(body.next());
-        self.functions.extend(locals);
-        self.functions.extend(body);
-        self.functions
-            .push(Record::new(Op::FUNCTION_END, &[], &[])?);
+        let (label, rest) = body.split_at(LABEL_BYTES.min(body.len()));
+        for part in [&head[..], label, &locals, rest] {
+            self.functions.extend_from_slice(part);
+        }
+        put(
+            &mut self.functions,
+            &mut self.written,
+            self.encoder.bound(),
+            Op::FUNCTION_END,
+            (&[], &[], Trail::None),
+        )?;
         Ok(())
     }
 
@@ -674,6 +726,21 @@ impl Builder {
     /// [`BuildError::Refused`] for a module the encoder, the decoder or the
     /// validator refused.
     pub fn finish(self) -> Result<Admitted, BuildError> {
+        Admitted::new(self.lay_out()?).map_err(BuildError::Refused)
+    }
+
+    /// The module laid out and decoded but not validated: what a test reads
+    /// a refusal's word offset against.
+    ///
+    /// # Errors
+    ///
+    /// [`BuildError::Encode`] or [`BuildError::Decode`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn lay_out_unvalidated(self) -> Result<Module, BuildError> {
+        self.lay_out()
+    }
+
+    fn lay_out(self) -> Result<Module, BuildError> {
         let Self {
             mut encoder,
             capabilities,
@@ -684,8 +751,11 @@ impl Builder {
             annotations,
             globals,
             functions,
+            written,
             ..
         } = self;
+        // The preamble is a few dozen bytes beside the sections.
+        encoder.room_for(written.saturating_add(256))?;
         for capability in capabilities {
             encoder.emit(Op::CAPABILITY, &[Arg::Word(capability.0)])?;
         }
@@ -705,32 +775,12 @@ impl Builder {
                 Arg::Word(MemoryModel::GLSL450.0),
             ],
         )?;
-        let sections = [entries, modes, annotations, globals, functions];
-        let mut args = Vec::new();
-        for section in &sections {
-            for record in section {
-                args.clear();
-                if !fallible::reserve(&mut args, record.words.len()) {
-                    return Err(BuildError::OutOfMemory);
-                }
-                args.extend(record.words.iter().map(Word::arg));
-                encoder.emit(record.op, &args)?;
-            }
+        // Each section is let go as soon as it is copied.
+        for section in [entries, modes, annotations, globals, functions] {
+            encoder.append(&section)?;
         }
-        let module = Module::decode(&encoder.finish()).map_err(BuildError::Decode)?;
-        Admitted::new(module).map_err(BuildError::Refused)
+        crate::decode::decode_owned(encoder.finish(), MAX_INSTRUCTIONS).map_err(BuildError::Decode)
     }
-}
-
-/// `record` with `literals` after its operands.
-fn with_literals(mut record: Record, literals: &[u32]) -> Result<Record, BuildError> {
-    if !fallible::reserve(&mut record.words, literals.len()) {
-        return Err(BuildError::OutOfMemory);
-    }
-    record
-        .words
-        .extend(literals.iter().map(|&word| Word::One(word)));
-    Ok(record)
 }
 
 /// Whether `op` ends the block it is written in.
@@ -752,11 +802,11 @@ fn terminates(op: Op) -> bool {
 #[derive(Debug)]
 pub struct Function<'b> {
     builder: &'b mut Builder,
-    body: Vec<Record>,
+    body: Vec<u8>,
     /// Its `Function`-class variables, laid at the head of its first block.
-    locals: Vec<Record>,
-    /// Whether a block is open: begun and not yet terminated.
-    open: bool,
+    locals: Vec<u8>,
+    /// The block open, begun and not yet terminated.
+    open: Option<Id>,
 }
 
 impl Function<'_> {
@@ -781,21 +831,41 @@ impl Function<'_> {
     ///
     /// [`BuildError::Unterminated`] while a block is still open.
     pub fn begin(&mut self, label: Id) -> Result<(), BuildError> {
-        if self.open {
+        if self.open.is_some() {
             return Err(BuildError::Unterminated);
         }
-        place(&mut self.body, Record::new(Op::LABEL, &[label], &[])?)?;
-        self.open = true;
+        let bound = self.builder.encoder.bound();
+        put(
+            &mut self.body,
+            &mut self.builder.written,
+            bound,
+            Op::LABEL,
+            (&[label], &[], Trail::None),
+        )?;
+        self.open = Some(label);
         Ok(())
     }
 
-    fn place(&mut self, record: Record) -> Result<(), BuildError> {
-        if !self.open {
+    /// The label of the block open, if one is: the predecessor an `OpPhi`
+    /// names for a value made in it.
+    #[must_use]
+    pub const fn block(&self) -> Option<Id> {
+        self.open
+    }
+
+    fn place(&mut self, op: Op, operands: Operands<'_>) -> Result<(), BuildError> {
+        let Some(label) = self.open else {
             return Err(BuildError::NoBlock);
-        }
-        let ends = terminates(record.op);
-        place(&mut self.body, record)?;
-        self.open = !ends;
+        };
+        let bound = self.builder.encoder.bound();
+        put(
+            &mut self.body,
+            &mut self.builder.written,
+            bound,
+            op,
+            operands,
+        )?;
+        self.open = if terminates(op) { None } else { Some(label) };
         Ok(())
     }
 
@@ -807,12 +877,7 @@ impl Function<'_> {
     /// [`BuildError::NoBlock`] with no block open; as [`Builder::id`].
     pub fn op(&mut self, op: Op, result_type: Id, operands: &[Id]) -> Result<Id, BuildError> {
         let id = self.builder.id()?;
-        let mut record = Record::new(op, &[result_type, id], &[])?;
-        if !fallible::reserve(&mut record.words, operands.len()) {
-            return Err(BuildError::OutOfMemory);
-        }
-        record.words.extend(operands.iter().map(|&id| Word::Id(id)));
-        self.place(record)?;
+        self.place(op, (&[result_type, id], &[], Trail::Ids(operands)))?;
         Ok(id)
     }
 
@@ -823,7 +888,7 @@ impl Function<'_> {
     /// As [`Self::op`].
     pub fn op_args(&mut self, op: Op, result_type: Id, args: &[Arg<'_>]) -> Result<Id, BuildError> {
         let id = self.builder.id()?;
-        self.place(Record::new(op, &[result_type, id], args)?)?;
+        self.place(op, (&[result_type, id], args, Trail::None))?;
         Ok(id)
     }
 
@@ -834,7 +899,7 @@ impl Function<'_> {
     ///
     /// [`BuildError::NoBlock`] with no block open.
     pub fn emit(&mut self, op: Op, operands: &[Id]) -> Result<(), BuildError> {
-        self.place(Record::new(op, operands, &[])?)
+        self.place(op, (operands, &[], Trail::None))
     }
 
     /// [`Self::emit`] over operands that are not all ids.
@@ -843,7 +908,7 @@ impl Function<'_> {
     ///
     /// As [`Self::emit`].
     pub fn emit_args(&mut self, op: Op, args: &[Arg<'_>]) -> Result<(), BuildError> {
-        self.place(Record::new(op, &[], args)?)
+        self.place(op, (&[], args, Trail::None))
     }
 
     /// The `GLSL.std.450` instruction `inst` of `result_type` over the ids
@@ -860,12 +925,14 @@ impl Function<'_> {
     ) -> Result<Id, BuildError> {
         let set = self.builder.glsl()?;
         let id = self.builder.id()?;
-        let mut record = Record::new(Op::EXT_INST, &[result_type, id, set], &[Arg::Word(inst.0)])?;
-        if !fallible::reserve(&mut record.words, operands.len()) {
-            return Err(BuildError::OutOfMemory);
-        }
-        record.words.extend(operands.iter().map(|&id| Word::Id(id)));
-        self.place(record)?;
+        self.place(
+            Op::EXT_INST,
+            (
+                &[result_type, id, set],
+                &[Arg::Word(inst.0)],
+                Trail::Ids(operands),
+            ),
+        )?;
         Ok(id)
     }
 
@@ -877,18 +944,24 @@ impl Function<'_> {
     /// As [`Builder::id`].
     pub fn local(&mut self, pointer: Id) -> Result<Id, BuildError> {
         let id = self.builder.id()?;
-        let record = Record::new(
+        let bound = self.builder.encoder.bound();
+        put(
+            &mut self.locals,
+            &mut self.builder.written,
+            bound,
             Op::VARIABLE,
-            &[pointer, id],
-            &[Arg::Word(StorageClass::FUNCTION.0)],
+            (
+                &[pointer, id],
+                &[Arg::Word(StorageClass::FUNCTION.0)],
+                Trail::None,
+            ),
         )?;
-        place(&mut self.locals, record)?;
         Ok(id)
     }
 
     /// Branch to `target` if a block is still open.
     fn fall_to(&mut self, target: Id) -> Result<(), BuildError> {
-        if self.open {
+        if self.open.is_some() {
             self.emit(Op::BRANCH, &[target])?;
         }
         Ok(())

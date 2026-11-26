@@ -85,18 +85,20 @@ mod validate;
 mod tables;
 
 pub use build::{BuildError, Builder, Function};
+pub use decode::MAGIC;
 pub use encode::{Arg, Encoder};
 pub use error::{DecodeError, EncodeError, Fault};
 pub use module::{Id, Instruction, Module, Op, Operand, Value, Version};
 pub use tables::{enumerant, GlslStd450, Kind};
 pub use validate::{
     Access, Admitted, Binding, BindingKind, Component, Constant, ConstantId, Disagreement,
-    EntryPoint, FoldError, ImageShape, ImageType, Interpolation, Layout, Limit, Member, Refusal,
-    Rule, SampleForms, Sampling, Scalar, SpecError, SpecValue, Specialized, Stage, Stages, Type,
-    TypeId, Varying, WorkgroupSize, CAPABILITIES, MAX_BINDINGS, MAX_CALL_DEPTH, MAX_ENTRY_POINTS,
-    MAX_GLOBALS, MAX_INDEXES, MAX_LOCALS, MAX_LOCATIONS, MAX_MATRIX_COLUMNS, MAX_MEMBERS,
-    MAX_MODES, MAX_NESTING, MAX_SAMPLINGS, MAX_SAMPLING_WORK, MAX_SPECIALIZED, MAX_STRING,
-    MAX_TYPE_DEPTH, MAX_VECTOR_COMPONENTS,
+    EntryPoint, FoldError, GuardError, Guarded, ImageShape, ImageType, Interpolation,
+    InterpolationSampling, Layout, Limit, Member, Refusal, Rule, SampleForms, Sampling, Scalar,
+    SpecError, SpecValue, Specialized, Stage, Stages, Type, TypeId, Varying, WorkgroupSize,
+    CAPABILITIES, MAX_BINDINGS, MAX_CALL_DEPTH, MAX_ENTRY_POINTS, MAX_GLOBALS, MAX_INDEXES,
+    MAX_LOCALS, MAX_LOCATIONS, MAX_MATRIX_COLUMNS, MAX_MEMBERS, MAX_MODES, MAX_NESTING,
+    MAX_SAMPLINGS, MAX_SAMPLING_WORK, MAX_SPECIALIZED, MAX_STRING, MAX_TYPE_DEPTH,
+    MAX_VECTOR_COMPONENTS,
 };
 
 /// The largest module decoded or encoded, in bytes.

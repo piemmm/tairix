@@ -26,7 +26,7 @@ use tairix_abi::time::MonotonicClock;
 use tairix_abi::{CapabilityId, DriverError, Errno, ProcId, PROC_ID_LEN};
 use tairix_geometry::{Rect, Region};
 
-use crate::client::{BufferMapper, DisplayClient, DisplayTransport, RemoteDisplay};
+use crate::client::{BufferMapper, DisplayClient, DisplayTransport, OnScreen, RemoteDisplay};
 use crate::driver_error_from_errno;
 use crate::presenter::{Base, BaseFrame, Presenter};
 use crate::server::{
@@ -162,6 +162,11 @@ impl StepClock {
 
     fn advance(&self, ns: u64) {
         *self.now.borrow_mut() += ns;
+    }
+
+    /// The next reading, without taking it.
+    fn peek(&self) -> u64 {
+        *self.now.borrow()
     }
 }
 
@@ -734,13 +739,12 @@ fn a_present_shows_only_a_frame_of_the_live_configuration() {
         Some(Errno::LengthOutOfRange),
         "damage outside the mode"
     );
+    let before = rig.clock.peek();
     let reply = rig.present(frames[1], &[rect(1, 1, 2, 1)]).expect("shown");
-    assert_eq!(
-        reply,
-        PresentReply {
-            presented: Presented::Shown,
-            seq: 1
-        }
+    assert_eq!((reply.presented, reply.seq), (Presented::Shown, 1));
+    assert!(
+        (before..rig.clock.peek()).contains(&reply.at_ns),
+        "a shown present is timed within its call"
     );
     assert_eq!(rig.display.shown, vec![(frames[1], vec![rect(1, 1, 2, 1)])]);
     assert_eq!(rig.present(frames[0], &[full()]).map(|r| r.seq), Ok(2));
@@ -802,10 +806,18 @@ fn a_queued_present_holds_the_next_until_its_latch_is_posted() {
         rig.server.serviced(Serviced::default(), &mut rig.delivery),
         Latch::Idle
     );
+    let at_ns = rig.clock.peek();
     assert_eq!(rig.latch(), Latch::Posted);
     assert_eq!(
         rig.delivery.posts,
-        vec![(PORT, DisplayEvent::Presented { seq: first.seq })]
+        vec![(
+            PORT,
+            DisplayEvent::Presented {
+                seq: first.seq,
+                at_ns
+            }
+        )],
+        "timed when the latch was taken from the device"
     );
     assert_eq!(rig.server.deadline_ns(), None);
     assert!(rig.present(frames[1], &[full()]).is_ok());
@@ -824,6 +836,7 @@ fn a_present_that_never_latches_is_released_at_its_deadline() {
     );
     assert_eq!(rig.display.abandoned, 0);
     rig.clock.advance(PRESENT_LATCH_DEADLINE_NS);
+    let due = rig.clock.peek();
     assert_eq!(
         rig.server.expire(&mut rig.display, &mut rig.delivery),
         Latch::Overdue
@@ -832,9 +845,13 @@ fn a_present_that_never_latches_is_released_at_its_deadline() {
         rig.display.abandoned, 1,
         "the display stops waiting on it too, so the next present is not refused"
     );
-    assert_eq!(
-        rig.delivery.posts,
-        vec![(PORT, DisplayEvent::Presented { seq: queued.seq })]
+    let [(port, DisplayEvent::Presented { seq, at_ns })] = rig.delivery.posts[..] else {
+        panic!("one latch posted: {:?}", rig.delivery.posts);
+    };
+    assert_eq!((port, seq), (PORT, queued.seq));
+    assert!(
+        (due..rig.clock.peek()).contains(&at_ns),
+        "timed when it was abandoned"
     );
     assert_eq!(rig.latch(), Latch::Idle, "nothing is queued any more");
 }
@@ -860,6 +877,7 @@ fn a_latch_the_kernel_had_no_memory_for_is_posted_once_its_retry_falls_due() {
     let frames = rig.frames();
     let queued = rig.present(frames[0], &[full()]).expect("queued");
     rig.delivery.refuse_post = Some(Errno::OutOfMemory);
+    let at_ns = rig.clock.peek();
     assert_eq!(rig.latch(), Latch::Owed);
     assert_eq!(rig.server.room_port(), None);
     assert!(rig.server.deadline_ns().is_some(), "the retry is timed");
@@ -877,7 +895,14 @@ fn a_latch_the_kernel_had_no_memory_for_is_posted_once_its_retry_falls_due() {
     );
     assert_eq!(
         rig.delivery.posts,
-        vec![(PORT, DisplayEvent::Presented { seq: queued.seq })]
+        vec![(
+            PORT,
+            DisplayEvent::Presented {
+                seq: queued.seq,
+                at_ns
+            }
+        )],
+        "posted late, timed when it latched"
     );
     assert_eq!(rig.server.deadline_ns(), None);
     assert_eq!(rig.display.abandoned, 0, "it had latched");
@@ -935,12 +960,19 @@ fn a_later_latch_takes_the_place_of_one_still_owed() {
     rig.delivery.refuse_post = Some(Errno::WouldBlock);
     assert_eq!(rig.latch(), Latch::Owed);
     let later = rig.present(frames[1], &[full()]).expect("queued");
+    let at_ns = rig.clock.peek();
     assert_eq!(rig.latch(), Latch::Owed);
     rig.delivery.refuse_post = None;
     assert_eq!(rig.redeliver(), Latch::Posted);
     assert_eq!(
         rig.delivery.posts,
-        vec![(PORT, DisplayEvent::Presented { seq: later.seq })]
+        vec![(
+            PORT,
+            DisplayEvent::Presented {
+                seq: later.seq,
+                at_ns
+            }
+        )]
     );
     assert_eq!(rig.redeliver(), Latch::Idle, "nothing more is owed");
 }
@@ -1539,13 +1571,20 @@ fn a_remote_display_waits_for_a_queued_frames_latch() {
     );
     assert_eq!(rig.borrow().display.shown.len(), 1, "nothing was sent");
     assert!(
-        !remote.latched(DisplayEvent::Presented { seq: 9 }),
+        !remote.latched(DisplayEvent::Presented { seq: 9, at_ns: 1 }),
         "another present's"
     );
+    assert_eq!(remote.on_screen(), None, "nothing reached the screen yet");
     let latch = rig.borrow_mut().latch();
     assert_eq!(latch, Latch::Posted);
     let event = rig.borrow().delivery.posts[0].1;
     assert!(remote.latched(event));
+    let DisplayEvent::Presented { seq, at_ns } = event;
+    assert_eq!(
+        remote.on_screen(),
+        Some(OnScreen { seq, at_ns }),
+        "the latch is on screen, at its moment"
+    );
     assert!(remote.present(&[1u8; FRAME_LEN], &[full()]).is_ok());
 }
 

@@ -1,0 +1,35 @@
+[package]
+name = "tairix-wgsl"
+description = "TAIRiX WGSL front end: WebGPU Shading Language source, hostile by assumption, read by a bounded lexer and parser, its meaning resolved as the W3C specification states it — scopes, types, abstract numerics and constant evaluation, layouts, interfaces, behaviours and uniformity — and written as SPIR-V through lib/spirv's builder, each module admitted by its validator (plans/SHADER.md SH5). no_std + alloc, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The ordered, fallible map types are interned through, so no hash an input
+# chooses decides their cost.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
+# The module written, through its builder, and admitted by its validator.
+tairix-spirv = { path = "../spirv", version = "=0.0.0" }
+# The identifier properties WGSL's identifiers are defined by.
+tairix-unicode = { path = "../unicode", version = "=0.0.0" }
+# Fallible collections and the transcendentals constant evaluation shares
+# with the software device.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The shared per-run seed and budget the fuzz harness draws through.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# Its validator's refusals read against the module laid out unvalidated.
+tairix-spirv = { path = "../spirv", version = "=0.0.0", features = ["test-support"] }
+# The software device each compiled module runs on, against the values the
+# specification gives, with the clock and runner it is made with.
+tairix-gpu = { path = "../gpu", version = "=0.0.0" }
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }

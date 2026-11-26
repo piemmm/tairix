@@ -28,14 +28,20 @@ bounds stay fixed), §26.4 (untrusted input is hostile).
 | SH8 | The lowering view: an admitted module's resolved types and explicit layouts kept and exposed, its specialization evaluated once for every backend, and stage visibility in a pipeline layout's agreement | done | GP3.2, GP3.3 |
 | SH9 | Each entry point's samplings: which image each sampler samples and in which forms, followed through calls, so a layout's sample and sampler types are agreed against them | done | GP5.5 |
 | SH3 | The builder: a Rust API that emits validated modules, plus `cargo xtask shaders` and the pinned first-party set | done | GP4 |
-| SH4 | The compile sandbox: the service process, its request/answer protocol, its capability floor, and containment on crash | planned | GP8 |
-| SH5 | `lib/wgsl`: the WGSL front end — lexer, parser, resolver, and SPIR-V emission | planned | GP8 |
-| SH6 | Enforced robustness: the access model that makes an admitted module safe to run, and the injection pass that guarantees it | planned | GP8 |
-| SH7 | The verification battery: differential execution, fuzz targets, the property model, and the hostile corpus | planned | GP8 |
+| SH10 | Sample-rate shading: `SampleRateShading` admitted, the device feature that states it, and the software device shading each sample | done | — |
+| SH5 | `lib/wgsl`: the WGSL front end — lexer, parser, resolver, and SPIR-V emission | done | — |
+| SH5.1 | The text: identifier properties in `lib/unicode`, the lexer, template-list discovery, and the parser's bounded syntax tree | done | — |
+| SH5.2 | The meaning: declarations and scope, types and conversions, the built-in functions, const evaluation, memory layout, attributes and interfaces, statement behaviours, uniformity, and diagnostic filters | done | — |
+| SH5.3 | The module: SPIR-V written through the builder for every declaration, statement and expression, WGSL's arithmetic where SPIR-V leaves it undefined, `discard` as demotion, overrides given at compile time, pointer parameters specialised; every module written admitted | done | — |
+| SH4 | The compile sandbox: the `wgsl` service in `lib/sandbox`, its request/answer protocol, the caller's admission of what it answers, its capability floor, deadline and memory ceiling, and containment on crash | done | — |
+| SH6 | Enforced robustness: one access model on every backend — a buffer bounded by its range, every other memory object by each level an index steps through — and `lib/spirv`'s guard pass, checked, that Venus's lowering runs | done | — |
+| SH7 | The verification battery: differential execution over every admitted opcode, fuzz targets, the property models, the hostile corpus, robustness on each backend, and sandbox containment | done | GP8 |
 
 Items are built in ledger order. SH7's harness is written *with* SH1–SH6 rather
 than after them: a validator whose refusals are untested has no property worth
-naming. SH8 and SH9 follow SH2, which they extend.
+naming. SH8 and SH9 follow SH2, which they extend. The front end precedes the
+sandbox that hosts it, and sample-rate shading precedes the front end's
+emission, which needs it for WGSL's `sample_index` and sample interpolation.
 
 ## 0. Binding decisions
 
@@ -148,7 +154,8 @@ An `EntryPoint` states what a pipeline must provide:
 - its stage and workgroup size;
 - each `Binding`: set, binding, `BindingKind`, count and `Access`;
 - its push-constant bytes;
-- each `Varying` its stage interface occupies;
+- each `Varying` its stage interface occupies, with where a fragment input
+  is interpolated, and whether what it reads makes it shade each sample;
 - the module-scope variables its call tree names, so a module of several
   entry points is lowered one entry point at a time.
 
@@ -192,6 +199,7 @@ extension enables.
 | `Sampled1D`, `Image1D` | One-dimensional lookups: the theme's ramps and palettes. |
 | `SampledBuffer`, `ImageBuffer` | Texel buffers: large linear tables such as terrain heights and material weights. |
 | `SampledCubeArray`, `ImageCubeArray` | Cube-map arrays: point-light shadows in the light pass. |
+| `SampleRateShading` | WGSL's `sample_index` built-in and `sample` interpolation: a fragment stage shading each sample (SH10). |
 | `ImageQuery` | A pass sizing its sampling from the bound image: the frost, blurs. |
 | `ImageGatherExtended` | Gathers at computed offsets: filtered shadows. |
 | `StorageImageExtendedFormats` | One- and two-channel storage images: the frost field, height maps. |
@@ -239,6 +247,8 @@ capabilities a device supports is the backend's to state at pipeline creation
 - A structure with no members in a stage interface — every interface value
   must occupy a location, so that the location bound also bounds the
   interface analysis.
+- `Sample` beside `Centroid` or `Flat` on one input — each pair names two
+  places to interpolate, or none.
 
 **Admitted though its capability is not declared:** a `ClipDistance` or
 `CullDistance` member of a built-in block, as glslang declares in every
@@ -355,15 +365,25 @@ source — runs in a dedicated process holding exactly one shared-memory IPC
 endpoint and nothing else: no filesystem capability, no network capability, no
 capability to spawn. Source in, module bytes out.
 
+- **One service on the one seam.** `lib/sandbox`'s `wgsl` module is the
+  service and its caller: a program that compiles WGSL serves it from its own
+  binary, started again as a `SPAWN_FLAG_SANDBOX` worker as every
+  `lib/sandbox` service is, so the compiler shares no address space with the
+  program that asked. A request carries the source and the override values; an
+  answer carries the module's words and its diagnostics, or the error.
 - **Validation happens on the receiving side**, in the caller, after the
   sandbox returns. A compromised sandbox can therefore return anything it likes
   and still cannot get an invalid module admitted — the trust boundary is the
-  validator, not the process.
+  validator, not the process. The caller decodes the words and admits them
+  (`Admitted::new`), and believes a diagnostic only within the source's lines,
+  of a known code, and printable; anything else retires the worker.
 - **A crash is contained**: the caller receives a typed error, the sandbox is
   replaced, and the event is logged with a stable event ID (§19.4, §19.5). A
   compiler crash never takes down the compositor or the calling application.
 - **Work is bounded**: a compile carries a deadline and a memory ceiling, so a
   pathological input costs a refusal rather than the machine (§24.3, §26.4).
+  The ceiling is the seam's message-sized worker; the front end's own bounds
+  keep its peak below it, which a test measures at the largest source.
 
 ## 5. SH5 — `lib/wgsl`
 
@@ -378,6 +398,81 @@ what it emits, exactly as they would on a module an application supplied
 directly. That is what makes the front end's inevitable bugs a correctness
 problem rather than a security one.
 
+**The language** is the W3C WebGPU Shading Language's core, whole, as its
+Candidate Recommendation states it, with the extensions whose every construct
+lands on an admitted capability:
+
+- **Enable-extensions offered:** `f16` and `dual_source_blending` (`Index` on
+  the first location's outputs). Refused as unsupported, naming the extension:
+  `clip_distances` (`ClipDistance` is not admitted), `subgroups` and
+  `subgroup_size_control` (their shuffle and quad operations are not),
+  `primitive_index` (`PrimitiveId` needs `Geometry`) and `atomic_vec2u_min_max`
+  (64-bit atomics).
+- **Language extensions offered:** `readonly_and_readwrite_storage_textures`,
+  `packed_4x8_integer_dot_product`, `unrestricted_pointer_parameters`,
+  `pointer_composite_access`, `texture_and_sampler_let`,
+  `texture_formats_tier1`, `linear_indexing`, `immediate_address_space`,
+  `fragment_depth` and `swizzle_assignment`. Refused: `uniform_buffer_standard_layout`
+  (a device feature; only the portable layout is admitted), `subgroup_id` and
+  `subgroup_uniformity` (they need `subgroups`), `buffer_view` (untyped
+  pointers) and `atomic_vec2u_min_max`.
+
+**Mapping decisions**, each the one reading every backend sees:
+
+- **SPIR-V 1.3**, the portable baseline, with `SPV_KHR_terminate_invocation`
+  declared only by a module that discards.
+- **Arithmetic SPIR-V leaves undefined is written out as WGSL defines it**:
+  an integer divided by zero is its dividend and the most negative divided by
+  −1 is itself, a remainder in either case is zero; a shift takes its amount
+  modulo the bit width; a float converted to an integer saturates, NaN to
+  zero; `extractBits` and `insertBits` clamp their offset and count;
+  `countLeadingZeros`, `countTrailingZeros` and the packed 4×8 dot products are
+  written from admitted instructions.
+- **`discard` demotes.** A discarded invocation keeps running as a helper so
+  its quad's derivatives stay defined; a module-private flag masks every
+  storage write and atomic it would make, and the entry point terminates the
+  invocation where it returns.
+- **Override values are given at compile time**: each takes the value the
+  request names or its default, and the module carries constants, not
+  specialization constants, so an override may size an array, set a workgroup
+  size or call a built-in in its initializer. An override with neither is a
+  compile error naming it.
+- **Pointer parameters past the core's** (`unrestricted_pointer_parameters`)
+  are specialised: each function is written once per root variable and access
+  shape its callers pass, the indexes passed as values, so every pointer a call
+  carries is a whole memory object as logical addressing requires. The
+  variants are counted against a fixed bound.
+- **A type used both in a buffer and in workgroup memory** is written twice —
+  laid out, and plain, since workgroup memory takes no explicit layout — and a
+  value crossing between them is rebuilt member by member.
+- **`texture_external`** is a 2D image of float texels: TAIRiX has no
+  multi-planar external texture, and every built-in WGSL defines on one reads
+  a single plane identically.
+
+**Bounds** (§24.4) are the specification's minimum limits — 1,023 structure
+members, 15 levels of composite nesting, 127 of brace-enclosed statements, 255
+function parameters, 1,023 case selectors, 2,047 elements in an array
+constructor — and the front end's own: `MAX_SOURCE_BYTES` (256 KiB),
+`MAX_SYNTAX_NODES` (131,072) expressions and statements, 255 levels of
+expression nesting, a fixed budget of constant-evaluation work, a fixed budget
+of nodes and edges for each function's uniformity analysis, and the module it
+writes at most `MAX_OUTPUT_BYTES` (1 MiB). The front end's bounds are set
+by the worker, not by the language: a compile of the largest source of every
+shape that costs memory — statements, functions, constant arrays, nested
+control flow, the densest spellings the grammar allows, loops and selections
+nested to the brace bound over every variable, chains, switches, loops and
+functions whose every branch or exit could join every variable, and calls
+whose every pointer takes every other's — holds, with its request, no more
+than the two frames a message-sized worker allows beside its baseline, which
+`lib/sandbox`'s `wgsl_memory` test measures. A source past any bound is
+refused as too large, never partly compiled.
+
+**The answer** is a module the builder admitted, with the warnings and notes
+the source's diagnostic filters leave (at most `MAX_DIAGNOSTICS`), or the first
+error: a closed `Code`, the line and column it begins at, and a message built
+from fixed text and the source's own names. Compilation is deterministic: one
+source and one set of override values write one sequence of bytes.
+
 ## 6. SH6 — enforced robustness
 
 The property every execution of an admitted module has: **every buffer, texture
@@ -386,16 +481,73 @@ shader computes.** Logical addressing (§2) removes arbitrary addresses; this
 item removes out-of-range indices into legitimate resources.
 
 There is one semantics on every backend, `plans/GPU.md` §1.2's: a read past the
-bound range reads zero and a write past it does nothing — a predicated store and
-a select to zero, never a clamp. Where the device guarantees it in hardware, that
-is used (Venus requires the host's second robustness level); where it does not,
-the backend's own lowering injects the guard as a verified step and checks the
-guarantee holds rather than trusting that a pass ran. An access proven in range
-statically costs nothing. Admission stays device-independent: the validator
+bound reads zero and a write past it does nothing — a predicated store and a
+select to zero, never a clamp. What *the bound* is depends on the memory:
+
+- **A buffer a binding describes** — storage, uniform, texel — is bounded by
+  the range the binding was given, scalar by scalar, whatever its indexes said:
+  an explicitly laid out byte is that byte on every device.
+- **Every other memory object** — push constants, private, function, workgroup,
+  and the stage interface — is bounded by **each level an index steps
+  through**: an index past its array's, matrix's or vector's length reads
+  zero and writes nothing, even where it would have landed inside the
+  variable. These objects have no laid-out bytes for "inside" to mean.
+- **A dynamic component of a value** (`OpVectorExtractDynamic`,
+  `OpVectorInsertDynamic`) is bounded by its vector: past it an extraction is
+  zero and an insertion changes nothing.
+
+Where the device guarantees it in hardware, that is used: Venus requires the
+host's second robustness level for buffers and images, and Vulkan's
+robustness covers nothing else. Where it does not, the backend's own lowering
+runs `lib/spirv`'s guard pass (`Admitted::guarded`): every dynamic index into a
+level it bounds is compared with what it reaches of that level, the access made
+through the index clamped to the last element it reaches, a load's value
+selected to zero and a store or atomic predicated on the comparison — a block
+split around it, its merge taking the block's original terminator. A composite
+load before 1.4, whose `OpSelect` takes no composite, is predicated too, and a
+vector before 1.4 is selected by the comparison splatted. A loop header split
+keeps its merge instruction at its head, its body moved to a block of its own,
+so its back edge still returns to it; an `OpPhi` naming a split block names
+its last segment. The pass's output is admitted again, and an independent
+check confirms the guarantee rather than trusting that a pass ran: only that
+check makes a `Guarded` module, and it holds every dynamic index into a bounded
+level, and every dynamic vector component, to be a clamp to the last element
+it reaches. An access proven in range statically — a constant index, which the
+validator already holds within what it reaches — costs nothing. The software
+device implements the same model in its interpreter, so a guarded module and
+its source run alike there. Admission stays device-independent: the validator
 requires nothing of a module for this.
+
+Two readings make the model exact rather than approximate:
+
+- **An index is a signed count.** An access chain reads every index as signed,
+  so an index `w` bits wide reaches no more than its positive values: a level's
+  reach is its length or 2^(w−1), whichever is less. The validator refuses a
+  constant index past its reach, and the pass widens a 16-bit index to 32 bits,
+  sign-extended, before comparing it, so the count it compares is the count the
+  device reads.
+- **The pass may compute with data a module only moves.** A module holding
+  16-bit values in push constants or its interface needs only the storage
+  capability to load them, but the select or merge the pass writes computes
+  with them, so it declares the arithmetic capability the module lacks. Venus
+  then holds the guarded module, not its source, to what the host states, and
+  refuses its pipeline as unsupported where the host does not state that
+  capability.
 
 This is the mechanism that makes an untrusted shader safe to execute, and it is
 why it is its own item rather than a note inside the validator.
+
+## 6a. SH10 — sample-rate shading
+
+WGSL's `sample_index` built-in and its `sample` interpolation are core
+language, and each needs SPIR-V's `SampleRateShading`. It is admitted with the
+`SampleId` built-in and the `Sample` decoration, and its consumer states it: a
+device runs a module declaring it only where its `DeviceInfo` states sample
+shading (`plans/GPU.md` §1.1). The software device states it and shades such a
+pipeline's fragments once per covered sample — interpolated at the sample's
+own position, its `SampleId` the sample, its coverage that sample alone, its
+outputs written to that sample — so a four-sample pass resolves exactly what
+its samples hold. Venus states it where the host offers the feature.
 
 ## 7. Refused by name
 
@@ -419,7 +571,28 @@ why it is its own item rather than a note inside the validator.
 - **Differential execution is the headline test.** A module executed by the
   software backend and by a hardware backend produces the same result within a
   stated tolerance, over a corpus covering every admitted opcode. This is the
-  oracle that replaces a vendor conformance suite (`plans/GPU.md` §0b).
+  oracle that replaces a vendor conformance suite (`plans/GPU.md` §0b). The
+  corpus is written with the builder and run by `gpucheck`; a host test holds
+  its coverage to `admitted_body_ops` and `admitted_glsl`, so a newly admitted
+  instruction the corpus does not run fails the build. It is families of
+  kernels — numbers, structure, atomics, barriers, subgroups, images, and a
+  draw's fragment stage — whose inputs are words of their buffer, never
+  constants, so a device computes each instruction rather than folding it.
+  Each word a kernel leaves is held to the software device's bit for bit,
+  within its units in the last place, or within an absolute error, as Vulkan
+  states the instruction that computed it; every input is one every
+  conforming device answers alike — no tie a rounding direction decides, no
+  NaN or subnormal, no integer past its definition, every index in range — and
+  a host test holds the chosen inputs to that. A device that does not state a
+  kernel's capabilities, formats or features is not held to it; the Venus
+  verticals require every family to run but those needing a subgroup
+  capability, which no Vulkan host offers the seam.
+- **The front end is tested by what it compiles and what it refuses**: each
+  construct compiled and admitted, run on the software device against the value
+  the specification gives; each shader-creation error the specification names
+  refused with its code; a compiled module's bytes identical across runs.
+  WGSL fixtures are test data for a parser of third-party input, held as string
+  literals in Rust tests rather than as source files of a third language.
 - **Tests write modules as assembly text**, through `lib/spirv`'s `test-support`
   assembler, which reads each operand as the kind the grammar gives its
   position; no build enables it.
@@ -439,10 +612,15 @@ why it is its own item rather than a note inside the validator.
   still-valid module or refused with a typed error — never accepted as
   something different, never a panic.
 - **Robustness is demonstrated, not asserted**: a module deliberately indexing
-  past every resource kind reads or writes nothing outside it, on every backend.
+  past every resource kind reads or writes nothing outside it, on every backend
+  — the software device on the host and in `gpucheck`, Venus in `gpucheck` —
+  and the guard pass's output, run on the software device, agrees with its
+  input there.
 - **Sandbox containment**: a compiler process cannot open a file, reach the
   network, or spawn; a crash yields a typed error and a replacement; an
-  overrunning compile is refused at its deadline.
+  overrunning compile is refused at its deadline. `sandbox_qemu_aarch64`'s
+  probe worker shows the first for every sandboxed worker, the network leg
+  included.
 - **Reproducibility**: `cargo xtask shaders` is byte-reproducible and its verify
   mode fails on drift in `ci`.
 - **`miri`**: `lib/spirv` and `lib/wgsl` are enrolled from their first item. The
@@ -455,13 +633,7 @@ why it is its own item rather than a note inside the validator.
 
 ## 9. Open decisions
 
-1. **Whether WGSL conformance fixtures count as authored non-Rust source.** The
-   front end's test corpus is WGSL text. It is test *data* for a parser of
-   third-party input, not TAIRiX source, which is why SH5 is not read as a §1
-   violation — but it is a judgement call and is recorded rather than assumed.
-   If the answer is that it is one, the fixtures are generated from Rust
-   descriptions instead, at some cost in expressiveness.
-2. **Whether a module cache is worth its risk.** Caching compiled modules across
+1. **Whether a module cache is worth its risk.** Caching compiled modules across
    runs saves real time on a large application and introduces a persistent
    artefact an attacker may try to poison. If it lands, the cache is keyed on a
    hash of the validated module and revalidated on load — never trusted because

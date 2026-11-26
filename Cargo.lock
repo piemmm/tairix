@@ -3116,13 +3116,19 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-buildcfg",
+ "tairix-fuzzseed",
  "tairix-gpu",
  "tairix-help",
  "tairix-parallel",
  "tairix-procinfo",
  "tairix-rt",
+ "tairix-sandbox",
  "tairix-shaders",
  "tairix-spirv",
+ "tairix-test-shadercheck",
+ "tairix-util",
+ "tairix-wgsl",
+ "tairix-window",
 ]
 
 [[package]]
@@ -3411,6 +3417,7 @@ name = "tairix-itest-witness"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-kernel-syscall",
  "tairix-log",
  "tairix-util",
 ]
@@ -4903,6 +4910,7 @@ dependencies = [
  "tairix-rt",
  "tairix-sandbox",
  "tairix-sound",
+ "tairix-spirv",
  "tairix-svg",
  "tairix-sync",
  "tairix-syntax",
@@ -4911,6 +4919,7 @@ dependencies = [
  "tairix-video",
  "tairix-vt",
  "tairix-wallpaper",
+ "tairix-wgsl",
 ]
 
 [[package]]
@@ -5328,6 +5337,7 @@ dependencies = [
 name = "tairix-spirv"
 version = "0.0.0"
 dependencies = [
+ "tairix-collections",
  "tairix-fuzzseed",
  "tairix-spirv",
  "tairix-util",
@@ -6854,6 +6864,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-gpucheck-present-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appload",
+ "tairix-arch-aarch64",
+ "tairix-itest-desktop-witness",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-gpucheck-shader-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kernel",
+ "tairix-log",
+ "tairix-test-shadercheck",
+]
+
+[[package]]
 name = "tairix-test-greeter-default-qemu-aarch64"
 version = "0.0.0"
 dependencies = [
@@ -8326,6 +8363,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-shadercheck"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-buildcfg",
+ "tairix-log",
+ "tairix-rt",
+ "tairix-spirv",
+ "tairix-wgsl",
+]
+
+[[package]]
 name = "tairix-test-signal"
 version = "0.0.0"
 dependencies = [
@@ -8448,6 +8497,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -8459,6 +8509,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-riscv64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -8470,6 +8521,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-x86_64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kernel",
  "tairix-log",
 ]
@@ -8839,6 +8891,7 @@ dependencies = [
  "tairix-arch-x86_64",
  "tairix-caps",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-ipc",
@@ -9130,7 +9183,6 @@ dependencies = [
  "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
- "tairix-kernel-syscall",
  "tairix-log",
  "tairix-test-twins",
 ]
@@ -9255,6 +9307,7 @@ dependencies = [
  "tairix-inline",
  "tairix-log",
  "tairix-rt",
+ "tairix-spirv",
  "tairix-virtio",
 ]
 
@@ -10002,6 +10055,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-wgsl"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-collections",
+ "tairix-fuzzseed",
+ "tairix-gpu",
+ "tairix-parallel",
+ "tairix-spirv",
+ "tairix-unicode",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-whoami"
 version = "0.0.0"
 dependencies = [
@@ -10043,6 +10110,7 @@ dependencies = [
  "tairix-font",
  "tairix-fuzzseed",
  "tairix-geometry",
+ "tairix-gpu",
  "tairix-icon",
  "tairix-input",
  "tairix-parallel",
@@ -10285,6 +10353,8 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-fwcfg",
  "tairix-geometry",
+ "tairix-gpu",
+ "tairix-gpucheck",
  "tairix-greeter-service",
  "tairix-hash",
  "tairix-help",
@@ -10346,6 +10416,7 @@ dependencies = [
  "tairix-test-filepick-qemu-aarch64",
  "tairix-test-filepicks-qemu-aarch64",
  "tairix-test-framestats",
+ "tairix-test-gpucheck-present-qemu-aarch64",
  "tairix-test-handover-qemu-aarch64",
  "tairix-test-images",
  "tairix-test-iso9660-image",
@@ -10360,6 +10431,7 @@ dependencies = [
  "tairix-test-rtc-fixture",
  "tairix-test-screensaver-qemu-aarch64",
  "tairix-test-settings-qemu-aarch64",
+ "tairix-test-shadercheck",
  "tairix-test-stalltrace",
  "tairix-test-svgtext",
  "tairix-test-tcpecho",
@@ -10377,6 +10449,7 @@ dependencies = [
  "tairix-virtio-input",
  "tairix-visible",
  "tairix-wallpaper",
+ "tairix-wgsl",
  "tairix-window",
  "tairix-wintersun-app",
  "tairix-wintersun-figure",

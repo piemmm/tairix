@@ -3,12 +3,13 @@
 
 use super::tables::{
     CANONICAL, COMPATIBILITY, COMPOSING_SECONDS, COMPOSITIONS, DEFAULT_IGNORABLE, EXTENSIONS,
-    EXTENSION_SETS, MAX_CANONICAL_DECOMPOSITION, NONSPACING_MARKS, SCRIPTS,
+    EXTENSION_SETS, MAX_CANONICAL_DECOMPOSITION, NONSPACING_MARKS, SCRIPTS, XID_CONTINUE,
+    XID_START,
 };
 use super::{
     augmented, decomposed_marks, in_ranges, is_default_ignorable, is_hidden, is_nonspacing_mark,
-    restriction_level, script, Faithful, MarkRun, RestrictionLevel, Scripts, BOPO, CYRL, GREK,
-    HANB, HANI, HNTL, JPAN, KORE, LATN, MAX_MARKS, VERSION,
+    is_xid_continue, is_xid_start, restriction_level, script, Faithful, MarkRun, RestrictionLevel,
+    Scripts, BOPO, CYRL, GREK, HANB, HANI, HNTL, JPAN, KORE, LATN, MAX_MARKS, VERSION,
 };
 
 #[test]
@@ -327,4 +328,43 @@ fn the_canonical_and_compatibility_decompositions_are_apart() {
         "it decomposes by compatibility through its canonical parts"
     );
     assert_eq!(COMPATIBILITY.of('\u{17f}'), Some(&['s'][..]));
+}
+
+#[test]
+fn identifier_properties_are_uax_31_s_and_ascii_answers_as_its_tables() {
+    for byte in 0u8..=0x7f {
+        let ch = char::from(byte);
+        assert_eq!(
+            is_xid_start(ch),
+            in_ranges(XID_START, u32::from(byte)),
+            "{ch:?} starts"
+        );
+        assert_eq!(
+            is_xid_continue(ch),
+            in_ranges(XID_CONTINUE, u32::from(byte)),
+            "{ch:?} goes on"
+        );
+    }
+    for ch in [
+        'a',
+        'Z',
+        '\u{e9}',
+        '\u{1c5}',
+        '\u{3b1}',
+        '\u{4e2d}',
+        '\u{10000}',
+    ] {
+        assert!(is_xid_start(ch) && is_xid_continue(ch), "{ch:?}");
+    }
+    for ch in ['_', '7', '\u{b7}', '\u{663}', '\u{301}'] {
+        assert!(
+            !is_xid_start(ch) && is_xid_continue(ch),
+            "{ch:?} only goes on"
+        );
+    }
+    for ch in [' ', '-', '$', '\u{2028}', '\u{fffe}', '\u{1f600}'] {
+        assert!(!is_xid_start(ch) && !is_xid_continue(ch), "{ch:?}");
+    }
+    assert!(XID_START.windows(2).all(|w| w[0].1 < w[1].0));
+    assert!(XID_CONTINUE.windows(2).all(|w| w[0].1 < w[1].0));
 }

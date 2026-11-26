@@ -29,6 +29,40 @@ use crate::tables::{ENUMERANT_NAMES, GLSL_STD_450, GLSL_STD_450_NAMES, INSTRUCTI
 use crate::validate::allow::Class;
 use crate::{Admitted, Arg, Encoder, Id, Kind, Module, Op, Refusal, Version};
 
+/// `module` listed an instruction a line, each after the offset of its
+/// first word, so a refusal's word offset names its instruction.
+#[must_use]
+pub fn listing(module: &Module) -> String {
+    use core::fmt::Write as _;
+    let mut out = String::new();
+    let mut at = 5;
+    for instruction in module.instructions() {
+        let _ = write!(out, "{at:6}: {}", instruction.op().name().unwrap_or("Op?"));
+        if let Some(result) = module.result(instruction) {
+            let _ = write!(out, " %{}", result.get());
+        }
+        for operand in module.operands(instruction) {
+            match module.value(operand) {
+                crate::Value::Id(id) => {
+                    let _ = write!(out, " %{}", id.get());
+                }
+                crate::Value::Word(word) => {
+                    let _ = write!(out, " {word}");
+                }
+                crate::Value::Number(number) => {
+                    let _ = write!(out, " #{number}");
+                }
+                crate::Value::Text(text) => {
+                    let _ = write!(out, " {text:?}");
+                }
+            }
+        }
+        out.push('\n');
+        at += u32::from(instruction.words);
+    }
+    out
+}
+
 /// Assemble `text` as a module of `version`.
 ///
 /// # Panics

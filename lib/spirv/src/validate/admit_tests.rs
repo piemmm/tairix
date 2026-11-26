@@ -4,10 +4,14 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt::Write as _;
 
 use super::assemble::{admit, admit_version};
 use crate::enumerant::Decoration;
-use crate::{Access, BindingKind, Component, Interpolation, Stage, Varying, Version};
+use crate::{
+    Access, BindingKind, Component, Interpolation, InterpolationSampling, Rule, Stage, Varying,
+    Version,
+};
 
 /// The declarations a storage-buffer compute shader shares; `{body}` is the
 /// function's body after its first label.
@@ -422,7 +426,7 @@ OpFunctionEnd
             variable,
             offset: 0,
             interpolation: Interpolation::Flat,
-            centroid: false,
+            sampling: InterpolationSampling::Centre,
         }]
     );
 }
@@ -463,21 +467,154 @@ OpFunctionEnd
     let entry = admitted
         .entry_point("main", Stage::Fragment)
         .expect("the entry point");
-    let read: Vec<(Interpolation, bool)> = entry
+    let read: Vec<(Interpolation, InterpolationSampling)> = entry
         .inputs()
         .iter()
-        .map(|v| (v.interpolation, v.centroid))
+        .map(|v| (v.interpolation, v.sampling))
         .collect();
     assert_eq!(
         read,
         [
-            (Interpolation::Smooth, false),
-            (Interpolation::NoPerspective, false),
-            (Interpolation::NoPerspective, true),
-            (Interpolation::Flat, false),
-            (Interpolation::Flat, false),
+            (Interpolation::Smooth, InterpolationSampling::Centre),
+            (Interpolation::NoPerspective, InterpolationSampling::Centre),
+            (
+                Interpolation::NoPerspective,
+                InterpolationSampling::Centroid
+            ),
+            (Interpolation::Flat, InterpolationSampling::Centre),
+            (Interpolation::Flat, InterpolationSampling::Centre),
         ]
     );
+    assert!(!entry.per_sample());
+}
+
+/// A fragment stage declaring `capability` and `extra` decorations that
+/// loads the inputs `read` and lists `listed` beside them unread: `at` and
+/// `middle` are floats, `id` an integer, `place` two floats.
+fn sampled_fragment(capability: &str, extra: &str, read: &[&str], listed: &[&str]) -> String {
+    let pointer = |name: &str| match name {
+        "id" => ("in_int", "int"),
+        "place" => ("in_v2float", "v2float"),
+        _ => ("in_float", "float"),
+    };
+    let mut interface = String::new();
+    let mut variables = String::new();
+    for name in read.iter().chain(listed) {
+        let _ = write!(interface, " %{name}");
+        let _ = writeln!(variables, "%{name} = OpVariable %{} Input", pointer(name).0);
+    }
+    let mut loads = String::new();
+    for name in read {
+        let _ = writeln!(loads, "%v_{name} = OpLoad %{} %{name}", pointer(name).1);
+    }
+    format!(
+        r#"
+OpCapability Shader
+{capability}
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main"{interface}
+OpExecutionMode %main OriginUpperLeft
+{extra}
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%int = OpTypeInt 32 1
+%v2float = OpTypeVector %float 2
+%in_float = OpTypePointer Input %float
+%in_int = OpTypePointer Input %int
+%in_v2float = OpTypePointer Input %v2float
+{variables}%main = OpFunction %void None %fn
+%entry = OpLabel
+{loads}OpReturn
+OpFunctionEnd
+"#
+    )
+}
+
+#[test]
+fn an_input_read_at_its_sample_shades_each_sample() {
+    let decorations = "OpDecorate %at Location 0\nOpDecorate %at Sample\n\
+                       OpDecorate %middle Location 1\nOpDecorate %middle Centroid";
+    let shading = "OpCapability SampleRateShading";
+    let admitted = admit(&sampled_fragment(
+        shading,
+        decorations,
+        &["at", "middle"],
+        &[],
+    ))
+    .expect("admitted");
+    let entry = admitted
+        .entry_point("main", Stage::Fragment)
+        .expect("the entry point");
+    let read: Vec<InterpolationSampling> = entry.inputs().iter().map(|v| v.sampling).collect();
+    assert_eq!(
+        read,
+        [
+            InterpolationSampling::Sample,
+            InterpolationSampling::Centroid
+        ]
+    );
+    assert!(entry.per_sample());
+    // Listed but never read, it shades nothing on its own.
+    let unread = admit(&sampled_fragment(
+        shading,
+        decorations,
+        &["middle"],
+        &["at"],
+    ))
+    .expect("admitted");
+    let entry = unread
+        .entry_point("main", Stage::Fragment)
+        .expect("the entry point");
+    assert!(!entry.per_sample());
+    // Without the capability the decoration is not enabled.
+    assert!(admit(&sampled_fragment("", decorations, &["at", "middle"], &[])).is_err());
+}
+
+#[test]
+fn a_sample_id_or_position_read_shades_each_sample() {
+    let shading = "OpCapability SampleRateShading";
+    for (name, built_in) in [("id", "SampleId"), ("place", "SamplePosition")] {
+        let decorations = format!("OpDecorate %{name} BuiltIn {built_in}");
+        let admitted =
+            admit(&sampled_fragment(shading, &decorations, &[name], &[])).expect("admitted");
+        let entry = admitted
+            .entry_point("main", Stage::Fragment)
+            .expect("the entry point");
+        assert!(entry.per_sample(), "{built_in}");
+        assert!(entry.inputs().is_empty(), "{built_in} is no location");
+        let listed =
+            admit(&sampled_fragment(shading, &decorations, &[], &[name])).expect("admitted");
+        assert!(
+            !listed
+                .entry_point("main", Stage::Fragment)
+                .expect("the entry point")
+                .per_sample(),
+            "{built_in} unread"
+        );
+        assert!(
+            admit(&sampled_fragment("", &decorations, &[name], &[])).is_err(),
+            "{built_in} without the capability"
+        );
+    }
+}
+
+#[test]
+fn a_sample_input_beside_centroid_or_flat_is_refused() {
+    let shading = "OpCapability SampleRateShading";
+    for beside in ["Centroid", "Flat"] {
+        let decorations =
+            format!("OpDecorate %at Location 0\nOpDecorate %at Sample\nOpDecorate %at {beside}");
+        let refusal =
+            admit(&sampled_fragment(shading, &decorations, &["at"], &[])).expect_err("refused");
+        assert_eq!(
+            refusal.rule,
+            Rule::DecorationTarget(crate::enumerant::Decoration::SAMPLE),
+            "{beside}"
+        );
+    }
+    let alone = "OpDecorate %at Location 0\nOpDecorate %at Sample";
+    assert!(admit(&sampled_fragment(shading, alone, &["at"], &[])).is_ok());
 }
 
 #[test]

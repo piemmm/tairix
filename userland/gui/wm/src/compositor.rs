@@ -74,6 +74,9 @@ mod layers;
 #[path = "capture.rs"]
 mod capture;
 
+#[path = "direct.rs"]
+mod direct;
+
 pub use capture::{CaptureError, CaptureTap};
 use layers::{Change, Depth};
 
@@ -162,8 +165,8 @@ pub enum Presentation {
     Composited,
     /// Handed to the display's layer engine, a layer for each surface.
     Layered,
-    /// Handed to the layer engine as the scene's one layer: this window,
-    /// which covers the scan-out.
+    /// This window alone, which covers the scan-out: the layer engine's one
+    /// layer, or the whole of a frame the display draws in place.
     Promoted(WindowId),
     /// Handed to the layer engine as no layer at all: its own black, which
     /// this solid window shows across the scan-out.
@@ -171,13 +174,16 @@ pub enum Presentation {
 }
 
 impl Presentation {
+    /// How a witness record names a promoted frame, whichever window it is.
+    pub const PROMOTED: &'static str = "promoted";
+
     /// The name a witness record states the presentation by.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Composited => "composited",
             Self::Layered => "layered",
-            Self::Promoted(_) => "promoted",
+            Self::Promoted(_) => Self::PROMOTED,
             Self::Blanked(_) => "blanked",
         }
     }
@@ -341,6 +347,14 @@ pub struct Compositor {
     zone_rest: Region,
     /// The screen capture the session has armed, while it has one.
     capture: Option<capture::Armed>,
+    /// The promoted window presented straight from its client's frame, while
+    /// one is.
+    direct: Option<direct::Direct>,
+    /// What frames laid straight into a display's own memory showed that the
+    /// back buffer has not composed.
+    direct_hidden: Region,
+    /// What a frame laid straight changed, held for reuse.
+    direct_changed: Region,
     /// Which of the composite's specialisations may serve this compositor.
     /// Only a test turns one off, to compose the same scene the general way
     /// and hold the two to each other; production has no reason to and no way
@@ -559,6 +573,9 @@ impl Compositor {
             plane_bytes: Vec::new(),
             zone_rest: Region::new(),
             capture: None,
+            direct: None,
+            direct_hidden: Region::new(),
+            direct_changed: Region::new(),
             #[cfg(test)]
             fast_paths: FastPaths::ALL,
             next_id: 1,
@@ -639,6 +656,7 @@ impl Compositor {
         // A rectangle of the old screen cannot name one of the new, and the
         // whole-screen composite below re-encodes every pixel anyway.
         self.scanout.clear();
+        self.direct_hidden.clear();
         let screen = self.screen_rect();
         self.mark(screen);
         true
@@ -687,6 +705,7 @@ impl Compositor {
         self.damage.clear();
         self.scanout.clear();
         self.undelivered.clear();
+        self.direct_hidden.clear();
         let screen = self.screen_rect();
         self.mark(screen);
         true
@@ -1428,6 +1447,7 @@ impl Compositor {
         }
         let bytes = window.release_content();
         let id = window.id();
+        self.forget_direct(id);
         if bytes > 0 && !self.released_notices.contains(&id) {
             self.released_notices.push(id);
         }
@@ -2185,6 +2205,7 @@ impl Compositor {
         height: u32,
         convert: impl FnOnce(&mut Surface, &mut Region) -> T,
     ) -> Option<T> {
+        self.end_direct(id);
         let index = self.index_of(id)?;
         let window = self.windows.get_mut(index)?;
         let (content, established) = window.content_for_present(width, height)?;
@@ -2229,6 +2250,7 @@ impl Compositor {
     /// [`Errno::OutOfMemory`] where its picture cannot be held: the window
     /// keeps the view it had.
     pub fn set_window_view(&mut self, id: WindowId, view: Option<WindowView>) -> Result<(), Errno> {
+        self.end_direct(id);
         let index = self.index_of(id).ok_or(Errno::NotFound)?;
         let window = self.windows.get_mut(index).ok_or(Errno::NotFound)?;
         if window.view().map(View::spec) == view.as_ref() {
@@ -2276,6 +2298,7 @@ impl Compositor {
     /// Window `id`'s content as the window shows it, its view enlarged in:
     /// for a reader of the picture itself, as a thumbnail is.
     pub fn window_picture(&mut self, id: WindowId) -> Option<&Surface> {
+        self.settle_window(id);
         self.overlay_view(id);
         self.window(id)?.content()
     }
@@ -3038,6 +3061,7 @@ impl Compositor {
             return false;
         };
         let mut window = self.windows.remove(index);
+        self.forget_direct(id);
         self.chrome.invalidate(&id);
         self.frost.invalidate(&id);
         self.pending_redraws.retain(|pending| *pending != id);
@@ -3509,6 +3533,7 @@ impl Compositor {
     /// tracks the pointer as one solid window rather than opening a hole
     /// inside its own frame.
     pub fn resize_window(&mut self, id: WindowId, new_outer: Rect) -> bool {
+        self.end_direct(id);
         let reach = self.shadow.reach();
         self.mutate_frame(id, |window, scale, theme, damage| {
             let before = window.footprint(reach);
@@ -3537,6 +3562,7 @@ impl Compositor {
     /// (unlike [`resize_window`](Self::resize_window), which sizes from an
     /// outer rectangle and moves the origin for an interactive edge drag).
     pub fn resize_window_client(&mut self, id: WindowId, client_w: u32, client_h: u32) -> bool {
+        self.end_direct(id);
         let reach = self.shadow.reach();
         self.mutate_frame(id, |window, scale, theme, damage| {
             let before = window.footprint(reach);
@@ -3747,11 +3773,15 @@ impl Compositor {
     }
 
     /// Plan the frame a composite draws, leaving `encoded` naming every output
-    /// pixel it encodes: the pointer's own damage marked, the damage clipped
-    /// and taken as the plan, the frosts' fields fitted to it, the furniture it
-    /// reaches made resident, and the whole screen set aside to encode again
-    /// wherever the strength its frames hold changed.
+    /// pixel it encodes: a promoted window's owed content settled and what was
+    /// laid straight past the back buffer owed to it, the pointer's own damage
+    /// marked, the damage clipped and taken as the plan, the frosts' fields
+    /// fitted to it, the furniture it reaches made resident, and the whole
+    /// screen set aside to encode again wherever the strength its frames hold
+    /// changed.
     fn plan_composite(&mut self, encoded: &mut Region) -> Planned {
+        self.replay_direct_hidden();
+        self.settle_content();
         encoded.clear();
         let screen = self.screen_rect();
         let mut owed: ArrayVec<Rect, MAX_OWED> = ArrayVec::new();
@@ -4360,9 +4390,8 @@ impl Compositor {
             return Ok(());
         }
         // Only a promoted window, which is fullscreen, must be known opaque.
-        let tracks = presenter.layers().is_some();
         for window in &mut self.windows {
-            if tracks && window.size_state().is_fullscreen() {
+            if window.size_state().is_fullscreen() {
                 window.track_transparency();
             } else {
                 window.forget_transparency();
@@ -4388,7 +4417,20 @@ impl Compositor {
         // Before the layers are planned, which lay a frost only where its blur
         // is retained, and before any pass, so none can evict a field it uses.
         let _ = self.ration_frost();
-        if layered && self.present_layered(presenter)? {
+        let shown = self.present_shown(presenter, layered);
+        self.retire_direct();
+        shown
+    }
+
+    /// Present the frame [`present`](Self::present) found damaged: through
+    /// the layers where `layered`, else laid straight from a promoted window's
+    /// frame where it may be, else composed.
+    fn present_shown(
+        &mut self,
+        presenter: &mut dyn Presenter,
+        layered: bool,
+    ) -> Result<(), DriverError> {
+        if (layered && self.present_layered(presenter)?) || self.present_direct_frame(presenter)? {
             self.move_plane(presenter);
             return Ok(());
         }
@@ -4431,7 +4473,7 @@ impl Compositor {
             }
             match (drawn, handed) {
                 (Ok(()), true) => {
-                    self.presented = Some(Presentation::Composited);
+                    self.presented = Some(self.drawn_presentation());
                     return Ok(());
                 }
                 (Err(err), true) => return Err(err),

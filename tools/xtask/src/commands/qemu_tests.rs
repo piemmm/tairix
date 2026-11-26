@@ -590,6 +590,14 @@ enum FsDisk {
     /// than a bundle added to the shared autoload image, because a fixture
     /// bundle belongs on the one vertical that runs it.
     SvgTextRootDisk,
+    /// The [`Self::VirtioGpuRootDisk`] driver store, its display a virtio GPU
+    /// taking Venus work that its driver serves, under the shared application
+    /// set plus the test-only `shadercheck` fixture bundle
+    /// ([`super::image_apps::shadercheck_store_files`]), the text login asked
+    /// for, and the kernels the fixture hands `gpucheck --shader` planted in
+    /// its account's home ([`shader_plants`]): the Venus shader vertical's
+    /// backing (`plans/GPU.md` GP8, MG3).
+    ShaderRootDisk,
     /// The [`Self::EncryptedRootDisk`] layout whose **read-only `/System`
     /// volume** additionally carries the signed virtio-net driver bundle
     /// (only — no display/input driver, so the console stays the UART text
@@ -807,7 +815,7 @@ impl FsDisk {
     const fn carries_virtio_gpu_drivers(self) -> bool {
         matches!(
             self,
-            Self::VirtioGpuRootDisk | Self::CaptureVirtioGpuRootDisk
+            Self::VirtioGpuRootDisk | Self::CaptureVirtioGpuRootDisk | Self::ShaderRootDisk
         )
     }
 
@@ -1117,6 +1125,21 @@ const SVGTEXT_LOGIN_DIALOGUE: &str = "root\nroot\nsvgtext\n";
 /// guest replays — is what the transcript carries and the only honest thing
 /// to wait on.
 const SVGTEXT_MEASURED_MARKER: &str = tairix_test_svgtext::REPORT_MESSAGE;
+
+/// The login + command dialogue the Venus shader vertical types at the seat
+/// keyboard: the fixture account's credentials, then the fixture's own
+/// command word, pinned against both by the assertions below.
+const SHADER_LOGIN_DIALOGUE: &str = "root\nroot\nshadercheck\n";
+
+/// Serial marker after which the Venus shader vertical types the shell
+/// `exit` completing its PASS chain: the fixture's verdict record, read from
+/// its own definition. Its stdout goes to the GPU's console, not to serial.
+const SHADER_PASSED_MARKER: &str = tairix_test_shadercheck::PASSED_MESSAGE;
+
+/// How many times [`AUTOLOAD_INPUT_KEY_MARKER`] appears before the Venus
+/// shader vertical types: once for the keyboard's driver and once for the
+/// GPU's, whichever arms first.
+const SHADER_ARMED_OCCURRENCES: u32 = 2;
 
 /// Serial marker after which the desktop verticals take their screendump
 /// **and** inject the mouse motion: the session's one-shot
@@ -1758,6 +1781,33 @@ const _: () = {
             tairix_test_svgtext::COMMAND.as_bytes()
         ),
         "SVGTEXT_LOGIN_DIALOGUE must end with the fixture's own command word"
+    );
+    assert!(
+        starts_with_bytes(
+            SHADER_LOGIN_DIALOGUE.as_bytes(),
+            SESSION_USERNAME_LINE.as_bytes()
+        ),
+        "SHADER_LOGIN_DIALOGUE must start with the fixture username line"
+    );
+    assert!(
+        starts_with_bytes(
+            SHADER_LOGIN_DIALOGUE
+                .as_bytes()
+                .split_at(SESSION_USERNAME_LINE.len())
+                .1,
+            SESSION_PASSWORD_LINE.as_bytes()
+        ),
+        "SHADER_LOGIN_DIALOGUE must continue with the fixture password line"
+    );
+    assert!(
+        is_line_of(
+            SHADER_LOGIN_DIALOGUE
+                .as_bytes()
+                .split_at(SESSION_USERNAME_LINE.len() + SESSION_PASSWORD_LINE.len())
+                .1,
+            tairix_test_shadercheck::COMMAND.as_bytes()
+        ),
+        "SHADER_LOGIN_DIALOGUE must end with the fixture's own command word"
     );
 };
 
@@ -11175,6 +11225,57 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
+    // `plans/GPU.md` GP6.5: a window a device draws, shown end to end. The
+    // board's only display is a virtio GPU, the pointer on its cursor plane.
+    // `gpucheck --present` is launched by name from a terminal, asks for full
+    // screen and presents its scene through a swapchain. The dump waits on the
+    // session's own witness that the window is on screen at the scan-out's
+    // extent, which names how the frame reached the display — promoted — and
+    // is held to the scene this host draws; `Escape`, held until the dump is
+    // on disk, ends the check.
+    //
+    // PASS needs the guest's three witnesses in order: an `APP_LOADED` naming
+    // the command's bundle, the desktop's record of its window shown, and the
+    // load of the command the typed line runs only once the check exited
+    // clean, which it does only when every frame it presented was shown.
+    QemuTest {
+        package: "tairix-test-gpucheck-present-qemu-aarch64",
+        binary: "tairix-test-gpucheck-present-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: VIRTIO_GPU,
+        crypto: false,
+        fs_disk: FsDisk::VirtioGpuRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            TypedStep::text(
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES + 1,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            TypedStep::text(GREETER_READY_MARKER, 1, GREETER_LOGIN_DIALOGUE),
+            // The terminal's window is on screen, so its shell is already
+            // spawned and the line waits in its pty until the shell reads it.
+            TypedStep::text(WINDOW_SHOWN_MARKER, 1, GPUCHECK_COMMAND_LINE),
+            TypedStep::named(WINDOW_SIZED_MARKER, 1, &[NamedKey::Escape]),
+        ],
+        screendumps: &[ScreendumpPlan {
+            marker: WINDOW_SIZED_MARKER,
+            occurrences: 1,
+            suffix: GPUCHECK_PRESENT_DUMP,
+            assert: assert_gpucheck_present_screendump,
+        }],
+        pointer_script: Some(gpucheck_pointer_script),
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
     // `plans/CINDER.md` CD12: the companion let out onto the desktop, the
     // regression test `OPEN-DEFECTS` D1807 owes. The revealed desktop is
     // photographed; Cinder is opened from the program library and his pen is
@@ -11579,6 +11680,45 @@ static TESTS: &[QemuTest] = &[
     QemuTest {
         binary: "tairix-test-virtio-gpu-venus-unconfined-qemu-x86-64",
         ..VENUS_ON_Q35
+    },
+    // `plans/GPU.md` GP8 / MG3: the same board with the production driver
+    // serving its Venus GPU, and a root shell running the `shadercheck`
+    // fixture, which hands `gpucheck --shader` an honest kernel in WGSL and
+    // compiled, one reaching past every memory, one that never ends, and one
+    // the front end and one the validator refuse, each planted in the
+    // account's home. PASS on the shell's exit after the fixture's, typed
+    // once it logged every kernel answered as it must be. Its budget is the
+    // longest the guest may fall silent: the endless kernel holds each
+    // device to its ten-second deadline.
+    QemuTest {
+        package: "tairix-test-gpucheck-shader-qemu-x86-64",
+        binary: "tairix-test-gpucheck-shader-qemu-x86-64",
+        target: X86_64_TARGET,
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        display: VENUS_GPU,
+        crypto: false,
+        fs_disk: FsDisk::ShaderRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            TypedStep::text(
+                AUTOLOAD_INPUT_KEY_MARKER,
+                SHADER_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, SHADER_LOGIN_DIALOGUE),
+            TypedStep::text(SHADER_PASSED_MARKER, 1, "exit\n"),
+        ],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
     },
     // `plans/NETWORK.md` N4e-riscv64 (first stage): the riscv64
     // driver-loading-by-discovery autoload vertical — the `virt`-board
@@ -12823,7 +12963,7 @@ fn root_volume_components(t: &QemuTest, path: &str) -> Result<Vec<String>, Strin
 /// parses.
 fn login_type_plant(t: &QemuTest) -> Result<Option<(Vec<String>, String)>, String> {
     let settings = match t.fs_disk {
-        FsDisk::SvgTextRootDisk => tairix_sysconfig::SystemConfig {
+        FsDisk::SvgTextRootDisk | FsDisk::ShaderRootDisk => tairix_sysconfig::SystemConfig {
             login_type: tairix_sysconfig::LoginType::Text,
             ..tairix_sysconfig::SystemConfig::default()
         },
@@ -13085,7 +13225,43 @@ fn root_plants(
     plants.extend(user_saver_plants(t, apps)?);
     plants.extend(disk_image_plants(t)?);
     plants.extend(capture_plants(t));
+    plants.extend(shader_plants(t)?);
     Ok(plants)
+}
+
+/// The kernels the Venus shader vertical's account finds in its home, each
+/// as the fixture names it: its compiled kernel compiled here from the
+/// fixture's own WGSL, so the two cannot drift.
+fn shader_plants(t: &QemuTest) -> Result<Vec<RootPlant>, String> {
+    if !matches!(t.fs_disk, FsDisk::ShaderRootDisk) {
+        return Ok(Vec::new());
+    }
+    let folder = [
+        tairix_abi::home::USERS_DIR,
+        tairix_test_encrypted_root_image::USERNAME,
+    ]
+    .into_iter()
+    .chain(tairix_test_shadercheck::FOLDER);
+    tairix_test_shadercheck::CASES
+        .iter()
+        .map(|case| {
+            let bytes = match case.source {
+                Some(bytes) => bytes.to_vec(),
+                None => {
+                    tairix_wgsl::compile(tairix_test_shadercheck::HONEST, &tairix_wgsl::Options::default())
+                        .map_err(|failure| {
+                            format!(
+                                "test --qemu ({}): the fixture's honest kernel did not compile: {failure:?}",
+                                t.name()
+                            )
+                        })?
+                        .module
+                }
+            };
+            let components = folder.clone().chain([case.file]).map(String::from).collect();
+            Ok(RootPlant::account(components, bytes))
+        })
+        .collect()
 }
 
 /// The scratch file a session ended mid-capture left in the capture
@@ -13686,6 +13862,9 @@ pub(crate) struct StoreSet {
     /// The application/service bundles the SVG-text vertical plants: the
     /// shared set plus the test-only `svgtext` fixture bundle.
     apps_with_svgtext: &'static [AppStoreFile],
+    /// The application/service bundles the Venus shader vertical plants: the
+    /// shared set plus the test-only `shadercheck` fixture bundle.
+    apps_with_shadercheck: &'static [AppStoreFile],
     /// The signed autoload driver bundles the `-M virt` autoload verticals
     /// plant in the `/System/Drivers/` store.
     autoload_drivers: &'static [AppStoreFile],
@@ -13770,6 +13949,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         watchdog: apps_with_watchdog,
         framestats: apps_with_framestats,
         svgtext: apps_with_svgtext,
+        shadercheck: apps_with_shadercheck,
     } = fixture_stores(ctx, t, arch, profile)?;
     let autoload_drivers = if t.fs_disk.carries_autoload_drivers() {
         super::image_drivers::autoload_driver_store_files(ctx, arch, profile)?
@@ -13822,6 +14002,7 @@ fn stores_for(ctx: &Context, t: &QemuTest) -> Result<StoreSet, String> {
         apps_with_watchdog,
         apps_with_framestats,
         apps_with_svgtext,
+        apps_with_shadercheck,
         autoload_drivers,
         virtio_gpu_drivers,
         venus_drivers,
@@ -13874,6 +14055,8 @@ struct FixtureStores {
     framestats: &'static [AppStoreFile],
     /// The SVG-text vertical's set.
     svgtext: &'static [AppStoreFile],
+    /// The Venus shader vertical's set.
+    shadercheck: &'static [AppStoreFile],
 }
 
 /// Select the [`FixtureStores`] one disk layout plants.
@@ -13911,6 +14094,12 @@ fn fixture_stores(
         },
         svgtext: match t.fs_disk {
             FsDisk::SvgTextRootDisk => super::image_apps::svgtext_store_files(ctx, arch, profile)?,
+            _ => EMPTY,
+        },
+        shadercheck: match t.fs_disk {
+            FsDisk::ShaderRootDisk => {
+                super::image_apps::shadercheck_store_files(ctx, arch, profile)?
+            }
             _ => EMPTY,
         },
     })
@@ -14786,23 +14975,124 @@ fn host_compositor(
 fn wintersun_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_qemu::MouseButton;
 
-    let BarLaunch {
-        library_button,
-        entry,
-        ..
-    } = reconstruct_bar_launch()?;
     let window = wintersun_window()?;
-
-    let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
-    let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
-    pen.click(ready, 1, MouseButton::Primary, library_button);
-    entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
-    pen.aim(LIBRARY_SHOWN_MARKER, 1, corner_rest());
+    let mut pen = terminal_opened()?;
     // Restored from fullscreen and photographed, so the next change is the
     // maximise; the pointer stays on the toggle through the last dump.
     pen.click(WINDOW_SIZED_MARKER, 2, MouseButton::Primary, window.toggle);
     pen.click(WINDOW_SIZED_MARKER, 3, MouseButton::Primary, window.close);
     Ok(pen.steps())
+}
+
+/// A pen that opens the terminal from the program library once the desktop
+/// is revealed, and rests where a photograph of the desktop sees it on no
+/// window short of a full-screen one.
+fn terminal_opened() -> Result<PointerPen, String> {
+    use tairix_qemu::MouseButton;
+
+    let BarLaunch {
+        library_button,
+        entry,
+        ..
+    } = reconstruct_bar_launch()?;
+    let ready = AUTOLOAD_DESKTOP_REVEALED_MARKER;
+    let mut pen = PointerPen::pinned_at_origin(ready, ramfb_screen());
+    pen.click(ready, 1, MouseButton::Primary, library_button);
+    entry.click(&mut pen, LIBRARY_SHOWN_MARKER, 1);
+    pen.aim(LIBRARY_SHOWN_MARKER, 1, corner_rest());
+    Ok(pen)
+}
+
+/// The line the `gpucheck --present` vertical types at the terminal's shell,
+/// from its shared contract.
+const GPUCHECK_COMMAND_LINE: &str = tairix_test_gpucheck_present_qemu_aarch64::COMMAND_LINE;
+
+/// The `gpucheck --present` vertical's dump: the scene full screen.
+const GPUCHECK_PRESENT_DUMP: &str = "present";
+
+/// `plans/GPU.md` GP6.5: the terminal opened, from which the typed line
+/// launches the check; nothing else is clicked.
+fn gpucheck_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    Ok(terminal_opened()?.steps())
+}
+
+/// A clock that never moves: the scene is drawn here synchronously, so no
+/// deadline of its drawing is ever reached.
+struct NeverMoves;
+
+impl tairix_abi::time::MonotonicClock for NeverMoves {
+    fn now_ns(&self) -> u64 {
+        0
+    }
+}
+
+/// The `gpucheck --present` dump: the session announced the check's window
+/// full screen at the scan-out's extent, promoted, and the whole scan-out is
+/// the scene this host draws, to the byte.
+fn assert_gpucheck_present_screendump(
+    t: &QemuTest,
+    path: &Path,
+    serial: &str,
+) -> Result<(), String> {
+    let image = read_screendump(t, path)?;
+    let witnesses = window_sized_witnesses(serial);
+    let expected = SizedRecord {
+        window: witnesses.first().map_or(0, |first| first.window),
+        state: tairix_desktop_session::size_state_name(
+            tairix_controls::WindowSizeState::Fullscreen,
+        ),
+        extent: (image.width, image.height),
+        path: tairix_wm::Presentation::PROMOTED,
+    };
+    if witnesses.first() != Some(&expected) {
+        return Err(format!(
+            "test --qemu ({}): the size-state witness is {:?}, expected {expected:?} (the \
+             check's window full screen at the scan-out's extent, promoted)",
+            t.name(),
+            witnesses.first()
+        ));
+    }
+    let drawn = tairix_gpucheck::rendered(
+        (image.width, image.height),
+        tairix_gpu::Format::Rgba8Unorm,
+        std::sync::Arc::new(NeverMoves),
+    )
+    .map_err(|why| {
+        format!(
+            "test --qemu ({}): the scene could not be drawn: {why}",
+            t.name()
+        )
+    })?;
+    let mut differing = Vec::new();
+    for (at, pixel) in drawn.as_chunks::<4>().0.iter().enumerate() {
+        let (Ok(x), Ok(y)) = (
+            u32::try_from(at % image.width as usize),
+            u32::try_from(at / image.width as usize),
+        ) else {
+            continue;
+        };
+        let shown = image.pixel(x, y)?;
+        let want = (pixel[0], pixel[1], pixel[2]);
+        if shown != want {
+            differing.push((x, y, want, shown));
+        }
+    }
+    if differing.is_empty() {
+        return Ok(());
+    }
+    let first: Vec<String> = differing
+        .iter()
+        .take(4)
+        .map(|(x, y, want, shown)| format!("({x},{y}) drew {want:?} shows {shown:?}"))
+        .collect();
+    Err(format!(
+        "test --qemu ({}): {} differs from the scene at {} of {} pixels: {}",
+        t.name(),
+        path.display(),
+        differing.len(),
+        drawn.len() / 4,
+        first.join(", ")
+    ))
 }
 
 /// The field text of every line in `serial` that logs `id` with `message`, in
@@ -20918,6 +21208,7 @@ fn fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<Option<FsImage>, Str
         | FsDisk::VenusRootDisk
         | FsDisk::HoverRootDisk
         | FsDisk::SvgTextRootDisk
+        | FsDisk::ShaderRootDisk
         | FsDisk::StreamRootDisk
         | FsDisk::EcnRootDisk
         | FsDisk::ListenRootDisk
@@ -20949,6 +21240,7 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, St
         apps,
         apps_with_framestats,
         apps_with_svgtext,
+        apps_with_shadercheck,
         autoload_drivers,
         virtio_gpu_drivers,
         venus_drivers,
@@ -20975,6 +21267,7 @@ fn net_root_fs_disk_image(t: &QemuTest, stores: &StoreSet) -> Result<FsImage, St
         FsDisk::VenusRootDisk => (venus_drivers, apps, "venus-root.img"),
         FsDisk::HoverRootDisk => (autoload_drivers, apps_with_framestats, "hover-root.img"),
         FsDisk::SvgTextRootDisk => (autoload_drivers, apps_with_svgtext, "svgtext-root.img"),
+        FsDisk::ShaderRootDisk => (virtio_gpu_drivers, apps_with_shadercheck, "shader-root.img"),
         FsDisk::StreamRootDisk => (net_only_drivers, apps_with_tcpecho, "stream-root.img"),
         FsDisk::AudioRootDisk => (device_drivers, device_apps, "audio-root.img"),
         FsDisk::UsbAudioRootDisk => (device_drivers, device_apps, "usb-audio-root.img"),

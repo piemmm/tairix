@@ -53,6 +53,9 @@ pub(crate) trait Link: Send + Sync {
     fn write_region(&self, at: usize, data: &[u8]);
     /// Copy `out.len()` bytes at `at` out of the region.
     fn read_region(&self, at: usize, out: &mut [u8]);
+    /// Grant the device the shared region `region` names, answering the
+    /// grant's handle.
+    fn grant(&self, region: u64) -> Result<u64, Errno>;
 }
 
 /// A served device's channel and the client's region.
@@ -474,6 +477,59 @@ impl Host for Remote {
                 .checked_add(piece.len() as u64)
                 .ok_or(Error::OutOfRange)?;
         }
+        Ok(())
+    }
+
+    fn attach(&self, region: Option<u64>, len: usize) -> Result<Option<u32>, Error> {
+        // Memory only this process reaches cannot be mapped by the device's.
+        let region = region.ok_or(Error::Unsupported)?;
+        let grant = self
+            .channel
+            .link
+            .grant(region)
+            .map_err(|errno| match errno {
+                Errno::OutOfMemory => Error::OutOfMemory,
+                _ => Error::Stale,
+            })?;
+        let ops::Attached { attachment } = self.channel.call(
+            GpuOp::Attach,
+            &ops::Attach {
+                grant,
+                len: len as u64,
+            },
+        )?;
+        Ok(Some(attachment))
+    }
+
+    fn detach(&self, attachment: u32) {
+        // A device gone already holds no attachment to let go.
+        let _ = self
+            .channel
+            .call::<Empty>(GpuOp::Detach, &ops::Attached { attachment });
+    }
+
+    fn transfer(
+        &self,
+        (context, allocation, offset): (ContextKey, AllocationKey, u64),
+        (attachment, at, len): (u32, u64, u64),
+        inward: bool,
+    ) -> Result<(), Error> {
+        let op = if inward {
+            GpuOp::ReadInto
+        } else {
+            GpuOp::WriteFrom
+        };
+        self.channel.call::<Empty>(
+            op,
+            &ops::Transfer {
+                context: id(context),
+                allocation,
+                offset,
+                attachment,
+                at,
+                len,
+            },
+        )?;
         Ok(())
     }
 

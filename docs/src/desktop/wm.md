@@ -353,6 +353,24 @@ Only a fullscreen window's content is read for that, as it changes. A
 desktop composed smaller than its output is presented as one desktop-sized
 layer the engine scales onto it.
 
+A display drawing its own frames promotes the same window too: the frame it
+draws in place is that window alone, unscaled, unfaded and uncaptured, with
+the pointer on the cursor plane or hidden. **A promoted window's presents are
+laid straight from its client's frame** into the buffer the display scans —
+its one layer, or the display's frame — with no copy into its content between
+(`plans/GPU.md` GP6.4). Where `presents_directly` says the window may still be
+shown alone, the session hands the compositor the frame
+(`owe_window_content`) rather than decoding it, and the compositor holds the
+frame, which keeps its region mapped. The content is owed what the frame
+changed and is brought up to date before anything composes, bakes, captures
+or pictures it; whatever reshapes or rewrites the content lets the frame go
+first, and so does the window server taking it back for its client
+(`end_direct`), which holds the client off a frame the compositor keeps. Each
+pixel is judged as it is laid: one short of opaque ends the
+promotion that frame, and the frame is composed from the content brought up
+to date. What a frame laid into the display's own frame showed is owed to the
+back buffer and recomposed once anything else can be seen.
+
 A **solid black window over the whole screen**, with nothing of the pointer
 drawn over it, is what the engine shows with **no layer at all**: its own
 background, opaque black, so the screen goes black without a pixel written,
@@ -1709,7 +1727,7 @@ to the newest, exactly as a drag's extents do.
 * **Fullscreen** takes the whole scan-out and does **not** honour that
   ceiling: the app asked for this state by name rather than for "as large
   as useful", and a surface short of the scan-out would leave the desktop
-  showing around it and could not be promoted to one layer. The window is
+  showing around it and could not be promoted. The window is
   raised, so nothing — the taskbar included — is over it.
 
 A fullscreen window's **decoration is withdrawn, not removed**. It keeps
@@ -2403,8 +2421,9 @@ forwards to `Compositor::set_backdrop_blur` for that window and no other
   process holds at most `OBJECT_RANGES_MAX` ranges, all gone with
   `client_exited`. The granted region is mapped **once** at create (the shared
   `tairix_display::ShmMapper` seam) and validated to hold every frame;
-  each present hands the session's compositor bridge (`WindowHost`) a
-  bounds-checked frame slice and a damage list, every rectangle validated
+  each present hands the session's compositor bridge (`FrameHost`) a
+  bounds-checked frame — a `SharedFrame`, whose holders keep the region mapped —
+  and a damage list, every rectangle validated
   inside the window's surface and none overlapping another. A per-client window cap bounds pinned memory, a dead
   client's windows are torn down via `client_exited`, and app-ward events
   are validated against the live window before delivery. A request naming

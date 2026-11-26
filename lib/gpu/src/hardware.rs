@@ -1322,4 +1322,4 @@ fn command<H: Hardware>(op: &Op<Driven<H>>) -> JobCommand<'_, H> {
 
 #[cfg(test)]
 #[path = "hardware_tests.rs"]
-mod tests;
+pub(crate) mod tests;

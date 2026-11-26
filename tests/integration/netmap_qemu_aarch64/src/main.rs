@@ -98,9 +98,8 @@ mod kernel {
 
     /// The ordered PASS witnesses described in the module docs.
     struct Witnesses {
-        /// The map bundle was loaded.
-        launched: AtomicBool,
-        /// The windows first shown after that: the map's.
+        /// Armed when the map bundle loads, then the windows first shown: the
+        /// map's.
         windows: ShownWindows<1>,
         /// Its active probe reached at least one host after that.
         probe_reached: AtomicBool,
@@ -112,7 +111,6 @@ mod kernel {
         /// No witness latched.
         const fn new() -> Self {
             Self {
-                launched: AtomicBool::new(false),
                 windows: ShownWindows::new(),
                 probe_reached: AtomicBool::new(false),
                 exited: AtomicBool::new(false),
@@ -129,7 +127,6 @@ mod kernel {
                     NETMAP_APP_NAME,
                 )
             }) {
-                self.launched.store(true, Ordering::Release);
                 self.windows.arm();
             }
         }

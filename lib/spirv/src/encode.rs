@@ -34,6 +34,100 @@ impl Arg<'_> {
     }
 }
 
+/// What follows an instruction's arguments: more ids, or literal words.
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum Trail<'a> {
+    None,
+    Ids(&'a [Id]),
+    Words(&'a [u32]),
+}
+
+impl Trail<'_> {
+    const fn len(self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Ids(ids) => ids.len(),
+            Self::Words(words) => words.len(),
+        }
+    }
+}
+
+/// An instruction's operands in order: leading ids, arguments, then the
+/// trail.
+pub(crate) type Operands<'a> = (&'a [Id], &'a [Arg<'a>], Trail<'a>);
+
+fn put(bytes: &mut Vec<u8>, word: u32) {
+    bytes.extend_from_slice(&word.to_le_bytes());
+}
+
+/// Append instruction `op` over `operands` to `bytes`, every id below
+/// `bound`; `bytes` growing past `limit` is refused. Nothing is written when
+/// anything is refused.
+///
+/// # Errors
+///
+/// [`EncodeError::IdNotIssued`] for an id at or past `bound`,
+/// [`EncodeError::InteriorNul`] for a string holding a nul,
+/// [`EncodeError::TooLong`] past one instruction's words,
+/// [`EncodeError::TooLarge`] past `limit`, and [`EncodeError::OutOfMemory`].
+pub(crate) fn encode(
+    bytes: &mut Vec<u8>,
+    op: Op,
+    (lead, args, trail): Operands<'_>,
+    bound: u32,
+    limit: usize,
+) -> Result<(), EncodeError> {
+    let issued = |id: &Id| id.get() < bound;
+    let trail_issued = match trail {
+        Trail::Ids(ids) => ids.iter().all(issued),
+        Trail::None | Trail::Words(_) => true,
+    };
+    let args_issued = args
+        .iter()
+        .all(|arg| !matches!(arg, Arg::Id(id) if !issued(id)));
+    if !lead.iter().all(issued) || !args_issued || !trail_issued {
+        return Err(EncodeError::IdNotIssued);
+    }
+    let words = 1 + lead.len() + args.iter().map(Arg::words).sum::<usize>() + trail.len();
+    let count = u16::try_from(words).map_err(|_| EncodeError::TooLong)?;
+    // An over-long string is refused by its length, unread.
+    if args
+        .iter()
+        .any(|arg| matches!(arg, Arg::Text(text) if text.as_bytes().contains(&0)))
+    {
+        return Err(EncodeError::InteriorNul);
+    }
+    let size = words * 4;
+    if bytes.len().saturating_add(size) > limit {
+        return Err(EncodeError::TooLarge);
+    }
+    bytes
+        .try_reserve(size)
+        .map_err(|_| EncodeError::OutOfMemory)?;
+    put(bytes, u32::from(count) << 16 | u32::from(op.code()));
+    for id in lead {
+        put(bytes, id.get());
+    }
+    for arg in args {
+        match *arg {
+            Arg::Id(id) => put(bytes, id.get()),
+            Arg::Word(word) => put(bytes, word),
+            Arg::Wide(wide) => bytes.extend_from_slice(&wide.to_le_bytes()),
+            Arg::Text(text) => {
+                bytes.extend_from_slice(text.as_bytes());
+                let padded = (text.len() / 4 + 1) * 4;
+                bytes.resize(bytes.len() + padded - text.len(), 0);
+            }
+        }
+    }
+    match trail {
+        Trail::None => {}
+        Trail::Ids(ids) => ids.iter().for_each(|id| put(bytes, id.get())),
+        Trail::Words(words) => words.iter().for_each(|&word| put(bytes, word)),
+    }
+    Ok(())
+}
+
 /// A module being written.
 #[derive(Debug)]
 pub struct Encoder {
@@ -87,7 +181,39 @@ impl Encoder {
     }
 
     fn put(&mut self, word: u32) {
-        self.bytes.extend_from_slice(&word.to_le_bytes());
+        put(&mut self.bytes, word);
+    }
+
+    /// One past the largest id issued or copied.
+    pub(crate) const fn bound(&self) -> u32 {
+        self.bound
+    }
+
+    /// Room for `bytes` more, exactly, held to the largest module.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::TooLarge`] past the largest module, and
+    /// [`EncodeError::OutOfMemory`].
+    pub(crate) fn room_for(&mut self, bytes: usize) -> Result<(), EncodeError> {
+        if self.bytes.len().saturating_add(bytes) > MAX_MODULE_BYTES {
+            return Err(EncodeError::TooLarge);
+        }
+        self.bytes
+            .try_reserve_exact(bytes)
+            .map_err(|_| EncodeError::OutOfMemory)
+    }
+
+    /// Append instructions already encoded against this encoder's ids.
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::TooLarge`] past the largest module, and
+    /// [`EncodeError::OutOfMemory`].
+    pub(crate) fn append(&mut self, encoded: &[u8]) -> Result<(), EncodeError> {
+        self.reserve(encoded.len() / 4)?;
+        self.bytes.extend_from_slice(encoded);
+        Ok(())
     }
 
     /// A fresh id, below no other this encoder has issued or copied.
@@ -112,36 +238,13 @@ impl Encoder {
     /// [`EncodeError::TooLarge`] past the largest module. Nothing is written
     /// in any of them.
     pub fn emit(&mut self, op: Op, args: &[Arg<'_>]) -> Result<(), EncodeError> {
-        let mut words = 1usize;
-        for arg in args {
-            if matches!(arg, Arg::Id(id) if id.get() >= self.bound) {
-                return Err(EncodeError::IdNotIssued);
-            }
-            words += arg.words();
-        }
-        let count = u16::try_from(words).map_err(|_| EncodeError::TooLong)?;
-        // An over-long string is refused by its length, unread.
-        if args
-            .iter()
-            .any(|arg| matches!(arg, Arg::Text(text) if text.as_bytes().contains(&0)))
-        {
-            return Err(EncodeError::InteriorNul);
-        }
-        self.reserve(words)?;
-        self.put(u32::from(count) << 16 | u32::from(op.code()));
-        for arg in args {
-            match *arg {
-                Arg::Id(id) => self.put(id.get()),
-                Arg::Word(word) => self.put(word),
-                Arg::Wide(wide) => self.bytes.extend_from_slice(&wide.to_le_bytes()),
-                Arg::Text(text) => {
-                    self.bytes.extend_from_slice(text.as_bytes());
-                    let padded = (text.len() / 4 + 1) * 4;
-                    self.bytes.resize(self.bytes.len() + padded - text.len(), 0);
-                }
-            }
-        }
-        Ok(())
+        encode(
+            &mut self.bytes,
+            op,
+            (&[], args, Trail::None),
+            self.bound,
+            MAX_MODULE_BYTES,
+        )
     }
 
     /// Write `instruction`, one of `module`'s, as it stands; every id of

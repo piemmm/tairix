@@ -6,9 +6,13 @@
 //! answers and its body. What an op carries beyond a few words — a
 //! description, a module, bytes written or read, commands — lies in the one
 //! region the client created and granted at [`GpuOp::Open`], named in the body
-//! by a [`RegionSpan`]: the server copies a span out before it reads it, and
-//! writes what it answers into one. The bodies are the seam's descriptions,
-//! encoded by `lib/gpu`; this module is the frame every one of them shares.
+//! by a [`RegionSpan`]: the server copies a span out before it reads it as a
+//! description, moves bytes between a span and host-visible memory in one
+//! copy, and writes what it answers into one. A region of the client's own
+//! beyond that one crosses only as an attachment ([`GpuOp::Attach`]), which
+//! host-visible memory is copied straight into and out of. The bodies are the
+//! seam's descriptions, encoded by `lib/gpu`; this module is the frame every
+//! one of them shares.
 //!
 //! The channel is a per-node device channel ([`GPU_CHANNEL_ENDPOINTS`]),
 //! bound only by its node's driver, and only where a DMA translation unit
@@ -64,6 +68,14 @@ pub const MAX_CLIENT_CONTEXTS: usize = 64;
 /// The most export tokens one client holds at once: a containment bound on
 /// the record the server keeps of each.
 pub const MAX_CLIENT_EXPORTS: usize = 4096;
+
+/// The most regions of its own one client attaches at once
+/// ([`GpuOp::Attach`]): a containment bound, not a capacity.
+pub const MAX_CLIENT_ATTACHMENTS: usize = 8;
+
+/// The most bytes one client's attachments make its server map, in all: a
+/// containment bound on the address space a client spends of its server's.
+pub const GPU_ATTACHED_MAX: u64 = 1 << 30;
 
 /// The bytes of an export token: random, so no client imports memory it was
 /// not handed a token for.
@@ -155,11 +167,20 @@ pub enum GpuOp {
     CreateComputePipeline = 33,
     /// A render pipeline.
     CreateRenderPipeline = 34,
+    /// Map a region of the client's own the client granted, for transfers
+    /// straight into and out of it.
+    Attach = 35,
+    /// Let an attachment go.
+    Detach = 36,
+    /// Copy host-visible memory into an attachment.
+    ReadInto = 37,
+    /// Copy an attachment's bytes into host-visible memory.
+    WriteFrom = 38,
 }
 
 impl GpuOp {
     /// Every op, in order.
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 38] = [
         Self::Open,
         Self::Close,
         Self::Info,
@@ -194,6 +215,10 @@ impl GpuOp {
         Self::CreateSampler,
         Self::CreateComputePipeline,
         Self::CreateRenderPipeline,
+        Self::Attach,
+        Self::Detach,
+        Self::ReadInto,
+        Self::WriteFrom,
     ];
 
     /// The op `raw` names.

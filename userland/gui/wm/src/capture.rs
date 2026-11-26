@@ -254,6 +254,7 @@ impl Compositor {
         let Some(armed) = self.capture.take() else {
             return Err(CaptureError::Disarmed);
         };
+        self.settle_content();
         let composed = self.compose_tapped(&armed.tap, into, region);
         self.capture = Some(armed);
         composed

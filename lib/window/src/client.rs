@@ -1031,7 +1031,7 @@ enum Asked {
     SizeState(WindowSizeState),
     BackdropBlur(u16),
     PlaceLayer(i32, i32, LayerDepth),
-    Present(u32, DamageList),
+    Present(u32, u64, DamageList),
     OfferedFile(u32),
     DragSpot(u32),
     Terrain,
@@ -1113,9 +1113,10 @@ impl Asked {
                 y,
                 depth,
             },
-            Self::Present(frame_index, damage) => WindowRequest::Present {
+            Self::Present(frame_index, serial, damage) => WindowRequest::Present {
                 window_id,
                 frame_index,
+                serial,
                 damage,
             },
             Self::OfferedFile(serial) => WindowRequest::OfferedFile { window_id, serial },
@@ -1360,6 +1361,9 @@ pub struct WindowClient<T: WindowTransport> {
     unannounced: bool,
     /// The token the next hand-over or reveal is answered by.
     next_token: u64,
+    /// The serial the next present names: one count for every window, so
+    /// each window's rise as the session asks.
+    next_serial: u64,
     /// The session's endpoint has gone: nothing posted will be answered.
     lost: bool,
     /// The client could not keep what it was owed: the application ends the
@@ -1383,6 +1387,7 @@ impl<T: WindowTransport> WindowClient<T> {
             answers: VecDeque::new(),
             unannounced: false,
             next_token: 1,
+            next_serial: 1,
             lost: false,
             broken: None,
         }
@@ -1762,6 +1767,10 @@ impl<T: WindowTransport> WindowClient<T> {
     /// [`EventError::Refused`], and the window's next present declares the
     /// whole window, since the refused one never reached it.
     ///
+    /// Answers the present's serial, which the session's
+    /// [`WindowEvent::FramePresented`] names once it is finished — or a later
+    /// serial of the window, which answers for it.
+    ///
     /// # Errors
     ///
     /// [`Errno::WouldBlock`] while a present of the window is in flight — the
@@ -1771,7 +1780,7 @@ impl<T: WindowTransport> WindowClient<T> {
         window_id: u64,
         frame_index: u32,
         damage: DamageList,
-    ) -> Result<(), Errno> {
+    ) -> Result<u64, Errno> {
         if self.present_state(window_id) == PresentState::InFlight {
             self.owe_frame(window_id);
             return Err(Errno::WouldBlock);
@@ -1784,16 +1793,35 @@ impl<T: WindowTransport> WindowClient<T> {
             Some(framed) => framed.whole()?,
             None => damage,
         };
+        let serial = self.take_serial()?;
         self.post_or_hold(
             window_id,
-            Asked::Present(frame_index, damage),
+            Asked::Present(frame_index, serial, damage),
             Carried::Nothing,
         )?;
         if let Some(record) = self.record_mut(window_id) {
             record.frame_index = Some(frame_index);
             record.owed_whole = false;
         }
-        Ok(())
+        Ok(serial)
+    }
+
+    /// A fresh `len`-byte region granted to the session, and the grant's
+    /// handle: the frames of a window whose pixels the client fills itself.
+    ///
+    /// # Errors
+    ///
+    /// The transport's refusal.
+    #[cfg(all(feature = "gpu", any(test, freestanding)))]
+    pub(crate) fn grant_region(&mut self, len: usize) -> Result<(T::Region, u64), Errno> {
+        self.transport.grant_region(len)
+    }
+
+    /// The serial the next present names.
+    fn take_serial(&mut self) -> Result<u64, Errno> {
+        let serial = self.next_serial;
+        self.next_serial = serial.checked_add(1).ok_or(Errno::OutOfRange)?;
+        Ok(serial)
     }
 
     /// Where window `window_id`'s presents stand, once every answer that has
@@ -1808,7 +1836,7 @@ impl<T: WindowTransport> WindowClient<T> {
             None => PresentState::Idle,
             Some(Posting {
                 ticket: None,
-                held: Some(Held::Asked(Asked::Present(frame_index, _))),
+                held: Some(Held::Asked(Asked::Present(frame_index, ..))),
                 ..
             }) => PresentState::Waiting(*frame_index),
             Some(_) => PresentState::InFlight,
@@ -3052,9 +3080,10 @@ impl<T: WindowTransport> WindowClient<T> {
             return Ok(false);
         };
         let damage = record.framed().whole()?;
+        let serial = self.take_serial()?;
         self.post_or_hold(
             window_id,
-            Asked::Present(frame_index, damage),
+            Asked::Present(frame_index, serial, damage),
             Carried::Nothing,
         )?;
         Ok(true)
@@ -3205,7 +3234,7 @@ impl<T: WindowTransport> WindowClient<T> {
                 .find(|posting| posting.window_id == window_id && posting.kind.folds(kind))
             {
                 let newest = match (posting.held.take(), asked) {
-                    (Some(Held::Asked(Asked::Present(frame, damage))), Asked::Present(..)) => {
+                    (Some(Held::Asked(Asked::Present(frame, _, damage))), Asked::Present(..)) => {
                         merged_present((frame, damage), asked, extent)
                     }
                     _ => asked,
@@ -3820,13 +3849,13 @@ impl Framed {
 /// The present `newer` held behind the present of frame `earlier`, held
 /// before it, in a window of `extent`: the same frame drawn again declares
 /// what both changed, and another frame the whole window, since what it lacks
-/// of the first is unknown.
+/// of the first is unknown. The newer serial answers for both.
 fn merged_present(
     (frame, damage): (u32, DamageList),
     newer: Asked,
     extent: Option<Framed>,
 ) -> Asked {
-    let Asked::Present(newer_frame, newer_damage) = newer else {
+    let Asked::Present(newer_frame, serial, newer_damage) = newer else {
         return newer;
     };
     let both = if newer_frame == frame {
@@ -3838,7 +3867,7 @@ fn merged_present(
     } else {
         extent.and_then(|framed| framed.whole().ok())
     };
-    Asked::Present(newer_frame, both.unwrap_or(newer_damage))
+    Asked::Present(newer_frame, serial, both.unwrap_or(newer_damage))
 }
 
 /// `text`, owned.
@@ -4290,27 +4319,29 @@ impl<S: EventDrain> WindowEvents<S> {
             }
             return Ok(None);
         }
-        self.fold_resizes(&mut frame)?;
+        self.fold_runs(&mut frame)?;
         decode_delivered(client, &frame).map(Some)
     }
 
-    /// Advance `frame` past an unbroken run of [`WindowEvent::Resized`] for
-    /// the same window, leaving the newest one in it.
+    /// Advance `frame` past an unbroken run of [`WindowEvent::Resized`], or
+    /// of [`WindowEvent::FramePresented`], for the same window, leaving the
+    /// newest one in it.
     ///
     /// A client extent is a value the window converges on, not an occurrence
     /// it must witness: an interactive resize-grab reports one per pointer
     /// sample, and an app that re-laid-out and re-mapped for each of them
     /// would do that work once per queued sample to arrive at the size the
-    /// last one already named. Only a *consecutive* run folds — the frame
-    /// that ends it is put back untouched — so nothing is reordered and no
-    /// other event is lost. The reads are non-blocking, so a fold never
+    /// last one already named. A frame's fate is one too, since a later serial
+    /// answers for every one before it. Only a *consecutive* run folds — the
+    /// frame that ends it is put back untouched — so nothing is reordered and
+    /// no other event is lost. The reads are non-blocking, so a fold never
     /// waits for an event that may not come.
     ///
     /// A frame that will not decode ends the run and is put back, so its
     /// typed refusal reaches the caller on the next drain rather than being
     /// swallowed here.
-    fn fold_resizes(&mut self, frame: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), EventError> {
-        let Some(window) = resized_window(frame) else {
+    fn fold_runs(&mut self, frame: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<(), EventError> {
+        let Some(run) = converging(frame) else {
             return Ok(());
         };
         let mut ahead = [0u8; WindowEvent::WIRE_LEN];
@@ -4319,7 +4350,7 @@ impl<S: EventDrain> WindowEvents<S> {
             .try_next(&mut ahead)
             .map_err(EventError::Mailbox)?
         {
-            if resized_window(&ahead) != Some(window) {
+            if converging(&ahead) != Some(run) {
                 self.read_ahead = Some(ahead);
                 return Ok(());
             }
@@ -4390,13 +4421,23 @@ impl<S: EventSource> WindowEvents<S> {
     }
 }
 
-/// The window a delivered frame reports a new client extent for, or `None`
+/// What a delivered frame converges on and the window it is for, or `None`
 /// when it is any other event (or will not decode).
-fn resized_window(frame: &[u8; WindowEvent::WIRE_LEN]) -> Option<u64> {
+fn converging(frame: &[u8; WindowEvent::WIRE_LEN]) -> Option<(Converging, u64)> {
     match WindowEvent::from_bytes(frame) {
-        Ok(WindowEvent::Resized { window_id, .. }) => Some(window_id),
+        Ok(WindowEvent::Resized { window_id, .. }) => Some((Converging::Extent, window_id)),
+        Ok(WindowEvent::FramePresented { window_id, .. }) => Some((Converging::Fate, window_id)),
         _ => None,
     }
+}
+
+/// A value a window converges on, whose run folds to its newest.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Converging {
+    /// The client extent and size state.
+    Extent,
+    /// The newest present finished.
+    Fate,
 }
 
 /// Decode one delivered frame and answer a redraw request on the app's behalf.

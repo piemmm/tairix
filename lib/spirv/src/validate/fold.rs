@@ -428,7 +428,7 @@ impl<'a> Folder<'a> {
     clippy::cast_possible_truncation,
     reason = "a literal a word wide is its value's low word"
 )]
-fn literal(scalar: Scalar, bits: u64) -> Option<Arg<'static>> {
+pub(super) fn literal(scalar: Scalar, bits: u64) -> Option<Arg<'static>> {
     let (width, signed) = match scalar {
         Scalar::Bool => return None,
         Scalar::Int { width, signed } => (width, signed),

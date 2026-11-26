@@ -11,12 +11,13 @@ use tairix_log::EventId;
 /// Contexts, blobs and their mappings were made against the device and let
 /// go, a blob's second mapping read what its first wrote, and the driver's
 /// Venus backend agreed with the software device in all of `gpucheck`'s
-/// work, its image work, its render work and its four-sample pass included.
+/// work, its image work, its render work, its four-sample pass and every
+/// kernel of its differential corpus included.
 pub const PASSED: EventId = EventId(4590);
 
 /// The message [`PASSED`] is recorded with.
 pub const PASSED_MESSAGE: &str = "venus check: contexts, blobs and mappings made and let go; \
-                                  the GPU agreed with the software device, images and draws too";
+                                  the GPU agreed with the software device in all its work";
 
 // A longer message would be cut short in the log.
 const _: () = assert!(PASSED_MESSAGE.len() <= tairix_log::CALLER_MESSAGE_MAX);

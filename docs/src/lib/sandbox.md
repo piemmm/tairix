@@ -349,6 +349,21 @@ Stability tier: **experimental**.
   back to the latest keyframe passed, giving up where it fails twice there.
   `is_movie` knows a recording by its signature; the `fixture` feature muxes
   recordings in memory for the tests of the crates that play one.
+- **`wgsl`** — WGSL source compiled to SPIR-V by
+  [`tairix-wgsl`](./wgsl.md) in a worker (`plans/SHADER.md` SH4), one compile
+  per request: the source and the values its overrides take, at most
+  `MAX_OVERRIDES` of them, each name at most `MAX_OVERRIDE_NAME_BYTES`. The
+  caller-side `compile` believes nothing it is answered until it has checked
+  it on its own side: the module decoded and admitted by `lib/spirv`'s
+  validator, and each diagnostic believed only where its span lies on the
+  source's character boundaries, its code is one the front end has, and its
+  message is printable text, its line and column worked out from the
+  caller's own copy of the source. A reply failing any of it is a worker
+  broken or subverted, retired as a crash is, so the trust boundary is the
+  validator, not the process. The worker is given message-sized memory
+  (`WORKER_MEMORY`), within which the front end's bounds hold the largest
+  compile; `tests/wgsl_memory.rs` measures that it does. `gpucheck --shader`
+  compiles its kernels through it.
 - **`rt`** (feature `program`, freestanding targets only) — the
   production transport. `RtLauncher` spawns the program's **own binary**
   in a worker role: two fresh pipes wired to the child's fd 0/1 through

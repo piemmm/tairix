@@ -5,12 +5,20 @@
 
 use alloc::vec::Vec;
 
-use super::binding::Component;
-use super::entry::{Interpolation, Stage, Varying};
+use super::binding::{Access, Component};
+use super::entry::{Interpolation, InterpolationSampling, Stage, Varying};
 use super::types::{Holds, Scalar, Ty};
 use super::{push, Rule, Validator, MAX_LOCATIONS, NONE};
 use crate::enumerant::{BuiltIn, Decoration, StorageClass};
 use crate::Id;
+
+/// An entry point's stage interface: the locations its inputs and its
+/// outputs occupy, and whether what it reads makes it shade each sample.
+pub(crate) struct StageInterface {
+    pub(crate) inputs: Vec<Varying>,
+    pub(crate) outputs: Vec<Varying>,
+    pub(crate) per_sample: bool,
+}
 
 /// One location slot taken: its location, component mask, blend index and
 /// interpolation, and what it holds.
@@ -40,21 +48,26 @@ const LOCATIONS: usize = MAX_LOCATIONS as usize;
 const FLAT: u8 = 1;
 const NO_PERSPECTIVE: u8 = 1 << 1;
 const CENTROID: u8 = 1 << 2;
+const SAMPLE: u8 = 1 << 3;
 
 impl Validator<'_> {
     /// Check the interface's built-ins and user-defined variables, and
-    /// answer the locations its inputs and outputs occupy.
+    /// answer the locations its inputs and outputs occupy and whether those
+    /// of them the entry point's call tree `used` reads make it shade each
+    /// sample.
     pub(crate) fn stage_interface(
         &self,
         stage: Stage,
         interface: &[u32],
-    ) -> Result<(Vec<Varying>, Vec<Varying>), Rule> {
+        used: &[(u32, Access)],
+    ) -> Result<StageInterface, Rule> {
         let mut built_ins: Vec<(u32, u32)> = Vec::new();
         let mut blocks = [false; 2];
         let mut sides = [
             Occupancy::new(stage == Stage::Fragment),
             Occupancy::new(false),
         ];
+        let mut per_sample = false;
         for &slot in interface {
             let Some(&(id, _)) = self.m.definitions.get(slot as usize) else {
                 continue;
@@ -68,9 +81,17 @@ impl Validator<'_> {
             let Ty::Pointer { pointee, .. } = self.ty(self.value_type(id)?).ty else {
                 continue;
             };
+            let read = side == 0
+                && stage == Stage::Fragment
+                && used.binary_search_by_key(&slot, |&(s, _)| s).is_ok();
             if let Some(built_in) = self.decoration_value_of(id, NONE, Decoration::BUILT_IN) {
                 self.built_in(stage, class, BuiltIn(built_in), pointee)?;
                 claim(&mut built_ins, (class.0, built_in))?;
+                per_sample |= read
+                    && matches!(
+                        BuiltIn(built_in),
+                        BuiltIn::SAMPLE_ID | BuiltIn::SAMPLE_POSITION
+                    );
                 continue;
             }
             let block = Some(self.innermost(pointee))
@@ -100,10 +121,21 @@ impl Validator<'_> {
                 continue;
             }
             let occupancy = sides.get_mut(side).ok_or(Rule::Interface)?;
+            let before = occupancy.varyings.len();
             self.user_variable(stage, class, id, pointee, occupancy)?;
+            per_sample |= read
+                && occupancy.varyings.get(before..).is_some_and(|taken| {
+                    taken
+                        .iter()
+                        .any(|v| v.sampling == InterpolationSampling::Sample)
+                });
         }
         let [inputs, outputs] = sides;
-        Ok((inputs.into_varyings(), outputs.into_varyings()))
+        Ok(StageInterface {
+            inputs: inputs.into_varyings(),
+            outputs: outputs.into_varyings(),
+            per_sample,
+        })
     }
 
     /// A built-in of the Vulkan environment's table: the stage and storage
@@ -154,7 +186,8 @@ impl Validator<'_> {
             BuiltIn::CLIP_DISTANCE | BuiltIn::CULL_DISTANCE => vertex && output && float32_array,
             BuiltIn::VERTEX_INDEX | BuiltIn::INSTANCE_INDEX => vertex && input && int32(1),
             BuiltIn::FRAG_COORD => fragment && input && float32(4),
-            BuiltIn::POINT_COORD => fragment && input && float32(2),
+            BuiltIn::POINT_COORD | BuiltIn::SAMPLE_POSITION => fragment && input && float32(2),
+            BuiltIn::SAMPLE_ID => fragment && input && int32(1),
             BuiltIn::FRONT_FACING | BuiltIn::HELPER_INVOCATION => fragment && input && boolean,
             BuiltIn::SAMPLE_MASK => fragment && (input || output) && int32_array,
             BuiltIn::FRAG_DEPTH => fragment && output && float32(1),
@@ -200,6 +233,7 @@ impl Validator<'_> {
         {
             return Err(Rule::DecorationTarget(Decoration::FLAT));
         }
+        sampled_alone(interpolation)?;
         // Dual-source blending is the one use of a blend index.
         let index = self
             .decoration_value_of(id, NONE, Decoration::INDEX)
@@ -268,6 +302,7 @@ impl Validator<'_> {
                     {
                         return Err(Rule::DecorationTarget(Decoration::FLAT));
                     }
+                    sampled_alone(member_interpolation)?;
                     let at = Place {
                         location,
                         component: component.unwrap_or(0),
@@ -296,6 +331,7 @@ impl Validator<'_> {
             (Decoration::FLAT, FLAT),
             (Decoration::NO_PERSPECTIVE, NO_PERSPECTIVE),
             (Decoration::CENTROID, CENTROID),
+            (Decoration::SAMPLE, SAMPLE),
         ] {
             if self.decoration_of(id, member, decoration).is_some() {
                 bits |= bit;
@@ -367,7 +403,7 @@ impl Validator<'_> {
                             variable: at.variable,
                             offset: *offset,
                             interpolation: interpolation_of(at.interpolation),
-                            centroid: at.interpolation & (CENTROID | FLAT) == CENTROID,
+                            sampling: sampling_of(at.interpolation),
                         },
                     })?;
                     *offset = offset.checked_add(here).ok_or(Rule::Location)?;
@@ -452,6 +488,25 @@ const fn interpolation_of(bits: u8) -> Interpolation {
         Interpolation::NoPerspective
     } else {
         Interpolation::Smooth
+    }
+}
+
+/// Where the decorations' `bits` interpolate: a flat value has no place.
+const fn sampling_of(bits: u8) -> InterpolationSampling {
+    match (bits & FLAT != 0, bits & SAMPLE != 0, bits & CENTROID != 0) {
+        (false, true, _) => InterpolationSampling::Sample,
+        (false, false, true) => InterpolationSampling::Centroid,
+        _ => InterpolationSampling::Centre,
+    }
+}
+
+/// Refuse `Sample` beside `Centroid` or `Flat`: each would name another place
+/// to interpolate, or none.
+const fn sampled_alone(bits: u8) -> Result<(), Rule> {
+    if bits & SAMPLE != 0 && bits & (CENTROID | FLAT) != 0 {
+        Err(Rule::DecorationTarget(Decoration::SAMPLE))
+    } else {
+        Ok(())
     }
 }
 

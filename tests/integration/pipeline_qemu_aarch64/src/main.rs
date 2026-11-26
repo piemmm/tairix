@@ -83,7 +83,7 @@ mod kernel {
     use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
-    use tairix_log::{Event, EventId, Sink};
+    use tairix_log::{Event, Sink};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -101,18 +101,13 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
-    /// `EventId` emitted by the syscall dispatcher for an audited syscall
-    /// that passed every check. Pinned by the audit-id test in
-    /// `kernel/syscall/src/audit.rs`.
-    const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
-
     /// The scripted round trip's final tool: `cat < /Users/root/nums.txt`.
     /// Its audited `exit` is the kernel-side witness that every scripted
     /// pipeline and redirection step ran to completion.
     const FINAL_TOOL_COMM: &str = "cat";
 
     /// The run's end: the shell's exit after the round trip's `cat`.
-    static END: FixtureExit = FixtureExit::new(&[FINAL_TOOL_COMM], SYSCALL_INVOKED_EVENT_ID);
+    static END: FixtureExit = FixtureExit::new(&[FINAL_TOOL_COMM]);
 
     /// Replays every event to the serial console and ends the run at [`END`].
     struct PipelineSink;

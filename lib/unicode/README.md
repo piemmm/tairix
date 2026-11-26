@@ -24,6 +24,8 @@ algorithms.
 - `restriction_level` and `RestrictionLevel` — UTS #39 §5.2 over the
   `Script_Extensions` UTS #39 §5.1 augments, with UAX #31's Recommended
   Scripts.
+- `is_xid_start`, `is_xid_continue` — UAX #31's `XID_Start` and
+  `XID_Continue`, what an identifier may begin and go on with.
 - `normalize`, `Form` and `Overflow` — UAX #15's four normalization forms,
   written into a buffer the caller holds that need only be as long as the
   result; `MAX_DECOMPOSITION` times the input's length always is.

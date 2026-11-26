@@ -10,22 +10,23 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_gpu::{
-    Allocation, AllocationDesc, Aspects, BindSetEntry, BindSetLayout, Buffer, BufferImageCopy,
-    BufferUsage, BufferViewDesc, ClearValue, CompareOp, ComputePipeline, ComputePipelineDesc,
-    Context, ContextDesc, DescriptorType, Device, Error, Extent3d, Filter, Format, FormatFeatures,
-    Image, ImageCopy, ImageDesc, ImageDimension, ImageRange, ImageSubresource, ImageUsage,
+    Allocation, AllocationDesc, Aspects, BindSetLayout, Buffer, BufferImageCopy, BufferUsage,
+    BufferViewDesc, ClearValue, CompareOp, ComputePipeline, ComputePipelineDesc, Context,
+    ContextDesc, DescriptorType, Device, Error, Extent3d, Filter, Format, FormatFeatures, Image,
+    ImageCopy, ImageDesc, ImageDimension, ImageRange, ImageSubresource, ImageUsage, ImageView,
     ImageViewDesc, LayoutBinding, Origin3d, PushConstants, QueueCapabilities, Resource, SampleType,
-    SamplerDesc, SamplerType, ViewDimension,
+    Sampler, SamplerDesc, SamplerType, ViewDimension,
 };
 use tairix_spirv::enumerant::{
     BuiltIn, Capability, Decoration, Dim, ExecutionMode, ExecutionModel, ImageFormat,
     ImageOperands, StorageClass,
 };
 use tairix_spirv::{
-    Access, Admitted, Arg, BuildError, Builder, Function, Id, ImageShape, Op, Stages, Version,
+    Access, Admitted, Arg, BuildError, Builder, Component, Function, Id, ImageShape, ImageType, Op,
+    Stages, Version,
 };
 
-use super::{buffer, family, submit};
+use super::{buffer, family, in_binding_order, states_uses, submit};
 
 /// What the work asks of each format it uses, beside copying it.
 const USES: [(Format, FormatFeatures); 4] = [
@@ -42,7 +43,7 @@ const USES: [(Format, FormatFeatures); 4] = [
 ];
 
 /// The side of the square grid the dispatch runs over and its images hold.
-const SIDE: u32 = 4;
+pub(crate) const SIDE: u32 = 4;
 
 /// The texels the dispatch's images and texel buffers hold.
 const TEXELS: u32 = SIDE * SIDE;
@@ -54,11 +55,7 @@ const WORDS: u32 = 3;
 /// type `near`; `None` where the device states not every use it makes of
 /// the formats it reads.
 pub(crate) fn work(device: &Device, near: u32) -> Result<Option<Vec<u8>>, Error> {
-    let formats = &device.info().formats;
-    if !USES
-        .iter()
-        .all(|&(format, uses)| formats.get(format).contains(uses))
-    {
+    if !states_uses(device, &USES) {
         return Ok(None);
     }
     let transfer = family(device, QueueCapabilities::TRANSFER)?;
@@ -69,7 +66,12 @@ pub(crate) fn work(device: &Device, near: u32) -> Result<Option<Vec<u8>>, Error>
     Ok(Some(left))
 }
 
-const fn square(format: Format, (levels, layers): (u32, u32), usage: ImageUsage) -> ImageDesc {
+/// An image of `format` [`SIDE`] texels square of `levels` and `layers`.
+pub(crate) const fn square(
+    format: Format,
+    (levels, layers): (u32, u32),
+    usage: ImageUsage,
+) -> ImageDesc {
     ImageDesc {
         dimension: ImageDimension::D2,
         format,
@@ -292,17 +294,33 @@ const fn flat(component: tairix_spirv::Component, format: ImageFormat) -> ImageS
     }
 }
 
+/// How the sampled images and the comparing sampler are bound: the integer
+/// image through a sampler of its own, the depth image, and the sampler that
+/// compares its depths.
+pub(crate) const SAMPLED_KINDS: [DescriptorType; 3] = [
+    DescriptorType::CombinedImageSampler(
+        flat(Component::Uint, ImageFormat::UNKNOWN),
+        SampleType::Uint,
+        SamplerType::Integer,
+    ),
+    DescriptorType::SampledImage(
+        flat(Component::Float, ImageFormat::UNKNOWN),
+        SampleType::UnfilterableDepth,
+    ),
+    DescriptorType::Sampler(SamplerType::NonFilteringComparison),
+];
+
 /// The dispatch's bindings, in [`program`]'s order.
 fn bindings() -> [LayoutBinding; 7] {
-    use tairix_spirv::Component::{Float, Uint};
     let texel_buffer = ImageShape {
         dim: Dim::BUFFER,
-        ..flat(Uint, ImageFormat::UNKNOWN)
+        ..flat(Component::Uint, ImageFormat::UNKNOWN)
     };
     let stored = ImageShape {
         format: ImageFormat::R32UI,
         ..texel_buffer
     };
+    let [combined, depth, comparing] = SAMPLED_KINDS;
     let kinds = [
         (
             DescriptorType::UniformTexelBuffer(texel_buffer),
@@ -310,28 +328,12 @@ fn bindings() -> [LayoutBinding; 7] {
         ),
         (DescriptorType::StorageTexelBuffer(stored), Access::WRITE),
         (
-            DescriptorType::StorageImage(flat(Uint, ImageFormat::R32UI)),
+            DescriptorType::StorageImage(flat(Component::Uint, ImageFormat::R32UI)),
             Access::WRITE,
         ),
-        (
-            DescriptorType::CombinedImageSampler(
-                flat(Uint, ImageFormat::UNKNOWN),
-                SampleType::Uint,
-                SamplerType::Integer,
-            ),
-            Access::READ,
-        ),
-        (
-            DescriptorType::SampledImage(
-                flat(Float, ImageFormat::UNKNOWN),
-                SampleType::UnfilterableDepth,
-            ),
-            Access::READ,
-        ),
-        (
-            DescriptorType::Sampler(SamplerType::NonFilteringComparison),
-            Access::READ,
-        ),
+        (combined, Access::READ),
+        (depth, Access::READ),
+        (comparing, Access::READ),
         (DescriptorType::StorageBuffer, Access::WRITE),
     ];
     let mut next = 0;
@@ -356,27 +358,52 @@ fn resource(b: &mut Builder, ty: Id, binding: u32) -> Result<Id, BuildError> {
     Ok(variable)
 }
 
-/// An image type of `texel`s: `dim`, depth where `depth`, sampled or
-/// stored as `sampled` says (one or two), of `format`.
-fn image_type(
+/// The type of a single-sampled image of `texel`s, of `dim`, a depth image
+/// where `depth`, read and written by texel where `storage`, of `format`.
+pub(crate) fn image_type(
     b: &mut Builder,
     texel: Id,
-    (dim, depth, sampled): (Dim, bool, u32),
+    (dim, depth, storage): (Dim, bool, bool),
     format: ImageFormat,
 ) -> Result<Id, BuildError> {
-    b.declare(
-        Op::TYPE_IMAGE,
-        None,
-        &[
-            Arg::Id(texel),
-            Arg::Word(dim.0),
-            Arg::Word(u32::from(depth)),
-            Arg::Word(0),
-            Arg::Word(0),
-            Arg::Word(sampled),
-            Arg::Word(format.0),
-        ],
-    )
+    b.image(&ImageType {
+        sampled: texel,
+        dim,
+        depth: u32::from(depth),
+        arrayed: false,
+        multisampled: false,
+        storage,
+        format,
+    })
+}
+
+/// The types the sampled images are read through: the integer image, it
+/// with its sampler, the depth image, it with the comparing sampler, and
+/// that sampler.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SampledTypes {
+    pub(crate) integer: Id,
+    pub(crate) combined: Id,
+    pub(crate) depth: Id,
+    pub(crate) depth_sampled: Id,
+    pub(crate) comparing: Id,
+}
+
+/// [`SampledTypes`] in `b`, their texels read as `uint` and their depths as
+/// `float`.
+pub(crate) fn sampled_types(
+    b: &mut Builder,
+    (uint, float): (Id, Id),
+) -> Result<SampledTypes, BuildError> {
+    let integer = image_type(b, uint, (Dim::DIM_2D, false, false), ImageFormat::UNKNOWN)?;
+    let depth = image_type(b, float, (Dim::DIM_2D, true, false), ImageFormat::UNKNOWN)?;
+    Ok(SampledTypes {
+        integer,
+        combined: b.sampled_image(integer)?,
+        depth,
+        depth_sampled: b.sampled_image(depth)?,
+        comparing: b.sampler()?,
+    })
 }
 
 /// The ids the dispatch's body reads.
@@ -413,14 +440,10 @@ fn declared(b: &mut Builder) -> Result<Kit, BuildError> {
         Decoration::BUILT_IN,
         &[BuiltIn::GLOBAL_INVOCATION_ID.0],
     )?;
-    let fetched_t = image_type(b, uint, (Dim::BUFFER, false, 1), ImageFormat::UNKNOWN)?;
-    let stored_t = image_type(b, uint, (Dim::BUFFER, false, 2), ImageFormat::R32UI)?;
-    let surface_t = image_type(b, uint, (Dim::DIM_2D, false, 2), ImageFormat::R32UI)?;
-    let integer_t = image_type(b, uint, (Dim::DIM_2D, false, 1), ImageFormat::UNKNOWN)?;
-    let combined_t = b.declare(Op::TYPE_SAMPLED_IMAGE, None, &[Arg::Id(integer_t)])?;
-    let depth_t = image_type(b, float, (Dim::DIM_2D, true, 1), ImageFormat::UNKNOWN)?;
-    let depth_sampled = b.declare(Op::TYPE_SAMPLED_IMAGE, None, &[Arg::Id(depth_t)])?;
-    let comparing_t = b.declare(Op::TYPE_SAMPLER, None, &[])?;
+    let fetched_t = image_type(b, uint, (Dim::BUFFER, false, false), ImageFormat::UNKNOWN)?;
+    let stored_t = image_type(b, uint, (Dim::BUFFER, false, true), ImageFormat::R32UI)?;
+    let surface_t = image_type(b, uint, (Dim::DIM_2D, false, true), ImageFormat::R32UI)?;
+    let sampled = sampled_types(b, (uint, float))?;
     let words = b.runtime_array(uint)?;
     b.decorate(words, Decoration::ARRAY_STRIDE, &[4])?;
     let block = b.structure(&[words])?;
@@ -443,10 +466,10 @@ fn declared(b: &mut Builder) -> Result<Kit, BuildError> {
         fetched: (fetched_t, resource(b, fetched_t, 0)?),
         stored: (stored_t, resource(b, stored_t, 1)?),
         surface: (surface_t, resource(b, surface_t, 2)?),
-        combined: (combined_t, resource(b, combined_t, 3)?),
-        depth: (depth_t, resource(b, depth_t, 4)?),
-        comparing: (comparing_t, resource(b, comparing_t, 5)?),
-        depth_sampled,
+        combined: (sampled.combined, resource(b, sampled.combined, 3)?),
+        depth: (sampled.depth, resource(b, sampled.depth, 4)?),
+        comparing: (sampled.comparing, resource(b, sampled.comparing, 5)?),
+        depth_sampled: sampled.depth_sampled,
         out,
         word,
     })
@@ -646,6 +669,43 @@ fn dispatch_pipeline(context: &Context) -> Result<(ComputePipeline, BindSetLayou
     Ok((pipeline, layout))
 }
 
+/// The sampled images with their views, and the samplers they are read
+/// through, as [`SAMPLED_KINDS`] binds them.
+pub(crate) struct Sampled {
+    _images: [(Allocation, Image); 2],
+    views: [ImageView; 2],
+    samplers: [Sampler; 2],
+}
+
+impl Sampled {
+    /// The sampled images made in `context`, filled on a queue of family
+    /// `transfer` through memory of type `near`.
+    pub(crate) fn new(context: &Context, (near, transfer): (u32, u32)) -> Result<Self, Error> {
+        let images = sampled_images(context, (near, transfer))?;
+        let [(_, integer), (_, depth)] = &images;
+        let views = [
+            whole_view(context, integer, (Format::R32Uint, Aspects::COLOR))?,
+            whole_view(context, depth, (Format::Depth32Float, Aspects::DEPTH))?,
+        ];
+        Ok(Self {
+            _images: images,
+            views,
+            samplers: samplers(context)?,
+        })
+    }
+
+    /// The resources each of [`SAMPLED_KINDS`] binds, in order.
+    pub(crate) const fn resources(&self) -> [Resource<'_>; 3] {
+        let [integer, depth] = &self.views;
+        let [reading, comparing] = &self.samplers;
+        [
+            Resource::ImageSampler(integer, reading),
+            Resource::Image(depth),
+            Resource::Sampler(comparing),
+        ]
+    }
+}
+
 /// The images the dispatch samples, filled on a queue of family `transfer`:
 /// an integer image of each texel's index times seven plus one, and a depth
 /// image of [`depths`].
@@ -668,6 +728,24 @@ fn sampled_images(
     commands.copy_buffer_to_image(&staging, &depth, &[depth_ramp()])?;
     submit(context, transfer, &commands)?;
     Ok([(integer_memory, integer), (depth_memory, depth)])
+}
+
+/// The samplers the sampled images are read through: one taking the nearest
+/// texel, and one comparing a depth with a reference.
+fn samplers(context: &Context) -> Result<[Sampler; 2], Error> {
+    let nearest = SamplerDesc {
+        mag_filter: Filter::Nearest,
+        min_filter: Filter::Nearest,
+        mipmap_filter: Filter::Nearest,
+        ..SamplerDesc::LINEAR
+    };
+    Ok([
+        context.create_sampler(&nearest)?,
+        context.create_sampler(&SamplerDesc {
+            compare: Some(CompareOp::LessOrEqual),
+            ..nearest
+        })?,
+    ])
 }
 
 /// The bytes `len` long `memory` holds from its start.
@@ -709,45 +787,25 @@ fn dispatch(
     let marked_usage = ImageUsage::STORAGE.with(ImageUsage::TRANSFER_SRC);
     let (_surface_memory, surface) =
         placed(context, &square(Format::R32Uint, (1, 1), marked_usage))?;
-    let [(_integer_memory, integer), (_depth_memory, depth)] =
-        sampled_images(context, (near, transfer))?;
+    let sampled = Sampled::new(context, (near, transfer))?;
     let surface_view = whole_view(context, &surface, (Format::R32Uint, Aspects::COLOR))?;
-    let integer_view = whole_view(context, &integer, (Format::R32Uint, Aspects::COLOR))?;
-    let depth_view = whole_view(context, &depth, (Format::Depth32Float, Aspects::DEPTH))?;
-    let nearest = SamplerDesc {
-        mag_filter: Filter::Nearest,
-        min_filter: Filter::Nearest,
-        mipmap_filter: Filter::Nearest,
-        ..SamplerDesc::LINEAR
-    };
-    let reading = context.create_sampler(&nearest)?;
-    let comparing = context.create_sampler(&SamplerDesc {
-        compare: Some(CompareOp::LessOrEqual),
-        ..nearest
-    })?;
     let out_bytes = u64::from(TEXELS * WORDS) * 4;
     let (out_memory, out) = buffer(context, (near, out_bytes), BufferUsage::STORAGE)?;
+    let [combined, depth, comparing] = sampled.resources();
     let resources = [
         Resource::TexelBuffer(&fetch),
         Resource::TexelBuffer(&store),
         Resource::Image(&surface_view),
-        Resource::ImageSampler(&integer_view, &reading),
-        Resource::Image(&depth_view),
-        Resource::Sampler(&comparing),
+        combined,
+        depth,
+        comparing,
         Resource::Buffer {
             buffer: &out,
             offset: 0,
             size: out_bytes,
         },
     ];
-    let entries: Vec<BindSetEntry<'_>> = (0u32..)
-        .zip(&resources)
-        .map(|(binding, resource)| BindSetEntry {
-            binding,
-            resources: core::slice::from_ref(resource),
-        })
-        .collect();
-    let set = context.create_bind_set(&layout, &entries)?;
+    let set = context.create_bind_set(&layout, &in_binding_order(&resources))?;
     let mut run = context.command_buffer();
     run.dispatch(&pipeline, &[&set], &[], [1, 1, 1])?;
     submit(context, compute, &run)?;

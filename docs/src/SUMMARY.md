@@ -168,6 +168,7 @@
   - [`tairix-visible`](./lib/visible.md)
   - [`tairix-vt`](./lib/vt.md)
   - [`tairix-wallpaper`](./lib/wallpaper.md)
+  - [`tairix-wgsl`](./lib/wgsl.md)
   - [`tairix-writeback`](./lib/writeback.md)
   - [`tairix-xml`](./lib/xml.md)
 

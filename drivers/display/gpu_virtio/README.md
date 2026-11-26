@@ -66,8 +66,12 @@ process sees it.
   GPU request holds the display back and no 3D answer waits on a later wake.
 - **Compute.** Bind sets of buffers, compute pipelines and dispatches. A
   module is folded before it is sent — specialized as the seam specialized
-  it, and every value it could read unwritten defined — so the host compiles
-  the one meaning the seam admitted. An indirect dispatch's counts are checked
+  it, and every value it could read unwritten defined — and then guarded
+  (`Admitted::guarded`), every dynamic index into memory Vulkan's robustness
+  does not bound held within the level it steps into, so the host compiles
+  the one meaning the seam admitted. The guarded module, not its source, is
+  held to the capabilities the host states, and a pipeline whose guarded
+  module needs one it does not is refused as unsupported. An indirect dispatch's counts are checked
   on the device by the pinned `indirect_counts` pass before the dispatch reads
   them; counts past the device's run nothing and lose the context, as on the
   software device. The seam's semantics for what a program reads past its
@@ -109,7 +113,10 @@ process sees it.
   `indirect_records` pass, each check ordered after the last by a barrier,
   and a pass whose records outrun their slot renders as several rendering
   instances, each copying its records only once the one before has drawn, the
-  last alone resolving.
+  last alone resolving. Sample shading is stated, and the host's feature
+  enabled, only where the host shades each sample; a module reading its
+  sample starts it on the host as on the software device, with no state of
+  the pipeline's own.
 - **The pointer is the device's cursor.** A pointer image is copied into the
   driver's own 64 × 64 image, transferred, and shown on the cursor queue;
   moving it presents nothing.

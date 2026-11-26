@@ -32,7 +32,7 @@ use tairix_abi::window_ipc::{
     WINDOW_TITLE_MAX,
 };
 use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
-use tairix_display::{FrameRegion, ShmMapper};
+use tairix_display::{FrameRegion, SharedFrame, ShmMapper};
 use tairix_geometry::{Point, Rect, Region, Scale};
 
 use tairix_abi::window_ipc::{
@@ -50,10 +50,10 @@ use crate::damage_in;
 use crate::desktop::Desktop;
 use crate::server::{
     client_frame_budget_bytes, Activation, AlertOpen, AuthoriseFor, CallerIdentity, ClientRegion,
-    CursorSetName, DialogSpec, DragConclusion, DragReport, EventSink, FrameHost, HandOverDesk,
-    LayerSpec, OpenEntry, PickedFile, PlacedFile, Placement, PopupSpec, PreviewSize, Served,
-    ToolSpec, TransientSpec, WallpaperName, WindowHost, WindowServer, WindowSizeState,
-    WindowSizing, WINDOW_REPLY_MAX,
+    CursorSetName, DialogSpec, DragConclusion, DragReport, EventSink, FrameHost, FrameUse,
+    HandOverDesk, LayerSpec, OpenEntry, PickedFile, PlacedFile, Placement, PopupSpec, PreviewSize,
+    ReleasedFrames, Served, ToolSpec, TransientSpec, WallpaperName, WindowHost, WindowServer,
+    WindowSizeState, WindowSizing, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -77,11 +77,11 @@ fn refusal<T: WindowTransport>(client: &mut WindowClient<T>) -> Option<Refused> 
 }
 
 /// A client over the loopback.
-type Client = WindowClient<Rc<RefCell<Loopback>>>;
+pub(crate) type Client = WindowClient<Rc<RefCell<Loopback>>>;
 
 /// A client of `loopback`, connected as every application is before it
 /// opens anything.
-fn connected(loopback: &Rc<RefCell<Loopback>>) -> Client {
+pub(crate) fn connected(loopback: &Rc<RefCell<Loopback>>) -> Client {
     let mut client = WindowClient::new(Rc::clone(loopback));
     client
         .connect()
@@ -332,7 +332,7 @@ const TICKET_UNATTESTED: u64 = 9;
 const MINTED_TICKETS: u64 = 0x1_0000;
 
 /// The event endpoint client A names in its creates.
-const EVENTS_A: u64 = 0xA000;
+pub(crate) const EVENTS_A: u64 = 0xA000;
 /// The event endpoint client B names in its creates.
 const EVENTS_B: u64 = 0xB000;
 
@@ -482,7 +482,7 @@ impl CallerIdentity for MockIdentity {
 
 /// A host recording every bridge call, optionally refusing opens, picker
 /// requests.
-struct RecordingHost {
+pub(crate) struct RecordingHost {
     opened: Vec<(ProcId, u64, DisplayMode, String, WindowSizing)>,
     popups: Vec<(u64, u64, i32, i32, DisplayMode)>,
     /// Every tool window opened: its id, parent, carry, title and sizing.
@@ -496,16 +496,28 @@ struct RecordingHost {
     /// The terrain the host reports, and the refusal it answers instead.
     terrain: Vec<TerrainPlate>,
     refuse_terrain: Option<Errno>,
-    presented: Vec<(u64, Vec<u8>, DamageList)>,
+    pub(crate) presented: Vec<(u64, Vec<u8>, DamageList)>,
+    /// The frame last shown, as the latch shared it.
+    shared: Option<SharedFrame>,
+    /// Whether a frame shown is kept rather than read, as a window presented
+    /// straight from its frame is.
+    keeps_frames: bool,
+    /// Every window whose kept frame the engine took back.
+    reclaimed: Vec<u64>,
     /// Every view shown: the window, the view, its rows and what changed.
     views_presented: Vec<(u64, WindowView, Vec<u8>, DamageList)>,
     /// The view each resize carried.
     resized_views: Vec<Option<WindowView>>,
     /// What a frame refused at the latch is refused with, if it is.
     refuse_frames: Option<Errno>,
-    /// Every frame the latch could not show, by window.
-    frames_refused: Vec<(u64, Errno)>,
-    resized: Vec<(u64, DisplayMode)>,
+    /// Every present the latch could not show: its window and serial, why,
+    /// and whether it was the first since the window showed a frame.
+    frames_refused: Vec<(u64, u64, Errno, bool)>,
+    /// Every serial latched, by window.
+    pub(crate) latched: Vec<(u64, u64)>,
+    /// Every serial a resize dropped, by window.
+    dropped: Vec<(u64, u64)>,
+    pub(crate) resized: Vec<(u64, DisplayMode)>,
     closed: Vec<u64>,
     picks: Vec<(u64, PickPurpose)>,
     /// Whether each pick the host was asked for earned the keyboard, and
@@ -625,10 +637,15 @@ impl Default for RecordingHost {
             terrain: Vec::new(),
             refuse_terrain: None,
             presented: Vec::new(),
+            shared: None,
+            keeps_frames: false,
+            reclaimed: Vec::new(),
             views_presented: Vec::new(),
             resized_views: Vec::new(),
             refuse_frames: None,
             frames_refused: Vec::new(),
+            latched: Vec::new(),
+            dropped: Vec::new(),
             resized: Vec::new(),
             closed: Vec::new(),
             picks: Vec::new(),
@@ -714,14 +731,20 @@ impl FrameHost for RecordingHost {
         &mut self,
         window_id: u64,
         _surface: &DisplayMode,
-        frame: &[u8],
+        frame: &SharedFrame,
         damage: &DamageList,
-    ) -> Result<(), Errno> {
+    ) -> Result<FrameUse, Errno> {
         if let Some(errno) = self.refuse_frames {
             return Err(errno);
         }
-        self.presented.push((window_id, frame.to_vec(), *damage));
-        Ok(())
+        self.presented
+            .push((window_id, frame.bytes().to_vec(), *damage));
+        self.shared = Some(frame.clone());
+        Ok(if self.keeps_frames {
+            FrameUse::Kept
+        } else {
+            FrameUse::Read
+        })
     }
 
     fn view_presented(
@@ -740,8 +763,17 @@ impl FrameHost for RecordingHost {
         Ok(())
     }
 
-    fn frame_refused(&mut self, window_id: u64, errno: Errno) {
-        self.frames_refused.push((window_id, errno));
+    fn frame_refused(&mut self, window_id: u64, serial: u64, errno: Errno, first: bool) {
+        self.frames_refused.push((window_id, serial, errno, first));
+    }
+
+    fn frame_latched(&mut self, window_id: u64, serial: u64) {
+        self.latched.push((window_id, serial));
+    }
+
+    fn frame_reclaimed(&mut self, window_id: u64) {
+        self.reclaimed.push(window_id);
+        self.shared = None;
     }
 }
 
@@ -895,6 +927,10 @@ impl WindowHost for RecordingHost {
 
     fn window_closed(&mut self, window_id: u64) {
         self.closed.push(window_id);
+    }
+
+    fn frames_dropped(&mut self, window_id: u64, serial: u64) {
+        self.dropped.push((window_id, serial));
     }
 
     fn pick_requested(
@@ -1347,6 +1383,8 @@ impl WindowHost for MinimalHost {
 
     fn window_closed(&mut self, _window_id: u64) {}
 
+    fn frames_dropped(&mut self, _window_id: u64, _serial: u64) {}
+
     fn pick_requested(
         &mut self,
         _window_id: u64,
@@ -1392,9 +1430,9 @@ impl EventSink for FullSink {
 }
 
 /// The in-process loopback: a real server behind the client seams.
-struct Loopback {
+pub(crate) struct Loopback {
     server: WindowServer<MockMapper>,
-    host: RecordingHost,
+    pub(crate) host: RecordingHost,
     identity: MockIdentity,
     /// Where an event the engine sends while serving a request lands — the
     /// hand-over's wake is the one that does.
@@ -1409,7 +1447,7 @@ struct Loopback {
     sent: alloc::vec::Vec<alloc::vec::Vec<u8>>,
     /// Whether a posted request waits to be served until
     /// [`Loopback::serve_posted`], as one does while the session is busy.
-    holds_posts: bool,
+    pub(crate) holds_posts: bool,
     /// Posted requests not yet served, oldest first, by post ticket.
     unserved: VecDeque<(u64, alloc::vec::Vec<u8>)>,
     /// Replies to served posts not yet reaped, by post ticket.
@@ -1419,7 +1457,7 @@ struct Loopback {
     /// The depth this client's place at the endpoint holds, counting what is
     /// posted, what the session holds unanswered, and what is answered and not
     /// yet reaped.
-    lane: Option<usize>,
+    pub(crate) lane: Option<usize>,
     /// Whether presented frames wait to be shown until [`Loopback::latch`],
     /// as they do between the desktop's frames, rather than being shown as
     /// each request is served.
@@ -1447,7 +1485,7 @@ struct Loopback {
 }
 
 impl Loopback {
-    fn with_regions(regions: &[(u64, usize)]) -> Rc<RefCell<Self>> {
+    pub(crate) fn with_regions(regions: &[(u64, usize)]) -> Rc<RefCell<Self>> {
         Self::with_mapper(MockMapper::with_regions(regions))
     }
 
@@ -1479,7 +1517,7 @@ impl Loopback {
 
     /// Show every frame presented since the last, as the desktop's next frame
     /// does, and send the answers that released.
-    fn latch(&mut self) {
+    pub(crate) fn latch(&mut self) {
         self.latches += 1;
         self.server.latch(&mut self.host);
         self.collect_answers();
@@ -1556,7 +1594,7 @@ impl Loopback {
 
     /// Serve every posted request still waiting, oldest first, as the session
     /// reaches them.
-    fn serve_posted(&mut self) {
+    pub(crate) fn serve_posted(&mut self) {
         while self.serve_next().is_some() {}
     }
 
@@ -1659,12 +1697,13 @@ fn replied(served: Served) -> usize {
     }
 }
 
-/// A present of frame `frame_index` of `window_id` declaring the whole
-/// surface, as the wire carries it.
-fn present_frame(window_id: u64, frame_index: u32) -> alloc::vec::Vec<u8> {
+/// Present `serial`, of frame `frame_index` of `window_id`, declaring the
+/// whole surface, as the wire carries it.
+fn present_frame(window_id: u64, frame_index: u32, serial: u64) -> alloc::vec::Vec<u8> {
     request_frame(&WindowRequest::Present {
         window_id,
         frame_index,
+        serial,
         damage: full_damage(),
     })
 }
@@ -2956,7 +2995,10 @@ fn released_frames_refuse_a_present_and_come_back_on_a_resize() {
 
     // The session's half of the release.
     let released = loopback.borrow_mut().server.release_frames(window);
-    assert_eq!(released, FRAME_LEN as u64, "the mapped bytes are reported");
+    assert_eq!(
+        released.bytes, FRAME_LEN as u64,
+        "the mapped bytes are reported"
+    );
     assert_eq!(
         loopback.borrow().server.window_count(),
         1,
@@ -3001,7 +3043,7 @@ fn released_frames_stop_counting_against_the_client_budget() {
         "the budget is full"
     );
     let released = loopback.borrow_mut().server.release_frames(opened[0]);
-    assert_eq!(released, FRAME_LEN as u64);
+    assert_eq!(released.bytes, FRAME_LEN as u64);
     create_id(&mut client, 7, EVENTS_A, 1, "w").expect("the released window's bytes are free");
 }
 
@@ -3013,17 +3055,17 @@ fn releasing_frames_is_idempotent_and_total() {
     let mut client = connected(&loopback);
     let window = create_id(&mut client, 7, EVENTS_A, 1, "w").expect("window");
     assert_eq!(
-        loopback.borrow_mut().server.release_frames(window),
+        loopback.borrow_mut().server.release_frames(window).bytes,
         FRAME_LEN as u64
     );
     assert_eq!(
         loopback.borrow_mut().server.release_frames(window),
-        0,
+        ReleasedFrames::default(),
         "a second release has nothing left to give back"
     );
     assert_eq!(
         loopback.borrow_mut().server.release_frames(9999),
-        0,
+        ReleasedFrames::default(),
         "an unknown window is not an error"
     );
 }
@@ -4136,12 +4178,16 @@ fn a_frame_the_host_cannot_show_is_reported_once_and_owed_to_the_next() {
         width_px: 1,
         height_px: 1,
     };
-    client.present(window, 0, one(first)).expect("posted");
+    let refused = client.present(window, 0, one(first)).expect("posted");
     loopback.borrow_mut().latch();
     loopback.borrow_mut().latch();
     {
         let inner = &mut *loopback.borrow_mut();
-        assert_eq!(inner.host.frames_refused, [(window, Errno::OutOfMemory)]);
+        assert_eq!(
+            inner.host.frames_refused,
+            [(window, refused, Errno::OutOfMemory, true)],
+            "a present refused twice is told once"
+        );
         assert!(inner.host.presented.is_empty());
         assert!(!inner.server.has_pending_frames());
         inner.host.refuse_frames = None;
@@ -4320,13 +4366,20 @@ fn a_refused_frame_is_tried_again_with_the_next_desktop_frame() {
         inner.holds_frames = true;
         inner.host.refuse_frames = Some(Errno::OutOfMemory);
     }
-    client.present(window, 0, full_damage()).expect("posted");
+    let first = client.present(window, 0, full_damage()).expect("posted");
     loopback.borrow_mut().latch();
-    client.present(window, 1, full_damage()).expect("posted");
+    let second = client.present(window, 1, full_damage()).expect("posted");
     loopback.borrow_mut().latch();
     {
         let inner = &mut *loopback.borrow_mut();
-        assert_eq!(inner.host.frames_refused, [(window, Errno::OutOfMemory)]);
+        assert_eq!(
+            inner.host.frames_refused,
+            [
+                (window, first, Errno::OutOfMemory, true),
+                (window, second, Errno::OutOfMemory, false),
+            ],
+            "each present refused is told, the first of the run marked"
+        );
         assert!(
             !inner.server.has_pending_frames(),
             "a refused frame asks the desktop for no frame of its own"
@@ -4341,12 +4394,12 @@ fn a_refused_frame_is_tried_again_with_the_next_desktop_frame() {
     );
 
     loopback.borrow_mut().host.refuse_frames = Some(Errno::OutOfMemory);
-    client.present(window, 0, full_damage()).expect("posted");
+    let third = client.present(window, 0, full_damage()).expect("posted");
     loopback.borrow_mut().latch();
     assert_eq!(
-        loopback.borrow().host.frames_refused.len(),
-        2,
-        "refused again after showing, it is reported again"
+        loopback.borrow().host.frames_refused.last(),
+        Some(&(window, third, Errno::OutOfMemory, true)),
+        "refused again after showing, it starts a run again"
     );
 }
 
@@ -4434,7 +4487,7 @@ fn a_streaming_client_is_held_to_the_desktops_frames() {
     let mut presented = 0u32;
     while presented < 64 {
         match client.present(window, presented % 2, full_damage()) {
-            Ok(()) => presented += 1,
+            Ok(_) => presented += 1,
             // Both frames are the session's: the desktop's next frame answers
             // the present in flight and hands one back.
             Err(Errno::WouldBlock) => {
@@ -4502,9 +4555,10 @@ fn a_refused_frame_still_answers_the_present_held_behind_it() {
     hold_a_present(&mut client, window);
     loopback.borrow_mut().latch();
     assert!(!presenting(&mut client, window), "refused yet answered");
-    assert_eq!(
-        loopback.borrow().host.frames_refused,
-        [(window, Errno::OutOfMemory)]
+    let refused = loopback.borrow().host.frames_refused.clone();
+    assert!(
+        matches!(refused[..], [(at, _, Errno::OutOfMemory, true)] if at == window),
+        "{refused:?}"
     );
 }
 
@@ -4517,11 +4571,11 @@ fn a_present_superseding_a_held_one_answers_the_older_at_once() {
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     let inner = &mut *loopback.borrow_mut();
     inner.holds_frames = true;
-    let (_, first) = inner.serve_request(&present_frame(window, 0));
+    let (_, first) = inner.serve_request(&present_frame(window, 0, 1));
     assert!(first.is_some(), "nothing waited to be shown");
-    let (older, held) = inner.serve_request(&present_frame(window, 1));
+    let (older, held) = inner.serve_request(&present_frame(window, 1, 2));
     assert!(held.is_none(), "held behind the unshown frame");
-    let (newer, held) = inner.serve_request(&present_frame(window, 0));
+    let (newer, held) = inner.serve_request(&present_frame(window, 0, 3));
     assert!(held.is_none(), "held in the older's place");
     inner.collect_answers();
     assert_eq!(
@@ -4533,6 +4587,233 @@ fn a_present_superseding_a_held_one_answers_the_older_at_once() {
     assert_eq!(called_tickets(inner), [older, newer]);
 }
 
+/// A present names a serial above every one its window presented before:
+/// one at or below it is refused and changes nothing, and the serial a latch
+/// reports is the newest present's, which answers for the one it replaced.
+#[test]
+fn a_present_names_a_rising_serial_and_the_latch_reports_the_newest() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    let inner = &mut *loopback.borrow_mut();
+    let (_, first) = inner.serve_request(&present_frame(window, 0, 5));
+    let first = first.expect("answered at once");
+    assert_eq!(decode_status_reply(&first), Ok(()));
+    for stale in [5, 4] {
+        let (_, reply) = inner.serve_request(&present_frame(window, 1, stale));
+        let reply = reply.expect("refused at once");
+        assert_eq!(
+            decode_status_reply(&reply),
+            Err(Errno::OutOfRange),
+            "serial {stale} does not rise"
+        );
+    }
+    assert!(inner.server.has_pending_frames(), "the first still waits");
+    let (_, _) = inner.serve_request(&present_frame(window, 1, 9));
+    inner.latch();
+    assert_eq!(
+        inner.host.latched,
+        [(window, 9)],
+        "the newest serial, standing for the one it replaced"
+    );
+    assert!(inner.host.dropped.is_empty());
+}
+
+/// The latch shares the frame it shows, and a holder of it reads that frame
+/// still once a resize took the region from the window.
+#[test]
+fn a_shown_frame_is_shared_and_outlives_the_region_a_resize_took() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    let inner = &mut *loopback.borrow_mut();
+    let _ = inner.serve_request(&present_frame(window, 1, 1));
+    inner.latch();
+    let frame = inner.host.shared.clone().expect("shared");
+    let want: Vec<u8> = (FRAME_LEN..2 * FRAME_LEN)
+        .map(|at| region_byte(7, at))
+        .collect();
+    assert_eq!(frame.bytes(), &want[..], "frame 1 of region 7");
+    let resize = request_frame(&WindowRequest::Resize {
+        window_id: window,
+        shm_handle: 8,
+        frame_count: 2,
+        width_px: SURFACE.width_px,
+        height_px: SURFACE.height_px,
+        stride_bytes: SURFACE.stride_bytes,
+        format: SURFACE.format,
+        view: None,
+    });
+    let _ = inner.serve_request(&resize);
+    assert_eq!(inner.host.resized.len(), 1, "the window took region 8");
+    assert_eq!(frame.bytes(), &want[..], "still mapped for its holder");
+}
+
+/// The frame a host keeps once shown is its own until it is shown a later
+/// one, so a present naming the other is held until then however long ago the
+/// kept one was latched: the client never draws into a frame still read.
+#[test]
+fn a_present_behind_a_kept_frame_is_held_until_a_later_one_is_shown() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    let inner = &mut *loopback.borrow_mut();
+    inner.host.keeps_frames = true;
+    let (_, first) = inner.serve_request(&present_frame(window, 0, 1));
+    assert!(first.is_some(), "nothing was kept yet");
+    inner.latch();
+    let (second, held) = inner.serve_request(&present_frame(window, 1, 2));
+    assert!(held.is_none(), "the host still reads frame 0");
+    inner.collect_answers();
+    assert!(called_tickets(inner).is_empty(), "held past the turn");
+    inner.latch();
+    assert_eq!(
+        called_tickets(inner),
+        [second],
+        "frame 1 shown, frame 0 let go"
+    );
+    assert!(
+        inner.host.reclaimed.is_empty(),
+        "nothing had to be taken back"
+    );
+    let (_, third) = inner.serve_request(&present_frame(window, 0, 3));
+    assert!(third.is_none(), "the host keeps frame 1 now");
+}
+
+/// A window of one frame has no other to hand back, so the frame its host
+/// keeps holds none of its presents.
+#[test]
+fn a_kept_frame_holds_no_present_naming_it() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let inner = &mut *loopback.borrow_mut();
+    inner.host.keeps_frames = true;
+    let _ = inner.serve_request(&present_frame(window, 0, 1));
+    inner.latch();
+    let (_, again) = inner.serve_request(&present_frame(window, 0, 2));
+    assert!(again.is_some(), "it names the frame kept");
+}
+
+/// A frame refused at the latch leaves the host holding the one it kept, so
+/// the answer held behind it waits for the host to give that one back.
+#[test]
+fn a_refused_frame_has_the_kept_one_given_back_before_its_present_is_answered() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    let inner = &mut *loopback.borrow_mut();
+    inner.host.keeps_frames = true;
+    let _ = inner.serve_request(&present_frame(window, 0, 1));
+    inner.latch();
+    let (second, held) = inner.serve_request(&present_frame(window, 1, 2));
+    assert!(held.is_none());
+    inner.host.refuse_frames = Some(Errno::OutOfMemory);
+    inner.latch();
+    assert_eq!(inner.host.reclaimed, [window], "frame 0 taken back first");
+    assert!(inner.host.shared.is_none(), "and no longer read");
+    assert_eq!(called_tickets(inner), [second], "then answered");
+}
+
+/// While no frame reaches the screen a held present is answered only once
+/// the host gives back the frame it kept, and the frame still waiting is
+/// kept in its place once a screen shows it.
+#[test]
+fn answers_released_in_the_dark_have_the_kept_frame_given_back_first() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    let inner = &mut *loopback.borrow_mut();
+    inner.host.keeps_frames = true;
+    let _ = inner.serve_request(&present_frame(window, 0, 1));
+    inner.latch();
+    let (second, held) = inner.serve_request(&present_frame(window, 1, 2));
+    assert!(held.is_none());
+    inner.server.release_answers(&mut inner.host);
+    inner.collect_answers();
+    assert_eq!(inner.host.reclaimed, [window], "frame 0 taken back first");
+    assert_eq!(called_tickets(inner), [second], "then answered");
+    inner.latch();
+    assert_eq!(
+        inner.host.reclaimed,
+        [window],
+        "frame 1 is shown, not taken"
+    );
+    let (_, third) = inner.serve_request(&present_frame(window, 0, 3));
+    assert!(third.is_none(), "held behind frame 1, kept");
+}
+
+/// A resize takes the region the kept frame lies in, so the client may draw
+/// either frame of the new one.
+#[test]
+fn a_resize_lets_the_kept_frame_go() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    let inner = &mut *loopback.borrow_mut();
+    inner.host.keeps_frames = true;
+    let _ = inner.serve_request(&present_frame(window, 1, 1));
+    inner.latch();
+    let resize = request_frame(&WindowRequest::Resize {
+        window_id: window,
+        shm_handle: 8,
+        frame_count: 2,
+        width_px: SURFACE.width_px,
+        height_px: SURFACE.height_px,
+        stride_bytes: SURFACE.stride_bytes,
+        format: SURFACE.format,
+        view: None,
+    });
+    let _ = inner.serve_request(&resize);
+    let (_, first) = inner.serve_request(&present_frame(window, 0, 2));
+    assert!(first.is_some(), "nothing of the new region is kept");
+}
+
+/// A resize or a release takes the frames a pending present named, and the
+/// host is told its serial, so the present is finished though never shown.
+#[test]
+fn a_resize_and_a_release_report_the_serial_they_drop() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    let inner = &mut *loopback.borrow_mut();
+    let _ = inner.serve_request(&present_frame(window, 0, 3));
+    let resize = request_frame(&WindowRequest::Resize {
+        window_id: window,
+        shm_handle: 8,
+        frame_count: 2,
+        width_px: SURFACE.width_px,
+        height_px: SURFACE.height_px,
+        stride_bytes: SURFACE.stride_bytes,
+        format: SURFACE.format,
+        view: None,
+    });
+    let _ = inner.serve_request(&resize);
+    assert_eq!(inner.host.dropped, [(window, 3)]);
+    let _ = inner.serve_request(&resize);
+    assert_eq!(
+        inner.host.dropped,
+        [(window, 3)],
+        "nothing pending, nothing dropped"
+    );
+    let _ = inner.serve_request(&present_frame(window, 1, 4));
+    assert_eq!(
+        inner.server.release_frames(window),
+        ReleasedFrames {
+            bytes: 2 * FRAME_LEN as u64,
+            dropped: Some(4),
+        }
+    );
+    let (_, reply) = inner.serve_request(&present_frame(window, 0, 4));
+    assert_eq!(
+        decode_status_reply(&reply.expect("refused")),
+        Err(Errno::OutOfRange),
+        "a serial stays spent across a release"
+    );
+    inner.latch();
+    assert!(inner.host.latched.is_empty(), "nothing was left to show");
+}
+
 /// A client that exits is owed nothing more: its calls ended with it, so what
 /// it was owed, held or due, is dropped unsent.
 #[test]
@@ -4542,8 +4823,8 @@ fn an_exited_clients_answers_are_dropped() {
     let window = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
     let inner = &mut *loopback.borrow_mut();
     inner.holds_frames = true;
-    for frame_index in [0, 1, 0] {
-        let _ = inner.serve_request(&present_frame(window, frame_index));
+    for (frame_index, serial) in [(0, 1), (1, 2), (0, 3)] {
+        let _ = inner.serve_request(&present_frame(window, frame_index, serial));
     }
     inner.server.client_exited(&mut inner.host, proc_id(0xA1));
     assert!(!inner.server.holds_answers());
@@ -4577,16 +4858,16 @@ fn every_call_is_answered_exactly_once() {
     let close = request_frame(&WindowRequest::Close { window_id: window });
     // `None` is a desktop frame.
     let script = [
-        Some(present_frame(window, 0)),
-        Some(present_frame(window, 1)),
-        Some(present_frame(window, 0)),
+        Some(present_frame(window, 0, 1)),
+        Some(present_frame(window, 1, 2)),
+        Some(present_frame(window, 0, 3)),
         None,
-        Some(present_frame(window, 1)),
-        Some(present_frame(window, 0)),
+        Some(present_frame(window, 1, 4)),
+        Some(present_frame(window, 0, 5)),
         Some(resize),
-        Some(present_frame(window, 0)),
-        Some(present_frame(window, 1)),
-        Some(present_frame(window, 0)),
+        Some(present_frame(window, 0, 6)),
+        Some(present_frame(window, 1, 7)),
+        Some(present_frame(window, 0, 8)),
         Some(close),
     ];
     let mut served = Vec::new();
@@ -4620,7 +4901,7 @@ fn held_answers_are_released_with_their_frames_left_to_show() {
     {
         let inner = &mut *loopback.borrow_mut();
         assert!(inner.server.holds_answers());
-        inner.server.release_answers();
+        inner.server.release_answers(&mut inner.host);
         inner.collect_answers();
         assert!(!inner.server.holds_answers());
         assert!(
@@ -5134,6 +5415,69 @@ fn folding_a_resize_run_keeps_every_other_event_in_order() {
         Ok(Some(resized(window + 1, 160)))
     );
     assert_eq!(waiter.try_wait(&mut client), Ok(None));
+}
+
+/// A frame's fate is a value the window converges on: a run for one window
+/// folds to its newest serial, and a resize between two runs keeps them apart.
+#[test]
+fn a_run_of_frame_fates_folds_to_the_newest() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let fate = |window_id, serial, shown| WindowEvent::FramePresented {
+        window_id,
+        serial,
+        at_ns: serial * 1_000,
+        shown,
+    };
+    let resized = WindowEvent::Resized {
+        window_id: window,
+        width_px: 90,
+        height_px: 50,
+        state: WindowSizeState::Restored,
+    };
+    let mut waiter = WindowEvents::new(QueueSource::new([
+        fate(window, 1, true).to_le_bytes(),
+        fate(window, 2, false).to_le_bytes(),
+        fate(window, 3, true).to_le_bytes(),
+        resized.to_le_bytes(),
+        fate(window, 4, true).to_le_bytes(),
+        fate(window + 1, 5, true).to_le_bytes(),
+    ]));
+    assert_eq!(
+        waiter.try_wait(&mut client),
+        Ok(Some(fate(window, 3, true)))
+    );
+    assert_eq!(waiter.try_wait(&mut client), Ok(Some(resized)));
+    assert_eq!(
+        waiter.try_wait(&mut client),
+        Ok(Some(fate(window, 4, true)))
+    );
+    assert_eq!(
+        waiter.try_wait(&mut client),
+        Ok(Some(fate(window + 1, 5, true))),
+        "another window's fate is its own"
+    );
+    assert_eq!(waiter.try_wait(&mut client), Ok(None));
+}
+
+/// The client numbers its presents from one count, so every window's serials
+/// rise, and a present held behind another for room carries the newer one.
+#[test]
+fn presents_are_numbered_from_one_rising_count() {
+    let loopback = Loopback::with_regions(&[(7, 2 * FRAME_LEN), (8, 2 * FRAME_LEN)]);
+    let mut client = connected(&loopback);
+    let first = create_id(&mut client, 7, EVENTS_A, 2, "a").expect("a");
+    let second = create_id(&mut client, 8, EVENTS_A, 2, "b").expect("b");
+    let a = client.present(first, 0, full_damage()).expect("posted");
+    let b = client.present(second, 0, full_damage()).expect("posted");
+    client.reap_posted();
+    let c = client.present(first, 1, full_damage()).expect("posted");
+    assert!(a < b && b < c, "{a} {b} {c}");
+    loopback.borrow_mut().latch();
+    let latched = &loopback.borrow().host.latched;
+    assert!(latched.contains(&(first, c)), "{latched:?}");
+    assert!(latched.contains(&(second, b)), "{latched:?}");
 }
 
 /// The drained path answers a redraw request on the app's behalf exactly as
@@ -10498,6 +10842,8 @@ fn a_host_that_has_not_implemented_the_layer_refuses_it() {
         }
 
         fn window_closed(&mut self, _window_id: u64) {}
+
+        fn frames_dropped(&mut self, _window_id: u64, _serial: u64) {}
 
         fn desktop(&mut self) -> Result<DesktopInfo, Errno> {
             Ok(sample_desktop())

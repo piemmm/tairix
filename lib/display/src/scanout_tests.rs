@@ -60,6 +60,39 @@ fn a_transcode_is_an_opaque_decode_then_an_encode() {
     }
 }
 
+/// A judged transcode lays every pixel as it is — its alpha kept — in the
+/// order asked, and is passed only where every pixel it laid was opaque.
+#[test]
+fn a_judged_transcode_lays_each_pixel_as_it_is_and_judges_its_alpha() {
+    let mut bytes: alloc::vec::Vec<u8> = (0..64u8)
+        .map(|at| at.wrapping_mul(37).wrapping_add(11))
+        .collect();
+    for pixel in bytes.as_chunks_mut::<4>().0 {
+        pixel[3] = 0xFF;
+    }
+    for from in [ChannelOrder::Rgba, ChannelOrder::Bgra] {
+        for to in [ChannelOrder::Rgba, ChannelOrder::Bgra] {
+            let mut opaque = [0u8; 64];
+            assert_eq!(to.transcode_opaque_run(from, &bytes, &mut opaque), 16);
+            let mut judged = [0u8; 64];
+            assert_eq!(
+                to.transcode_judged_run(from, &bytes, &mut judged),
+                (16, true)
+            );
+            assert_eq!(judged, opaque, "{from:?} to {to:?}");
+            let mut seen = bytes.clone();
+            seen[4 * 5 + 3] = 0xFE;
+            let (laid, passed) = to.transcode_judged_run(from, &seen, &mut judged);
+            assert_eq!((laid, passed), (16, false), "one pixel short of opaque");
+            assert_eq!(judged[4 * 5 + 3], 0xFE, "laid as it is");
+            assert_eq!(
+                to.transcode_judged_run(from, &bytes[..9], &mut judged),
+                (2, true)
+            );
+        }
+    }
+}
+
 #[test]
 fn a_pixel_encodes_into_the_order_its_format_wants() {
     let pixel = Pixel {

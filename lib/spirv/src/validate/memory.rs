@@ -293,7 +293,7 @@ impl Validator<'_> {
                     return Err(Rule::AccessChain);
                 }
             }
-            let value = constant.map(|(v, _)| v);
+            let value = constant.map(|(v, scalar)| (v, scalar.width()));
             let info = *self.ty(ty);
             // Every array an image or sampler variable holds is of descriptors,
             // and so is an array of blocks: no block nests in another.
@@ -306,7 +306,7 @@ impl Validator<'_> {
             ty = match info.ty {
                 Ty::Struct { first, count } => {
                     let member = value
-                        .and_then(|v| u32::try_from(v).ok())
+                        .and_then(|(v, _)| u32::try_from(v).ok())
                         .filter(|&m| m < count)
                         .ok_or(Rule::AccessChain)?;
                     forbid = forbid.with(self.member_forbids(info, member)?);
@@ -604,10 +604,18 @@ const fn strength(semantics: MemorySemantics) -> u32 {
     }
 }
 
-/// Refuse a constant index at or past `length`.
-fn bounded(index: Option<u64>, length: u32) -> Result<(), Rule> {
+/// Refuse a constant index, and its width, past what it reaches of a level
+/// of `length`.
+fn bounded(index: Option<(u64, u32)>, length: u32) -> Result<(), Rule> {
     match index {
-        Some(index) if index >= u64::from(length) => Err(Rule::AccessChain),
+        Some((index, width)) if index >= reach(length, width) => Err(Rule::AccessChain),
         _ => Ok(()),
     }
+}
+
+/// What an index `width` bits wide reaches of a level of `length`: an access
+/// chain reads every index as a signed count, so no more than its positive
+/// values.
+pub(crate) fn reach(length: u32, width: u32) -> u64 {
+    u64::from(length).min(1 << width.clamp(1, 64).saturating_sub(1))
 }

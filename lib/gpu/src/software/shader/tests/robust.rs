@@ -9,12 +9,13 @@
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use tairix_spirv::assemble::admit;
 use tairix_spirv::enumerant::{Dim, ImageFormat};
-use tairix_spirv::{Component, ImageShape};
+use tairix_spirv::{Admitted, Component, ImageShape};
 
 use crate::{DescriptorType, SampleType};
 
-use super::image::{dispatch, filled, texels, view, Bound};
+use super::image::{dispatch_module, filled, texels, view, Bound};
 use crate::device_tests::{context, device, memory, over};
 use crate::{
     Aspects, BufferViewDesc, Context, Extent3d, Format, ImageDesc, ImageDimension, ImageRange,
@@ -374,6 +375,30 @@ fn fill(words: &mut [u32], (offset, len): (u64, usize), first: u32) {
 
 #[test]
 fn an_access_past_every_kind_of_resource_reads_zero_and_writes_nothing() {
+    past_every_resource(admitted());
+}
+
+#[test]
+fn guarded_the_module_reads_and_leaves_what_its_source_does() {
+    let source = admitted();
+    let bytes = source.module().bytes().to_vec();
+    let guarded = super::guarded(source);
+    assert_ne!(
+        guarded.module().bytes(),
+        bytes.as_slice(),
+        "the pass bounds its accesses"
+    );
+    past_every_resource(guarded);
+}
+
+fn admitted() -> Admitted {
+    let text = module();
+    admit(&text).unwrap_or_else(|refusal| panic!("{refusal:?} in\n{text}"))
+}
+
+/// Run `module`, one of [`module`]'s, and hold what it reads and what it
+/// leaves to the robust rules.
+fn past_every_resource(module: Admitted) {
     let (device, _) = device();
     let context = context(&device);
     let held = memory(&context, 2048);
@@ -402,9 +427,9 @@ fn an_access_past_every_kind_of_resource_reads_zero_and_writes_nothing() {
     };
     let push: Vec<u8> = (4000u32..4004).flat_map(u32::to_le_bytes).collect();
     let texel_buffer = |format| uint_shape(Dim::BUFFER, false, format);
-    let out = dispatch(
+    let out = dispatch_module(
         &context,
-        &module(),
+        module,
         &[
             Bound(DescriptorType::StorageBuffer, alloc::vec![range(DATA, 32)]),
             Bound(

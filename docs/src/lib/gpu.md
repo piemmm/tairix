@@ -126,6 +126,17 @@ The CPU reaches host-visible memory through `Allocation::write` and
 `Allocation::read`, at any byte; memory the CPU cannot reach refuses both
 (`Error::NotHostVisible`), as does a range past its end (`Error::OutOfRange`).
 
+Memory of the caller's own is copied into and out of with one copy once it is
+attached: `Device::attach` takes anything `Attachable` — a `SharedRegion`, or
+for a device in this process any buffer — and `Allocation::read_into` and
+`Allocation::write_from` move bytes between host-visible memory and the
+`Attachment`, checked against both ends. A device in this process copies into
+the memory as it lies; one another process serves maps the shared region the
+memory is (`gpu-v1`'s `Attach`) and its driver makes the copy, so memory only
+this process reaches is refused there (`Error::Unsupported`). An attachment of
+another device is `Error::Foreign`, and dropping one lets the device's mapping
+go. A window's frames are attached this way by the swapchain.
+
 A `Buffer` is a span of one allocation, at an offset that is a multiple of the
 device's `buffer_alignment`, made for the `BufferUsage` it states:
 `TRANSFER_SRC` and `TRANSFER_DST` to be copied from and into, `UNIFORM`,
@@ -313,6 +324,13 @@ fixed:
   (`NoPerspective`), or the provoking vertex's (`Flat`); a `Centroid` input is
   interpolated at the pixel's centre where the primitive covers it, else at the
   first sample it covers, whatever the tests make of them.
+- **Sample shading.** A fragment stage that reads `SampleId` or
+  `SamplePosition`, or an input decorated `Sample` (`EntryPoint::per_sample`),
+  is shaded once for each sample a pixel's coverage holds, its quads those of
+  one sample across four pixels: `SampleId` is the sample, `SamplePosition`
+  and `FragCoord` its place, its `SampleMask` input that sample alone, and every
+  input but one taken at the centre is interpolated there. What it writes goes
+  to that sample only.
 - **Coverage** is what the primitive covers within the pipeline's sample mask,
   the fragment's `SampleMask` input — before any test — then narrowed by its
   `SampleMask` output and by alpha-to-coverage: the first target's alpha's share
@@ -460,6 +478,56 @@ them. Work the device finds malformed while running it loses its context too
 (`Loss::Fault`), and so does work whose tables the host refuses as it starts,
 past what its submission reserved (`Loss::OutOfMemory`).
 
+## Presenting to a window
+
+A renderer shows what it draws through a window, like any application: the
+swapchain (`tairix_window::swapchain`, `plans/GPU.md` GP6.3) is a window whose
+frames a device draws. It owns the image the renderer draws — the window's
+size, `Bgra8Unorm` or `Rgba8Unorm` after the frames' encoding, a colour
+attachment, sampled, a transfer source and destination, and storage where the
+format takes it — a host-visible staging buffer of one frame, and the window's
+frame region, attached to the device. Its objects are made in the renderer's
+context and charged to its limit.
+
+- `acquire` hands the image out when a frame may be drawn now: not while one
+  is being filled or waits to be presented, while the window is hidden or its
+  frames released, while the session holds both frames, or while a present
+  waits for room at the window channel — the client sends it with its next
+  drain, so its frame is not filled again behind it. `PresentMode::Fifo`
+  waits too for the last present to finish — the session's
+  `WindowEvent::FramePresented` — so one frame is on its way to the screen and
+  every one is shown; `PresentMode::Mailbox` does not, and the newest frame
+  wins. A window the desktop lays straight from its frame draws one frame a
+  desktop frame either way, the frame on screen being read until the next is
+  shown.
+- `present` copies the rows the frame lacks — the damage, and what changed
+  while the other frame was shown — from the image into the staging buffer, on
+  the renderer's queue after the work queued before it, within the device's
+  longest job time.
+- The application's worker (`tairix_rt::work::Worker`), which owns the
+  attached frames, waits on that copy and reads the rows straight into the
+  frame; `service`, on any turn of the loop, presents it, told whether the
+  loop's wait reported the worker's wake, whose nudge it takes then and only
+  then, the wake's read blocking on an empty pipe. No wait on the device runs
+  on the loop, and a machine that grants no worker makes each fill where it is
+  asked: `present` then presents the frame itself and answers that it did,
+  nothing being left to wake the loop.
+- A fill that fails leaves every frame to be drawn whole, the next into the
+  frame it was filling, since the session may still hold the other; `release`
+  lets the frames go when the session released its side, `reattach` and
+  `resize` make them anew — refused before the session is told while the
+  worker holds as many jobs as it has room for — and a fill of frames since
+  replaced is presented by nobody.
+- `idle` says every present made has been finished: none is being filled,
+  waits to go, or awaits its fate.
+
+A frame of a served device reaches its window with one copy, the driver's, and
+the session's decode is the one copy out of the window
+(`docs/src/desktop/session.md`) — made straight into the buffer the display
+scans where the window is promoted (`docs/src/desktop/wm.md`). `gpucheck
+--present` shows a stated scene full screen through a swapchain and checks
+every frame it presented was shown (`docs/src/userland/utilities.md`).
+
 ## Backends
 
 The model — contexts, their tables and charges, every check, the order work
@@ -535,7 +603,12 @@ driver's process, speaking [`gpu-v1`](../abi/gpu.md) to every process holding
 `CAP_GPU`. Requests run on up to `MAX_SERVE_WORKERS` workers, so one client's
 slow request holds back no other; waits, client exits and the watchdog stay
 on the loop, whose wait is bounded by the soonest wait's timeout and the
-device's soonest job deadline. A client is its kernel-attested process: a
+device's soonest job deadline. When the loop looks, jobs past their deadline
+are lost first; a wait whose timeout has passed is then answered as its
+value landing or its context ending wherever either already has, and as
+timed out only where neither has — so a loss an overrun made is never
+reported as a timeout, however late the loop looks. A client is its
+kernel-attested process: a
 context is found among its own before anything else is read, its exit lets go
 of everything it held, and its contexts, export tokens and memory are bounded
 as the channel's page states.
@@ -885,8 +958,9 @@ fill of the whole heap runs far past a deadline.
   of no draws, a target no output writes and an output of fewer components, a
   depth-fail operation written though a fragment stage shades, a viewport
   smaller than its scissor, plain and flipped, a sample mask holding early
-  depth writes to its samples, and a fragment's `SampleMask` input and centroid
-  before its tests; they draw a pass to the same bytes on one participant,
+  depth writes to its samples, a fragment's `SampleMask` input and centroid
+  before its tests, and a stage reading its sample index shaded per sample,
+  each input interpolated where its sampling says; they draw a pass to the same bytes on one participant,
   several in reverse order and several threads, pass over a draw of billions of
   empty instances, restarting or not, gather the memories of thousands of
   draws' distinct sets once, resolve a large set shared by thousands of draws
@@ -978,8 +1052,10 @@ fill of the whole heap runs far past a deadline.
   image copies and a dispatch — and hold the runtime to a command buffer
   longer than the region crossing in parts, no context of another client
   named however its id is forged, a refused request changing nothing, waits
-  answered as their value lands, their context ends or their timeout passes
-  and a closing client's as destroyed, a client's exit letting go of
+  answered as their value lands, their context ends or their timeout passes,
+  a wait on work its overrun lost answered as lost though the loop looks only
+  once both its deadline and the wait's timeout are past, and a closing
+  client's as destroyed, a client's exit letting go of
   everything, its bound of contexts, regions outside the channel's bounds
   refused, clients served at once seeing only their own work, and every
   command but a pass fitting the smallest region.
@@ -997,12 +1073,13 @@ fill of the whole heap runs far past a deadline.
   harness for the contention its threads put `lib/rt`'s lock and condition
   variable to, and for a dispatch's pieces and a pass's bins sharing memory as
   atomic views on threads of their own, which the determinism tests run at a
-  size the interpreter finishes. It skips the test that asks the host for an exbibyte,
-  which the interpreter cannot represent, and the deadline, lowering- and
-  specialization-budget, instruction-case and many-draw pass tests whose
-  extent is their assertion, and leaves out the `lowering_memory` binary, built to the lowering
-  bound, and the `fuzz_shader` harness, whose runners deal their pieces on one
-  thread; those run in full in the ordinary matrix. The crate forbids `unsafe`.
+  size the interpreter finishes. It skips the test that asks the host for an
+  exbibyte, which the interpreter cannot represent, and the deadline,
+  lowering- and specialization-budget, instruction-case — guarded and not —
+  and many-draw pass tests whose extent is their assertion, and leaves out the
+  `lowering_memory` binary, built to the lowering bound, and the
+  `fuzz_shader` harness, whose runners deal their pieces on one thread; those
+  run in full in the ordinary matrix. The crate forbids `unsafe`.
 - Loom has nothing to model. Every hand-off is made under a lock — the
   worker's wake flag, each piece's own workspace, the lease and the turns of
   the fair lock the device's model and every memory are had through included

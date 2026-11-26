@@ -39,7 +39,7 @@ use tairix_gpu::{
 use tairix_inline::ArrayVec;
 use tairix_rt::sync::{Condvar, Mutex};
 use tairix_shaders::indirect::{counts, records};
-use tairix_spirv::{Admitted, FoldError, Module, Stages};
+use tairix_spirv::{Admitted, FoldError, GuardError, Guarded, Module, Stages};
 use tairix_sync::claims;
 use tairix_virtio::{Part, SharedMemory};
 
@@ -295,10 +295,10 @@ pub(crate) struct Core {
     /// The host's index of the memory type feedback memory is made in.
     feedback_type: u32,
     /// The checks an indirect dispatch's counts are held to and, on a device
-    /// stating no first instance, an indirect draw's records, each folded as
-    /// the host compiles every module.
-    counts: Admitted,
-    records: Option<Admitted>,
+    /// stating no first instance, an indirect draw's records, each folded and
+    /// guarded as the host is given every module.
+    counts: Guarded,
+    records: Option<Guarded>,
 }
 
 /// A blob of host memory, mapped into the driver.
@@ -1015,9 +1015,9 @@ fn bring_up(
     })
 }
 
-/// The pinned module `spirv`, folded. The pinned set is admitted at build
-/// time, so one refused here is a build the driver cannot trust.
-fn pinned(spirv: &[u8]) -> Result<Admitted, DriverError> {
+/// The pinned module `spirv`, folded and guarded. The pinned set is admitted
+/// at build time, so one refused here is a build the driver cannot trust.
+fn pinned(spirv: &[u8]) -> Result<Guarded, DriverError> {
     let module = Module::decode(spirv)
         .ok()
         .and_then(|module| Admitted::new(module).ok())
@@ -1026,6 +1026,7 @@ fn pinned(spirv: &[u8]) -> Result<Admitted, DriverError> {
         .specialize(&[])
         .ok()
         .and_then(|specialized| module.fold(&specialized).ok())
+        .and_then(|folded| folded.guarded().ok())
         .ok_or(DriverError::DeviceFault)
 }
 
@@ -1201,9 +1202,9 @@ fn make_context(core: &Arc<Core>) -> Result<VenusContext, DriverError> {
     let queues = make_device(core, at)?;
     let ask = |commands: &[u8], reply_len| exchange(at, commands, (0, false, reply_len));
     let size = make_feedback(core, &ask)?;
-    make_check(&ask, &COUNTS_CHECK, core.counts.module().bytes())?;
+    make_check(&ask, &COUNTS_CHECK, core.counts.admitted().module().bytes())?;
     if let Some(records) = &core.records {
-        make_check(&ask, &RECORDS_CHECK, records.module().bytes())?;
+        make_check(&ask, &RECORDS_CHECK, records.admitted().module().bytes())?;
     }
     let spec = BlobSpec {
         blob_id: FEEDBACK_MEMORY,
@@ -1861,38 +1862,49 @@ fn make_set(
     })
 }
 
-/// Make a compute pipeline in `context` of the entry point `stage` names,
-/// its module folded as the host compiles every module: specialized as the
-/// seam specialized it, and every value it could read unwritten defined.
+/// Make a compute pipeline in `context` of the entry point `stage` names, its
+/// module as the host is given every module.
 fn make_compute(
     context: &Arc<VenusContext>,
     stage: PipelineStage<'_>,
 ) -> Result<VenusPipeline, Error> {
-    let module = folded(stage)?;
+    let module = prepared(context, stage)?;
     let [module_id, layout, pipeline] = context.ids();
     make_in(
         context,
         stage,
         (
             PipelineIds { layout, pipeline },
-            &[(module_id, module.module().bytes())],
+            &[(module_id, module.admitted().module().bytes())],
         ),
         Shape::Compute(stage.entry_point()),
     )
 }
 
-/// `stage`'s module folded, its every specialization constant and undefined
-/// value given the one value the seam reads, so the host resolves none its
-/// own way.
-fn folded(stage: PipelineStage<'_>) -> Result<Admitted, Error> {
-    stage
+/// `stage`'s module as the host is given it: folded, every specialization
+/// constant and undefined value given the one value the seam reads, so the
+/// host resolves none its own way; then guarded, as the host's robustness
+/// bounds only buffers and images. The guard may declare a capability the
+/// module did not, which the device must run as it must the module's own.
+fn prepared(context: &VenusContext, stage: PipelineStage<'_>) -> Result<Guarded, Error> {
+    let folded = stage
         .module()
         .fold(stage.specialized())
         .map_err(|refused| match refused {
             FoldError::OutOfMemory => Error::OutOfMemory,
             FoldError::TooLarge => Error::TooLarge,
             FoldError::Malformed | FoldError::Refused(_) => Error::Malformed,
-        })
+        })?;
+    let guarded = folded.guarded().map_err(|refused| match refused {
+        GuardError::OutOfMemory => Error::OutOfMemory,
+        GuardError::TooLarge => Error::TooLarge,
+        GuardError::Refused(_) | GuardError::Unguarded => Error::Malformed,
+    })?;
+    if context.core.statement.info.runs_module(guarded.admitted()) {
+        Ok(guarded)
+    } else {
+        Err(Error::Unsupported)
+    }
 }
 
 /// The pipeline `ids` names in `context` of `modules` running `shape`,

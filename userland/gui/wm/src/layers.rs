@@ -37,7 +37,7 @@ use alloc::vec::Vec;
 use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, BufferId, DamageRect, MAX_ACCEL_LAYERS, MAX_DAMAGE_RECTS,
 };
-use tairix_abi::DriverError;
+use tairix_abi::{DriverError, Errno};
 use tairix_display::{damage_list, Base, BaseFrame, ChannelOrder, LayerPresenter, Presenter};
 use tairix_inline::ArrayVec;
 use tairix_parallel::JobRunner;
@@ -1000,6 +1000,7 @@ impl Compositor {
     ) -> Result<(), DriverError> {
         let based = planned.filter(|_| plan.shape == Shape::Based);
         let layers = self.bake_composited(engine, changed).and_then(|()| {
+            self.lay_direct_layer(engine)?;
             self.bake_free(engine);
             self.bake_views(engine);
             self.bake_pointer(engine);
@@ -1501,7 +1502,7 @@ impl Compositor {
 
     /// Whether `window` may be the one layer of a promoted present, which has
     /// nothing beneath it: only where every pixel it shows is opaque.
-    fn promotable(window: &Window) -> bool {
+    pub(super) fn promotable(window: &Window) -> bool {
         !window.reads_backdrop() && window.is_opaque() == Some(true)
     }
 
@@ -1839,6 +1840,70 @@ impl Compositor {
                 .and_then(Window::view);
             if let Some(view) = view {
                 bake_view(layer, view, engine, *order);
+            }
+        }
+    }
+
+    /// Lay the promoted window's layer straight from its client's frame where
+    /// the stack is that window alone over nothing: what the buffer lacks,
+    /// every pixel judged opaque as it is laid.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::OutOfMemory`] for a pixel short of opaque, which ends the
+    /// window's presenting straight, its content brought up to date: the frame
+    /// carries the scene this once, and the next is planned knowing it.
+    fn lay_direct_layer(&mut self, engine: &mut dyn LayerPresenter) -> Result<(), DriverError> {
+        let Some(id) = self.direct.as_ref().map(super::direct::Direct::id) else {
+            return Ok(());
+        };
+        let Some(client) = self.window(id).map(Window::client_rect) else {
+            return Ok(());
+        };
+        let (order, runner) = (self.order, self.runner);
+        let Self { layers, direct, .. } = self;
+        let (Some(stack), Some(direct)) = (layers.as_mut(), direct.as_ref()) else {
+            return Ok(());
+        };
+        if stack.shape != Shape::Promoted {
+            return Ok(());
+        }
+        let Some(layer) = stack
+            .layers
+            .iter_mut()
+            .find(|layer| layer.source == Source::Window(id, Role::Free))
+        else {
+            return Ok(());
+        };
+        let Some(target) = layer.target() else {
+            return Ok(());
+        };
+        // Its pixels are the layer's only where the layer lies on the window.
+        let laid = if layer.at == client {
+            let held = &mut layer.held[target];
+            engine.pixels(held.id).map(|(bytes, stride)| {
+                usize::try_from(stride)
+                    .map_err(|_| Errno::OutOfRange)
+                    .and_then(|stride| direct.lay(&held.stale, (bytes, stride, order), runner))
+            })
+        } else {
+            Some(Err(Errno::OutOfRange))
+        };
+        match laid {
+            Some(Ok(true)) => {
+                layer.held[target].stale.clear();
+                layer.staged = Some(target);
+                Ok(())
+            }
+            None => Ok(()),
+            Some(Ok(false)) => {
+                self.end_direct(id);
+                Err(DriverError::OutOfMemory)
+            }
+            // Baked from the content instead.
+            Some(Err(_)) => {
+                self.end_direct(id);
+                Ok(())
             }
         }
     }

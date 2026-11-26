@@ -80,6 +80,22 @@ pub(crate) trait Host: Send + Sync {
         offset: u64,
         out: &mut [u8],
     ) -> Result<(), Error>;
+    /// Register `len` bytes of memory of the caller's own for transfers: a
+    /// device another process serves maps the shared region `region` names
+    /// and answers the attachment it filed; one in this process reaches the
+    /// memory as it lies and files nothing.
+    fn attach(&self, region: Option<u64>, len: usize) -> Result<Option<u32>, Error>;
+    /// Let filed attachment `attachment` go.
+    fn detach(&self, attachment: u32);
+    /// Copy `len` bytes between host-visible memory at `offset` into
+    /// `allocation` and filed attachment `attachment` at `at`, into the
+    /// attachment where `inward`.
+    fn transfer(
+        &self,
+        memory: (ContextKey, AllocationKey, u64),
+        attached: (u32, u64, u64),
+        inward: bool,
+    ) -> Result<(), Error>;
     fn export(&self, context: ContextKey, allocation: AllocationKey) -> Result<ExportId, Error>;
     fn import(&self, context: ContextKey, export: ExportId) -> Result<Imported, Error>;
     fn drop_export(&self, export: ExportId);
@@ -323,6 +339,22 @@ impl<B: Backend> Host for Shared<B> {
     ) -> Result<(), Error> {
         let memory = self.host_memory(context, allocation, offset, out.len())?;
         self.backend.read(&memory, offset, out)
+    }
+
+    fn attach(&self, _: Option<u64>, _: usize) -> Result<Option<u32>, Error> {
+        Ok(None)
+    }
+
+    fn detach(&self, _: u32) {}
+
+    // This process's device files no attachment, so none can be named.
+    fn transfer(
+        &self,
+        _: (ContextKey, AllocationKey, u64),
+        _: (u32, u64, u64),
+        _: bool,
+    ) -> Result<(), Error> {
+        Err(Error::Stale)
     }
 
     fn export(&self, context: ContextKey, allocation: AllocationKey) -> Result<ExportId, Error> {

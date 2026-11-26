@@ -281,12 +281,19 @@ impl<'d> Machine<'_, 'd, '_> {
                     index: by,
                     num,
                     stride,
+                    length,
                 } => {
                     self.fetch(by, 0, num.words() == 2, &mut index);
                     for lane in self.span.clone() {
                         let value = ops::signed(index.get(lane).copied().unwrap_or(0), num.bits());
+                        let beyond =
+                            length.is_some_and(|length| !(0..i64::from(length)).contains(&value));
                         if let Some(at) = offset.get_mut(lane) {
-                            *at = advance(*at, i128::from(value) * i128::from(stride));
+                            *at = if beyond {
+                                u64::from(INVALID)
+                            } else {
+                                advance(*at, i128::from(value) * i128::from(stride))
+                            };
                         }
                     }
                 }

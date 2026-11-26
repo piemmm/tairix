@@ -188,9 +188,9 @@ mod program {
         DesktopActivation, DesktopDrop, DesktopEnd, DesktopOutcome, DesktopShell,
         DeviceInputSource, DocumentAuthority, DocumentRelay, DragEnd, DragPlace, DragSurface,
         DropRefusal, ElevateAsk, Elevation, Elevator, FileManagerFound, FileManagerHand,
-        FileManagerKeeper, FileOffer, FrameContent, FramePacer, FrameReportGate, FrameShow,
-        FrameStatsPublisher, FrameStatsSink, GestureRefusal, HangTracker, HeldTarget, HoldBack,
-        IdleAction, IdleClock, IdlePolicy, InputPolicy, ItemsOffer, ItemsOfferEnd,
+        FileManagerKeeper, FileOffer, FrameContent, FrameOutcome, FramePacer, FrameReportGate,
+        FrameShow, FrameStatsPublisher, FrameStatsSink, GestureRefusal, HangTracker, HeldTarget,
+        HoldBack, IdleAction, IdleClock, IdlePolicy, InputPolicy, ItemsOffer, ItemsOfferEnd,
         KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget,
         LayerDecision, LayerFeed, Listing as Authorisers, LoadedPrograms, MachineWatch, OfferEnd,
         OwedReport, OwnPick, OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep,
@@ -216,14 +216,14 @@ mod program {
         TRIAL_SHOWN_MESSAGE, USAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
         WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
     };
-    use tairix_desktop_session::{machine_zone_place, moves_machine_zone, read_machine_zone};
     use tairix_desktop_session::{
-        preview_source, resolution_ask, slide_positions, slide_source, CivilAdoption, HeldZones,
-        ScreensaverPreview, ScreensaverServe,
+        fade_to_black, preview_source, resolution_ask, slide_positions, slide_source,
+        CivilAdoption, HeldZones, ScreensaverPreview, ScreensaverServe,
     };
+    use tairix_desktop_session::{machine_zone_place, moves_machine_zone, read_machine_zone};
     use tairix_display::{
-        DisplayClient, FramesRefused, Presenter, RtDisplay, RtDisplayTransport, RtShmMapper,
-        SwitchedOff,
+        DisplayClient, FrameRing, FramesRefused, Presenter, RtDisplay, RtDisplayTransport,
+        RtShmMapper, SwitchedOff,
     };
     use tairix_greeter::AccountTile;
     use tairix_greeter::{Asking, Courier, Ticket, Tickets, Verdict};
@@ -1516,6 +1516,88 @@ mod program {
         });
     }
 
+    /// Show the frame this wake produced, where it may go — the screen the
+    /// session's own and the pacer admitting it at `now_ns`: each window's
+    /// newest present latched into it, the presents held behind them
+    /// answered, the keyboard handed to a window first shown, the frame
+    /// presented, and every present it carries finished with its fate.
+    ///
+    /// # Errors
+    ///
+    /// The exit code a lost seat or a refused present ends the session with.
+    #[allow(clippy::too_many_arguments)] // The frame's whole mutable surround, threaded explicitly.
+    fn show_frame<S, F, D>(
+        (server, sink): (&mut WindowServer<RtShmMapper>, &mut RtEventSink),
+        (shell, compositor, windows): (&mut DesktopShell, &mut Compositor, &mut SessionWindows),
+        (display, suspended, pacer): (&mut Option<Ring>, &mut Option<bool>, &mut FramePacer),
+        (fade, saver, focused): (&mut ScreenFade, &mut DesktopSaver, &mut Option<u64>),
+        (lock, confirm, elevate): (&ScreenLock, &ConfirmPrompt, &AuthorisePrompt),
+        (picker, resolution, menu): (
+            &mut SessionPicker<S, F>,
+            &mut ResolutionPrompt,
+            &mut MenuChain,
+        ),
+        (apps, desktop): (&mut AppBarService, &mut Desktop<D>),
+        (now_ns, text): (u64, TextDrawn<'_>),
+    ) -> Result<(), i32>
+    where
+        S: tairix_browse::DirectorySource,
+        F: PickSources<S>,
+        D: tairix_browse::DirectorySource,
+    {
+        let admitted = presentable(saver, lock, compositor)
+            && pacer.admit(
+                now_ns,
+                compositor.has_damage() || server.has_pending_frames(),
+                display.as_ref().is_none_or(Presenter::ready),
+                compositor.refresh_rate(),
+            );
+        if !admitted {
+            return Ok(());
+        }
+        let held = seat_held(
+            lock,
+            (picker, shell.router().focused()),
+            (confirm, elevate, resolution),
+        );
+        latch_frames(server, shell, compositor, windows, held);
+        answer_presents(server);
+        // A window first shown may have taken the keyboard.
+        reconcile_focus(
+            focused, server, sink, shell, compositor, windows, picker, apps, menu,
+        );
+        let before = display
+            .as_ref()
+            .map(|ring| (ring.on_screen(), ring.queued()));
+        let presented = present(
+            shell,
+            compositor,
+            display,
+            fade,
+            windows,
+            menu,
+            (picker, resolution),
+            (apps, desktop),
+            suspended,
+            text,
+        )?;
+        if presented {
+            saver.shown(compositor);
+        }
+        pacer.presented(display.as_ref().is_some_and(|ring| !ring.ready()));
+        windows.frame_handed(
+            FrameOutcome::of(
+                display.as_ref().filter(|_| suspended.is_none()),
+                before,
+                compositor.has_damage(),
+            ),
+            tairix_rt::clock_get(),
+            |wm| compositor.on_display(wm),
+        );
+        deliver_owed_events(server, sink, shell, compositor, windows, picker, apps, menu);
+        Ok(())
+    }
+
     /// Whether a frame may go to the display: none while the saver holds it
     /// dark or draws its frames straight into it, nor while the lock does not
     /// cover the session.
@@ -1593,46 +1675,6 @@ mod program {
                     code.as_str()
                 ),
             );
-        }
-    }
-
-    /// Dissolve the session's screen to black, presenting every frame, and
-    /// return once it is dark.
-    ///
-    /// The last thing a session draws before it hands the seat on cleared,
-    /// so the desktop dims into the black the login screen appears out of
-    /// rather than vanishing mid-frame. Bounded by the fade's own span, and
-    /// a no-op under a reduced-motion theme, which is dark from its first
-    /// frame.
-    ///
-    /// Paced on the runtime's timed park, not the session wait-set: the
-    /// sources this loop is not serving would report ready on every re-park
-    /// and spin a core through the whole fade. A refused present stops the
-    /// dim where it got to — nothing here can act on it, and the seat is
-    /// handed on cleared regardless, so the screen still ends black.
-    fn fade_to_black(
-        fade: &mut ScreenFade,
-        compositor: &mut Compositor,
-        display: &mut Option<Ring>,
-    ) {
-        let Some(display) = display.as_mut() else {
-            return;
-        };
-        fade.depart(tairix_rt::clock_get(), compositor);
-        loop {
-            display.take_events();
-            if compositor.present(display).is_err() {
-                return;
-            }
-            if fade.settled() {
-                return;
-            }
-            tairix_rt::park_ns(fade.park_deadline_ns(
-                tairix_rt::clock_get(),
-                WAITSET_TIMEOUT_NONE,
-                compositor.refresh_rate(),
-            ));
-            fade.advance(tairix_rt::clock_get(), compositor);
         }
     }
 
@@ -2561,18 +2603,29 @@ mod program {
     }
 
     /// The session giving its screen up, as the switch drives it: the frame
-    /// ring, the compositor the fade is drawn through, and the wait-set the
-    /// seat member belongs to.
+    /// ring, the compositor the fade is drawn through, the windows whose
+    /// presents a latch during the fade finishes, and the wait-set the seat
+    /// member belongs to.
     struct SessionDeparture<'a> {
         display: &'a mut Option<Ring>,
         compositor: &'a mut Compositor,
         fade: &'a mut ScreenFade,
+        windows: &'a mut SessionWindows,
         set: u64,
     }
 
     impl SeatDeparture for SessionDeparture<'_> {
         fn fade_out(&mut self) {
-            fade_to_black(self.fade, self.compositor, self.display);
+            if let Some(ring) = self.display.as_mut() {
+                fade_to_black(
+                    self.fade,
+                    self.compositor,
+                    ring,
+                    self.windows,
+                    tairix_rt::clock_get,
+                    tairix_rt::park_ns,
+                );
+            }
         }
 
         fn suspend(&mut self) {
@@ -4155,7 +4208,16 @@ mod program {
                     windows.top_level().next().is_some(),
                     recorder.recording.is_some(),
                 ) {
-                    fade_to_black(&mut fade, &mut compositor, &mut display);
+                    if let Some(ring) = display.as_mut() {
+                        fade_to_black(
+                            &mut fade,
+                            &mut compositor,
+                            ring,
+                            &mut windows,
+                            tairix_rt::clock_get,
+                            tairix_rt::park_ns,
+                        );
+                    }
                     shell.teardown(&mut compositor);
                     see_out_private(&mut memory, &private_worker);
                     return leaving.exit_code();
@@ -4476,7 +4538,17 @@ mod program {
                 // the screen would have set.
                 let dark = display.is_none() || !presentable(&saver, &lock, &compositor);
                 if dark && server.holds_answers() && pacer.answers_due(now_ns, refresh) {
-                    server.release_answers();
+                    let seat_held = seat_held(
+                        &lock,
+                        (&picker, shell.router().focused()),
+                        (&confirm, &elevate, &resolution),
+                    );
+                    server.release_answers(&mut FrameShow {
+                        shell: &mut shell,
+                        compositor: &mut compositor,
+                        windows: &mut windows,
+                        seat_held,
+                    });
                 }
                 answer_presents(&mut server);
                 let dark_held = dark && server.holds_answers();
@@ -4681,53 +4753,23 @@ mod program {
                 // to it could be seen, and the damage waits for it to wake.
                 // Nor is a frame the lock does not cover, which would show
                 // the session around it.
-                if presentable(&saver, &lock, &compositor)
-                    && pacer.admit(
+                if let Err(code) = show_frame(
+                    (&mut server, &mut sink),
+                    (&mut shell, &mut compositor, &mut windows),
+                    (&mut display, &mut suspended, &mut pacer),
+                    (&mut fade, &mut saver, &mut focused),
+                    (&lock, &confirm, &elevate),
+                    (&mut picker, &mut resolution, &mut menu),
+                    (&mut apps.service, &mut desktop),
+                    (
                         now_ns,
-                        compositor.has_damage() || server.has_pending_frames(),
-                        display.as_ref().is_none_or(Presenter::ready),
-                        compositor.refresh_rate(),
-                    )
-                {
-                    let held = seat_held(
-                        &lock,
-                        (&picker, shell.router().focused()),
-                        (&confirm, &elevate, &resolution),
-                    );
-                    latch_frames(&mut server, &mut shell, &mut compositor, &mut windows, held);
-                    answer_presents(&mut server);
-                    // A window first shown may have taken the keyboard.
-                    reconcile_focus(
-                        &mut focused,
-                        &mut server,
-                        &mut sink,
-                        &mut shell,
-                        &mut compositor,
-                        &mut windows,
-                        &mut picker,
-                        &mut apps.service,
-                        &mut menu,
-                    );
-                    match present(
-                        &mut shell,
-                        &mut compositor,
-                        &mut display,
-                        &mut fade,
-                        &mut windows,
-                        &mut menu,
-                        (&mut picker, &mut resolution),
-                        (&mut apps.service, &mut desktop),
-                        &mut suspended,
                         TextDrawn {
                             fonts: &font_worker,
                             generation: text_drawn,
                         },
-                    ) {
-                        Ok(true) => saver.shown(&mut compositor),
-                        Ok(false) => {}
-                        Err(code) => return code,
-                    }
-                    pacer.presented(display.as_ref().is_some_and(|ring| !ring.ready()));
+                    ),
+                ) {
+                    return code;
                 }
                 advance_saver(
                     (&mut saver, &lock),
@@ -5757,10 +5799,20 @@ mod program {
                 // A latch frees the frame a held present waits for; the
                 // frame path below presents it.
                 if let Some(ring) = display.as_mut() {
-                    if ring.take_events() && saver.scans_out() {
+                    if windows.take_latches(ring) && saver.scans_out() {
                         saver.latched(&mut compositor, ring);
                     }
                 }
+                deliver_owed_events(
+                    &mut server,
+                    &mut sink,
+                    &mut shell,
+                    &mut compositor,
+                    &mut windows,
+                    &mut picker,
+                    &mut apps.service,
+                    &mut menu,
+                );
             } else if token == WAKE_TOKEN {
                 // The session authority speaking to this desktop: it is the
                 // foreground session again, or the authority is going away
@@ -6369,53 +6421,23 @@ mod program {
             // damage the pumped events and served presents produced, and the
             // ring copies only that region once the pacer admits the frame.
             // A frame the lock does not cover is never presented.
-            if presentable(&saver, &lock, &compositor)
-                && pacer.admit(
+            if let Err(code) = show_frame(
+                (&mut server, &mut sink),
+                (&mut shell, &mut compositor, &mut windows),
+                (&mut display, &mut suspended, &mut pacer),
+                (&mut fade, &mut saver, &mut focused),
+                (&lock, &confirm, &elevate),
+                (&mut picker, &mut resolution, &mut menu),
+                (&mut apps.service, &mut desktop),
+                (
                     now_ns,
-                    compositor.has_damage() || server.has_pending_frames(),
-                    display.as_ref().is_none_or(Presenter::ready),
-                    compositor.refresh_rate(),
-                )
-            {
-                let held = seat_held(
-                    &lock,
-                    (&picker, shell.router().focused()),
-                    (&confirm, &elevate, &resolution),
-                );
-                latch_frames(&mut server, &mut shell, &mut compositor, &mut windows, held);
-                answer_presents(&mut server);
-                // A window first shown may have taken the keyboard.
-                reconcile_focus(
-                    &mut focused,
-                    &mut server,
-                    &mut sink,
-                    &mut shell,
-                    &mut compositor,
-                    &mut windows,
-                    &mut picker,
-                    &mut apps.service,
-                    &mut menu,
-                );
-                match present(
-                    &mut shell,
-                    &mut compositor,
-                    &mut display,
-                    &mut fade,
-                    &mut windows,
-                    &mut menu,
-                    (&mut picker, &mut resolution),
-                    (&mut apps.service, &mut desktop),
-                    &mut suspended,
                     TextDrawn {
                         fonts: &font_worker,
                         generation: text_drawn,
                     },
-                ) {
-                    Ok(true) => saver.shown(&mut compositor),
-                    Ok(false) => {}
-                    Err(code) => return code,
-                }
-                pacer.presented(display.as_ref().is_some_and(|ring| !ring.ready()));
+                ),
+            ) {
+                return code;
             }
             advance_saver(
                 (&mut saver, &lock),
@@ -10772,6 +10794,7 @@ mod program {
                     display: self.display,
                     compositor: seat.compositor,
                     fade: self.fade,
+                    windows: self.windows,
                     set: self.set,
                 },
             )
@@ -17007,11 +17030,12 @@ mod program {
         apps: &mut dyn AppBarBridge,
         menu: &mut MenuChain,
     ) {
-        for event in windows.take_owed_events() {
+        windows.time_unseen(tairix_rt::clock_get());
+        windows.deliver_owed(|windows, event| {
             deliver(
                 server, sink, shell, compositor, windows, picker, apps, menu, &event,
             );
-        }
+        });
     }
 
     /// Tell every client whose window content was released while nobody could
@@ -17040,7 +17064,11 @@ mod program {
             let Some(window_id) = windows.ipc_id(wm) else {
                 continue;
             };
-            let bytes = server.release_frames(window_id);
+            let released = server.release_frames(window_id);
+            let bytes = released.bytes;
+            if let Some(serial) = released.dropped {
+                windows.frames_unseen(window_id, serial);
+            }
             // Its pixels are gone, so the window is awaiting them again and
             // the shown announcement must be re-earned by the frame that
             // brings them back.
@@ -17071,6 +17099,8 @@ mod program {
                 &WindowEvent::ContentReleased { window_id },
             );
         }
+        // A frame a release dropped unshown is finished all the same.
+        deliver_owed_events(server, sink, shell, compositor, windows, picker, apps, menu);
     }
 
     /// Publish the desktop every application shares, so each converges on

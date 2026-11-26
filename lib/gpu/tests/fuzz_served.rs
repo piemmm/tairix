@@ -53,7 +53,7 @@ use tairix_abi::reply::decode_status_reply;
 use tairix_abi::Duration64;
 use tairix_fuzzseed::Prng;
 use tairix_gpu::testing::{Answered, Loopback, Step};
-use tairix_gpu::{ContextDesc, Device};
+use tairix_gpu::{AllocationDesc, Attachable, ContextDesc, Device};
 use tairix_parallel::JobRunner;
 
 /// The region each client grants: room for every module the sweeps make.
@@ -156,8 +156,29 @@ fn journals(rng: &mut Prng) -> Vec<Journal> {
         .collect()
 }
 
+/// Memory a loopback grant names, attached by the waiting session.
+struct Granted {
+    grant: u64,
+    bytes: Vec<u8>,
+}
+
+impl Attachable for Granted {
+    fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes
+    }
+
+    fn region(&self) -> Option<u64> {
+        Some(self.grant)
+    }
+}
+
 /// A session waiting on a timeline its context made, a value it has not
-/// reached: the journal every request sweep holds a wait from, whatever it
+/// reached, then copying memory into and out of a region it attached: the
+/// journal every request sweep holds a wait and attaches from, whatever it
 /// draws.
 fn waiting_session() -> Journal {
     let runner = runner(1);
@@ -173,6 +194,26 @@ fn waiting_session() -> Journal {
             timeline.wait(1, Duration64::ZERO),
             Err(tairix_gpu::Error::TimedOut)
         );
+        let memory = context
+            .allocate(&AllocationDesc {
+                size: 64,
+                memory_type: 0,
+            })
+            .expect("memory");
+        memory.write(0, &[7; 64]).expect("written");
+        let grant = loopback.grant(1, 64);
+        let mut attached = client
+            .attach(Granted {
+                grant,
+                bytes: vec![0; 64],
+            })
+            .expect("attached");
+        memory
+            .read_into(0, &mut attached, (0, 32))
+            .expect("read into it");
+        memory
+            .write_from(32, &attached, (0, 32))
+            .expect("written from it");
     }
     Journal {
         width,

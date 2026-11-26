@@ -875,6 +875,7 @@ mod program {
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::Shown { .. }
+            | WindowEvent::FramePresented { .. }
             | WindowEvent::FilePicked { .. }
             // The monitor shows the machine, not a document: it declares no
             // file association, so no open target can name anything here.

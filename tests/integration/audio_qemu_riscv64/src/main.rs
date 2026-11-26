@@ -52,15 +52,12 @@ mod kernel {
     use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel::riscv64::boot as boot_riscv64;
-    use tairix_log::{Event, EventId, Sink};
+    use tairix_log::{Event, Sink};
     use tairix_test_audio_wire::{COMMAND, PLAYER};
-
-    /// `SyscallInvoked`, the audited record [`END`] reads.
-    const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
     /// The run's end: the shell's exit after the tone fixture's or the
     /// player's, whose decoder worker runs as the player too.
-    static END: FixtureExit = FixtureExit::new(&[COMMAND, PLAYER], SYSCALL_INVOKED_EVENT_ID);
+    static END: FixtureExit = FixtureExit::new(&[COMMAND, PLAYER]);
 
     /// Replays every event to the serial console and ends the run at [`END`].
     struct AudioSink;

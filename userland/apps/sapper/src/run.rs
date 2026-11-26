@@ -541,6 +541,7 @@ mod program {
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::Shown { .. }
+            | WindowEvent::FramePresented { .. }
             | WindowEvent::Scrolled { .. }
             | WindowEvent::RedrawRequested { .. }
             | WindowEvent::ContentReleased { .. }

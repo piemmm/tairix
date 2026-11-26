@@ -16,8 +16,8 @@ use crate::grammar::{self, Quantity, Shape, Spec};
 use crate::module::{text, Instruction, Module, Operand, Version};
 use crate::{DecodeError, Fault, Id, Kind, Op, MAX_MODULE_BYTES};
 
-/// The SPIR-V magic number.
-pub(crate) const MAGIC: u32 = 0x0723_0203;
+/// The SPIR-V magic number: every module's first word, in its byte order.
+pub const MAGIC: u32 = 0x0723_0203;
 
 /// Words in a module's header.
 pub(crate) const HEADER_WORDS: usize = 5;
@@ -67,18 +67,38 @@ fn push<T>(list: &mut Vec<T>, item: T, at: usize) -> Result<(), DecodeError> {
 
 /// Decode `input`, refusing one of more than `max_instructions`.
 pub(crate) fn decode(input: &[u8], max_instructions: usize) -> Result<Module, DecodeError> {
+    let swapped = byte_order(input)?;
+    decode_normalised(normalised(input, swapped)?, max_instructions)
+}
+
+/// [`decode`] of bytes it may keep, copied only to reverse their order.
+pub(crate) fn decode_owned(input: Vec<u8>, max_instructions: usize) -> Result<Module, DecodeError> {
+    let bytes = if byte_order(&input)? {
+        normalised(&input, true)?
+    } else {
+        input
+    };
+    decode_normalised(bytes, max_instructions)
+}
+
+/// Whether `input`, words of a module no larger than the largest, holds
+/// them in reversed byte order.
+fn byte_order(input: &[u8]) -> Result<bool, DecodeError> {
     if input.len() > MAX_MODULE_BYTES {
         return Err(refused(0, Fault::TooLarge));
     }
     if !input.len().is_multiple_of(4) || input.len() < HEADER_WORDS * 4 {
         return Err(refused(0, Fault::NotWords));
     }
-    let swapped = match word(input, 0) {
-        MAGIC => false,
-        magic if magic == MAGIC.swap_bytes() => true,
-        _ => return Err(refused(0, Fault::Magic)),
-    };
-    let bytes = normalised(input, swapped)?;
+    match word(input, 0) {
+        MAGIC => Ok(false),
+        magic if magic == MAGIC.swap_bytes() => Ok(true),
+        _ => Err(refused(0, Fault::Magic)),
+    }
+}
+
+/// A module of little-endian `bytes`, decoded.
+fn decode_normalised(bytes: Vec<u8>, max_instructions: usize) -> Result<Module, DecodeError> {
     let version = Version::from_word(word(&bytes, 1))
         .filter(|v| v.major == 1 && *v <= Version::NEWEST)
         .ok_or_else(|| refused(1, Fault::Version))?;

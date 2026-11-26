@@ -57,7 +57,8 @@ The ops are one for each method of the seam, numbered from 1 in this order:
 `Wait`, `Reached`, `Upload`, `Submit`, `Discard`, `CreateBindSetLayout`,
 `CreateBindSet`, `CreatePipelineLayout`, `CreateShaderModule`,
 `ImageRequirements`, `CreateImage`, `CreateView`, `CreateBufferView`,
-`CreateSampler`, `CreateComputePipeline` and `CreateRenderPipeline`.
+`CreateSampler`, `CreateComputePipeline`, `CreateRenderPipeline`, `Attach`,
+`Detach`, `ReadInto` and `WriteFrom`.
 
 ## The region
 
@@ -67,7 +68,10 @@ waits and signals — crosses in one region the client creates and grants to
 the channel, between `GPU_REGION_MIN` (128 KiB) and `GPU_REGION_MAX`
 (16 MiB), named at `Open`. A body names its bytes there by a `RegionSpan`.
 The client may change the region at any time, so the server copies a span out
-before it decodes it, and checks every span against the region's length.
+before it decodes it, and checks every span against the region's length. Bytes
+written to or read from host-visible memory are no description, so `Write` and
+`Read` lend the span to the copy itself: one copy in the server, not one into
+a buffer of its own and another out of it.
 
 - **Commands** cross in region-sized `Upload`s staged for their context, the
   last of a command buffer marked; `Submit` checks and queues everything
@@ -103,6 +107,21 @@ A `Wait` is held by the serve loop, not a worker, and answered when its
 timeline reaches its value, when its context is lost or destroyed, or when its
 timeout passes. The loop's own wait is bounded by the soonest timeout and the
 device's soonest job deadline.
+
+## Attachments
+
+`Attach` maps a further region of the client's own, which the client granted
+to the channel, for transfers straight into and out of it: a window's frames
+among them, which a frame drawn on the device then reaches with one copy, made
+here. It answers the attachment's id; `ReadInto` copies host-visible memory
+into an attachment and `WriteFrom` an attachment's bytes into host-visible
+memory, each range checked against the allocation and the attachment and
+refused past either, never clamped. A client holds at most
+`MAX_CLIENT_ATTACHMENTS` (8) attachments and `GPU_ATTACHED_MAX` (1 GiB) of
+them in all, each a containment bound on what it makes its server map; a grant
+that is not there is refused `Stale`, another process's `Foreign`, and one
+shorter than what is attached `OutOfRange`. `Detach`, `Close` and the client's
+exit let them go, a mapping going once no copy holds it.
 
 ## Exports
 

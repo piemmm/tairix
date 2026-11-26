@@ -35,6 +35,7 @@ mod program {
     use tairix_gpucheck::{compare, reference, work};
     use tairix_inline::ArrayVec;
     use tairix_log::{Field, FieldValue, Level};
+    use tairix_spirv::enumerant::Capability;
     use tairix_test_venus_check::{FAILED, PASSED, PASSED_MESSAGE, UNSERVED};
     use tairix_virtio::{SharedMemory, Transport};
 
@@ -44,6 +45,15 @@ mod program {
 
     /// Bytes of each blob: two pages.
     const BLOB_BYTES: u64 = 8192;
+
+    /// The subgroup capabilities, none of which a Vulkan host can offer the
+    /// seam.
+    const SUBGROUP_CAPABILITIES: [Capability; 4] = [
+        Capability::GROUP_NON_UNIFORM,
+        Capability::GROUP_NON_UNIFORM_VOTE,
+        Capability::GROUP_NON_UNIFORM_BALLOT,
+        Capability::GROUP_NON_UNIFORM_ARITHMETIC,
+    ];
 
     /// Where the check failed, and why.
     struct Failed {
@@ -264,6 +274,16 @@ mod program {
                     return Err("the GPU states no four samples of the render work's colour".into())
                 }
                 Some(_) => {}
+            }
+            // A Vulkan host never offers the seam's subgroups, so only a kernel
+            // needing one may go unrun (plans/GPU.md).
+            let subgroup = |capability: &Capability| SUBGROUP_CAPABILITIES.contains(capability);
+            if let Some(skipped) = answered
+                .corpus
+                .iter()
+                .find(|ran| ran.left.is_none() && !ran.capabilities.iter().any(subgroup))
+            {
+                return Err(format!("the GPU states less than {} uses", skipped.family));
             }
             compare(&answered, &expected).map_err(|difference| format!("{difference}"))
         });

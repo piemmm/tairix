@@ -36,6 +36,7 @@
 
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
+use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -72,7 +73,7 @@ use tairix_abi::window_ipc::{
 use tairix_abi::window_ipc::{KeyboardMode, LandingStep, WindowView, DROP_LANDINGS_MAX};
 pub use tairix_abi::window_ipc::{WindowSizeState, WindowSizing};
 use tairix_abi::{BundleId, CapabilityId, Errno};
-use tairix_display::{add_damage, damage_list, FrameRegion, ShmMapper};
+use tairix_display::{add_damage, damage_list, FrameRegion, SharedFrame, ShmMapper};
 use tairix_geometry::{Rect, Region};
 
 /// Upper bound, in bytes, of any reply [`WindowServer::serve`] writes,
@@ -621,6 +622,10 @@ pub trait WindowHost {
     /// owner exited. Infallible: the window is already unmapped and
     /// forgotten by the engine, and the host must not resurrect it.
     fn window_closed(&mut self, window_id: u64);
+
+    /// Window `window_id`'s presents up to `serial` were dropped before the
+    /// session showed them: a resize took the frames they named.
+    fn frames_dropped(&mut self, window_id: u64, serial: u64);
 
     /// A validated `PickFile`: the attested owner of live window
     /// `window_id` (which has no pick pending, its application within
@@ -1400,24 +1405,38 @@ struct SlotAuthorisation {
     output: Option<Vec<u8>>,
 }
 
+/// What a [`FrameHost`] did with a frame it was shown.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameUse {
+    /// Read while it was shown, and never after.
+    Read,
+    /// Kept, to be read after: until the host is shown a later frame of the
+    /// window, it is asked for the frame back ([`FrameHost::frame_reclaimed`]),
+    /// or the window's region goes. No present's answer hands it back to the
+    /// client meanwhile.
+    Kept,
+}
+
 /// Where [`WindowServer::latch`] shows each window's newest presented frame:
 /// the compositor's side of a present, reached once a desktop frame rather
 /// than once a request.
 pub trait FrameHost {
     /// Show `damage` of `frame`, window `window_id`'s newest presented frame,
-    /// exactly one frame of its region shaped as `surface`.
+    /// exactly one frame of its region shaped as `surface`, answering whether
+    /// the frame was only read or is kept. A holder of the frame keeps the
+    /// region mapped.
     ///
     /// # Errors
     ///
     /// Any [`Errno`] compositing fails with; the engine hands it to
-    /// [`Self::frame_refused`].
+    /// [`Self::frame_refused`]. A refusal keeps what the host kept before.
     fn window_presented(
         &mut self,
         window_id: u64,
         surface: &DisplayMode,
-        frame: &[u8],
+        frame: &SharedFrame,
         damage: &DamageList,
-    ) -> Result<(), Errno>;
+    ) -> Result<FrameUse, Errno>;
 
     /// Show `damage` of `view`, window `window_id`'s view, from `frame`: the
     /// view's rows of the newest presented frame, shaped as `surface`.
@@ -1434,11 +1453,32 @@ pub trait FrameHost {
         damage: &DamageList,
     ) -> Result<(), Errno>;
 
-    /// Window `window_id`'s frame could not be shown, the first refused since
-    /// the window last showed one. The window keeps the pixels it had, and the
-    /// frame is tried again with the next frame the desktop composes, carrying
-    /// what a later present changes as well.
-    fn frame_refused(&mut self, window_id: u64, errno: Errno);
+    /// Window `window_id`'s present `serial`, and every one before it, could
+    /// not be shown, for `errno`: none is on screen, though the window keeps
+    /// the pixels it had and the frame is tried again with the next frame the
+    /// desktop composes, carrying what a later present changes as well. Told
+    /// once a present; `first` says it is the first refused since the window
+    /// last showed a frame.
+    fn frame_refused(&mut self, window_id: u64, serial: u64, errno: Errno, first: bool);
+
+    /// Window `window_id`'s present `serial`, and every one before it, is
+    /// what the desktop frame about to be composed shows of the window.
+    fn frame_latched(&mut self, window_id: u64, serial: u64);
+
+    /// Give back the frame of window `window_id` the host keeps, bringing up
+    /// to date from it what is still owed and reading it no more: a present's
+    /// answer is about to hand it to the client to draw into.
+    fn frame_reclaimed(&mut self, window_id: u64);
+}
+
+/// What [`WindowServer::release_frames`] let go of.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReleasedFrames {
+    /// The bytes unmapped, zero for a window holding none.
+    pub bytes: u64,
+    /// The serial of the present its frames held unshown, if one: it and
+    /// every present before it are dropped.
+    pub dropped: Option<u64>,
 }
 
 /// The newest frame a window presented that the session has not shown, and
@@ -1449,6 +1489,9 @@ pub trait FrameHost {
 /// brings each frame up to date before presenting it.
 struct Pending {
     frame: Option<u32>,
+    /// The newest present's serial, nought before any: a later present names
+    /// a greater one, and the frame pending is that present's.
+    serial: u64,
     damage: Region,
     /// What changed of the view, in the view's own pixels.
     view_damage: Region,
@@ -1456,8 +1499,7 @@ struct Pending {
     /// composes rather than asking for one: a lasting refusal would otherwise
     /// compose a frame every period for nothing.
     refused: bool,
-    /// A frame was refused since the window last showed one, and the host was
-    /// told.
+    /// A frame was refused since the window last showed one.
     reported: bool,
     /// The ticket of the present that replaced an unshown frame, its answer
     /// held until the frame it named is shown or refused, or something
@@ -1469,6 +1511,7 @@ impl Pending {
     const fn new() -> Self {
         Self {
             frame: None,
+            serial: 0,
             damage: Region::with_budget(MAX_DAMAGE_RECTS),
             view_damage: Region::with_budget(MAX_DAMAGE_RECTS),
             refused: false,
@@ -1477,16 +1520,17 @@ impl Pending {
         }
     }
 
-    /// Frame `frame_index` is the newest, `damage` of it changed: of the
-    /// window's rows of `surface`, and of `view`'s after them.
+    /// Frame `frame_index`, present `serial`'s, is the newest, `damage` of it
+    /// changed: of the window's rows of `surface`, and of `view`'s after them.
     fn record(
         &mut self,
-        frame_index: u32,
+        (frame_index, serial): (u32, u64),
         damage: &DamageList,
         surface: &DisplayMode,
         view: Option<&WindowView>,
     ) {
         self.frame = Some(frame_index);
+        self.serial = serial;
         self.refused = false;
         let bounds = Rect::new(0, 0, surface.width_px, surface.height_px);
         add_damage(&mut self.damage, damage.rects(), bounds);
@@ -1498,6 +1542,11 @@ impl Pending {
                 }
             }
         }
+    }
+
+    /// The serial a [`Self::clear`] drops unshown, if a frame is pending.
+    fn dropped(&self) -> Option<u64> {
+        self.frame.map(|_| self.serial)
     }
 
     /// Nothing is pending: the frames it named are gone.
@@ -1514,11 +1563,12 @@ impl Pending {
         self.reported = false;
     }
 
-    /// The frame named could not be shown. Answers whether the host is to be
-    /// told, which it is once until the window next shows a frame.
-    fn refuse(&mut self) -> bool {
-        self.refused = true;
-        !core::mem::replace(&mut self.reported, true)
+    /// The frame named could not be shown. Answers whether this present was
+    /// not refused before, and whether it is the first refused since the
+    /// window last showed a frame.
+    fn refuse(&mut self) -> (bool, bool) {
+        let newly = !core::mem::replace(&mut self.refused, true);
+        (newly, !core::mem::replace(&mut self.reported, true))
     }
 }
 
@@ -2076,10 +2126,14 @@ struct WindowRecord<R> {
     /// unmaps a hidden window's frames under memory pressure so the physical
     /// pages can actually go, which needs both sides to let go. The geometry
     /// stays, so the window still lays out, hit-tests, and re-attaches.
-    region: Option<R>,
+    region: Option<Rc<R>>,
     /// The frame presented since the last the session showed, and the
     /// present held behind it.
     pending: Pending,
+    /// The frame the host kept when it was shown ([`FrameUse::Kept`]), until
+    /// it is shown a later one, gives it back, or a resize or a release takes
+    /// the region it lies in.
+    kept: Option<u32>,
     /// A `PickFile` was accepted for this purpose and its conclusion
     /// (`FilePicked`, `FolderPicked` or `PickCancelled`) has not been
     /// delivered yet. At most one pick is pending per window; the engine sets
@@ -2179,8 +2233,9 @@ impl<R> WindowRecord<R> {
             view: None,
             frame_count: opened.frame_count,
             frame_len: opened.frame_len,
-            region: Some(region),
+            region: Some(Rc::new(region)),
             pending: Pending::new(),
+            kept: None,
             pick_pending: None,
             picked_name: None,
             picked_files: VecDeque::new(),
@@ -2352,6 +2407,12 @@ impl<R> WindowRecord<R> {
         }
         (self.frame_len as u64).saturating_mul(u64::from(self.frame_count))
     }
+
+    /// Whether the host keeps a frame of the window other than `named`, so an
+    /// answer handing back every frame but `named` would hand back that one.
+    fn keeps_other_than(&self, named: Option<u32>) -> bool {
+        self.kept.is_some() && self.kept != named
+    }
 }
 
 /// The window-channel engine: one instance serves one desktop session.
@@ -2515,10 +2576,12 @@ impl<M: ShmMapper> WindowServer<M> {
         if let WindowRequest::Present {
             window_id,
             frame_index,
+            serial,
             damage,
         } = decoded
         {
-            return match self.present((caller, ticket), window_id, frame_index, &damage) {
+            let named = (frame_index, serial);
+            return match self.present((caller, ticket), window_id, named, &damage) {
                 Ok(true) => Served::Withheld,
                 Ok(false) => Served::Reply(status(reply, Ok(()))),
                 Err(err) => Served::Reply(status(reply, Err(err))),
@@ -3706,10 +3769,14 @@ impl<M: ShmMapper> WindowServer<M> {
             record.view = spec.view;
             record.frame_count = spec.frame_count;
             record.frame_len = frame_len;
-            record.region = Some(region);
+            record.region = Some(Rc::new(region));
+            record.kept = None;
             // What was pending named a frame of the region just dropped, and
             // the present held behind it was recorded, so it is answered.
             self.unshown.count_out(&record.pending);
+            if let Some(serial) = record.pending.dropped() {
+                host.frames_dropped(spec.window_id, serial);
+            }
             record.pending.clear();
             self.answers.release(&mut record.pending, record.owner);
         }
@@ -3720,22 +3787,23 @@ impl<M: ShmMapper> WindowServer<M> {
     /// as `ticket`, answering whether that answer is withheld.
     ///
     /// Recorded, not shown: [`Self::latch`] shows it with the desktop's next
-    /// frame. A window holding no unshown frame is answered at once, so the
-    /// client may draw its other frame while this one waits — never the one
-    /// named here, which the session reads until a later present replaces it.
-    /// One replacing an unshown frame is held until the frame it names is
-    /// shown or refused, or something supersedes it: answered, its client
-    /// draws again, so one drawing faster than the desktop shows frames draws
-    /// at most two a desktop frame rather than frames nobody sees.
+    /// frame. Its answer hands the client back every frame but the one named,
+    /// so it is given at once only while the session reads no other: none is
+    /// unshown and the host keeps none. One replacing an unshown frame is held
+    /// until the frame it names is shown or refused, or something supersedes
+    /// it, so a client drawing faster than the desktop shows frames draws at
+    /// most two a desktop frame rather than frames nobody sees. One behind a
+    /// kept frame is held until the host lets that frame go, which paces a
+    /// window the host reads straight from to one frame a desktop frame.
     fn present(
         &mut self,
         (caller, ticket): (ProcId, u64),
         window_id: u64,
-        frame_index: u32,
+        (frame_index, serial): (u32, u64),
         damage: &DamageList,
     ) -> Result<bool, Errno> {
         let record = owned_window_mut(&mut self.windows, caller, window_id)?;
-        if frame_index >= record.frame_count {
+        if frame_index >= record.frame_count || serial <= record.pending.serial {
             return Err(Errno::OutOfRange);
         }
         for rect in damage.rects() {
@@ -3753,13 +3821,16 @@ impl<M: ShmMapper> WindowServer<M> {
         if record.region.is_none() {
             return Err(Errno::NotAttached);
         }
-        let replaces = record.pending.frame.is_some();
+        let held = record.pending.frame.is_some() || record.keeps_other_than(Some(frame_index));
         self.unshown.count_out(&record.pending);
-        record
-            .pending
-            .record(frame_index, damage, &record.surface, record.view.as_ref());
+        record.pending.record(
+            (frame_index, serial),
+            damage,
+            &record.surface,
+            record.view.as_ref(),
+        );
         self.unshown.count_in(&record.pending);
-        Ok(replaces && self.answers.hold(&mut record.pending, caller, ticket))
+        Ok(held && self.answers.hold(&mut record.pending, caller, ticket))
     }
 
     /// Show every window's newest presented frame through `host`, once a
@@ -3774,36 +3845,67 @@ impl<M: ShmMapper> WindowServer<M> {
         let mut unshown = Unshown::NONE;
         for (&window_id, record) in &mut self.windows {
             if let Some(frame_index) = record.pending.frame {
-                let shown = Self::frame_of(record, frame_index)
-                    .and_then(|frame| Self::show(host, window_id, record, frame));
+                let shown = Self::shared_frame(record, frame_index)
+                    .and_then(|frame| Self::show(host, window_id, record, (&frame, frame_index)));
                 match shown {
-                    Ok(()) => record.pending.shown(),
+                    Ok(()) => {
+                        host.frame_latched(window_id, record.pending.serial);
+                        record.pending.shown();
+                    }
                     Err(errno) => {
-                        if record.pending.refuse() {
-                            host.frame_refused(window_id, errno);
+                        if let (true, first) = record.pending.refuse() {
+                            host.frame_refused(window_id, record.pending.serial, errno, first);
                         }
                     }
                 }
-                self.answers.release(&mut record.pending, record.owner);
+                Self::answer(
+                    &mut self.answers,
+                    host,
+                    window_id,
+                    record,
+                    Some(frame_index),
+                );
             }
             unshown.count_in(&record.pending);
         }
         self.unshown = unshown;
     }
 
-    /// Show what changed of `record`'s window `window_id` in `frame`: its own
-    /// rows, then its view's.
+    /// Let the answer `record`, window `window_id`'s, holds fall due, the host
+    /// first giving back any frame it keeps but `named`, the one that present
+    /// named: the answer hands the client every other.
+    fn answer(
+        answers: &mut Outbox,
+        host: &mut dyn FrameHost,
+        window_id: u64,
+        record: &mut WindowRecord<M::Region>,
+        named: Option<u32>,
+    ) {
+        if record.pending.withheld.is_none() {
+            return;
+        }
+        if record.keeps_other_than(named) {
+            host.frame_reclaimed(window_id);
+            record.kept = None;
+        }
+        answers.release(&mut record.pending, record.owner);
+    }
+
+    /// Show what changed of `record`'s window `window_id` in `frame`, frame
+    /// `index` of its region: its own rows, recording whether the host kept
+    /// them, then its view's.
     fn show(
         host: &mut dyn FrameHost,
         window_id: u64,
-        record: &WindowRecord<M::Region>,
-        frame: &[u8],
+        record: &mut WindowRecord<M::Region>,
+        (frame, index): (&SharedFrame, u32),
     ) -> Result<(), Errno> {
-        let pending = &record.pending;
-        if !pending.damage.is_empty() {
-            let damage = damage_of(&pending.damage, &record.surface)?;
-            host.window_presented(window_id, &record.surface, frame, &damage)?;
+        if !record.pending.damage.is_empty() {
+            let damage = damage_of(&record.pending.damage, &record.surface)?;
+            let used = host.window_presented(window_id, &record.surface, frame, &damage)?;
+            record.kept = (used == FrameUse::Kept).then_some(index);
         }
+        let pending = &record.pending;
         if let Some(view) = record
             .view
             .as_ref()
@@ -3811,7 +3913,7 @@ impl<M: ShmMapper> WindowServer<M> {
         {
             let surface = view_surface(&record.surface, view);
             let start = frame_bytes(&record.surface, None)?;
-            let rows = frame.get(start..).ok_or(Errno::DeviceFault)?;
+            let rows = frame.bytes().get(start..).ok_or(Errno::DeviceFault)?;
             let damage = damage_of(&pending.view_damage, &surface)?;
             host.view_presented(window_id, view, &surface, rows, &damage)?;
         }
@@ -3837,12 +3939,14 @@ impl<M: ShmMapper> WindowServer<M> {
     /// pending for the desktop's next: the session's turn while no frame can
     /// reach the screen, taken once an output period, so a client is held to
     /// the same pace with the screen dark as lit and never stalls behind it.
-    pub fn release_answers(&mut self) {
+    /// `host` first gives back a frame it keeps that the answer hands back.
+    pub fn release_answers(&mut self, host: &mut dyn FrameHost) {
         if self.answers.held == 0 {
             return;
         }
-        for record in self.windows.values_mut() {
-            self.answers.release(&mut record.pending, record.owner);
+        for (&window_id, record) in &mut self.windows {
+            let named = record.pending.frame;
+            Self::answer(&mut self.answers, host, window_id, record, named);
         }
     }
 
@@ -3852,11 +3956,15 @@ impl<M: ShmMapper> WindowServer<M> {
     /// frame. A reply lands in the room its call was posted with, so the
     /// kernel refuses one only for a caller no longer waiting, and every
     /// answer goes once sent.
+    ///
+    /// The host sends them after every serve, latch and release: the room
+    /// kept is one answer a window beside those due, and a present finding
+    /// none is answered at once, held behind nothing.
     pub fn send_answers(&mut self, reply: impl FnMut(u64, &[u8])) {
         self.answers.send(reply);
     }
 
-    /// Frame `frame_index` of `record`'s region.
+    /// Frame `frame_index` of `record`'s region, shared.
     ///
     /// # Errors
     ///
@@ -3864,14 +3972,15 @@ impl<M: ShmMapper> WindowServer<M> {
     /// [`Errno::DeviceFault`] for one that no longer holds the frame: the
     /// region was validated to hold every frame when it was mapped, so one
     /// that shrank is a fault, not a clamp.
-    fn frame_of(record: &WindowRecord<M::Region>, frame_index: u32) -> Result<&[u8], Errno> {
-        let bytes = record.region.as_ref().ok_or(Errno::NotAttached)?.bytes();
+    fn shared_frame(
+        record: &WindowRecord<M::Region>,
+        frame_index: u32,
+    ) -> Result<SharedFrame, Errno> {
+        let region: Rc<dyn FrameRegion> = record.region.clone().ok_or(Errno::NotAttached)?;
         let base = (frame_index as usize)
             .checked_mul(record.frame_len)
             .ok_or(Errno::DeviceFault)?;
-        bytes
-            .get(base..base.saturating_add(record.frame_len))
-            .ok_or(Errno::DeviceFault)
+        SharedFrame::new(region, base, record.frame_len)
     }
 
     /// Accept a trusted-picker request for `caller`'s window `window_id`:
@@ -4749,17 +4858,19 @@ impl<M: ShmMapper> WindowServer<M> {
     /// next paint does; until then a present is refused
     /// ([`Errno::NotAttached`]) rather than reading a mapping nobody has. A
     /// present held behind the frame it drops is answered: it was recorded.
-    pub fn release_frames(&mut self, window_id: u64) -> u64 {
+    pub fn release_frames(&mut self, window_id: u64) -> ReleasedFrames {
         let Some(record) = self.windows.get_mut(&window_id) else {
-            return 0;
+            return ReleasedFrames::default();
         };
         let bytes = record.mapped_bytes();
         // Dropping the region is the unmap: the mapper owns that side.
         record.region = None;
+        record.kept = None;
         self.unshown.count_out(&record.pending);
+        let dropped = record.pending.dropped();
         record.pending.clear();
         self.answers.release(&mut record.pending, record.owner);
-        bytes
+        ReleasedFrames { bytes, dropped }
     }
 
     /// Tear down every window `client` owns: the session calls this when

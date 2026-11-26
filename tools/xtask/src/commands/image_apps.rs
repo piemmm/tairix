@@ -654,6 +654,30 @@ pub fn svgtext_store_files(
     )
 }
 
+/// The composed store files the Venus shader vertical's disk plants: the
+/// shared [`app_store_files`] set plus the test-only `shadercheck` fixture
+/// bundle (`plans/GPU.md` GP8, MG3), memoised per arch.
+///
+/// # Errors
+///
+/// As [`fixture_store_files`].
+pub fn shadercheck_store_files(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<&'static [AppStoreFile], String> {
+    static FILES: [OnceLock<Result<Vec<AppStoreFile>, String>>; MEMO_SLOTS] =
+        [const { OnceLock::new() }; MEMO_SLOTS];
+    fixture_store_files(
+        ctx,
+        arch,
+        profile,
+        "tests/integration/shadercheck_program",
+        tairix_test_shadercheck::COMMAND,
+        &FILES,
+    )
+}
+
 /// The composed store files the stream vertical's disk plants: the shared
 /// [`app_store_files`] set plus the test-only `tcpecho` stream-socket client
 /// fixture bundle (`plans/NETWORK.md` N5c), memoised per arch.

@@ -682,6 +682,7 @@ const fn is_state_edge(event: &WindowEvent) -> bool {
             | WindowEvent::CloseRequested { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::Shown { .. }
+            | WindowEvent::FramePresented { .. }
     )
 }
 

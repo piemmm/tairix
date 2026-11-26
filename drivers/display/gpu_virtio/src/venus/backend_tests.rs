@@ -3186,11 +3186,12 @@ fn a_module_longer_than_the_exchange_area_travels_whole_in_a_blob_of_its_own() {
     let context = context(&device);
     let spirv = lengthened(fill::SPIRV, EXCHANGE_LEN);
     // What the host is sent: the module folded, every value it could read
-    // unwritten defined.
+    // unwritten defined, and guarded.
     let admitted = Admitted::new(Module::decode(&spirv).expect("decoded")).expect("admitted");
     let specialized = admitted.specialize(&[]).expect("specialized");
-    let sent = admitted.fold(&specialized).expect("folded");
-    let sent = sent.module().bytes();
+    let folded = admitted.fold(&specialized).expect("folded");
+    let sent = folded.guarded().expect("guarded");
+    let sent = sent.admitted().module().bytes();
     assert!(sent.len() > EXCHANGE_LEN, "longer than the exchange area");
     let held = |state: &HostState| {
         state
@@ -3207,6 +3208,107 @@ fn a_module_longer_than_the_exchange_area_travels_whole_in_a_blob_of_its_own() {
     assert_eq!(made, 1);
     drop((pipeline, layout));
     rig.wait_for(|state| held(state) == 0);
+    drop((context, device));
+    let_go(&rig.finish());
+}
+
+/// A kernel reading a 16-bit push constant through a dynamic 16-bit index, a
+/// module declaring only that it stores 16-bit values there.
+const NARROW: &str = r#"OpCapability Shader
+OpCapability StoragePushConstant16
+OpMemoryModel Logical GLSL450
+OpEntryPoint GLCompute %main "main" %pc %out
+OpExecutionMode %main LocalSize 1 1 1
+OpDecorate %push Block
+OpMemberDecorate %push 0 Offset 0
+OpMemberDecorate %push 1 Offset 8
+OpMemberDecorate %push 2 Offset 10
+OpDecorate %halves ArrayStride 2
+OpDecorate %out DescriptorSet 0
+OpDecorate %out Binding 0
+OpDecorate %block Block
+OpMemberDecorate %block 0 Offset 0
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%uint = OpTypeInt 32 0
+%float = OpTypeFloat 32
+%half = OpTypeFloat 16
+%ushort = OpTypeInt 16 0
+%c0 = OpConstant %uint 0
+%c1 = OpConstant %uint 1
+%c4 = OpConstant %uint 4
+%halves = OpTypeArray %half %c4
+%push = OpTypeStruct %halves %ushort %ushort
+%block = OpTypeStruct %float
+%pc_ptr = OpTypePointer PushConstant %push
+%pc_half = OpTypePointer PushConstant %half
+%pc_ushort = OpTypePointer PushConstant %ushort
+%out_ptr = OpTypePointer StorageBuffer %block
+%out_float = OpTypePointer StorageBuffer %float
+%pc = OpVariable %pc_ptr PushConstant
+%out = OpVariable %out_ptr StorageBuffer
+%main = OpFunction %void None %fn
+%entry = OpLabel
+%ip = OpAccessChain %pc_ushort %pc %c1
+%i = OpLoad %ushort %ip
+%hp = OpAccessChain %pc_half %pc %c0 %i
+%h = OpLoad %half %hp
+%f = OpFConvert %float %h
+%op = OpAccessChain %out_float %out %c0
+OpStore %op %f
+OpReturn
+OpFunctionEnd
+"#;
+
+#[test]
+fn the_host_is_sent_its_module_guarded_and_a_guard_it_cannot_run_is_refused() {
+    let spirv = tairix_spirv::assemble::assemble(NARROW, Version::NEWEST);
+    let admitted = Admitted::new(Module::decode(&spirv).expect("decoded")).expect("admitted");
+    let specialized = admitted.specialize(&[]).expect("specialized");
+    let folded = admitted.fold(&specialized).expect("folded");
+    let unguarded = folded.module().bytes().to_vec();
+    let guarded = folded.guarded().expect("guarded");
+    let sent = guarded.admitted().module().bytes();
+    assert_ne!(
+        sent,
+        unguarded.as_slice(),
+        "its push constant indexed through a clamp"
+    );
+    let selects_halves = guarded
+        .admitted()
+        .capabilities()
+        .binary_search(&tairix_spirv::enumerant::Capability::FLOAT16)
+        .is_ok();
+    assert!(selects_halves, "the guard's own capability declared");
+    let rig = Rig::new();
+    let device = rig.device();
+    let made = context(&device);
+    let (pipeline, layout) = pass(&made, &spirv).expect("a pipeline");
+    let held = rig
+        .host
+        .state
+        .lock()
+        .expect("unpoisoned")
+        .contexts
+        .iter()
+        .flat_map(|(_, host)| host.objects.values())
+        .filter(|object| {
+            matches!(object, Object::Pipeline(program) if program.module.module().bytes() == sent)
+        })
+        .count();
+    assert_eq!(held, 1, "the guarded module is the one the host made");
+    drop((pipeline, layout, made, device));
+    let_go(&rig.finish());
+
+    let rig = Rig::new();
+    rig.offer(|offered| {
+        offered
+            .withheld
+            .push((Structure::PhysicalDeviceShaderFloat16Int8Features, 0));
+    });
+    let device = rig.device();
+    let context = context(&device);
+    assert!(matches!(pass(&context, &spirv), Err(Error::Unsupported)));
     drop((context, device));
     let_go(&rig.finish());
 }

@@ -162,7 +162,7 @@ mod kernel {
     use tairix_itest_witness::{field_str, field_u64, FixtureExit};
     use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
-    use tairix_log::{Event, EventId, Sink};
+    use tairix_log::{Event, Sink};
 
     use super::{assess, Verdict, LATENCY_OVERRUN_EVENT_ID};
 
@@ -181,11 +181,6 @@ mod kernel {
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
-
-    /// `EventId` emitted by the syscall dispatcher for an audited syscall
-    /// that passed every check. Pinned by the audit-id test in
-    /// `kernel/syscall/src/audit.rs`.
-    const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
     /// A record arrived with no `budget_ms`, so there is nothing to judge the
     /// stall against.
@@ -208,8 +203,7 @@ mod kernel {
     static OVERRUN_SEEN: AtomicBool = AtomicBool::new(false);
 
     /// The run's end: the fixture's exit, then the shell's.
-    static END: FixtureExit =
-        FixtureExit::new(&[tairix_test_stalltrace::COMMAND], SYSCALL_INVOKED_EVENT_ID);
+    static END: FixtureExit = FixtureExit::new(&[tairix_test_stalltrace::COMMAND]);
 
     /// Gate on the diagnostic trail: replay everything to serial, judge each
     /// overrun record, and arm the PASS on an accepted one.

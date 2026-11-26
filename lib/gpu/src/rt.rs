@@ -14,6 +14,7 @@ use crate::remote::{Link, Remote};
 use crate::serve::{Channel, Region, Server};
 use crate::software::Spawn;
 use crate::wire::ops::ExportToken;
+use crate::Error;
 
 /// The most workers a serve loop runs requests on, whatever the processors:
 /// a containment bound on the threads one driver keeps.
@@ -53,6 +54,33 @@ impl Region for RtRegion {
             bytes.copy_from_slice(data);
         }
     }
+
+    fn lend(
+        &self,
+        at: usize,
+        len: usize,
+        copy: &mut dyn FnMut(&[u8]) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let grant = self.0.lock();
+        let end = at.checked_add(len).ok_or(Error::OutOfRange)?;
+        copy(grant.bytes().get(at..end).ok_or(Error::OutOfRange)?)
+    }
+
+    fn lend_mut(
+        &self,
+        at: usize,
+        len: usize,
+        copy: &mut dyn FnMut(&mut [u8]) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let mut grant = self.0.lock();
+        let end = at.checked_add(len).ok_or(Error::OutOfRange)?;
+        copy(
+            grant
+                .bytes_mut()
+                .get_mut(at..end)
+                .ok_or(Error::OutOfRange)?,
+        )
+    }
 }
 
 impl Channel for RtChannel {
@@ -61,8 +89,8 @@ impl Channel for RtChannel {
         let _ = tairix_rt::call_reply(self.endpoint, ticket, frame);
     }
 
-    fn map(&self, client: ProcId, grant: u64) -> Result<Arc<dyn Region>, Errno> {
-        let mapped = MappedGrant::map(client, grant, GPU_REGION_MIN)?;
+    fn map(&self, client: ProcId, grant: u64, min_len: usize) -> Result<Arc<dyn Region>, Errno> {
+        let mapped = MappedGrant::map(client, grant, min_len)?;
         crate::shared(RtRegion(Mutex::new(mapped)))
             .map(|region| region as Arc<dyn Region>)
             .map_err(|_| Errno::OutOfMemory)
@@ -192,6 +220,14 @@ impl Link for RtLink {
         if let Some(bytes) = region.bytes().get(at..at.saturating_add(out.len())) {
             out.copy_from_slice(bytes);
         }
+    }
+
+    fn grant(&self, region: u64) -> Result<u64, Errno> {
+        let grant = tairix_rt::shm_grant(region, self.endpoint);
+        u64::try_from(grant)
+            .ok()
+            .filter(|&grant| grant >= 1)
+            .ok_or_else(|| Errno::from_syscall(grant))
     }
 }
 

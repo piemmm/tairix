@@ -105,6 +105,120 @@ impl Device {
             key,
         })
     }
+
+    /// Attach `memory`, of the caller's own, for host-visible memory to be
+    /// copied straight into and out of it ([`Allocation::read_into`],
+    /// [`Allocation::write_from`]): a device another process serves maps the
+    /// shared region it is, and one in this process reaches it as it lies.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Empty`] for no bytes; on a device another process serves,
+    /// [`Error::Unsupported`] for memory only this process reaches,
+    /// [`Error::TooMany`] and [`Error::TooLarge`] past
+    /// [`MAX_CLIENT_ATTACHMENTS`](tairix_abi::gpu::MAX_CLIENT_ATTACHMENTS)
+    /// and [`GPU_ATTACHED_MAX`](tairix_abi::gpu::GPU_ATTACHED_MAX), and the
+    /// refusal of the region's grant.
+    pub fn attach<B: Attachable>(&self, memory: B) -> Result<Attachment<B>, Error> {
+        let len = memory.bytes().len();
+        if len == 0 {
+            return Err(Error::Empty);
+        }
+        let filed = self.host.attach(memory.region(), len)?;
+        Ok(Attachment {
+            host: Arc::clone(&self.host),
+            filed,
+            memory,
+        })
+    }
+}
+
+/// Memory of the caller's own a device copies host-visible memory straight
+/// into and out of ([`Device::attach`]).
+pub trait Attachable: Send {
+    /// The bytes.
+    fn bytes(&self) -> &[u8];
+    /// The bytes, to change.
+    fn bytes_mut(&mut self) -> &mut [u8];
+    /// The kernel id of the shared region the bytes are, which a device
+    /// another process serves maps; `None` for memory only this process
+    /// reaches.
+    fn region(&self) -> Option<u64>;
+}
+
+impl Attachable for Vec<u8> {
+    fn bytes(&self) -> &[u8] {
+        self
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        self
+    }
+
+    fn region(&self) -> Option<u64> {
+        None
+    }
+}
+
+impl Attachable for tairix_rt::shm::SharedRegion {
+    fn bytes(&self) -> &[u8] {
+        Self::bytes(self)
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        Self::bytes_mut(self)
+    }
+
+    fn region(&self) -> Option<u64> {
+        Some(self.id())
+    }
+}
+
+/// Memory of the caller's own, attached to a device: let go of when dropped.
+pub struct Attachment<B: Attachable> {
+    host: Arc<dyn Host>,
+    /// The attachment a device another process serves filed for it.
+    filed: Option<u32>,
+    memory: B,
+}
+
+impl<B: Attachable> Attachment<B> {
+    /// The memory.
+    pub fn memory(&self) -> &B {
+        &self.memory
+    }
+
+    /// The memory, to change: a device writes it only within a copy into it,
+    /// which holds the attachment.
+    pub fn memory_mut(&mut self) -> &mut B {
+        &mut self.memory
+    }
+
+    /// `len` bytes at `at`, checked against the memory's end.
+    fn span(&self, at: usize, len: usize) -> Result<core::ops::Range<usize>, Error> {
+        let end = at.checked_add(len).ok_or(Error::OutOfRange)?;
+        if end > self.memory.bytes().len() {
+            return Err(Error::OutOfRange);
+        }
+        Ok(at..end)
+    }
+}
+
+impl<B: Attachable> Drop for Attachment<B> {
+    fn drop(&mut self) {
+        if let Some(filed) = self.filed {
+            self.host.detach(filed);
+        }
+    }
+}
+
+impl<B: Attachable> fmt::Debug for Attachment<B> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Attachment")
+            .field("len", &self.memory.bytes().len())
+            .field("filed", &self.filed)
+            .finish_non_exhaustive()
+    }
 }
 
 impl fmt::Debug for Device {
@@ -330,6 +444,71 @@ impl Allocation {
     /// As [`write`](Self::write).
     pub fn read(&self, offset: u64, out: &mut [u8]) -> Result<(), Error> {
         self.host.read(self.context, self.key, offset, out)
+    }
+
+    /// Copy `len` bytes at `offset` straight into `to` at `at`: one copy, by
+    /// the driver of a device another process serves, or by this process.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Foreign`] for an attachment of another device,
+    /// [`Error::OutOfRange`] past the attachment's end, and
+    /// [`write`](Self::write)'s.
+    pub fn read_into<B: Attachable>(
+        &self,
+        offset: u64,
+        to: &mut Attachment<B>,
+        (at, len): (usize, usize),
+    ) -> Result<(), Error> {
+        self.attached(to)?;
+        let span = to.span(at, len)?;
+        if let Some(filed) = to.filed {
+            return self.host.transfer(
+                (self.context, self.key, offset),
+                (filed, at as u64, len as u64),
+                true,
+            );
+        }
+        let into = to
+            .memory
+            .bytes_mut()
+            .get_mut(span)
+            .ok_or(Error::OutOfRange)?;
+        self.host.read(self.context, self.key, offset, into)
+    }
+
+    /// Copy `len` bytes of `from` at `at` straight into this memory at
+    /// `offset`, as [`read_into`](Self::read_into) copies the other way.
+    ///
+    /// # Errors
+    ///
+    /// As [`read_into`](Self::read_into).
+    pub fn write_from<B: Attachable>(
+        &self,
+        offset: u64,
+        from: &Attachment<B>,
+        (at, len): (usize, usize),
+    ) -> Result<(), Error> {
+        self.attached(from)?;
+        let span = from.span(at, len)?;
+        if let Some(filed) = from.filed {
+            return self.host.transfer(
+                (self.context, self.key, offset),
+                (filed, at as u64, len as u64),
+                false,
+            );
+        }
+        let data = from.memory.bytes().get(span).ok_or(Error::OutOfRange)?;
+        self.host.write(self.context, self.key, offset, data)
+    }
+
+    /// Whether `attachment` is of this memory's device.
+    fn attached<B: Attachable>(&self, attachment: &Attachment<B>) -> Result<(), Error> {
+        if Arc::ptr_eq(&self.host, &attachment.host) {
+            Ok(())
+        } else {
+            Err(Error::Foreign)
+        }
     }
 
     /// A token another context of this device imports the memory through.

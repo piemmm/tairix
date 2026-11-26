@@ -208,6 +208,12 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   slot it left free and a size a slot holds — and brings a replaced worker,
   handed a ring of its own, back to the latest keyframe. `View.app` plays
   movies through it.
+- **The WGSL compile service** (`wgsl`): WGSL source compiled to SPIR-V by
+  `tairix-wgsl` in a worker given message-sized memory. The caller-side
+  `compile` believes the module only once `lib/spirv`'s validator has admitted
+  it again, and a diagnostic only where its span, code and message hold on
+  the caller's own copy of the source; any other reply retires the worker as
+  a crash does. `gpucheck --shader` compiles its kernels through it.
 - **The spawn share** (`session::Share`, `session::ShareWrite`): a region an
   owner hands its session worker at spawn, read by the owner only by copying
   out of it. `rt::RtSessionLauncher::sharing` makes a fresh one for each worker

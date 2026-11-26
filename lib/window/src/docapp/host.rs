@@ -2625,6 +2625,7 @@ impl<A: DocumentApp> Host<A> {
             }
             WindowEvent::Minimized { .. }
             | WindowEvent::Shown { .. }
+            | WindowEvent::FramePresented { .. }
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
@@ -2767,6 +2768,7 @@ impl<A: DocumentApp> Host<A> {
             | WindowEvent::MenuChosen { .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::Shown { .. }
+            | WindowEvent::FramePresented { .. }
             | WindowEvent::ToolMoved { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
@@ -2927,6 +2929,7 @@ impl<A: DocumentApp> Host<A> {
             // Minimised and shown only with its window, it asks for no picker.
             WindowEvent::Minimized { .. }
             | WindowEvent::Shown { .. }
+            | WindowEvent::FramePresented { .. }
             | WindowEvent::PickCancelled { .. }
             | WindowEvent::FolderPicked { .. }
             | WindowEvent::MenuClosed { .. }

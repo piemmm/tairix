@@ -2912,11 +2912,18 @@ pub enum WindowRequest {
     },
     /// Show frame `frame_index` of window `window_id`, of which only
     /// `damage` changed since the previously presented frame.
+    ///
+    /// The session finishes the present with a [`WindowEvent::FramePresented`]
+    /// naming `serial` or a later serial of the window, unless the window
+    /// closes first.
     Present {
         /// The window being presented (from the `Create` reply).
         window_id: u64,
         /// Index of the frame inside the window's region.
         frame_index: u32,
+        /// The client's number for this present: nonzero and above every
+        /// serial the window presented before, or the present is refused.
+        serial: u64,
         /// The changed rectangles, each non-empty: the edits themselves, so
         /// the session converts and recomposes what moved rather than the box
         /// spanning it.
@@ -4015,12 +4022,12 @@ const OP_DROP_LANDING: u16 = 49;
 const REQUEST_HEADER_LEN: usize = 8;
 
 /// Encoded size of a [`WindowRequest::Present`] naming no rectangle: the
-/// header, the window id, the frame index, and the rectangle count. Each
-/// rectangle adds [`PRESENT_RECT_LEN`].
+/// header, the window id, the frame index, the rectangle count and the
+/// serial. Each rectangle adds [`PRESENT_RECT_LEN`].
 ///
 /// This is the hottest operation on the channel — one per composited frame
 /// per window — so the frame is as long as the rectangles it names.
-const PRESENT_WIRE_LEN: usize = 24;
+const PRESENT_WIRE_LEN: usize = 32;
 /// Encoded size of one damage rectangle a present names: four words.
 const PRESENT_RECT_LEN: usize = 16;
 /// Encoded size of a request whose whole operand block is one window id
@@ -5160,18 +5167,20 @@ impl WindowRequest {
         }
     }
 
-    /// Write a present's operand block: the window, the frame index, and the
-    /// damage rectangle. A no-op for any other request.
+    /// Write a present's operand block: the window, the frame index, the
+    /// serial and the damage rectangles. A no-op for any other request.
     fn write_present_operands(&self, out: &mut [u8]) {
         if let Self::Present {
             window_id,
             frame_index,
+            serial,
             damage,
         } = *self
         {
             put_u64(out, 8, window_id);
             put_u32(out, 16, frame_index);
             put_u32(out, 20, u32::try_from(damage.len()).unwrap_or(0));
+            put_u64(out, 24, serial);
             for (index, rect) in damage.rects().iter().enumerate() {
                 let at = PRESENT_WIRE_LEN + index * PRESENT_RECT_LEN;
                 put_u32(out, at, rect.x);
@@ -6287,8 +6296,9 @@ fn read_hand_over(bytes: &[u8]) -> Result<WindowRequest, Errno> {
 }
 
 /// Decode the operands of a [`WindowRequest::Present`]: the window, the
-/// frame index, and one to [`MAX_DAMAGE_RECTS`] damage rectangles, none of
-/// them empty, the frame exactly as long as the count says.
+/// frame index, a nonzero serial, and one to [`MAX_DAMAGE_RECTS`] damage
+/// rectangles, none of them empty, the frame exactly as long as the count
+/// says.
 fn read_present(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     if bytes.len() < PRESENT_WIRE_LEN {
         return Err(Errno::LengthOutOfRange);
@@ -6300,6 +6310,7 @@ fn read_present(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     exact_len(bytes, PRESENT_WIRE_LEN + count * PRESENT_RECT_LEN)?;
     let window_id = nonzero_id(read_u64(bytes, 8))?;
     let frame_index = read_u32(bytes, 16);
+    let serial = nonzero_id(read_u64(bytes, 24))?;
     let mut rects = [NO_RECT; MAX_DAMAGE_RECTS];
     for (index, rect) in rects.iter_mut().take(count).enumerate() {
         let at = PRESENT_WIRE_LEN + index * PRESENT_RECT_LEN;
@@ -6313,6 +6324,7 @@ fn read_present(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     Ok(WindowRequest::Present {
         window_id,
         frame_index,
+        serial,
         damage: DamageList::new(&rects[..count])?,
     })
 }
@@ -9802,6 +9814,8 @@ const EV_SHOWN: u16 = 37;
 const EV_DOCUMENTS_FOLDER: u16 = 38;
 /// Wire event discriminant of [`WindowEvent::DocumentsFolderRefused`].
 const EV_DOCUMENTS_FOLDER_REFUSED: u16 = 39;
+/// Wire event discriminant of [`WindowEvent::FramePresented`].
+const EV_FRAME_PRESENTED: u16 = 40;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -10118,6 +10132,22 @@ pub enum WindowEvent {
         /// Whether it is on show.
         shown: bool,
     },
+    /// The session has finished the window's presents up to `serial`
+    /// ([`WindowRequest::Present`]): the desktop frame carrying it reached the
+    /// screen, or the session set it aside unseen. A window's fates come in
+    /// serial order, and a later serial answers for every one before it, so a
+    /// run folds to the newest.
+    FramePresented {
+        /// The window.
+        window_id: u64,
+        /// The newest present finished.
+        serial: u64,
+        /// When, on the monotonic clock: the flip that showed the frame, or
+        /// the moment it was set aside.
+        at_ns: u64,
+        /// Whether the window's pixels are in the frame on screen.
+        shown: bool,
+    },
     /// The window manager changed the window's client content size — one
     /// sample of a live resize-grab, or a maximize/restore size toggle. The
     /// app re-lays-out to the new size: it allocates a fresh frame region
@@ -10431,6 +10461,25 @@ impl WindowEvent {
     /// (the embedded [`KeyInput`] record is the widest).
     pub const WIRE_LEN: usize = 40;
 
+    /// Write a [`Self::FramePresented`]'s block into the already-headed frame
+    /// `out`: the serial, the moment and whether it is shown. A no-op for any
+    /// other event.
+    fn write_frame_presented(&self, out: &mut [u8; Self::WIRE_LEN]) {
+        let Self::FramePresented {
+            serial,
+            at_ns,
+            shown,
+            ..
+        } = *self
+        else {
+            return;
+        };
+        put_u16(out, 6, EV_FRAME_PRESENTED);
+        put_u64(out, 16, serial);
+        put_u64(out, 24, at_ns);
+        out[32] = u8::from(shown);
+    }
+
     /// Write a [`Self::Resized`]'s block into the already-headed frame
     /// `out`. A no-op for any other event.
     fn write_resized(&self, out: &mut [u8; Self::WIRE_LEN]) {
@@ -10629,6 +10678,7 @@ impl WindowEvent {
             | Self::PointerMotion { window_id, .. }
             | Self::PointerLock { window_id, .. }
             | Self::Shown { window_id, .. }
+            | Self::FramePresented { window_id, .. }
             | Self::TerrainChanged { window_id, .. }
             | Self::LayerPointer { window_id, .. }
             | Self::ToolMoved { window_id, .. }
@@ -10765,6 +10815,7 @@ impl WindowEvent {
                 put_u16(&mut out, 6, EV_MINIMIZED);
             }
             Self::Resized { .. } => self.write_resized(&mut out),
+            Self::FramePresented { .. } => self.write_frame_presented(&mut out),
             Self::RedrawRequested { .. } => {
                 put_u16(&mut out, 6, EV_REDRAW_REQUESTED);
             }
@@ -10910,6 +10961,7 @@ impl WindowEvent {
             EV_POINTER => read_pointer_event(window_id, bytes),
             EV_POINTER_MOTION => read_pointer_motion(window_id, bytes),
             EV_POINTER_LOCK | EV_SHOWN => read_flag_event(kind, window_id, bytes),
+            EV_FRAME_PRESENTED => read_frame_presented(window_id, bytes),
             EV_FILE_PICKED | EV_SUBTREE_PICKED | EV_FOLDER_PICKED => {
                 read_pick_event(kind, window_id, bytes)
             }
@@ -11742,6 +11794,18 @@ fn read_preview_render_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent
 
 /// Refuse an event whose reserved tail (from `from` to the end of the
 /// fixed frame) carries any non-zero byte.
+/// Decode a [`WindowEvent::FramePresented`]'s block: a nonzero serial, the
+/// moment, a flag, and a zero tail.
+fn read_frame_presented(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    event_reserved_zero(bytes, 33)?;
+    Ok(WindowEvent::FramePresented {
+        window_id,
+        serial: nonzero_id(read_u64(bytes, 16))?,
+        at_ns: read_u64(bytes, 24),
+        shown: flag_at(bytes, 32)?,
+    })
+}
+
 fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
     if bytes[from..WindowEvent::WIRE_LEN].iter().any(|&b| b != 0) {
         return Err(Errno::BadMagic);
@@ -11988,6 +12052,7 @@ mod tests {
         WindowRequest::Present {
             window_id: 3,
             frame_index: 1,
+            serial: 9,
             damage: DamageList::new(&[DamageRect {
                 x: 10,
                 y: 20,
@@ -12009,6 +12074,7 @@ mod tests {
         WindowRequest::Present {
             window_id: 3,
             frame_index: 0,
+            serial: u64::MAX,
             damage: DamageList::new(&rects).expect("as many as one may"),
         }
     }
@@ -12871,8 +12937,8 @@ mod tests {
     /// the frame were shared again.
     #[test]
     fn present_frames_are_short() {
-        assert_eq!(sample_present().wire_len(), 40, "one rectangle");
-        assert_eq!(widest_present().wire_len(), 152, "the most a present names");
+        assert_eq!(sample_present().wire_len(), 48, "one rectangle");
+        assert_eq!(widest_present().wire_len(), 160, "the most a present names");
         assert!(widest_present().wire_len() * 4 < WindowRequest::MAX_WIRE_LEN);
     }
 
@@ -17040,15 +17106,15 @@ mod tests {
     }
 
     #[test]
-    fn present_refuses_an_empty_damage_rectangle_and_a_zero_id() {
+    fn present_refuses_an_empty_damage_rectangle_a_zero_id_and_a_zero_serial() {
         let mut zero_width = sample_present().frame();
-        zero_width[32..36].copy_from_slice(&0u32.to_le_bytes());
+        zero_width[40..44].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&zero_width),
             Err(Errno::LengthOutOfRange)
         );
         let mut zero_height = sample_present().frame();
-        zero_height[36..40].copy_from_slice(&0u32.to_le_bytes());
+        zero_height[44..48].copy_from_slice(&0u32.to_le_bytes());
         assert_eq!(
             WindowRequest::from_bytes(&zero_height),
             Err(Errno::LengthOutOfRange)
@@ -17056,6 +17122,13 @@ mod tests {
         let mut zero_id = sample_present().frame();
         zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
+        let mut zero_serial = sample_present().frame();
+        zero_serial[24..32].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&zero_serial),
+            Err(Errno::OutOfRange),
+            "no present is numbered nought"
+        );
         let mut zero_close = WindowRequest::Close { window_id: 9 }.frame();
         zero_close[8..16].copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(
@@ -18838,6 +18911,54 @@ mod tests {
             },
         ] {
             assert_eq!(WindowEvent::from_bytes(&event.to_le_bytes()), Ok(event));
+        }
+    }
+
+    /// A frame's fate round-trips, and names a present the window made, so a
+    /// serial of nought, a flag that is neither, and anything in the reserved
+    /// tail are refused.
+    #[test]
+    fn a_frame_presented_event_round_trips_and_refuses_a_zero_serial_a_bad_flag_and_a_dirty_tail() {
+        for event in [
+            WindowEvent::FramePresented {
+                window_id: 4,
+                serial: u64::MAX,
+                at_ns: 1_234_567,
+                shown: true,
+            },
+            WindowEvent::FramePresented {
+                window_id: 4,
+                serial: 1,
+                at_ns: 0,
+                shown: false,
+            },
+        ] {
+            assert_eq!(WindowEvent::from_bytes(&event.to_le_bytes()), Ok(event));
+        }
+        let good = WindowEvent::FramePresented {
+            window_id: 4,
+            serial: 9,
+            at_ns: 77,
+            shown: true,
+        }
+        .to_le_bytes();
+        let mut zero_serial = good;
+        zero_serial[16..24].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            WindowEvent::from_bytes(&zero_serial),
+            Err(Errno::OutOfRange)
+        );
+        let mut bad_flag = good;
+        bad_flag[32] = 2;
+        assert_eq!(WindowEvent::from_bytes(&bad_flag), Err(Errno::OutOfRange));
+        for at in 33..WindowEvent::WIRE_LEN {
+            let mut dirty = good;
+            dirty[at] = 1;
+            assert_eq!(
+                WindowEvent::from_bytes(&dirty),
+                Err(Errno::BadMagic),
+                "byte {at}"
+            );
         }
     }
 

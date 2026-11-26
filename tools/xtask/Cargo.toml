@@ -175,6 +175,10 @@ tairix-test-amiga-image = { path = "../../tests/integration/amiga_image", versio
 # (its `Run` binary's userland runtime) is for its freestanding cross-compile
 # only.
 tairix-test-svgtext = { path = "../../tests/integration/svgtext_program", version = "=0.0.0", default-features = false }
+# The Venus shader vertical's kernels and the record its script waits on, and
+# the front end its compiled kernel is compiled with as it is planted.
+tairix-test-shadercheck = { path = "../../tests/integration/shadercheck_program", version = "=0.0.0", default-features = false }
+tairix-wgsl = { path = "../../lib/wgsl", version = "=0.0.0" }
 # The stream-socket vertical's fixture constant: the `TCPECHO PASS` marker its
 # serial script waits for is pinned against the fixture's own `PASS_MARKER` by
 # a unit test, so the script and the program cannot drift. `default-features =
@@ -522,6 +526,7 @@ tairix-test-openmicro-qemu-aarch64 = { path = "../../tests/integration/openmicro
 # and the bundles its guest latches, so the script and the PASS gate read one
 # definition.
 tairix-test-wintersun-client-qemu-aarch64 = { path = "../../tests/integration/wintersun_client_qemu_aarch64", version = "=0.0.0" }
+tairix-test-gpucheck-present-qemu-aarch64 = { path = "../../tests/integration/gpucheck_present_qemu_aarch64", version = "=0.0.0" }
 # The Cinder vertical's shared contract: the bundle its guest latches the
 # launch to, which the script opens from the program library.
 tairix-test-cinder-qemu-aarch64 = { path = "../../tests/integration/cinder_qemu_aarch64", version = "=0.0.0" }
@@ -582,6 +587,11 @@ tairix-wintersun-figure = { path = "../../userland/games/wintersun/figure", vers
 # copy of it. Taken without its `run` feature: the host needs the library,
 # not the freestanding program.
 tairix-wintersun-app = { path = "../../userland/games/wintersun/app", version = "=0.0.0", default-features = false }
+# The `gpucheck --present` vertical holds the screen to the scene drawn here
+# on the software device by the command's own library. Taken without its
+# `program` feature: the host needs the library, not the freestanding program.
+tairix-gpucheck = { path = "../../userland/apps/gpucheck", version = "=0.0.0", default-features = false }
+tairix-gpu = { path = "../../lib/gpu", version = "=0.0.0" }
 # The Cinder vertical lays the pen out and sizes his surface by the app's own
 # rules, so the button it clicks is where the pen draws it.
 tairix-cinder = { path = "../../userland/apps/cinder", version = "=0.0.0" }

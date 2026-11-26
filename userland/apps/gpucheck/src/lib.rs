@@ -1,5 +1,6 @@
 //! `gpucheck`: the same work run on a GPU and on the software device, and
-//! where their answers differ (`plans/GPU.md` GP11.2, GP5.4, GP5.5, GP5.6).
+//! where their answers differ (`plans/GPU.md` GP11.2, GP5.4, GP5.5, GP5.6),
+//! and a kernel a program supplies run the same way (`shader`, GP8).
 //!
 //! The work is, first, the transfers every device runs: words updated into
 //! host-visible memory, a fill beside them, both copied through memory the
@@ -8,10 +9,12 @@
 //! stating the uses it makes of its formats, the image work (`images`) and,
 //! on one that draws, the render work (`render`); and last an indirect
 //! dispatch whose counts are past the device's own, which must lose its
-//! context. Each step runs on the first queue family stating its kind of
-//! work. What each device leaves in memory, and how it refused, is the
-//! answer: two devices that agree leave the same bytes and words, refuse the
-//! same command for the same reason, and lose the same context.
+//! context; and last the differential corpus (`corpus`), every instruction
+//! the validator admits run and held to the software device's answer. Each
+//! step runs on the first queue family stating its kind of work. What each
+//! device leaves in memory, and how it refused, is the answer: two devices
+//! that agree leave the same bytes and words, refuse the same command for
+//! the same reason, and lose the same context.
 
 #![no_std]
 #![deny(missing_docs)]
@@ -21,9 +24,25 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+// The unit tests refuse the host's heap to see each refusal answered.
+#[cfg(test)]
+#[global_allocator]
+static ALLOCATOR: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
+
+mod corpus;
 mod images;
 mod render;
+mod scene;
+mod shader;
 
+pub use corpus::{Held, Output, Ran};
+pub use scene::{memory_for, rendered, Scene};
+pub use shader::{
+    compare_kernel, lost, marked_at, run_kernel, Answered, Kernel, KernelDifference, KernelError,
+    Outcome, Source, DEFAULT_WORDS, MAX_FILE_BYTES, MAX_WORDS,
+};
+
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -34,22 +53,147 @@ use tairix_abi::Duration64;
 use tairix_gpu::{
     Allocation, AllocationDesc, BindSetEntry, BindSetLayout, Buffer, BufferDesc, BufferUsage,
     CommandBuffer, ComputePipeline, ComputePipelineDesc, Context, ContextDesc, CopyRegion,
-    DescriptorType, Device, Error, LayoutBinding, Limits, Loss, MemoryProperties, NoThreads,
-    PushConstants, QueueCapabilities, Resource, SoftwareDesc, Submission, SubmitError,
-    DEFAULT_SUBGROUP_SIZE,
+    DescriptorType, Device, Error, Format, FormatFeatures, LayoutBinding, Limits, Loss,
+    MemoryProperties, NoThreads, PushConstants, QueueCapabilities, Resource, SoftwareDesc,
+    Submission, SubmitError, DEFAULT_SUBGROUP_SIZE,
 };
 use tairix_shaders::compose::fill;
 use tairix_shaders::{Pinned, Refused, SET};
 use tairix_spirv::{Admitted, Module, Stage, Stages};
+use tairix_util::getopt::{Arg, Opt, Order, Scan, Takes};
+use tairix_util::quote::quote;
 
 /// The usage line the short help shows.
-pub const USAGE: &str = "usage: gpucheck [-h | -?]";
+pub const USAGE: &str = "usage: gpucheck [--present | --shader FILE [--words N]] [-h | -?]";
+
+/// What a `gpucheck` command line asks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Command<'a> {
+    /// Check every served GPU against the software device.
+    Check,
+    /// Show the present scene full screen through a swapchain, and check
+    /// every frame presented was shown.
+    Present,
+    /// Run the kernel `file` holds over a buffer of `words` on every served
+    /// GPU and on the software device.
+    Shader {
+        /// The file holding the kernel: WGSL source or a SPIR-V module.
+        file: &'a str,
+        /// The words of the buffer it runs over.
+        words: u32,
+    },
+    /// Show the command's own short help.
+    Help,
+}
+
+/// Why a `gpucheck` command line was refused.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CommandError {
+    /// An option the shared `getopt` refuses, worded as it words it.
+    Option(tairix_util::getopt::Refusal),
+    /// An operand; the command takes none.
+    ExtraOperand(String),
+    /// A word count that is not a whole number from one to [`MAX_WORDS`].
+    Words(String),
+    /// A word count without a kernel to run over them.
+    WordsWithoutShader,
+    /// Both `--present` and `--shader`.
+    PresentAndShader,
+}
+
+impl fmt::Display for CommandError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Option(refusal) => write!(f, "{refusal}"),
+            Self::ExtraOperand(operand) => {
+                write!(f, "extra operand {operand}", operand = quote(operand))
+            }
+            Self::Words(count) => write!(
+                f,
+                "invalid word count {count}: a whole number from 1 to {MAX_WORDS}",
+                count = quote(count)
+            ),
+            Self::WordsWithoutShader => f.write_str("--words is given only with --shader"),
+            Self::PresentAndShader => f.write_str("--present and --shader exclude each other"),
+        }
+    }
+}
+
+/// What an option of the command line asks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Asked {
+    Help,
+    Present,
+    Shader,
+    Words,
+}
+
+/// The options `gpucheck` takes: what each asks.
+const OPTIONS: &[Opt<Asked>] = &[
+    Opt::flag('h', &["help"], Asked::Help),
+    Opt::letter('?', Takes::Nothing, Asked::Help),
+    Opt::long(&["present"], Takes::Nothing, Asked::Present),
+    Opt::long(&["shader"], Takes::Value, Asked::Shader),
+    Opt::long(&["words"], Takes::Value, Asked::Words),
+];
+
+/// Read `args`, the command line after the program's name: a help switch
+/// anywhere asks for help, and a repeated option's last value stands.
+///
+/// # Errors
+///
+/// [`CommandError::Option`] for an option `getopt` refuses,
+/// [`CommandError::ExtraOperand`] for an operand, [`CommandError::Words`]
+/// for a word count out of range, and [`CommandError::WordsWithoutShader`]
+/// or [`CommandError::PresentAndShader`] for options that do not go
+/// together.
+pub fn command<'a>(args: &'a [&'a str]) -> Result<Command<'a>, CommandError> {
+    let (mut present, mut file, mut words, mut operand) = (false, None, None, None);
+    for arg in Scan::new(OPTIONS, args, Order::Permute) {
+        match arg.map_err(CommandError::Option)? {
+            Arg::Opt(Asked::Help, _) => return Ok(Command::Help),
+            Arg::Opt(Asked::Present, _) => present = true,
+            Arg::Opt(Asked::Shader, value) => file = value,
+            Arg::Opt(Asked::Words, value) => words = value,
+            Arg::Operand(found) => {
+                operand.get_or_insert(found);
+            }
+        }
+    }
+    if let Some(operand) = operand {
+        return Err(CommandError::ExtraOperand(String::from(operand)));
+    }
+    match (present, file, words) {
+        (true, Some(_), _) => Err(CommandError::PresentAndShader),
+        (_, None, Some(_)) => Err(CommandError::WordsWithoutShader),
+        (true, None, None) => Ok(Command::Present),
+        (false, None, None) => Ok(Command::Check),
+        (false, Some(file), words) => {
+            let words = match words {
+                None => DEFAULT_WORDS,
+                Some(count) => count
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|&count| (1..=MAX_WORDS).contains(&count))
+                    .ok_or_else(|| CommandError::Words(String::from(count)))?,
+            };
+            Ok(Command::Shader { file, words })
+        }
+    }
+}
 
 /// The bytes of each memory the transfers run through.
 const BYTES: u64 = 64 << 10;
 
 /// The longest the work takes on any device.
-const DEADLINE: Duration64 = Duration64::from_secs(10);
+pub const DEADLINE: Duration64 = Duration64::from_secs(DEADLINE_SECS);
+
+/// How long the CPU waits on the work: as long again past its deadline,
+/// which runs only once the device starts the work, for it to start and for
+/// its end to be told.
+const WAIT: Duration64 = Duration64::from_secs(2 * DEADLINE_SECS);
+
+const DEADLINE_SECS: i64 = 10;
 
 /// The memory the reference is made for: the half its heap offers holds the
 /// work's memory and its pipelines with room to spare.
@@ -74,6 +218,8 @@ pub struct Answer {
     /// How a dispatch past the device's counts was answered; `None` where no
     /// count is past them.
     pub past_counts: Option<Result<(), Error>>,
+    /// What each kernel of the differential corpus left, in its order.
+    pub corpus: Vec<Ran>,
 }
 
 /// What the render work left.
@@ -208,6 +354,17 @@ pub enum Difference {
         /// The reference's.
         reference: Option<Result<(), Error>>,
     },
+    /// A word a kernel of the corpus left is past what it is held to.
+    Corpus {
+        /// The kernel's family.
+        family: &'static str,
+        /// The instruction the word answers.
+        case: &'static str,
+        /// What the device left.
+        device: u32,
+        /// What the reference left.
+        reference: u32,
+    },
 }
 
 impl fmt::Display for Difference {
@@ -282,6 +439,15 @@ impl fmt::Display for Difference {
                 f.write_str(" where the software device's was ")?;
                 write_outcome(f, reference.as_ref())
             }
+            Self::Corpus {
+                family,
+                case,
+                device,
+                reference,
+            } => write!(
+                f,
+                "{family}: {case} left {device:#010x} where the software device left {reference:#010x}"
+            ),
         }
     }
 }
@@ -317,8 +483,21 @@ fn write_ran(f: &mut fmt::Formatter<'_>, ran: &Result<(), Error>) -> fmt::Result
 ///
 /// What the software device refused.
 pub fn reference(clock: Arc<dyn MonotonicClock + Send + Sync>) -> Result<Device, Error> {
+    software(REFERENCE_MEMORY, clock)
+}
+
+/// A software device of a machine of `memory_bytes`, reading its deadlines
+/// from `clock` and running its work on the thread that readies it.
+///
+/// # Errors
+///
+/// What the software device refused.
+pub fn software(
+    memory_bytes: u64,
+    clock: Arc<dyn MonotonicClock + Send + Sync>,
+) -> Result<Device, Error> {
     Device::software(&SoftwareDesc {
-        memory_bytes: REFERENCE_MEMORY,
+        memory_bytes,
         clock,
         runner: Arc::new(tairix_parallel::Serial),
         threads: &NoThreads,
@@ -326,14 +505,41 @@ pub fn reference(clock: Arc<dyn MonotonicClock + Send + Sync>) -> Result<Device,
     })
 }
 
-/// The first memory type of `device` holding all of `wanted`.
-fn memory_type(device: &Device, wanted: MemoryProperties) -> Option<u32> {
+/// The first host-visible, coherent memory type of `device`: what all the
+/// memory the CPU reads and writes is made of.
+///
+/// # Errors
+///
+/// [`Error::NoSuchMemoryType`] where the device has none.
+fn near(device: &Device) -> Result<u32, Error> {
+    let visible = MemoryProperties::HOST_VISIBLE.with(MemoryProperties::HOST_COHERENT);
     device
         .info()
         .memory_types
         .iter()
-        .position(|kind| kind.properties.contains(wanted))
+        .position(|kind| kind.properties.contains(visible))
         .and_then(|index| u32::try_from(index).ok())
+        .ok_or(Error::NoSuchMemoryType)
+}
+
+/// Whether `device` states each use `uses` names of its format.
+fn states_uses(device: &Device, uses: &[(Format, FormatFeatures)]) -> bool {
+    let formats = &device.info().formats;
+    uses.iter()
+        .all(|&(format, wanted)| formats.get(format).contains(wanted))
+}
+
+/// Each of `resources` bound in turn, from binding 0.
+fn in_binding_order<'a, const N: usize>(resources: &'a [Resource<'a>; N]) -> [BindSetEntry<'a>; N] {
+    let mut next = 0;
+    resources.each_ref().map(|resource| {
+        let binding = next;
+        next += 1;
+        BindSetEntry {
+            binding,
+            resources: core::slice::from_ref(resource),
+        }
+    })
 }
 
 /// A buffer for `usage` over memory of its own: `size` bytes of type
@@ -368,7 +574,11 @@ fn bytes_of(words: &[u32]) -> Vec<u8> {
 }
 
 /// The first queue family of `device` stating `work`.
-fn family(device: &Device, work: QueueCapabilities) -> Result<u32, Error> {
+///
+/// # Errors
+///
+/// [`Error::Unsupported`] where none states it.
+pub fn family(device: &Device, work: QueueCapabilities) -> Result<u32, Error> {
     device
         .info()
         .queue_families
@@ -390,7 +600,7 @@ fn submit(context: &Context, family: u32, commands: &CommandBuffer) -> Result<()
             deadline: DEADLINE,
         })
         .map_err(|refused| refused.error)?
-        .wait(DEADLINE)
+        .wait(WAIT)
 }
 
 /// A refusal, named for the work's step `step`.
@@ -404,11 +614,7 @@ fn at(step: &'static str) -> impl Fn(Error) -> Refusal {
 ///
 /// The step the device refused that every device must run, and why.
 pub fn work(device: &Device) -> Result<Answer, Refusal> {
-    let visible = MemoryProperties::HOST_VISIBLE.with(MemoryProperties::HOST_COHERENT);
-    let near = memory_type(device, visible).ok_or(Refusal {
-        step: TRANSFERS,
-        why: Error::NoSuchMemoryType,
-    })?;
+    let near = near(device).map_err(at(TRANSFERS))?;
     let (bytes, refused) = transfers(device, near).map_err(at(TRANSFERS))?;
     let context = device
         .create_context(&ContextDesc::default())
@@ -423,6 +629,7 @@ pub fn work(device: &Device) -> Result<Answer, Refusal> {
     let images = images::work(device, near).map_err(at(IMAGES))?;
     let render = render::work(device, near).map_err(at(RENDER))?;
     let past_counts = past_counts(device, near).map_err(at(PAST_COUNTS))?;
+    let corpus = corpus::run(device)?;
     Ok(Answer {
         bytes,
         refused,
@@ -430,6 +637,7 @@ pub fn work(device: &Device) -> Result<Answer, Refusal> {
         images,
         render,
         past_counts,
+        corpus,
     })
 }
 
@@ -487,18 +695,18 @@ fn transfers(device: &Device, near: u32) -> Result<(Vec<u8>, Option<SubmitError>
     Ok((bytes, refused))
 }
 
-/// The compute pipeline of `spirv`'s entry point, laid out as the module
-/// states with `push` bytes of push constants, its set's layout, and that
-/// set's bindings.
+/// The compute pipeline of `spirv`'s entry point `entry`, laid out as the
+/// module states with `push` bytes of push constants, its set's layout, and
+/// that set's bindings.
 fn pipeline(
     context: &Context,
-    spirv: &[u8],
+    (spirv, entry_point): (&[u8], &str),
     push: u32,
 ) -> Result<(ComputePipeline, BindSetLayout, Vec<LayoutBinding>), Error> {
     let module = Module::decode(spirv).map_err(|_| Error::Malformed)?;
     let admitted = Admitted::new(module).map_err(|_| Error::Malformed)?;
     let entry = admitted
-        .entry_point("main", Stage::Compute)
+        .entry_point(entry_point, Stage::Compute)
         .ok_or(Error::EntryPoint)?;
     let bindings = entry
         .bindings()
@@ -522,7 +730,7 @@ fn pipeline(
     let shader = context.create_shader_module(admitted)?;
     let pipeline = context.create_compute_pipeline(&ComputePipelineDesc {
         module: &shader,
-        entry_point: "main",
+        entry_point,
         layout: &laid_out,
         specialization: &[],
     })?;
@@ -543,7 +751,7 @@ fn pass(
         _ => Error::Malformed,
     })?;
     let push = u32::try_from(sample.push.len() * 4).map_err(|_| Error::TooLarge)?;
-    let (pipeline, layout, bindings) = pipeline(context, pinned.spirv, push)?;
+    let (pipeline, layout, bindings) = pipeline(context, (pinned.spirv, "main"), push)?;
     let mut held = Vec::new();
     for binding in &bindings {
         let words = sample
@@ -612,7 +820,7 @@ fn past_counts(device: &Device, near: u32) -> Result<Option<Result<(), Error>>, 
     let compute = family(device, QueueCapabilities::COMPUTE)?;
     let context = device.create_context(&ContextDesc::default())?;
     let push = u32::try_from(fill::WORDS * 4).map_err(|_| Error::TooLarge)?;
-    let (pipeline, layout, _) = pipeline(&context, fill::SPIRV, push)?;
+    let (pipeline, layout, _) = pipeline(&context, (fill::SPIRV, "main"), push)?;
     let surface_bytes = 64 * 4;
     let (_memory, surface) = buffer(&context, (near, surface_bytes), BufferUsage::STORAGE)?;
     let (arguments, read) = buffer(&context, (near, 16), BufferUsage::INDIRECT)?;
@@ -748,7 +956,7 @@ pub fn compare(answered: &Answer, expected: &Answer) -> Result<(), Difference> {
             reference: expected.past_counts,
         });
     }
-    Ok(())
+    corpus::compare(&answered.corpus, &expected.corpus)
 }
 
 /// The first place `left` and `held` differ, and what each holds there.

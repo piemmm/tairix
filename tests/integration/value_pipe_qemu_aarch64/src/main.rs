@@ -69,7 +69,7 @@ mod kernel {
 
     use tairix_abi::Errno;
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
-    use tairix_itest_witness::field_str;
+    use tairix_itest_witness::{field_str, SYSCALL_INVOKED};
     use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Sink};
@@ -90,11 +90,6 @@ mod kernel {
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
-
-    /// `EventId` emitted by the syscall dispatcher for an audited syscall
-    /// that passed every check. Pinned by the audit-id test in
-    /// `kernel/syscall/src/audit.rs`.
-    const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
     /// `EventId` emitted by the syscall dispatcher when the owning subsystem
     /// rejected a call — here `resource_open` refusing a *write* of a
@@ -132,7 +127,7 @@ mod kernel {
                 && err_field_is(event, Errno::NotSupported)
             {
                 WRITE_REFUSED.store(true, Ordering::Release);
-            } else if event.id == SYSCALL_INVOKED_EVENT_ID
+            } else if event.id == SYSCALL_INVOKED
                 && field_str(event, "sc") == Some("exit")
                 && WRITE_REFUSED.load(Ordering::Acquire)
             {

@@ -28,7 +28,6 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-#[cfg(any(test, feature = "test-support"))]
 extern crate alloc;
 
 pub mod client;
@@ -50,11 +49,13 @@ pub mod sleep;
 pub mod testkit;
 pub mod winframe;
 
-pub use client::{BufferMapper, DisplayClient, DisplayTransport, RemoteDisplay};
+pub use client::{
+    BufferMapper, DisplayClient, DisplayTransport, FrameRing, OnScreen, RemoteDisplay,
+};
 pub use framebuffer::{Framebuffer, FramebufferConfig};
 pub use memory::{copy_rows, frames_budget, BufferIds, BufferMemory, DeviceBuffer, SharedBuffer};
 pub use presenter::{Base, BaseFrame, CursorPlane, DrawInPlace, LayerPresenter, Presenter};
-pub use region::{FrameRegion, ShmMapper};
+pub use region::{FrameRegion, SharedFrame, ShmMapper};
 #[cfg(feature = "rt")]
 pub use rt::{
     establish_display, FramesRefused, RtBufferMapper, RtBufferMemory, RtDeviceBuffer,

@@ -834,7 +834,10 @@ fn generate(root: &Path) -> Result<String, String> {
             .chain(ranges_of(&categories, "Me")?)
             .collect(),
     );
-    let ignorable = ranges_of(&read(root, &CORE)?, "Default_Ignorable_Code_Point")?;
+    let core_properties = read(root, &CORE)?;
+    let ignorable = ranges_of(&core_properties, "Default_Ignorable_Code_Point")?;
+    let xid_start = ranges_of(&core_properties, "XID_Start")?;
+    let xid_continue = ranges_of(&core_properties, "XID_Continue")?;
     let recommended = scripts.set_of(RECOMMENDED)?;
     let data = Data::read(&read(root, &DATA)?)?;
     if data.marks != marks {
@@ -890,6 +893,10 @@ fn generate(root: &Path) -> Result<String, String> {
     push_ranges(&mut out, "NONSPACING_MARKS", &marks);
     out.push_str("\n/// The `Default_Ignorable_Code_Point` code points.\n");
     push_ranges(&mut out, "DEFAULT_IGNORABLE", &ignorable);
+    out.push_str("\n/// The `XID_Start` code points: those an identifier may begin with.\n");
+    push_ranges(&mut out, "XID_START", &xid_start);
+    out.push_str("\n/// The `XID_Continue` code points: those an identifier may go on with.\n");
+    push_ranges(&mut out, "XID_CONTINUE", &xid_continue);
     emit_normalization(&mut out, root, &data, &stringprep.unassigned)?;
     emit_stringprep(&mut out, root, &data, &stringprep)?;
     Ok(out)

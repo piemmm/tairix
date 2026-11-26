@@ -57,6 +57,7 @@ mod kernel {
     use core::sync::atomic::{AtomicUsize, Ordering};
 
     use tairix_arch_x86_64::qemu_exit;
+    use tairix_itest_witness::SYSCALL_INVOKED;
     use tairix_kernel::kalloc::{Arena, HEAP_BYTES};
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
@@ -78,12 +79,6 @@ mod kernel {
     /// by the `event_ids_are_unique` test in `kernel/core/src/audit.rs`.
     const PROCESS_SPAWNED_EVENT_ID: EventId = EventId(4030);
 
-    /// `EventId` the syscall dispatcher emits for a successfully dispatched
-    /// audited syscall — here PID 1 `init`'s `exit` (its `spawn` is *rejected*
-    /// while the X3b producer is unwired, which emits a different id). Pinned
-    /// by the audit-id test in `kernel/syscall/src/audit.rs`.
-    const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
-
     /// Number of `ProcessSpawned` records seen so far.
     static SPAWNED: AtomicUsize = AtomicUsize::new(0);
     /// Number of audited `SyscallInvoked` records seen so far.
@@ -104,7 +99,7 @@ mod kernel {
             SerialSink::new().write_event(event);
             if event.id == PROCESS_SPAWNED_EVENT_ID {
                 SPAWNED.fetch_add(1, Ordering::AcqRel);
-            } else if event.id == SYSCALL_INVOKED_EVENT_ID {
+            } else if event.id == SYSCALL_INVOKED {
                 SYSCALLS.fetch_add(1, Ordering::AcqRel);
             }
             if SPAWNED.load(Ordering::Acquire) >= 1 && SYSCALLS.load(Ordering::Acquire) >= 1 {

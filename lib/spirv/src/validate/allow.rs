@@ -12,7 +12,7 @@ use crate::{Instruction, Kind, Module, Op, Value, Version};
 
 /// The capabilities a module may declare, by ascending value; closed under
 /// what each implicitly declares.
-pub const CAPABILITIES: [Capability; 25] = [
+pub const CAPABILITIES: [Capability; 27] = [
     Capability::MATRIX,
     Capability::SHADER,
     Capability::FLOAT16,
@@ -21,6 +21,7 @@ pub const CAPABILITIES: [Capability; 25] = [
     Capability::INT16,
     Capability::IMAGE_GATHER_EXTENDED,
     Capability::IMAGE_CUBE_ARRAY,
+    Capability::SAMPLE_RATE_SHADING,
     Capability::SAMPLED1D,
     Capability::IMAGE1D,
     Capability::SAMPLED_CUBE_ARRAY,
@@ -28,6 +29,7 @@ pub const CAPABILITIES: [Capability; 25] = [
     Capability::IMAGE_BUFFER,
     Capability::STORAGE_IMAGE_EXTENDED_FORMATS,
     Capability::IMAGE_QUERY,
+    Capability::DERIVATIVE_CONTROL,
     Capability::STORAGE_IMAGE_READ_WITHOUT_FORMAT,
     Capability::STORAGE_IMAGE_WRITE_WITHOUT_FORMAT,
     Capability::GROUP_NON_UNIFORM,
@@ -421,7 +423,15 @@ pub(crate) fn class(op: Op) -> Option<Class> {
         Op::BIT_FIELD_S_EXTRACT | Op::BIT_FIELD_U_EXTRACT => Class::Body(T::BitFieldExtract),
         Op::BIT_REVERSE => Class::Body(T::BitReverse),
         Op::BIT_COUNT => Class::Body(T::BitCount),
-        Op::D_PDX | Op::D_PDY | Op::FWIDTH => Class::Body(T::Derivative),
+        Op::D_PDX
+        | Op::D_PDY
+        | Op::FWIDTH
+        | Op::D_PDX_FINE
+        | Op::D_PDY_FINE
+        | Op::FWIDTH_FINE
+        | Op::D_PDX_COARSE
+        | Op::D_PDY_COARSE
+        | Op::FWIDTH_COARSE => Class::Body(T::Derivative),
         Op::PHI => Class::Body(T::Phi),
         Op::LOOP_MERGE => Class::Body(T::LoopMerge),
         Op::SELECTION_MERGE => Class::Body(T::SelectionMerge),

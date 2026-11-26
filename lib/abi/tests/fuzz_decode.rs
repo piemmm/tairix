@@ -3646,6 +3646,7 @@ fn display_reply_seeds() -> Vec<Vec<u8>> {
         encode_present_reply(Ok(PresentReply {
             presented: Presented::Queued,
             seq: 7,
+            at_ns: 1_000_000,
         }))
         .to_vec(),
         encode_planes_reply(Ok(Planes {
@@ -3654,7 +3655,12 @@ fn display_reply_seeds() -> Vec<Vec<u8>> {
         }))
         .to_vec(),
         encode_stats_reply(Ok(stats)).to_vec(),
-        DisplayEvent::Presented { seq: 7 }.to_le_bytes().to_vec(),
+        DisplayEvent::Presented {
+            seq: 7,
+            at_ns: 1_000_000,
+        }
+        .to_le_bytes()
+        .to_vec(),
     ]
 }
 
@@ -3742,6 +3748,7 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
         WindowRequest::Present {
             window_id: 3,
             frame_index: 1,
+            serial: 5,
             damage: DamageList::new(&[
                 DamageRect {
                     x: 4,
@@ -4481,6 +4488,13 @@ fn seeded_window_events() -> Vec<[u8; WindowEvent::WIRE_LEN]> {
         WindowEvent::Shown {
             window_id: 3,
             shown: false,
+        }
+        .to_le_bytes(),
+        WindowEvent::FramePresented {
+            window_id: 3,
+            serial: 12,
+            at_ns: 16_666_667,
+            shown: true,
         }
         .to_le_bytes(),
     ];

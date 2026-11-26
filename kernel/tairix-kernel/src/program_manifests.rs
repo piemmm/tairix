@@ -1300,14 +1300,18 @@ mod tests {
         CapabilityId::FS_ACCESS,
     ];
 
-    // `gpucheck` (plans/GPU.md GP11.2) runs work on each served GPU: the
-    // device channel, the region its bytes cross, its report and its own
-    // Help/ documents.
+    // `gpucheck` (plans/GPU.md GP11.2, GP8) runs work on each served GPU:
+    // the device channel, the region its bytes cross, its report, its own
+    // Help/ documents and the kernel file `--shader` names, the sandboxed
+    // worker a WGSL kernel is compiled in, and that worker's replacement
+    // recorded.
     const GPUCHECK_REQUEST: &[CapabilityId] = &[
         CapabilityId::GPU,
         CapabilityId::SHM,
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::FS_ACCESS,
+        CapabilityId::SANDBOX_SPAWN,
+        CapabilityId::LOG_EMIT,
     ];
 
     // The device-inventory listing tools `lspci` and `lsusb`

@@ -22,8 +22,8 @@ pub use tables::{MAX_DECOMPOSITION, VERSION};
 
 use tables::{
     BOPO, CANONICAL, CYRL, DEFAULT_IGNORABLE, EXTENSIONS, EXTENSION_SETS, GREK, HANB, HANG, HANI,
-    HIRA, HNTL, JPAN, KANA, KORE, LATN, NONSPACING_MARKS, RECOMMENDED, SCRIPTS, SET_WORDS, ZINH,
-    ZYYY,
+    HIRA, HNTL, JPAN, KANA, KORE, LATN, NONSPACING_MARKS, RECOMMENDED, SCRIPTS, SET_WORDS,
+    XID_CONTINUE, XID_START, ZINH, ZYYY,
 };
 
 /// Whether `ch` draws nothing where it stands yet can hide, reorder or break
@@ -51,6 +51,26 @@ pub const fn is_default_ignorable(ch: char) -> bool {
 #[must_use]
 pub const fn is_nonspacing_mark(ch: char) -> bool {
     !ch.is_ascii() && in_ranges(NONSPACING_MARKS, ch as u32)
+}
+
+/// Whether `ch` may begin an identifier: `XID_Start` (UAX #31).
+#[must_use]
+pub const fn is_xid_start(ch: char) -> bool {
+    if ch.is_ascii() {
+        ch.is_ascii_alphabetic()
+    } else {
+        in_ranges(XID_START, ch as u32)
+    }
+}
+
+/// Whether `ch` may go on with an identifier: `XID_Continue` (UAX #31).
+#[must_use]
+pub const fn is_xid_continue(ch: char) -> bool {
+    if ch.is_ascii() {
+        ch.is_ascii_alphanumeric() || ch == '_'
+    } else {
+        in_ranges(XID_CONTINUE, ch as u32)
+    }
 }
 
 /// The most nonspacing marks one character may carry (UTS #39 §5.4): more

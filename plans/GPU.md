@@ -53,9 +53,14 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GP5.4 | Compute through Venus: modules, layouts, bind sets, compute pipelines, dispatches; the pinned set held to the software device, in `gpucheck` | done |
 | GP5.5 | Images, views, samplers, image copies, clears and bindings through Venus; typed sampling in the seam (`plans/SHADER.md` SH9); the image work held to the software device, in `gpucheck` | done |
 | GP5.6 | Render pipelines, passes and draws through Venus; the render work held to the software device, in `gpucheck` | done |
-| GP6 | Presentation: the swapchain, the accelerated layer path, fullscreen promotion, and the vsync flip | planned |
+| GP6 | Presentation: the swapchain, the accelerated layer path, fullscreen promotion, and the vsync flip | done |
+| GP6.1 | The flip's moment and each frame's fate: the display service's latch time on its replies and events, a serial on every window present, and the session finishing each with `FramePresented` | done |
+| GP6.2 | Transfers into a client's own memory: `Device::attach`, `read_into` and `write_from` with one copy, and the served `Read`/`Write` lending the client's region | done |
+| GP6.3 | The swapchain: `tairix_window::swapchain::Swapchain`, a window a device draws, its frames filled off the loop and paced `Fifo` or `Mailbox` | done |
+| GP6.4 | Promotion in one copy, on every engine: a promoted window laid straight from its client's frame into the buffer the display scans, its content brought up to that frame before anything reads it | done |
+| GP6.5 | Shown end to end: `gpucheck --present` through the swapchain, promoted on virtio-gpu in a desktop vertical | done |
 | GP7 | `plans/WINTERSUN.md` WS19: the game's 3D view (WS32) — its terrain, entity, particle and light passes — as pinned SPIR-V, offloaded | planned |
-| GP8 | Untrusted-shader admission: `plans/SHADER.md`'s runtime path wired into pipeline creation | planned |
+| GP8 | Untrusted-shader admission: `plans/SHADER.md`'s runtime path wired into pipeline creation | done |
 | GP9 | `drivers/display/v3d`: the Raspberry Pi VideoCore VI backend | planned |
 | GP10 | The application-facing GPU library and its generated C surface — what a ported game links | planned |
 | GD1 | The base presents only what it shows: nothing a composite layer covers is copied into the display's frame | done |
@@ -267,8 +272,9 @@ device has not stated.
   features — anisotropic filtering and mirror-clamp-to-edge, and with GP3.4's
   draws dual-source blending, logic operations, depth clamping, wide lines,
   large points, storage writes and atomics from a vertex or a fragment stage,
-  and indirect records naming a first instance, which Vulkan 1.1 does not
-  require; each format's features; its subgroup size; and the most records an
+  indirect records naming a first instance, and with `plans/SHADER.md` SH10
+  shading each sample, which Vulkan 1.1 does not require; each format's
+  features; its subgroup size; and the most records an
   indirect draw reads, one where the device draws no more. A statement is
   added with the creation-time check that reads it, never ahead of it. Each limit is either a fixed bound (§24.4)
   or, for the software device, a capacity derived from discovered memory.
@@ -404,12 +410,16 @@ device has not stated.
   is decoded and validated again on the receiving side, and a lowering that
   finds a validator invariant broken refuses the module rather than trusting it.
 - **Robustness is one semantics on every backend**: a buffer access past the
-  bound range reads zero and writes nothing; an image access past the view's
-  extent, levels or layers reads zero in every channel the format holds and one
-  for an alpha it lacks, and writes nothing; a vertex attribute past its buffer
-  reads zero with a missing alpha one, and an index past its buffer reads zero.
-  Venus requires the host's second robustness level; V3D's lowering injects it
-  (`plans/SHADER.md` SH6).
+  bound range reads zero and writes nothing; an access through an index past
+  its level of any other memory — push constants, private, function and
+  workgroup variables, the stage interface — and a dynamic component past its
+  vector read zero and write nothing; an image access past the view's extent,
+  levels or layers reads zero in every channel the format holds and one for an
+  alpha it lacks, and writes nothing; a vertex attribute past its buffer reads
+  zero with a missing alpha one, and an index past its buffer reads zero.
+  Venus requires the host's second robustness level and guards the rest with
+  `lib/spirv`'s guard pass; V3D's lowering injects both (`plans/SHADER.md`
+  SH6).
 
 ### 1.3 The software backend
 
@@ -1188,12 +1198,12 @@ GP5, not assumed.
 
 ## 4. GP6 — presentation
 
-A rendered surface is presented through the **one** existing display path: the
-compositor's accelerated layer seam
-(`plans/FIX-DISPLAY-ACCELERATION.md`), including the scanout-sized fullscreen
-promotion `plans/WINTERSUN.md` P3 needs. The swapchain is the seam's client-side
-view of that: acquire, render, present, with the flip's completion arriving as
-the driver's interrupt.
+A rendered surface is presented through the **one** existing display path: a
+window, composed or laid on the compositor's accelerated layer seam
+(`plans/FIX-DISPLAY-ACCELERATION.md`), and promoted to the screen alone when it
+covers it (`plans/COMPOSITOR-WORK.md` Stage J, the fullscreen `plans/WINTERSUN.md`
+P3 asked for). The swapchain is a renderer's view of that path: acquire, render,
+present, and the flip that shows the frame reported back.
 
 The division is worth stating because the two are easy to conflate: **the layer
 path places and blends finished pictures; `lib/gpu` computes the pictures.** A
@@ -1203,6 +1213,173 @@ pass, weather is thousands of sprites — none of which a stack of hardware
 planes expresses. Using the layer
 path for that would mean composing a scene from hundreds of planes no hardware
 has.
+
+What a frame costs between the renderer and the screen:
+
+| | cost |
+|---|---|
+| a served device's pixels into the app | the driver copies device memory into the window's frame (GP6.2) |
+| the app's frame to the screen, promoted | laid straight from the app's frame into the buffer the display scans, on every engine (GP6.4) |
+| when the frame was shown | the flip's moment and the frame's fate, per present (GP6.1) |
+
+Apps keep their own frames (`plans/FIX-DISPLAY-ACCELERATION.md` decision 1):
+the session's decode is the one copy out of an application's memory, and where
+the window is promoted it is laid straight into display memory instead (User
+ruling, 2026-11-24). A device drawing straight into the buffer the display scans is
+not reached on any engine TAIRiX drives: virtio-gpu's host renderer reaches no
+guest memory without a host `udmabuf`, and scanning a host blob out
+(`SET_SCANOUT_BLOB`) needs a GL display no vertical can hold to a picture
+(`plans/FIX-DISPLAY-ACCELERATION.md` decision 2); on the Pi it is GP9's.
+
+### 4.1 GP6.1 — the flip's moment and each frame's fate
+
+- **The display service times what it shows.** A present answered `Shown` is
+  timed when the driver's call returned; a queued one when its latch was taken
+  from the driver's events — the interrupt that ended the frame — or when its
+  deadline abandoned it. `PresentReply` and `DisplayEvent::Presented` carry the
+  moment (`at_ns`, monotonic), and a latch the presenter's port could not take
+  is posted later with the moment it happened, not the one it was delivered
+  at. `RemoteDisplay::on_screen` is the newest present known shown, with its
+  moment.
+- **A window present carries a serial.** `WindowRequest::Present` names one the
+  client chose, nonzero and strictly above the window's last; another is
+  refused, changing nothing. `tairix_window::WindowClient` numbers its presents
+  and answers each serial.
+- **The session finishes every present it accepted with one
+  `WindowEvent::FramePresented { window_id, serial, at_ns, shown }`** naming
+  it or a later serial of the window:
+  - when the display took the desktop frame carrying its pixels — the reply's
+    moment for a shown frame, the latch's for a queued one — `shown` saying
+    whether the window's pixels are in that frame (`Compositor::on_display`);
+  - when the desktop frame its latch belonged to changed nothing on screen, at
+    that moment or, behind a frame queued on the same configuration, at that
+    frame's latch, `shown` saying whether the window's pixels are on screen as
+    they stand;
+  - when the display could not take that frame yet, with the next it takes;
+  - when that frame could reach no display, unseen, at that moment;
+  - when a resize or a released region dropped it, or the latch refused it,
+    before the session showed it, unseen, at once — a refused frame still
+    tried again, so the window's pixels catch up.
+  `shown` is read when the frame is handed, so a queued frame answers for
+  what it showed.
+  A window closed first is told nothing, and each window is told its fates in
+  serial order. A run folds to the newest — a later serial answers for every
+  one before it — in the session's hold-back and in the client's reader, so a
+  client behind costs one event, not one a frame.
+- **Rate and phase.** A flipping display (the HVS) reports the flip; one that
+  shows synchronously (virtio-gpu, the framebuffers) the moment the device
+  answered the present, which is the rate with no phase
+  (`plans/FIX-DESKTOP-SPEEDUP.md` E.5). Either way a client paced by its fates
+  draws one frame a display frame, and none the screen does not show.
+
+### 4.2 GP6.2 — transfers into a client's own memory
+
+- **`Device::attach` registers memory of the caller's own** for transfers: a
+  shared region, or for a device in the caller's own process any buffer. A
+  served device's driver maps the region's grant (`GpuOp::Attach`): at most
+  `MAX_CLIENT_ATTACHMENTS` at once and `GPU_ATTACHED_MAX` bytes in all, each a
+  containment bound on what one client makes its server map. `GpuOp::Detach`
+  and the client's exit let them go; a refused attach maps nothing.
+- **`Allocation::read_into` and `write_from`** move host-visible memory into
+  and out of an attachment with one copy, made by whoever maps both — the
+  driver for a served device (`GpuOp::ReadInto`, `GpuOp::WriteFrom`), the
+  process itself otherwise. Every range is checked against the allocation and
+  the attachment and refused past either, never clamped.
+- **The served `Read` and `Write` lend the client's region** to the backend, so
+  a read is one copy in the driver and one out of the region, not three.
+- A frame of a served device reaches the app's window with one copy in the
+  driver: the device copies the image into host-visible memory, the driver
+  that into the window's frame.
+
+### 4.3 GP6.3 — the swapchain
+
+- **`tairix_window::swapchain::Swapchain`: a window whose frames a `lib/gpu` device
+  draws.** It owns the image the renderer draws — the window's size, in
+  `Bgra8Unorm` or `Rgba8Unorm` after the window's format, a colour attachment,
+  sampled, a transfer source and destination, and storage where the format
+  takes it — a
+  host-visible staging buffer of one frame, and the window's frame region,
+  attached to the device. The objects belong to the renderer's context and are
+  charged to its limit.
+- **Acquire, render, present.** `acquire` hands out the image when the present
+  mode allows, and never while a present waits for room at the window channel:
+  the client sends it with its next drain, so its frame is not filled again
+  behind it. `Fifo` is the vsync flip: the frame last presented has
+  finished, so one frame is on its way to the screen and every frame is shown.
+  `Mailbox` asks only that the session has a frame to give: a renderer faster
+  than the display has its intermediate frames shown to nobody, for the least
+  latency. `present(queue, damage)` copies the rows the frame lacks — the
+  damage, and what changed while the other frame was shown — from the image
+  into the staging buffer on the renderer's queue, after the work queued
+  before it.
+- **No wait on the device runs on the loop.** The app's worker
+  (`tairix_rt::work::Worker`, the one deferral mechanism) owns the attached
+  region: it waits on the copy's fence and reads the rows into the frame. The
+  loop presents the frame once the worker answers, and a frame the worker could
+  not fill is presented by nobody and drawn again whole. A machine granting no
+  worker fills each frame where `present` asks, and `present` then presents it
+  and says so, nothing being left to wake the loop.
+- **One pane.** The window's lifecycle is `WindowPane`'s — a hidden window, a
+  frame the session still reads, a region the session released and the app
+  re-attaches — and a pane's frame is filled either by an encode from a
+  surface, as every window is, or by the device: reserved, filled, then
+  committed.
+- **Resize** makes the image, staging buffer and region again at the new size;
+  **`FramePresented`** advances the pacing and gives the renderer the flip's
+  moment; a lost context or device leaves the window standing and the
+  swapchain refusing, to be made again.
+
+### 4.4 GP6.4 — promotion in one copy, on every engine
+
+- **A promoted window is laid straight from its client's frame into the buffer
+  the display scans.** On a layer engine that is the layer it is promoted to;
+  on a display drawing its own frames — virtio-gpu, the framebuffers — it is
+  the display's own frame, through `Presenter::present_drawn`, so such a
+  display promotes too: its frame is the window alone, unscaled, unfaded and
+  uncaptured, the pointer on the cursor plane or hidden
+  (`Presentation::Promoted`). Each buffer catches up from the frame on what it
+  missed while the other was shown, as a baked layer does.
+- **The compositor holds the frame; the content is owed.** The latch hands the
+  session each frame as a `tairix_display::SharedFrame`, whose holders keep the
+  frame's region mapped. Where `Compositor::presents_directly` says the window
+  may still be shown alone, the session gives the compositor the frame
+  (`owe_window_content`) instead of decoding it. The window's content is owed
+  what the frame changed, and the compositor brings it up to the frame itself
+  before anything composes, bakes, captures or pictures it; whatever reshapes
+  or rewrites the content, removes the window or releases its pixels lets the
+  frame go first, so the region it holds is never one the window server has
+  let go. What a frame laid into the display's own frame showed is owed to the
+  back buffer and recomposed once anything else can be seen.
+- **The client is held off the frame kept.** A present's answer hands the
+  client back every frame but the one it names, so while the compositor keeps
+  a frame (`FrameUse::Kept`) the window server holds the answer to a present
+  naming another until the latch shows that one. An answer going with its
+  frame unshown — a refused latch, a screen no frame reaches — goes only once
+  the compositor has given the kept frame back (`FrameHost::frame_reclaimed`),
+  the content brought up to date from it. A promoted window draws one frame a
+  desktop frame, whatever its present mode.
+- **Opaque by what was written.** Each pixel is judged as it is laid
+  (`winframe::lay_judged_into`): one short of opaque ends the promotion that
+  frame, the content brought up to the frame first, and the frame is composed
+  from it — on a layer engine the frame carries the scene this once and the
+  next is planned knowing the window is translucent.
+- The session's `WINDOW_SIZED` witness names the path, `promoted` on
+  virtio-gpu included.
+
+### 4.5 GP6.5 — shown end to end
+
+`gpucheck --present` opens a window, asks for full screen before it presents
+anything, and draws a stated scene through the swapchain
+(`tairix_gpucheck::Scene`): an opaque blue ground, a band of colours, a row of
+checked tiles and the first tile copied to the far corner, recorded as a clear
+and copies, so every device leaves the same bytes. It draws on the first served
+GPU, else on a software device sized for the screen; presents `Fifo` until
+`Escape` or a close; and fails unless every present it made was reported shown,
+each on its own. `gpucheck_present_qemu_aarch64` launches it from a terminal on
+a desktop whose only display is a virtio GPU, the pointer on its cursor plane:
+the session's `WINDOW_SIZED` witness names the window full screen at the
+scan-out's extent, `promoted`; the screen is the scene the host draws on the
+software device, to the byte; and the check exits clean.
 
 ## 5. GP4 / GP8 — the two compile times
 
@@ -1222,6 +1399,28 @@ intact — TAIRiX writes no third language.
 is decoded and validated in `plans/SHADER.md`'s sandbox, and only a validated
 module becomes a `ShaderModule`. This is the path a third-party game uses and
 the one the threat model in §0a is written against.
+
+- **Source or module.** WGSL source is compiled in the program's own `wgsl`
+  sandbox worker and admitted where it returns; SPIR-V a program supplies is
+  decoded and admitted in that program. Either way the served device admits it
+  again where it arrives (§2), and a hardware backend's lowering guards what
+  its device does not (`plans/SHADER.md` SH6) when the pipeline is made.
+- **`gpucheck --shader FILE`** is the first consumer: WGSL or SPIR-V told apart
+  by the module's magic word, its compute entry point run over a storage
+  buffer of a stated length on each served device and on the software device,
+  the buffers compared, and a neighbouring context's memory — filled with a
+  marker before the run — sought in every word it left. A refused module
+  answers its refusal; a dispatch that overruns is answered as the loss it is,
+  and the device then runs the next. The served runtime answers a wait as its
+  context's loss wherever that loss came first, however late its loop looks,
+  and the CPU waits on a submission its deadline twice over, since the
+  deadline runs only once the device starts the work; a submission answered
+  neither way in that time is a kernel the device never answered.
+- **MG3's vertical** launches it on Venus with an honest kernel, one indexing
+  past every kind of memory it can reach, one that never ends, and modules the
+  validator refuses: the first agrees with the software device, the second
+  reads only zeros and nothing of its neighbour, the third is lost while the
+  device keeps serving, and the last are refused by name.
 
 A consumer cannot tell the two apart at the seam, which is the property that
 keeps this one API rather than two.
@@ -1824,8 +2023,52 @@ Each needs sign-off before the item that depends on it; none is assumed.
     several rendering instances that leave the same; and the render work
     agreeing with the software device to the bit, in `gpucheck`, through
     QEMU's Venus.
+- **GP6**: a GPU-drawn window reaches the screen through the one display path,
+  promoted where it covers it, each frame's fate reported.
+  - **GP6.1**: a reply's and an event's moment cross the wire, and a latch
+    posted late keeps the moment it happened; a present at or below the
+    window's last serial is refused and changes nothing; every accepted present
+    is finished exactly once by its serial or a later one — shown, composed
+    unseen, carried by a frame that changed nothing on screen or by one that
+    could reach no display, dropped by a resize or a release — and a closed
+    window is told nothing; a queued frame's fate waits for its latch, through
+    a frame the display could not take yet and one that changed nothing on its
+    configuration, and says what that frame showed; a refused present is
+    finished unseen once; fates go in serial order; a run folds to the newest;
+    the decoders are fuzzed.
+  - **GP6.2**: an attachment past either bound is refused and maps nothing; a
+    range past the allocation or the attachment is refused, not clamped;
+    `read_into` and `write_from` move exactly the bytes named on the software
+    device and through a served device, the server copying once; a client's
+    exit lets its attachments go; the decoders are fuzzed.
+  - **GP6.3**: on the software device and on a served one, a frame reaches the
+    window's region as the image held it, and only the rows it lacked;
+    `Fifo` presents again only once the last present finished, `Mailbox`
+    whenever the session has a frame to give; a hidden window, a frame the
+    session still reads, a released region and a resize each leave the window
+    right; a fill that failed is drawn again whole, into the frame it was
+    filling; a present waiting for room holds the next frame back; a resize the
+    worker has no room for tells the session nothing; the device is waited on
+    only by the worker, and with none `present` fills and presents the frame
+    itself; a fate no newer than the newest leaves it.
+  - **GP6.4**: a promoted window's present is laid once, into the layer it
+    is promoted to or the display's own frame, and not into its content; a
+    composite, a capture, a picture, a decoded present and a reshape each find
+    the content brought up to the frame first, and a reshape, a removal or a
+    release lets the frame go; a present behind a kept frame is answered once
+    the latch shows its own, a refused latch and a dark screen have the kept
+    frame given back first, and a resize lets it go; a pixel short of opaque
+    ends the promotion that frame; every screen equals the software composite
+    of the same scene.
+  - **GP6.5**: launched from a terminal on virtio-gpu, `gpucheck --present`'s
+    window is promoted, the screen is the host's rendering of its scene, and it
+    reports every present shown.
 - **GP8**: a hostile module is refused or contained; a compromised compiler
   sandbox can reach nothing; the fuzz corpus is clean (`plans/SHADER.md`).
+  `gpucheck --shader` answers a refused module's refusal, agrees with the
+  software device on an honest kernel and on one indexing past everything it
+  can reach, finds no word of its neighbour's marker, and survives a kernel
+  that never ends; the MG3 vertical runs each on Venus.
 - **Differential**: a frame through the seam matches the direct software path
   within tolerance, so the seam itself is proven not to change the picture.
 - **`miri`**: `lib/gpu` and every driver here are enrolled from their first

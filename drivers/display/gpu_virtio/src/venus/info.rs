@@ -90,6 +90,7 @@ mod core {
     pub(super) const FULL_DRAW_INDEX_UINT32: usize = 1;
     pub(super) const IMAGE_CUBE_ARRAY: usize = 2;
     pub(super) const INDEPENDENT_BLEND: usize = 3;
+    pub(super) const SAMPLE_RATE_SHADING: usize = 6;
     pub(super) const DUAL_SRC_BLEND: usize = 7;
     pub(super) const LOGIC_OP: usize = 8;
     pub(super) const MULTI_DRAW_INDIRECT: usize = 9;
@@ -636,7 +637,8 @@ fn capability_feature(host: &HostDevice<'_>, capability: Capability) -> Option<F
         | Capability::IMAGE1D
         | Capability::SAMPLED_BUFFER
         | Capability::IMAGE_BUFFER
-        | Capability::IMAGE_QUERY => Some(Feature::None),
+        | Capability::IMAGE_QUERY
+        | Capability::DERIVATIVE_CONTROL => Some(Feature::None),
         Capability::FLOAT16 => {
             chained(Structure::PhysicalDeviceShaderFloat16Int8Features, 0).then_some(
                 Feature::Chained(Structure::PhysicalDeviceShaderFloat16Int8Features, 0),
@@ -649,6 +651,7 @@ fn capability_feature(host: &HostDevice<'_>, capability: Capability) -> Option<F
         Capability::IMAGE_CUBE_ARRAY | Capability::SAMPLED_CUBE_ARRAY => {
             core(core::IMAGE_CUBE_ARRAY)
         }
+        Capability::SAMPLE_RATE_SHADING => core(core::SAMPLE_RATE_SHADING),
         Capability::STORAGE_IMAGE_EXTENDED_FORMATS => {
             core(core::SHADER_STORAGE_IMAGE_EXTENDED_FORMATS)
         }

@@ -1605,8 +1605,8 @@ conclusion is *accepted*.
   owner's windows round-robin, so one window's backlog cannot starve a
   sibling's resize.
 - **Folding by what the quantity means.** A state edge (`Focus`, `Resized`,
-  `RedrawRequested`, `CloseRequested`, `Minimized`, `Shown`) is a value the app
-  converges on, so a later one replaces the held one where it stands and a
+  `RedrawRequested`, `CloseRequested`, `Minimized`, `Shown`, `FramePresented`)
+  is a value the app converges on, so a later one replaces the held one where it stands and a
   window owes at most one of each. A position is
   level-triggered (newest wins) and a wheel run is additive (a reversal ends
   it) — the same rule `pump` applies live, from the one shared predicate. A
@@ -1759,11 +1759,13 @@ part-lit, and nothing retries.
 The departure cannot ride the serve loop, because it has to *finish* before
 the seat is given up. Nor may it park on the session wait-set: the sources
 it is no longer serving would report ready on every re-park and spin a core
-through the whole fade. `fade_to_black` drives it instead — present a
-frame, sleep to the next one on `tairix_rt::park_ns` (the runtime's
-off-CPU timed park), step, repeat — bounded by the fade's own span. A
-refused present stops the dim where it got to; the seat is handed on
-cleared regardless, so the screen still ends black.
+through the whole fade. `fade::fade_to_black` drives it instead — take the
+ring's latches, present a frame, sleep to the next one on
+`tairix_rt::park_ns` (the runtime's off-CPU timed park), step, repeat —
+bounded by the fade's own span. A latch taken during the fade still finishes
+the window presents it put on screen (`SessionWindows::take_latches`), since
+the ring goes with the seat. A refused present stops the dim where it got to;
+the seat is handed on cleared regardless, so the screen still ends black.
 
 `SeatDeparture` and `SeatReturn` fix where the two fades sit in a user
 switch. Going out: `fade_out`, then `suspend`, then `release_seat` — the dim
@@ -1900,8 +1902,9 @@ title bar, the user settled a drag of its edge, or a desktop resize refitted it.
 It names the `window`, the `state` (`restored`, `maximized`,
 `fullscreen`), the client `width` and `height` the state gave, and the `path`
 the frame reached the display by: `composited` in software, `layered` as a
-stack of hardware layers, or `promoted`, the fullscreen window handed to the
-layer engine as the scene's one layer. The path is the compositor's own record
+stack of hardware layers, or `promoted`, the fullscreen window alone — the
+layer engine's one layer, or the whole of a frame the display draws in place.
+The path is the compositor's own record
 of what it did with that frame (`Compositor::presentation`), never an
 assumption.
 
@@ -2838,10 +2841,13 @@ since the last one shown, and `WindowServer::latch` converts each window's
 newest frame through `FrameShow` immediately before the compositor composes,
 inside the frame pacer's own admission; a pending frame counts as damage there,
 so the pacer admits or holds a frame for it exactly as for the session's own
-changes. A present to a window holding no unshown frame is answered at once;
-one replacing a frame not yet shown is held (`Served::Withheld`) until that
-frame is shown or refused, or a resize, a release or a close supersedes it. A
-window holds at most one such answer — a present replacing a held one answers
+changes. A present's answer hands the client back every frame but the one it
+named, so it is given at once only while the session reads no other: none
+unshown, and none the compositor kept (`FrameUse::Kept`). One replacing a frame
+not yet shown is held (`Served::Withheld`) until that frame is shown or
+refused, or a resize, a release or a close supersedes it; one behind a kept
+frame is held until the latch shows its own, so a window laid straight from its
+frame draws one frame a desktop frame. A window holds at most one such answer — a present replacing a held one answers
 the older at once — so an application drawing faster than the desktop shows
 frames draws at most two a desktop frame, the session converts one, and the
 desktop's frame work never waits on a present. Answers queue in an
@@ -2850,13 +2856,51 @@ the loop sends them (`WindowServer::send_answers`) after each latch, before
 the composite, after each served request and before every park. Each lands in
 the room its call was posted with, so none waits for kernel memory, and an
 exited client's are dropped unsent. A frame the compositor cannot show
-is recorded (`FRAME_REFUSED`, 20035) once until the window next shows one, and
-is tried again with the next frame the desktop composes, never with one of its
-own: the window keeps its pixels meanwhile, and a later present carries the
-refused frame's change with its own. A darkened session latches nothing until
+is recorded (`FRAME_REFUSED`, 20035) once until the window next shows one, its
+present finished unseen, and is tried again with the next frame the desktop
+composes, never with one of its own: the window keeps its pixels meanwhile,
+and a later present carries the refused frame's change with its own. A darkened session latches nothing until
 it draws again, and while no frame can reach the screen the presents held are
 answered at the screen's pace (see
-[one composite per frame deadline](#one-composite-per-frame-deadline)).
+[one composite per frame deadline](#one-composite-per-frame-deadline)). An
+answer that goes with its frame unshown — a refused latch, a screen no frame
+reaches — goes only once the compositor has given back a frame it kept
+(`FrameHost::frame_reclaimed`), the window's content brought up to date from
+it, so no client draws into a frame still being read.
+
+**Every present is finished with its frame's fate.** A present names a serial
+the client chose, above every one the window presented before; another is
+refused, changing nothing. The latch tells the session which serial each window
+shows (`FrameHost::frame_latched`), and once the display takes the desktop
+frame the session owes each of those windows a
+`WindowEvent::FramePresented { serial, at_ns, shown }`: at the reply's moment
+for a frame the display showed, at its latch's for one it queued
+(`SessionWindows::take_latches`, keyed by the configuration's event port),
+for a frame that changed nothing on screen at once or, behind a present queued
+on the same configuration, at that one's latch, and unseen at once for one
+that could reach no display, `shown` saying whether the window's pixels are in
+the frame handed (`Compositor::on_display`, read when it is handed, so a queued
+frame answers for what it showed). A frame the display could not take yet
+finishes nothing: what it carried goes with the next one handed. Every frame the session
+presents, on a deadline or after serving a request, takes the one path that
+finishes them (`show_frame`). A
+present a resize or a released region drops, or the latch refuses, is
+finished unseen (`WindowHost::frames_dropped`, `ReleasedFrames::dropped`,
+`FrameHost::frame_refused`), stamped when the loop
+delivers it, since a bridge reads no clock; a frame handed to another
+configuration, or to none, while presents wait on a latch finishes those
+unseen, the display they wait on having been replaced. A window closed first is
+told nothing. The serials live on the session's own window records, so
+tracking a frame's fate allocates nothing; each window is told its fates in
+serial order, and a later serial answers for every one before it.
+
+**A window promoted to the screen alone is not decoded at the latch.** Its
+frame reaches the bridge as a `SharedFrame`, a holder of which keeps the
+frame's region mapped, and where `Compositor::presents_directly` says the
+window is still the screen's opaque cover the bridge hands the frame over
+(`Compositor::owe_window_content`) instead of converting it: the compositor
+lays it straight into the buffer the display scans, and brings the window's
+content up to it only when something reads the content (`plans/GPU.md` GP6.4).
 
 The comparison is exact — a pixel reported unchanged carries the
 byte-identical value it already had — and it rides a loop that already reads

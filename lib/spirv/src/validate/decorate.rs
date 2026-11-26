@@ -134,6 +134,7 @@ impl Validator<'_> {
             Decoration::NO_PERSPECTIVE
             | Decoration::FLAT
             | Decoration::CENTROID
+            | Decoration::SAMPLE
             | Decoration::INVARIANT
             | Decoration::LOCATION
             | Decoration::COMPONENT => interface,
@@ -185,6 +186,7 @@ impl Validator<'_> {
             | Decoration::NO_PERSPECTIVE
             | Decoration::FLAT
             | Decoration::CENTROID
+            | Decoration::SAMPLE
             | Decoration::INVARIANT
             | Decoration::LOCATION
             | Decoration::COMPONENT

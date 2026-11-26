@@ -531,18 +531,28 @@ impl Selection<'_, '_, '_> {
                     a: counted,
                 })
             }
-            Op::D_PDX | Op::D_PDY | Op::FWIDTH => {
+            Op::D_PDX
+            | Op::D_PDY
+            | Op::FWIDTH
+            | Op::D_PDX_FINE
+            | Op::D_PDY_FINE
+            | Op::FWIDTH_FINE
+            | Op::D_PDX_COARSE
+            | Op::D_PDY_COARSE
+            | Op::FWIDTH_COARSE => {
                 let (a, ty) = self.data(2)?;
                 let (scalar, count) = self.l.components(ty)?;
                 let derivative = match op {
-                    Op::D_PDX => Derivative::X,
-                    Op::D_PDY => Derivative::Y,
+                    Op::D_PDX | Op::D_PDX_FINE | Op::D_PDX_COARSE => Derivative::X,
+                    Op::D_PDY | Op::D_PDY_FINE | Op::D_PDY_COARSE => Derivative::Y,
                     _ => Derivative::Width,
                 };
+                // The unstated precision is the fine one, every lane its own.
+                let fine = !matches!(op, Op::D_PDX_COARSE | Op::D_PDY_COARSE | Op::FWIDTH_COARSE);
                 let dst = self.result(false)?;
                 self.emit(Inst::Derivative {
                     op: derivative,
-                    fine: true,
+                    fine,
                     num: scalar,
                     count,
                     dst,

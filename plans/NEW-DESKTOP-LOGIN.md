@@ -634,8 +634,9 @@ The desktop side is `ScreenFade` (`userland/gui/session/src/fade.rs`), one
 serve loop's existing park like any other animation. Its **departure cannot**:
 it has to finish before the seat is given up, and parking on the session
 wait-set would spin a core, because the sources the loop is no longer serving
-report ready on every re-park. `run.rs`'s `fade_to_black` drives it instead —
-present, sleep to the next frame on `tairix_rt::park_ns`, step — bounded by
+report ready on every re-park. `fade.rs`'s `fade_to_black` drives it instead —
+take the ring's latches, present, sleep to the next frame on
+`tairix_rt::park_ns`, step — bounded by
 the fade's own span, and a refused present simply stops the dim (the seat is
 handed on cleared regardless). `SeatDeparture` and `SeatReturn` fix where the two sit in
 a switch: `fade_out` runs only after the authority *accepted* the step-aside

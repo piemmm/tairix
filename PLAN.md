@@ -150,7 +150,7 @@ plan's ledger. A `blocked` row names its blocker.
 | SOUND | The audio stack and the `dmaengine-v1` DMA-engine seam (`plans/SOUND.md`) | in progress |
 | FIX-DISPLAY-ACCELERATION | Driver-allocated scan-out, hardware layers and the cursor plane, `gpu_virtio`, and the console a display hosts (`plans/FIX-DISPLAY-ACCELERATION.md`) | done |
 | GPU | The `lib/gpu` render and compute seam and its backends (`plans/GPU.md`) | in progress |
-| SHADER | SPIR-V, its validator, and the WGSL front end (`plans/SHADER.md`) | in progress |
+| SHADER | SPIR-V, its validator, and the WGSL front end (`plans/SHADER.md`) | done |
 
 ### Networking and remote access
 
@@ -335,8 +335,11 @@ backends the PC emulator's translator and the browser's compiled tiers share,
 `plans/PCEMU.md` PC18),
 `lib/spirv` (the one reading of a SPIR-V shader module: the checked model, its
 total and bounded decoder over the generated Khronos grammar, its validator,
-its encoder, and the builder a first-party module is written from Rust
-through, `plans/SHADER.md`),
+its guard pass and the check that confirms it, its encoder, and the builder a
+first-party module is written from Rust through, `plans/SHADER.md`),
+`lib/wgsl` (the WGSL front end: hostile source compiled to a module the
+validator admits, run only in `lib/sandbox`'s `wgsl` worker,
+`plans/SHADER.md` SH5),
 `lib/shaders` (the pinned shader set: the desktop's passes, the compositor's
 chrome and the furniture painter's primitives as committed SPIR-V, each
 `lib/raster`'s arithmetic to the bit, `plans/GPU.md` GD6 and GP4),

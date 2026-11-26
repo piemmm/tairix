@@ -82,6 +82,28 @@ impl Region for Bytes {
             bytes.copy_from_slice(data);
         }
     }
+
+    fn lend(
+        &self,
+        at: usize,
+        len: usize,
+        copy: &mut dyn FnMut(&[u8]) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let bytes = self.0.lock();
+        let end = at.checked_add(len).ok_or(Error::OutOfRange)?;
+        copy(bytes.get(at..end).ok_or(Error::OutOfRange)?)
+    }
+
+    fn lend_mut(
+        &self,
+        at: usize,
+        len: usize,
+        copy: &mut dyn FnMut(&mut [u8]) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let mut bytes = self.0.lock();
+        let end = at.checked_add(len).ok_or(Error::OutOfRange)?;
+        copy(bytes.get_mut(at..end).ok_or(Error::OutOfRange)?)
+    }
 }
 
 /// The loopback channel: replies collected for the sender to take, regions
@@ -110,10 +132,13 @@ impl Channel for Line {
         self.replies.lock().push((ticket, frame.to_vec()));
     }
 
-    fn map(&self, client: ProcId, grant: u64) -> Result<Arc<dyn Region>, Errno> {
+    fn map(&self, client: ProcId, grant: u64, min_len: usize) -> Result<Arc<dyn Region>, Errno> {
         let (owner, bytes) = self.region(grant).ok_or(Errno::NotFound)?;
         if owner != client {
             return Err(Errno::PermissionDenied);
+        }
+        if bytes.len() < min_len {
+            return Err(Errno::LengthOutOfRange);
         }
         Ok(bytes as Arc<dyn Region>)
     }
@@ -209,6 +234,23 @@ impl Loopback {
         if let Some((_, bytes)) = self.line.region(grant) {
             bytes.write(at, data);
         }
+    }
+
+    /// Read `out.len()` bytes at `at` of the region granted as `grant`, as
+    /// the server's mapping of it holds them.
+    pub fn read_region(&self, grant: u64, at: usize, out: &mut [u8]) {
+        if let Some((_, bytes)) = self.line.region(grant) {
+            bytes.read(at, out);
+        }
+    }
+
+    /// How many mappings the server keeps of the region granted as `grant`.
+    #[must_use]
+    pub fn region_holders(&self, grant: u64) -> usize {
+        // The loopback's own and the one looked up here are no mappings.
+        self.line
+            .region(grant)
+            .map_or(0, |(_, bytes)| Arc::strong_count(&bytes).saturating_sub(2))
     }
 
     /// Process `proc`, connected through a region of `len` bytes it grants,
@@ -350,5 +392,11 @@ impl Link for Client {
         if let Some((_, bytes)) = self.loopback.line.region(self.grant) {
             bytes.read(at, out);
         }
+    }
+
+    // The loopback's grants are made by the test, which names one as the
+    // region it attaches.
+    fn grant(&self, region: u64) -> Result<u64, Errno> {
+        Ok(region)
     }
 }

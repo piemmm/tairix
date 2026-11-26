@@ -268,10 +268,11 @@ nothing retries.
 
 The departure cannot ride that loop: it must run to completion before the
 seat is given up, and the wake sources it is no longer serving would report
-ready on every re-park and spin a core through the whole fade. `run.rs`'s
-`fade_to_black` drives it instead, presenting each frame and sleeping
-between them on `tairix_rt::park_ns` (the runtime's off-CPU timed park), and
-it is bounded by the fade's own span. A refused present stops the dim where
+ready on every re-park and spin a core through the whole fade.
+`fade::fade_to_black` drives it instead, taking the ring's latches so a
+window present one put on screen is still finished as shown, presenting each
+frame and sleeping between them on `tairix_rt::park_ns` (the runtime's
+off-CPU timed park), and it is bounded by the fade's own span. A refused present stops the dim where
 it got to; the seat is handed on cleared regardless, so the screen still
 ends black. Under a reduced-motion theme it is black from its first frame
 and parks not at all.

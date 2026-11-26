@@ -7,7 +7,7 @@ use tairix_abi::driver::display::{
 };
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::DriverError;
-use tairix_display::{DrawInPlace, Presenter};
+use tairix_display::{winframe, DrawInPlace, FrameRegion, Presenter, SharedFrame};
 
 use crate::color::{div255, Color, Pixel};
 use crate::corner::Corners;
@@ -63,6 +63,55 @@ pub(crate) fn new_compositor(mode: DisplayMode, background: Color) -> Option<Com
     // invented to carry it.
     compositor.set_background(background);
     Some(compositor)
+}
+
+/// A decorated red window whose surface is the screen's size, windowed, over
+/// a blue desktop.
+pub(crate) fn fullscreenable(output: DisplayMode) -> (Compositor, WindowId) {
+    let mut c = new_compositor(output, BLUE).expect("compositor");
+    let id = c.add_window(
+        Point::new(20, 20),
+        opaque(output.width_px, output.height_px, RED),
+    );
+    let state = crate::WindowFurnitureState {
+        activation: crate::WindowActivationState::Active,
+        size: WindowSizeState::Restored,
+        movable: true,
+        resizable: true,
+    };
+    assert!(c.set_window_frame(id, WindowFrame::new(state)));
+    assert!(c.resize_window_client(id, 40, 30));
+    (c, id)
+}
+
+/// A client's mapped frame region.
+pub(crate) struct FrameBytes(alloc::vec::Vec<u8>);
+
+impl FrameRegion for FrameBytes {
+    fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// A client frame holding `picture`, shaped as `shape`, and the region it
+/// lies in.
+pub(crate) fn client_frame(
+    picture: &Surface,
+    shape: &DisplayMode,
+) -> (SharedFrame, alloc::rc::Rc<FrameBytes>) {
+    let mut bytes = alloc::vec![0; (shape.stride_bytes * shape.height_px) as usize];
+    winframe::encode(
+        picture,
+        &mut bytes,
+        shape,
+        DamageRect::full(shape),
+        &tairix_parallel::SERIAL,
+    )
+    .expect("encoded");
+    let len = bytes.len();
+    let region = alloc::rc::Rc::new(FrameBytes(bytes));
+    let held: alloc::rc::Rc<dyn FrameRegion> = region.clone();
+    (SharedFrame::new(held, 0, len).expect("one frame"), region)
 }
 
 /// A capture tap over the whole of `c`'s desktop, showing the pointer where
@@ -174,6 +223,11 @@ impl MockDisplay {
             drawn: Some(DrawnFrames::new(mode)),
             ..Self::new(mode)
         }
+    }
+
+    /// The frame the display last showed, laid out as its mode is.
+    pub(crate) fn shown(&self) -> &[u8] {
+        &self.last
     }
 }
 

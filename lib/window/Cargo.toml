@@ -52,6 +52,10 @@ tairix-visible = { path = "../visible", version = "=0.0.0" }
 tairix-controls = { path = "../controls", version = "=0.0.0", optional = true }
 tairix-appconf = { path = "../appconf", version = "=0.0.0", optional = true }
 tairix-icon = { path = "../icon", version = "=0.0.0", optional = true }
+# The device a swapchain's window is drawn on: the image the renderer draws,
+# the staging buffer a present copies into, and the window's frames attached
+# to it. Optional, for the applications that draw on a GPU.
+tairix-gpu = { path = "../gpu", version = "=0.0.0", optional = true }
 
 [target.'cfg(target_os = "none")'.dependencies]
 # The font client a document application's text is drawn through: the host
@@ -74,6 +78,10 @@ rt = [
     "dep:tairix-font",
 ]
 
+# A window whose frames a `tairix-gpu` device draws (`swapchain`), filled by
+# the application's worker.
+gpu = ["rt", "dep:tairix-gpu"]
+
 # The settings window over an application's closed registry
 # (`docapp::settings`), which needs none of the runtime.
 settings = [
@@ -93,5 +101,7 @@ tairix-buildcfg = { path = "../buildcfg", version = "=0.0.0", features = ["std"]
 # The shared seeded generator the randomised unit tests draw from (never in a
 # shipping build).
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
-# The settings window is tested with the rest of the crate.
-tairix-window = { path = ".", features = ["settings"] }
+# The settings window and the swapchain are tested with the rest of the crate.
+tairix-window = { path = ".", features = ["settings", "gpu"] }
+# The served device a swapchain's frames are filled through on its loopback.
+tairix-gpu = { path = "../gpu", version = "=0.0.0", features = ["test-support"] }

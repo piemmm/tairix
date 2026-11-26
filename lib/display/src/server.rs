@@ -158,11 +158,12 @@ struct Queued {
     deadline_ns: u64,
 }
 
-/// A latch its presenter's port could not take yet, and when it is posted
-/// again.
+/// A latch its presenter's port could not take yet, the moment it happened,
+/// and when it is posted again.
 #[derive(Copy, Clone, Debug)]
 struct Owed {
     seq: u64,
+    at_ns: u64,
     reoffer: Reoffer,
 }
 
@@ -187,16 +188,16 @@ impl Configured {
         self.buffers.iter().copied().find(|held| held.id == id)
     }
 
-    /// Post present `seq`'s latch to the presenter's port, owing it for what
-    /// refused it in place of any latch still owed; `now_ns` times a wait on
-    /// kernel memory.
+    /// Post present `seq`'s latch, which happened at `at_ns`, to the
+    /// presenter's port, owing it for what refused it in place of any latch
+    /// still owed; `now_ns` times a wait on kernel memory.
     fn offer(
         &mut self,
-        seq: u64,
+        (seq, at_ns): (u64, u64),
         delivery: &mut dyn Delivery,
         now_ns: impl FnOnce() -> u64,
     ) -> Latch {
-        let posted = delivery.post(self.events_port, &DisplayEvent::Presented { seq });
+        let posted = delivery.post(self.events_port, &DisplayEvent::Presented { seq, at_ns });
         let (reoffer, latch) = match posted.map_err(SendRefusal::of) {
             Ok(()) => (None, Latch::Posted),
             Err(SendRefusal::Full | SendRefusal::Budget) => (Some(Reoffer::OnRoom), Latch::Owed),
@@ -204,7 +205,11 @@ impl Configured {
             Err(SendRefusal::Gone) => (None, Latch::Gone),
             Err(SendRefusal::Final(refused)) => (None, Latch::Undelivered(refused)),
         };
-        self.owed = reoffer.map(|reoffer| Owed { seq, reoffer });
+        self.owed = reoffer.map(|reoffer| Owed {
+            seq,
+            at_ns,
+            reoffer,
+        });
         latch
     }
 }
@@ -446,7 +451,7 @@ impl<C: MonotonicClock> DisplayServer<C> {
         let Some(owed) = self.configured.as_ref().and_then(|c| c.owed) else {
             return Latch::Idle;
         };
-        self.offer(owed.seq, delivery)
+        self.offer((owed.seq, owed.at_ns), delivery)
     }
 
     /// The port whose room an owed latch waits on. Room is level-triggered,
@@ -479,20 +484,22 @@ impl<C: MonotonicClock> DisplayServer<C> {
         self.undelivered.take_due().map(|total| (total, refusal))
     }
 
-    /// Post the queued present's latch, `None` when no present is queued.
+    /// Post the queued present's latch, timed now, `None` when no present is
+    /// queued.
     fn post_latch(&mut self, delivery: &mut dyn Delivery) -> Option<Latch> {
         let queued = self.configured.as_mut()?.queued.take()?;
-        Some(self.offer(queued.seq, delivery))
+        let at_ns = self.clock.now_ns();
+        Some(self.offer((queued.seq, at_ns), delivery))
     }
 
-    /// Post present `seq`'s latch, owed for what refused it and counted when
-    /// refused for good.
-    fn offer(&mut self, seq: u64, delivery: &mut dyn Delivery) -> Latch {
+    /// Post present `seq`'s latch, which happened at `at_ns`, owed for what
+    /// refused it and counted when refused for good.
+    fn offer(&mut self, latched: (u64, u64), delivery: &mut dyn Delivery) -> Latch {
         let clock = &self.clock;
         let Some(configured) = self.configured.as_mut() else {
             return Latch::Idle;
         };
-        let latch = configured.offer(seq, delivery, || clock.now_ns());
+        let latch = configured.offer(latched, delivery, || clock.now_ns());
         if let Latch::Undelivered(refused) = latch {
             self.undelivered.note();
             self.refusal = Some(refused);
@@ -813,7 +820,11 @@ impl<C: MonotonicClock> DisplayServer<C> {
                 deadline_ns: now.saturating_add(PRESENT_LATCH_DEADLINE_NS),
             });
         }
-        Ok(PresentReply { presented, seq })
+        Ok(PresentReply {
+            presented,
+            seq,
+            at_ns: now,
+        })
     }
 
     /// Show `buffer` as `lease`'s pointer.

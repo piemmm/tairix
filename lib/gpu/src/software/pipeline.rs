@@ -3,7 +3,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_spirv::{EntryPoint, Interpolation};
+use tairix_spirv::{EntryPoint, Interpolation, InterpolationSampling};
 
 use super::dispatch::{self, Need};
 use super::shader::ir::{Carries, Fixed, Program, Term, LANES};
@@ -37,7 +37,7 @@ pub(crate) struct Fetch {
 pub(crate) struct Link {
     pub(crate) word: Option<u32>,
     pub(crate) interpolation: Interpolation,
-    pub(crate) centroid: bool,
+    pub(crate) sampling: InterpolationSampling,
     /// Whether it is 16 bits wide.
     pub(crate) narrow: bool,
 }
@@ -76,6 +76,8 @@ pub(crate) struct Shading {
     pub(crate) channels: [u8; MAX_PASS_ATTACHMENTS],
     pub(crate) second_channels: u8,
     pub(crate) effects: Effects,
+    /// Whether it shades each covered sample on its own.
+    pub(crate) per_sample: bool,
 }
 
 /// A render pipeline's programs and the tables a draw reads of them.
@@ -343,6 +345,7 @@ fn shading(
         narrow_outputs,
         channels: plan.channels,
         second_channels: plan.second_channels,
+        per_sample: entry.per_sample(),
         program,
     })
 }
@@ -387,7 +390,7 @@ fn links_of(
             links.push(Link {
                 word: source(location, component),
                 interpolation: input.interpolation,
-                centroid: input.centroid,
+                sampling: input.sampling,
                 narrow: input.width == 16,
             });
         }

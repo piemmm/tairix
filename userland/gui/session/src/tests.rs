@@ -80,7 +80,7 @@ use crate::{
     MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_svg::font::NoFonts;
-use tairix_window::WindowSizing;
+use tairix_window::{FrameUse, WindowSizing};
 
 /// A valid SVG asset (a single filled triangle on a square grid) that decodes
 /// to a non-empty vector form, so loading it is observably different from the
@@ -17452,7 +17452,7 @@ fn open_parent_and_popup(
                 &vec![0u8; 320 * 240 * 4],
                 &whole(&served_mode(320, 240)),
             ),
-            Ok(())
+            Ok(FrameUse::Read)
         );
         assert_eq!(
             host.popup_opened(2, 1, offset.0, offset.1, &served_mode(popup.0, popup.1)),
@@ -17492,7 +17492,7 @@ fn open_parent_and_tool(
                 &vec![0u8; 320 * 240 * 4],
                 &whole(&served_mode(320, 240)),
             ),
-            Ok(())
+            Ok(FrameUse::Read)
         );
         let spec = tairix_window::ToolSpec {
             transient: tairix_window::TransientSpec {
@@ -18221,7 +18221,7 @@ fn hovering_an_open_popup_repaints_only_the_popup() {
                 &vec![0x40; (popup_bounds.width * popup_bounds.height * 4) as usize],
                 &whole(&served_mode(popup_bounds.width, popup_bounds.height)),
             ),
-            Ok(())
+            Ok(FrameUse::Read)
         );
     });
 
@@ -19540,7 +19540,7 @@ fn a_popup_over_a_frosted_window_never_reblurs_it() {
                 &frame,
                 &whole(&served_mode(220, 180))
             ),
-            Ok(())
+            Ok(FrameUse::Read)
         );
     });
     comp.composite();

@@ -284,6 +284,34 @@ struct Extra<B> {
 /// beside its frames and the pointer image.
 const LAYER_BUFFERS: usize = DISPLAY_MAX_BUFFERS - DISPLAY_MAX_FRAMES as usize - 1;
 
+/// A present the display reported on screen, and when it got there.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct OnScreen {
+    /// The present's sequence number within its configuration.
+    pub seq: u64,
+    /// When it reached the screen, on the monotonic clock.
+    pub at_ns: u64,
+}
+
+/// The frames a presenter cycles through on a display whose driver posts
+/// each queued present's latch to a port.
+pub trait FrameRing {
+    /// The port to wait on beside the presenter's other sources: it fires
+    /// when the driver posts a latch.
+    fn events_port(&self) -> u64;
+
+    /// The newest present the display reported on screen, or `None` before
+    /// one reached it.
+    fn on_screen(&self) -> Option<OnScreen>;
+
+    /// The present the device queued and has not latched, if one.
+    fn queued(&self) -> Option<u64>;
+
+    /// Take every latch the driver posted, answering whether a present that
+    /// waited on one may now go.
+    fn take_events(&mut self) -> bool;
+}
+
 /// A display a compositor presents to over [`DisplayClient`], in frames the
 /// driver allocated.
 pub struct RemoteDisplay<M: BufferMapper, T: DisplayTransport> {
@@ -301,6 +329,8 @@ pub struct RemoteDisplay<M: BufferMapper, T: DisplayTransport> {
     /// The sequence number of a present the device queued and has not
     /// latched.
     in_flight: Option<u64>,
+    /// The newest present the display reported on screen.
+    on_screen: Option<OnScreen>,
     planes: Planes,
     layers: ArrayVec<Extra<M::Mapping>, LAYER_BUFFERS>,
     /// The pointer image, which the device has taken by the time a show
@@ -367,6 +397,7 @@ impl<M: BufferMapper, T: DisplayTransport> RemoteDisplay<M, T> {
             stride: configured.stride_bytes,
             back: 0,
             in_flight: None,
+            on_screen: None,
             planes,
             layers: ArrayVec::new(),
             cursor: None,
@@ -377,21 +408,42 @@ impl<M: BufferMapper, T: DisplayTransport> RemoteDisplay<M, T> {
     }
 
     /// Take a [`DisplayEvent`] the driver posted: a queued present that
-    /// latched frees the frames for the next. Answers whether a present was
-    /// waiting on it.
+    /// latched is on screen and frees the frames for the next. Answers
+    /// whether a present was waiting on it.
     pub fn latched(&mut self, event: DisplayEvent) -> bool {
-        let DisplayEvent::Presented { seq } = event;
+        let DisplayEvent::Presented { seq, at_ns } = event;
         if self.in_flight == Some(seq) {
             self.in_flight = None;
+            self.on_screen = Some(OnScreen { seq, at_ns });
             return true;
         }
         false
     }
 
-    /// Note how a present ended: one the device queued holds the next.
+    /// The newest present the display reported on screen, or `None` before
+    /// one reached it.
+    #[must_use]
+    pub const fn on_screen(&self) -> Option<OnScreen> {
+        self.on_screen
+    }
+
+    /// The present the device queued and has not latched, if one.
+    #[must_use]
+    pub const fn queued(&self) -> Option<u64> {
+        self.in_flight
+    }
+
+    /// Note how a present ended: one shown is on screen, and one the device
+    /// queued holds the next.
     fn settle(&mut self, reply: PresentReply) {
-        if reply.presented == Presented::Queued {
-            self.in_flight = Some(reply.seq);
+        match reply.presented {
+            Presented::Shown => {
+                self.on_screen = Some(OnScreen {
+                    seq: reply.seq,
+                    at_ns: reply.at_ns,
+                });
+            }
+            Presented::Queued => self.in_flight = Some(reply.seq),
         }
     }
 

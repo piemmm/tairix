@@ -11,11 +11,18 @@ publish.workspace = true
 [lints]
 workspace = true
 
-# The `Run` binary's runtime, its listing of the served GPUs and its short
-# help; a consumer of the work alone takes none of them.
+# The `Run` binary's runtime, its listing of the served GPUs, its short help
+# and the window `--present` shows the scene in; a consumer of the work alone
+# takes none of them.
 [features]
 default = ["program"]
-program = ["dep:tairix-rt", "dep:tairix-procinfo", "dep:tairix-help"]
+program = [
+    "dep:tairix-rt",
+    "dep:tairix-procinfo",
+    "dep:tairix-help",
+    "dep:tairix-window",
+    "dep:tairix-sandbox",
+]
 
 [[bin]]
 name = "tairix-gpucheck-run"
@@ -31,14 +38,24 @@ tairix-gpu = { path = "../../../lib/gpu", version = "=0.0.0" }
 tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", default-features = false }
 # The pinned set, each pass run on its sample.
 tairix-shaders = { path = "../../../lib/shaders", version = "=0.0.0" }
-# The passes' modules, admitted to read the layout each states.
+# The passes' modules, admitted to read the layout each states, and a
+# kernel's, admitted before any device is handed it.
 tairix-spirv = { path = "../../../lib/spirv", version = "=0.0.0" }
+# A WGSL kernel's bound, and the diagnostics its compile answers.
+tairix-wgsl = { path = "../../../lib/wgsl", version = "=0.0.0" }
+# The sandbox a WGSL kernel is compiled in: this binary as its own worker.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", optional = true }
+# The command line, read with the shared `getopt` and refused in its words.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The short help read from the bundle's own Help/ tree.
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", optional = true }
 # The served GPUs, listed by the System Information API.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", optional = true }
+# The window `--present` shows the scene in, its frames filled by a swapchain.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0", optional = true, features = ["gpu"] }
 
 [target.'cfg(target_os = "none")'.dependencies]
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"], optional = true }
 # `_start`, the streams and the clock the program reads.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
 # The System Information API's IPC transport.
@@ -46,8 +63,14 @@ tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", features
 tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"], optional = true }
 
 [dev-dependencies]
+# The kernels the MG3 vertical plants, each run here on the software device.
+tairix-test-shadercheck = { path = "../../../tests/integration/shadercheck_program", version = "=0.0.0" }
+# Modules the kernel tests write as assembly text.
+tairix-spirv = { path = "../../../lib/spirv", version = "=0.0.0", features = ["test-support"] }
 # The locales every help tree carries.
 tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
+# The heap the unit tests refuse.
+tairix-fuzzseed = { path = "../../../tests/fuzzseed", version = "=0.0.0" }
 
 [build-dependencies]
 tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

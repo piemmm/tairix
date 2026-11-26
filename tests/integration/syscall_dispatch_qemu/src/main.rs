@@ -104,6 +104,7 @@ mod kernel {
         boot, handle_panic_via_kernel_core, BinArch, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
 
+    use tairix_itest_witness::SYSCALL_INVOKED;
     use tairix_kernel_core::{
         AddressSpaceRegistry, BootReserve, IrqRouting, KernelSyscallHandlers, RandomReserve,
     };
@@ -140,13 +141,6 @@ mod kernel {
     /// `event_ids_are_unique` test in `kernel/core/src/audit.rs`.
     const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
 
-    /// `EventId` emitted by `kernel/syscall::Dispatcher::dispatch`
-    /// when a security-relevant syscall passes every check and is
-    /// forwarded to its handler. Pinned by the
-    /// `ids_are_frozen_and_in_range` test in
-    /// `kernel/syscall/src/audit.rs`.
-    const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
-
     /// Number of `SyscallInvoked` records the inner audit sink has
     /// observed during the synthesised-quartet test. The outer audit
     /// Sink starts the test on `BootCompleted` and inspects this
@@ -171,7 +165,7 @@ mod kernel {
     impl Sink for InnerAuditSink {
         fn write_event(&self, event: &Event<'_>) {
             SerialSink::new().write_event(event);
-            if event.id == SYSCALL_INVOKED_EVENT_ID {
+            if event.id == SYSCALL_INVOKED {
                 SYSCALL_INVOKED_COUNT.fetch_add(1, Ordering::Relaxed);
             }
         }

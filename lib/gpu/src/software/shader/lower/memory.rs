@@ -33,11 +33,12 @@ pub(crate) const fn private_pointer(first: u32, words: u32, pointee: TypeId, reg
 }
 
 /// How an access chain's index moves its pointer: to a struct member's
-/// offset, or by a stride per element.
+/// offset, or by a stride per element of a level of `length` elements
+/// where it has a length.
 #[derive(Copy, Clone)]
 enum Stride {
     Member(u32),
-    Each(u32),
+    Each(u32, Option<u32>),
 }
 
 impl Lowering<'_> {
@@ -503,7 +504,8 @@ impl Lowering<'_> {
             let (step, next) = self.index_step(ty, &mut layout, constant)?;
             let step = match step {
                 Stride::Member(offset) => Step::Bytes(offset),
-                Stride::Each(stride) => match constant
+                // A constant index the validator holds within its level.
+                Stride::Each(stride, length) => match constant
                     .and_then(|c| u64::try_from(c).ok())
                     .and_then(|c| c.checked_mul(u64::from(stride)))
                     .and_then(|bytes| u32::try_from(bytes).ok())
@@ -513,6 +515,8 @@ impl Lowering<'_> {
                         index: index_reg,
                         num: index_num,
                         stride,
+                        // A buffer is bounded by its binding's range alone.
+                        length: length.filter(|_| !matches!(root, Root::Binding(_))),
                     },
                 },
             };
@@ -593,28 +597,61 @@ impl Lowering<'_> {
                 }
                 (Stride::Member(offset), Some(declared.ty))
             }
-            (Type::Array { element, .. } | Type::RuntimeArray { element }, Layout::Words) => (
-                Stride::Each(self.words(element)?.checked_mul(4).ok_or(Fault::Budget)?),
+            (Type::Array { element, length }, Layout::Words) => (
+                Stride::Each(
+                    self.words(element)?.checked_mul(4).ok_or(Fault::Budget)?,
+                    Some(length),
+                ),
+                Some(element),
+            ),
+            (Type::RuntimeArray { element }, Layout::Words) => (
+                Stride::Each(
+                    self.words(element)?.checked_mul(4).ok_or(Fault::Budget)?,
+                    None,
+                ),
                 Some(element),
             ),
             (
                 Type::Array { element, .. } | Type::RuntimeArray { element },
                 Layout::Explicit { matrix, .. },
             ) => {
+                let length = match self.ty(ty)? {
+                    Type::Array { length, .. } => Some(length),
+                    _ => None,
+                };
                 *layout = Layout::Explicit {
                     matrix,
                     column: None,
                 };
                 (
-                    Stride::Each(self.admitted.array_stride(ty).ok_or(Fault::Malformed)?),
+                    Stride::Each(
+                        self.admitted.array_stride(ty).ok_or(Fault::Malformed)?,
+                        length,
+                    ),
                     Some(element),
                 )
             }
-            (Type::Matrix { column, .. }, Layout::Words) => (
-                Stride::Each(self.words(column)?.checked_mul(4).ok_or(Fault::Budget)?),
+            (
+                Type::Matrix {
+                    column, columns, ..
+                },
+                Layout::Words,
+            ) => (
+                Stride::Each(
+                    self.words(column)?.checked_mul(4).ok_or(Fault::Budget)?,
+                    Some(columns),
+                ),
                 Some(column),
             ),
-            (Type::Matrix { column, scalar, .. }, Layout::Explicit { matrix, .. }) => {
+            (
+                Type::Matrix {
+                    column,
+                    columns,
+                    scalar,
+                    ..
+                },
+                Layout::Explicit { matrix, .. },
+            ) => {
                 let (stride, row_major) = matrix.ok_or(Fault::Malformed)?;
                 // A row-major matrix's column starts a scalar further on
                 // and steps a row's stride between its components.
@@ -627,14 +664,15 @@ impl Lowering<'_> {
                 } else {
                     stride
                 };
-                (Stride::Each(each), Some(column))
+                (Stride::Each(each, Some(columns)), Some(column))
             }
-            (Type::Vector { scalar, .. }, Layout::Words) => {
-                (Stride::Each(num(scalar).words() * 4), None)
+            (Type::Vector { scalar, count }, Layout::Words) => {
+                (Stride::Each(num(scalar).words() * 4, Some(count)), None)
             }
-            (Type::Vector { scalar, .. }, Layout::Explicit { column, .. }) => {
-                (Stride::Each(column.unwrap_or(num(scalar).bits() / 8)), None)
-            }
+            (Type::Vector { scalar, count }, Layout::Explicit { column, .. }) => (
+                Stride::Each(column.unwrap_or(num(scalar).bits() / 8), Some(count)),
+                None,
+            ),
             _ => return Err(Fault::Malformed),
         })
     }
@@ -803,6 +841,8 @@ const fn fixed(built_in: BuiltIn) -> Option<Fixed> {
         BuiltIn::FRONT_FACING => Fixed::FrontFacing,
         BuiltIn::POINT_COORD => Fixed::PointCoord,
         BuiltIn::SAMPLE_MASK => Fixed::SampleMask,
+        BuiltIn::SAMPLE_ID => Fixed::SampleId,
+        BuiltIn::SAMPLE_POSITION => Fixed::SamplePosition,
         BuiltIn::FRAG_DEPTH => Fixed::FragDepth,
         _ => return None,
     })

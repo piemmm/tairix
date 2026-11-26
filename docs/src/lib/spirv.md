@@ -147,7 +147,11 @@ therefore known, and held to its declarations, through any depth of calls.
 
 **Entry points.** Each `EntryPoint` states what a pipeline must provide it:
 - its stage and workgroup size, and for a fragment stage whether its tests
-  run early (`EntryPoint::early_fragment_tests`);
+  run early (`EntryPoint::early_fragment_tests`) and whether it shades each
+  sample its fragment covers on its own (`EntryPoint::per_sample`): its call
+  tree reads `SampleId` or `SamplePosition`, or an input decorated `Sample`,
+  as Vulkan's sample shading starts — an input listed but never read starts
+  nothing;
 - the resource bindings its call tree statically uses, each as a set, binding,
   `BindingKind`, descriptor count and `Access`;
 - the bytes of push constants it reads;
@@ -155,7 +159,9 @@ therefore known, and held to its declarations, through any depth of calls.
   slot's location, component and index, its scalar type and width, the
   variable it belongs to and the 32-bit components before it there, and a
   fragment input's `Interpolation` — `Smooth`, `NoPerspective` or `Flat` — and
-  whether it is taken at the centroid;
+  `InterpolationSampling`: at the pixel's centre, its centroid or the sample
+  shaded, a flat value at its centre; `Sample` beside `Centroid` or `Flat`
+  names two places or none and is refused (`DecorationTarget`);
 - the module-scope variables its call tree names (`EntryPoint::globals`), so a
   consumer lowering one entry point of a module of several leaves the others'
   variables alone;
@@ -265,6 +271,44 @@ specialization is refused (`FoldError::Malformed`), as are a folded module past
 the encoder's bounds (`TooLarge`) and one the validator would not admit again
 (`Refused`).
 
+## The guard pass
+
+Every buffer, texture and shared-memory access an admitted module makes falls
+within what is actually bound, whatever the shader computes (`plans/SHADER.md`
+SH6). A buffer a binding describes is bounded by the range it was given, which
+devices bound themselves; every other memory object — push constants,
+private, function, workgroup and the stage interface — is bounded by each
+level an index steps through, and a dynamic vector component by its vector: a
+read past the bound is zero and a write past it does nothing. A device that
+bounds only buffers and images is given a module through
+`Admitted::guarded`, which writes that out:
+
+- each dynamic index into an array, matrix or vector of other memory is
+  compared with what it reaches of its level — its length or, an index being
+  a signed count, 2^(w−1) for an index `w` bits wide, whichever is less — and
+  the access clamped to the last element it reaches; a 16-bit index is
+  widened, sign-extended, first;
+- a load's value is selected to its type's null, and a store or an atomic
+  predicated on the comparison, its block split around it; before 1.4, where
+  `OpSelect` takes no composite, a composite load is predicated too and a
+  vector selected by the comparison splatted;
+- a dynamic vector component is handled alike, an insertion past the vector
+  keeping the component it would have replaced;
+- `OpCopyMemory` becomes a guarded load and a guarded store.
+
+A constant index costs nothing: the validator already holds it within what it
+reaches. A module needing none of this is answered as it stands. Otherwise the
+rewritten module is admitted again, and only the independent check
+`Guarded::new` makes a `Guarded` one: it trusts nothing of the pass and holds
+every dynamic index into a bounded level, and every dynamic component, to be a
+clamp to the last element it reaches. A selection or merge over 16-bit data
+the module only moved needs the arithmetic capability, which the pass declares;
+a device is then held to the guarded module, not its source. A `GuardError`
+names what stopped the pass: memory, a module past its bounds, or the pass's
+own fault — refused, or an index left unbounded. The software device bounds
+every access the same way in its interpreter, so a module and its guarded form
+run alike there.
+
 ## Encoding
 
 `Encoder` writes instructions: `next_id` issues ids densely, `emit` writes an
@@ -352,6 +396,11 @@ way.
   arrays of matrices, wide built-in and located blocks, and many entry points
   sharing deep outputs. Each is decided in milliseconds; a regression shows as
   a slow test, not a failing one.
+- The guard pass's tests guard every kind of access at every version, and a
+  split at every place a block may stand, each result admitted and confirmed
+  by the check; a module needing nothing is kept as it stands, one input
+  writes one module, narrow data gains the capability it is selected with,
+  and the check believes a clamp whoever wrote it and nothing less.
 - `tests/fuzz_spirv.rs` (in `cargo xtask fuzz`) mutates valid modules: bits,
   boundary words, insertions, deletions, duplications, truncations, either byte
   order. It holds the decoder total, its refusals within the module, and every
@@ -369,12 +418,15 @@ way.
   Beside the mutations, it has the builder write random structured programs —
   nested selections and loops, early returns, arithmetic, extended
   instructions and the locals that carry values out of a construct — and
-  holds each to being admitted and to building the same bytes twice.
+  holds each to being admitted and to building the same bytes twice. Every
+  admitted module guards into one the validator admits and the check confirms.
 - `cargo xtask miri` interprets the crate's tests, dealt across the host's
-  cores, and the harness. It leaves out ten whose extent is their assertion
-  and costs minutes to hours interpreted: the bounds on nesting, call depth,
-  bindings, globals, locals, members and cases, samplings and sampling work, a
-  hundred thousand selections, and a ladder as deep as nesting goes. It leaves out the
+  cores, and the harness. It leaves out twelve whose extent is their
+  assertion and costs minutes to hours interpreted: the bounds on nesting,
+  call depth, bindings, globals, locals, members and cases, samplings and
+  sampling work, a hundred thousand selections, a ladder as deep as nesting
+  goes, the guard's split at the deepest nesting, and two hundred thousand
+  constants interned — each linear in its extent natively. It leaves out the
   `specialize_memory` binary too, whose peak and allocation measurements are
   taken at a size that is their assertion. The ordinary matrix runs those in
   full.

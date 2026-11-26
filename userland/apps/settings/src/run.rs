@@ -1760,6 +1760,7 @@ mod program {
             | WindowEvent::Focus { focused: false, .. }
             | WindowEvent::Minimized { .. }
             | WindowEvent::Shown { .. }
+            | WindowEvent::FramePresented { .. }
             | WindowEvent::RedrawRequested { .. }
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }

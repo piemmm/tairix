@@ -12,6 +12,7 @@ mod entry;
 mod fold;
 pub(crate) mod glsl;
 mod group;
+mod guard;
 mod image;
 mod interface;
 mod layout;
@@ -40,14 +41,16 @@ mod tests;
 mod view_tests;
 
 use alloc::vec::Vec;
+use core::fmt;
 
 pub use allow::CAPABILITIES;
 pub use binding::{
     Access, Binding, BindingKind, Component, Disagreement, ImageShape, Layout, SampleForms,
     Sampling, Stages,
 };
-pub use entry::{EntryPoint, Interpolation, Stage, Varying, WorkgroupSize};
+pub use entry::{EntryPoint, Interpolation, InterpolationSampling, Stage, Varying, WorkgroupSize};
 pub use fold::FoldError;
+pub use guard::{GuardError, Guarded};
 pub use specialize::{Constant, ConstantId, SpecError, SpecValue, Specialized, MAX_SPECIALIZED};
 pub use types::{MAX_MATRIX_COLUMNS, MAX_VECTOR_COMPONENTS};
 pub use view::{ImageType, Member, Scalar, Type, TypeId};
@@ -137,6 +140,13 @@ impl Admitted {
     #[must_use]
     pub const fn module(&self) -> &Module {
         &self.module
+    }
+
+    /// The module's bytes, little-endian, given up with everything else it
+    /// holds: what a compiler hands on without copying what it admitted.
+    #[must_use]
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.module.bytes
     }
 
     /// The capabilities it declares, and those they implicitly declare, by
@@ -388,6 +398,174 @@ pub enum Rule {
     /// A resource variable without its set and binding, of a type no
     /// descriptor holds, or sharing its binding.
     Resource,
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "word {}: {}", self.word, self.rule)
+    }
+}
+
+impl fmt::Display for Limit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::EntryPoints => "entry points",
+            Self::CallDepth => "the depth of its calls",
+            Self::Bindings => "an entry point's bindings",
+            Self::Samplings => "a function's samplings",
+            Self::SamplingWork => "the samplings followed through it",
+            Self::Locations => "an interface's locations",
+            Self::TypeDepth => "the nesting of its types",
+            Self::Nesting => "the nesting of its constructs",
+            Self::Members => "a structure's members",
+            Self::Indexes => "an instruction's indexes",
+            Self::String => "a string's length",
+            Self::Globals => "global variables",
+            Self::Locals => "function variables",
+            Self::Modes => "an entry point's execution modes",
+        })
+    }
+}
+
+impl fmt::Display for Rule {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per rule keeps the rules one table"
+    )]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::Version => f.write_str("a version older than the oldest admitted"),
+            Self::Capability(capability) => {
+                write!(f, "capability {}, which is not admitted", capability.0)
+            }
+            Self::Extension => f.write_str("an extension that is not admitted"),
+            Self::InstructionNotEnabled(op) => {
+                write!(f, "{op:?}, which nothing the module declares enables")
+            }
+            Self::EnumerantNotEnabled(kind, value) => {
+                write!(
+                    f,
+                    "{kind:?} {value}, which nothing the module declares enables"
+                )
+            }
+            Self::NotAdmitted(op) => write!(f, "{op:?}, which is never admitted"),
+            Self::AddressingModel => f.write_str("an addressing model other than Logical"),
+            Self::MemoryModel => f.write_str("a memory model other than GLSL450"),
+            Self::Layout => f.write_str("an instruction outside the place it belongs"),
+            Self::NoEntryPoint => f.write_str("no entry point"),
+            Self::Limit(limit) => write!(f, "past the bound on {limit}"),
+            Self::OutOfMemory => f.write_str("the memory validating it needs could not be had"),
+            Self::Undefined(id) => write!(f, "%{} used where nothing defines it", id.get()),
+            Self::ForwardReference(id) => write!(f, "%{} used before its definition", id.get()),
+            Self::OtherFunction(id) => write!(f, "%{} local to another function", id.get()),
+            Self::WrongKind(id) => {
+                write!(
+                    f,
+                    "%{} naming the wrong sort of thing for its operand",
+                    id.get()
+                )
+            }
+            Self::NotDominated(id) => {
+                write!(f, "a use of %{} its definition does not dominate", id.get())
+            }
+            Self::Type => f.write_str("a type that is not well formed"),
+            Self::DuplicateType => f.write_str("a type declared twice"),
+            Self::ArrayLength => {
+                f.write_str("an array length that is not an integer constant of at least one")
+            }
+            Self::RuntimeArray => {
+                f.write_str("a run-time array other than ending a storage buffer")
+            }
+            Self::Contents => f.write_str("a type holding what its storage class or use may not"),
+            Self::Constant => f.write_str("a constant of the wrong type or constituents"),
+            Self::SpecConstantOp => {
+                f.write_str("a specialization constant's operation not admitted, or mistyped")
+            }
+            Self::DecorationTarget(decoration) => {
+                write!(f, "decoration {} on what it cannot decorate", decoration.0)
+            }
+            Self::DuplicateDecoration(decoration) => {
+                write!(f, "decoration {} twice on one target", decoration.0)
+            }
+            Self::ConflictingDecorations(decoration) => {
+                write!(f, "decoration {} beside one it excludes", decoration.0)
+            }
+            Self::ExplicitLayout => {
+                f.write_str("a buffer's layout missing, misaligned or overlapping")
+            }
+            Self::StorageClass(class) => write!(f, "storage class {}, not admitted there", class.0),
+            Self::VariableType => {
+                f.write_str("a variable of a type its storage class does not allow")
+            }
+            Self::Initializer => f.write_str("an initializer not admitted, or of the wrong type"),
+            Self::LogicalPointer => f.write_str("a pointer where a logical pointer may not be"),
+            Self::AccessChain => f.write_str("an access chain whose indexes do not walk its type"),
+            Self::NotWritable => f.write_str("a write to memory that may not be written"),
+            Self::NotReadable => f.write_str("a read of memory that may not be read"),
+            Self::OpaqueUse => f.write_str("an image or sampler used other than to operate on it"),
+            Self::OperandType(at) => {
+                write!(f, "operand {at} of a type the instruction does not take")
+            }
+            Self::ResultType => f.write_str("a result type the instruction cannot produce"),
+            Self::OperandValue(at) => {
+                write!(f, "operand {at} out of the range the instruction takes")
+            }
+            Self::Semantics => f.write_str("a scope or memory semantics not admitted"),
+            Self::ImageOperands => {
+                f.write_str("image operands not admitted with the instruction or image")
+            }
+            Self::Block => {
+                f.write_str("a block not opened by a label or not closed by a terminator")
+            }
+            Self::BranchTarget => {
+                f.write_str("a branch to no label of the function, or to its entry")
+            }
+            Self::BlockOrder => f.write_str("blocks out of dominance order"),
+            Self::Phi => {
+                f.write_str("an OpPhi misplaced, or whose parents are not its predecessors")
+            }
+            Self::Merge => f.write_str("a merge instruction misplaced, or a branch missing one"),
+            Self::MergeBlock => {
+                f.write_str("a merge block declared twice, or not dominated by its header")
+            }
+            Self::ContinueTarget => f.write_str("a loop's continue target wrongly placed"),
+            Self::BackEdge => f.write_str("a back edge to no loop header, or a loop without one"),
+            Self::ConstructExit => {
+                f.write_str("a branch leaving a construct other than where it may")
+            }
+            Self::ConstructEntry => {
+                f.write_str("a branch entering a construct other than at its header")
+            }
+            Self::Fallthrough => f.write_str("a switch's cases falling through out of their order"),
+            Self::NoExit => f.write_str("a block from which no return is reachable"),
+            Self::Call => f.write_str("a call whose arguments do not match its callee"),
+            Self::Recursion => f.write_str("recursion"),
+            Self::Return => f.write_str("a return of the wrong type, or none"),
+            Self::EntryPoint => {
+                f.write_str("an entry point's function, model or name not admitted")
+            }
+            Self::ExecutionModel => {
+                f.write_str("an instruction its entry point's model does not allow")
+            }
+            Self::ExecutionMode(mode) => {
+                write!(
+                    f,
+                    "execution mode {} not admitted, repeated, or missing",
+                    mode.0
+                )
+            }
+            Self::Interface => {
+                f.write_str("a global variable its entry point uses but does not list")
+            }
+            Self::BuiltIn => {
+                f.write_str("a built-in of the wrong type, class or model, or used twice")
+            }
+            Self::Location => {
+                f.write_str("interface locations missing, misassigned or overlapping")
+            }
+            Self::Resource => f.write_str("a resource without its set and binding, or sharing one"),
+        }
+    }
 }
 
 impl Rule {

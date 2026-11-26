@@ -74,7 +74,7 @@ mod kernel {
     use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
-    use tairix_log::{Event, EventId, Sink};
+    use tairix_log::{Event, Sink};
     use tairix_test_svgtext::{Report, Verdict, COMMAND, REPORT_FAILED_EVENT};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
@@ -92,11 +92,6 @@ mod kernel {
     #[global_allocator]
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
-
-    /// `EventId` emitted by the syscall dispatcher for an audited syscall
-    /// that passed every check. Pinned by the audit-id test in
-    /// `kernel/syscall/src/audit.rs`.
-    const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
 
     /// The fixture could not render at all, so there is no measurement to
     /// judge and none is coming.
@@ -118,7 +113,7 @@ mod kernel {
     static MEASURED: AtomicBool = AtomicBool::new(false);
 
     /// The run's end: the fixture's exit, then the shell's.
-    static END: FixtureExit = FixtureExit::new(&[COMMAND], SYSCALL_INVOKED_EVENT_ID);
+    static END: FixtureExit = FixtureExit::new(&[COMMAND]);
 
     /// The finisher a refused verdict exits with. Each expectation has its
     /// own code, so a failing run names which one it missed rather than

@@ -1135,31 +1135,88 @@ points and a line, depth-tested and stencilled, culled, blended, masked,
 scissored and offset, into unsigned normalised, integer and float targets,
 four samples resolved, and last a record naming its first instance, which a
 device stating no first instances must answer by losing that context; and
-last a fill dispatched indirectly with counts one past the device's own,
-which must lose its context. Every value the work reads is exact on any
-conforming device. It prints one line per GPU: agreement, or the first
-`tairix_gpucheck::Difference` — a step of the work refused, named; a byte; a
-different answer to the fill; a pass's word, named by pass, binding and
-place; a byte of the image work, of the render work, of the resolved samples
-or of the draw naming its first instance; a different answer to that draw;
-or a different answer to the dispatch past the counts (`plans/GPU.md` GP11.2,
-GP5.4–GP5.6). A device stating less than the image or render work uses of
-its formats, or no family that draws, is not held to that step, one stating
-no four samples of the render work's colour to its resolve, nor one whose
-counts no count is past to the last step.
+a fill dispatched indirectly with counts one past the device's own, which
+must lose its context; and last the differential corpus (`plans/SHADER.md`
+SH7). The corpus is every instruction the validator admits in a body and
+every `GLSL.std.450` instruction, written with the builder into kernels of
+families — numbers, structure, atomics, barriers, subgroups, images, and a
+draw's fragment stage — whose inputs are words of their buffer, never
+constants, so a device computes each instruction rather than folding it.
+Each word a kernel leaves is held to the software device's within what
+Vulkan states its instruction to (`tairix_gpucheck::Held`: bit for bit, units
+in the last place, or an absolute error), and every input is one whose answer
+every conforming device defines alike: no tie a rounding direction decides,
+no NaN or subnormal, no index out of range. A host test holds the corpus to
+`admitted_body_ops` and `admitted_glsl`, so an instruction the validator comes
+to admit fails the build until the corpus runs it. Every value the work reads
+is exact or held so on any conforming device. It prints one line per GPU:
+agreement, or the first `tairix_gpucheck::Difference` — a step of the work
+refused, named; a byte; a different answer to the fill; a pass's word, named
+by pass, binding and place; a byte of the image work, of the render work, of
+the resolved samples or of the draw naming its first instance; a different
+answer to that draw; a different answer to the dispatch past the counts; or a
+corpus word past what it is held to, named by family and instruction
+(`plans/GPU.md` GP11.2, GP5.4–GP5.6, GP8). A device stating less than the
+image or render work uses of its formats, or no family that draws, is not
+held to that step, one stating no four samples of the render work's colour
+to its resolve, one whose counts no count is past to the dispatch past them,
+nor one stating less than a corpus kernel's capabilities, formats or
+features to that kernel.
+
+`gpucheck --present` shows a stated scene instead (`tairix_gpucheck::Scene`):
+an opaque blue ground, a band of colours, a row of checked tiles and the first
+tile copied to the far corner, recorded as a clear and copies — every colour
+written exactly, so any device leaves the same bytes. It is drawn on the first
+GPU a driver serves, or on a software device sized for the screen when none
+is, in a window that asks for full screen before it presents anything, so no
+frame is shown at another size. The swapchain fills its frames, `Fifo`, until
+`Escape` or a close, the frames' fates are counted, and once the last present
+is finished (`Swapchain::idle`) it prints how many frames it presented and on
+what, and whether every one was shown (`plans/GPU.md` GP6.5).
+
+`gpucheck --shader FILE [--words N]` runs a kernel of the caller's own
+(`plans/GPU.md` GP8): WGSL source, compiled in `lib/sandbox`'s `wgsl` worker,
+or a SPIR-V module, told apart by the file's first word. Either is admitted
+(`tairix_gpucheck::Kernel`) before any device is given it, and a kernel
+refused is not run: the refusal is printed, with its line and column in WGSL.
+Its one compute entry point runs over one storage buffer of `N` words — 256
+unless asked, at most `MAX_WORDS` — word `i` starting as `i`, one invocation
+a word, on every served GPU and on the software device; beside it a context
+of its own holds a random marker with its top bit set, which no word of the
+buffer starts as. Each GPU's line is agreement — the buffer read alike, or the
+kernel lost to its deadline on both and a fill served after — or the first
+`KernelDifference`: a word holding the marker, a word read differently, the
+kernel answered otherwise than on the software device, or a GPU that served
+nothing once it had lost the kernel. The CPU waits on each submission its
+deadline twice over: the deadline runs only once the device starts the work,
+and its end is told only after, so a submission answered neither way in that
+time is a kernel the device never answered.
 
 The work and the comparison are the library, so `cargo test -p
 tairix-gpucheck` holds two software devices to agreement, the image work to
 the values it computes and the render work to a model of Vulkan's rules, a
 device running transfers alone refused at the first pass by name, a device
 whose first family runs transfers alone running its dispatches on the next,
-and each kind of difference found where it first is; and the Venus verticals
-hold the virtio-gpu driver's Venus backend to the same comparison, every
-step stated, with no translation unit and behind one translating the GPU. Manifest:
-`CAP_GPU`, `CAP_SHM`, `CAP_CONSOLE_WRITE` and `CAP_FS_ACCESS`, all within the
-session baseline. Exit status: `0` every served GPU agreed, `1` one differed
-or could not be reached, none is served, the list or the software device
-failed, or a usage error.
+each kind of difference found where it first is, every corpus family run on
+the software device alike each time with known answers among them held to
+the specification's values, the corpus to every admitted instruction, and
+each of its inputs to answering alike on every device; the Venus verticals hold the virtio-gpu driver's
+Venus backend to the same comparison, every step stated, with no translation
+unit and behind one translating the GPU, and the `gpucheck --shader` vertical
+hands it an honest kernel in WGSL and compiled, one reaching past every
+memory, one that never ends, and one each front end and validator refuse. The
+scene drawn on the software device is held to the scene stated, pixel by pixel,
+at every extent and in both frame formats, and the `gpucheck --present`
+vertical holds the screen of a desktop whose only display is a virtio GPU to
+the scene drawn on the host, its window promoted. Manifest:
+`CAP_GPU`, `CAP_SHM`, `CAP_CONSOLE_WRITE`, `CAP_FS_ACCESS`,
+`CAP_SANDBOX_SPAWN` and `CAP_LOG_EMIT`, all within the session baseline. Exit
+status: `0` every served GPU agreed, with `--present` every frame presented
+was shown, or with `--shader` every served GPU agreed on the kernel; `1` one
+differed or could not be reached, none is served, the list or the software
+device failed, a frame was not shown or none was presented, a step of the
+window or the device was refused, the kernel's file could not be read or the
+kernel was refused, or a usage error.
 
 ## `clear` — clear the terminal screen (`userland/apps/clear`)
 

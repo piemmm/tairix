@@ -613,6 +613,38 @@ fn a_call_of_the_wrong_arity_is_refused() {
 }
 
 #[test]
+fn a_derivative_of_stated_precision_is_admitted_only_under_derivative_control() {
+    for op in [
+        Op::D_PDX_FINE,
+        Op::D_PDY_FINE,
+        Op::FWIDTH_FINE,
+        Op::D_PDX_COARSE,
+        Op::D_PDY_COARSE,
+        Op::FWIDTH_COARSE,
+    ] {
+        let name = op.name().unwrap_or("Op?");
+        let precise = with(
+            FRAGMENT,
+            "%d = OpDPdx %v4 %s",
+            &format!("%d = {name} %v4 %s"),
+        );
+        assert_eq!(
+            refused(&precise),
+            Rule::InstructionNotEnabled(op),
+            "{name} without its capability"
+        );
+        let controlled = after(
+            &precise,
+            "OpCapability Shader",
+            "OpCapability DerivativeControl",
+        );
+        if let Err(refusal) = admit(&controlled) {
+            panic!("{name} under DerivativeControl was refused: {refusal:?}");
+        }
+    }
+}
+
+#[test]
 fn a_derivative_in_a_compute_shader_is_refused() {
     let module = after(COMPUTE, "%w = OpFAdd %float %v %v", "%d = OpDPdx %float %w");
     assert_eq!(refused(&module), Rule::ExecutionModel);
@@ -948,6 +980,30 @@ fn a_constant_index_past_an_arrays_length_is_refused() {
         "%past = OpAccessChain %fn_float %local %two",
     );
     assert_eq!(refused(&module), Rule::AccessChain);
+}
+
+#[test]
+fn a_constant_index_is_read_as_a_signed_count() {
+    let module = after(COMPUTE, "OpCapability Shader", "OpCapability Int16");
+    let module = after(
+        &module,
+        "%zero = OpConstant %uint 0",
+        "%ushort = OpTypeInt 16 0\n%length = OpConstant %uint 40000\n%many = OpTypeArray %float %length\n%fn_many = OpTypePointer Function %many\n%fn_float = OpTypePointer Function %float\n%top = OpConstant %ushort 32768\n%below = OpConstant %ushort 32767",
+    );
+    let module = with(
+        &module,
+        "%entry = OpLabel",
+        "%entry = OpLabel\n%local = OpVariable %fn_many Function",
+    );
+    let reaching = |index: &str| {
+        after(
+            &module,
+            "%w = OpFAdd %float %v %v",
+            &format!("%e = OpAccessChain %fn_float %local {index}"),
+        )
+    };
+    assert!(admit(&reaching("%below")).is_ok());
+    assert_eq!(refused(&reaching("%top")), Rule::AccessChain);
 }
 
 #[test]

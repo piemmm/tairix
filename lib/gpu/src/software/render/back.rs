@@ -11,7 +11,7 @@ use tairix_raster::{
     BlendInputs, BlendRange, CompareOp, Interpolation, Outcome, Primitive, StencilFace, StencilOp,
     BLOCK, MESH_SUB_UNITS,
 };
-use tairix_spirv::Component;
+use tairix_spirv::{Component, InterpolationSampling};
 use tairix_util::mathf;
 
 use super::front::{Batch, Setup};
@@ -38,8 +38,9 @@ struct Piece {
 }
 
 /// A quad waiting in a tile: its piece's place among the tile's, the pixel
-/// at its top-left, and each of its pixels' samples its piece covers within
-/// the draw's sample mask, and those of them its tests before shading kept.
+/// at its top-left, each of its pixels' samples its piece covers within the
+/// draw's sample mask and those of them its tests before shading kept, and,
+/// where its fragment stage shades each sample on its own, the one it shades.
 #[derive(Copy, Clone, Debug)]
 struct Quad {
     piece: u8,
@@ -47,6 +48,7 @@ struct Quad {
     y: u32,
     raster: [u8; 4],
     coverage: [u8; 4],
+    sample: Option<u8>,
 }
 
 /// Which samples a depth and stencil test writes the outcome of.
@@ -355,9 +357,52 @@ impl Drawing<'_, '_, '_> {
                 return true;
             }
         }
-        if drawn.render.form.fragment.is_none() {
+        let Some(shading) = &drawn.render.form.fragment else {
             // Nothing to shade: its tests were its whole work.
             return true;
+        };
+        self.draw = draw;
+        let quad = Quad {
+            piece: 0,
+            x: corner.0,
+            y: corner.1,
+            raster,
+            coverage,
+            sample: None,
+        };
+        if !shading.per_sample {
+            return self.hold((key, primitive), quad, meter);
+        }
+        for sample in 0..self.frame.samples.min(8) {
+            let bit = 1u8 << sample;
+            let covered = coverage.map(|cover| cover & bit);
+            if covered == [0; 4] {
+                continue;
+            }
+            let each = Quad {
+                raster: raster.map(|cover| cover & bit),
+                coverage: covered,
+                sample: u8::try_from(sample).ok(),
+                ..quad
+            };
+            if !self.hold((key, primitive), each, meter) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Hold `quad` of the piece `key` names in the tile, shading what waits
+    /// first where the tile or its pieces are full.
+    fn hold(
+        &mut self,
+        (key, primitive): ((u32, u32, u32), &Primitive),
+        quad: Quad,
+        meter: &mut Meter<'_>,
+    ) -> bool {
+        let known = self.pieces.iter().any(|piece| piece.at == key);
+        if (self.tile.is_full() || (!known && self.pieces.is_full())) && !self.shade_tile(meter) {
+            return false;
         }
         let slot = if let Some(slot) = self.pieces.iter().position(|piece| piece.at == key) {
             slot
@@ -374,16 +419,7 @@ impl Drawing<'_, '_, '_> {
         let Ok(piece) = u8::try_from(slot) else {
             return false;
         };
-        self.draw = draw;
-        self.tile
-            .try_push(Quad {
-                piece,
-                x: corner.0,
-                y: corner.1,
-                raster,
-                coverage,
-            })
-            .is_ok()
+        self.tile.try_push(Quad { piece, ..quad }).is_ok()
     }
 
     /// The depth of sample `sample` of pixel `(x, y)` of a piece, as its draw
@@ -799,8 +835,8 @@ struct Feeder<'a, 'd> {
 }
 
 /// What a tile's weights were found for: an input port, how it varies, and
-/// whether at its centroid.
-type Weighed = (usize, Interpolation, bool);
+/// where within each pixel.
+type Weighed = (usize, Interpolation, InterpolationSampling);
 
 impl Feeder<'_, '_> {
     /// The piece `quad` came from, with its batch and setup.
@@ -827,9 +863,10 @@ impl Feeder<'_, '_> {
             let Some((_, setup, primitive)) = self.piece_of(quad) else {
                 continue;
             };
+            let (sx, sy) = self.shading_point(quad);
             for lane in 0..4u32 {
                 let (px, py) = lane_pixel((quad.x, quad.y), lane);
-                let (cx, cy) = (f64::from(px) + 0.5, f64::from(py) + 0.5);
+                let (cx, cy) = (f64::from(px) + sx, f64::from(py) + sy);
                 let value = match carries {
                     Carries::Fixed(Fixed::FragCoord) => match word {
                         0 => single_bits(cx),
@@ -855,6 +892,10 @@ impl Feeder<'_, '_> {
                     Carries::Fixed(Fixed::SampleMask) if word == 0 => {
                         u32::from(quad.raster.get(lane as usize).copied().unwrap_or(0))
                     }
+                    Carries::Fixed(Fixed::SampleId) => u32::from(quad.sample.unwrap_or(0)),
+                    Carries::Fixed(Fixed::SamplePosition) => {
+                        single_bits(if word == 0 { sx } else { sy })
+                    }
                     Carries::Fixed(_) | Carries::Located { .. } => 0,
                 };
                 if let Some(slot) = values.get_mut(4 * slot + lane as usize) {
@@ -862,6 +903,14 @@ impl Feeder<'_, '_> {
                 }
             }
         }
+    }
+
+    /// Where within its pixels `quad` is shaded: at the one sample it shades,
+    /// or at their centres.
+    fn shading_point(&self, quad: &Quad) -> (f64, f64) {
+        quad.sample.map_or((0.5, 0.5), |sample| {
+            self.frame.sample_position(usize::from(sample))
+        })
     }
 
     /// Where a centroid input is interpolated in pixel `(x, y)`, whose
@@ -881,8 +930,14 @@ impl Feeder<'_, '_> {
         self.frame.sample_position(cover.trailing_zeros() as usize)
     }
 
-    /// Each lane's weights for `how`, at its centroid where `centroid`.
-    fn weights_for(&self, how: Interpolation, centroid: bool) -> [[f64; 3]; LANES] {
+    /// Each lane's weights for `how`, at the place in its pixel `sampling`
+    /// names: a quad shading one sample interpolates all but a centre input
+    /// at that sample.
+    fn weights_for(
+        &self,
+        how: Interpolation,
+        sampling: InterpolationSampling,
+    ) -> [[f64; 3]; LANES] {
         let mut weights = [[0.0; 3]; LANES];
         for (slot, quad) in self.tile.iter().enumerate() {
             let Some((_, _, primitive)) = self.piece_of(quad) else {
@@ -891,10 +946,14 @@ impl Feeder<'_, '_> {
             for lane in 0..4u32 {
                 let (x, y) = lane_pixel((quad.x, quad.y), lane);
                 let cover = quad.raster.get(lane as usize).copied().unwrap_or(0);
-                let (dx, dy) = if centroid {
-                    self.centroid(primitive, (x, y), cover)
-                } else {
-                    (0.5, 0.5)
+                let (dx, dy) = match (sampling, quad.sample) {
+                    (InterpolationSampling::Centroid, None) => {
+                        self.centroid(primitive, (x, y), cover)
+                    }
+                    (InterpolationSampling::Centre, _) | (InterpolationSampling::Sample, None) => {
+                        (0.5, 0.5)
+                    }
+                    (_, Some(sample)) => self.frame.sample_position(usize::from(sample)),
                 };
                 if let Some(held) = weights.get_mut(4 * slot + lane as usize) {
                     *held = primitive.weights(how, f64::from(x) + dx, f64::from(y) + dy);
@@ -925,9 +984,9 @@ impl Feeder<'_, '_> {
             tairix_spirv::Interpolation::NoPerspective => Some(Interpolation::Linear),
         };
         if let Some(how) = how {
-            let key = (port, how, link.centroid);
+            let key = (port, how, link.sampling);
             if self.weights.as_ref().is_none_or(|(held, _)| *held != key) {
-                self.weights = Some((key, self.weights_for(how, link.centroid)));
+                self.weights = Some((key, self.weights_for(how, link.sampling)));
             }
         }
         let value = |bits: u32| {

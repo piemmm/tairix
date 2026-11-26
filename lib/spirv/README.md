@@ -31,6 +31,11 @@ view backends read an admitted module through, and its encoder.
   `EntryPoint::agree` decides a pipeline layout against them, the stages that
   may see each binding included. `Admitted::held_bytes` states the host memory
   an admitted module keeps.
+- `Admitted::guarded` — the guard pass: every dynamic index into memory no
+  device bounds, and every dynamic vector component, clamped to the last
+  element it reaches, a read past it zero and a write past it nothing; the
+  result admitted again and made a `Guarded` module only by the independent
+  check `Guarded::new`, or a `GuardError`.
 - The lowering view — an admitted module's resolved types (`TypeId`, `Type`,
   `Member` with its explicit layout) and decorations, and `specialize`: every
   constant evaluated, total over every bit pattern, once a pipeline's

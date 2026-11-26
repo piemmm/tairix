@@ -385,6 +385,7 @@ pub const TARGETS: &[Target] = &[
                 "software::shader::lower::tests::constants_past_their_budget_are_refused",
                 "software::shader::lower::tests::a_constant_structure_of_the_most_members_is_laid_out_in_one_walk",
                 "software::shader::tests::every_case_runs_as_expected",
+                "software::shader::tests::every_case_runs_alike_guarded",
                 "software::shader::tests::every_admitted_instruction_has_a_case_that_runs_it",
                 "software::render::tests::a_pass_of_many_bins_and_flushes_draws_whole",
                 "software::render::tests::a_pass_of_many_draws_binding_distinct_sets_gathers_their_memories_once",
@@ -400,7 +401,8 @@ pub const TARGETS: &[Target] = &[
                      lowering-budget ones were unfinished after three hours, the widest constant \
                      structure took 43 minutes, the clear across three checks 25, the \
                      specialization budget's 16, the instruction-case test 69 as it lowers and \
-                     runs hundreds of modules, and the coverage test 8 as it admits them. The \
+                     runs hundreds of modules, its guarded twin unfinished after fifty as it \
+                     guards each one first, and the coverage test 8 as it admits them. The \
                      pass tests of many draws and flushes are their extent too — past five \
                      hundred primitives to cut a second flush, three thousand draws over sets \
                      of their own, two thousand over one set of four thousand descriptors — \
@@ -460,17 +462,27 @@ pub const TARGETS: &[Target] = &[
                 "validate::scale_tests::samplings_to_the_bound_are_admitted_and_past_it_refused",
                 "validate::scale_tests::samplings_followed_through_calls_are_admitted_within_the_work_bound_and_past_it_refused",
                 "validate::cfg::ladder_tests::the_ladder_agrees_with_the_parents_on_a_chain_as_deep_as_nesting_goes",
+                "validate::guard::tests::a_split_past_the_deepest_nesting_is_too_large",
+                "build::tests::interning_stays_one_id_per_constant_at_a_large_module_s_scale",
             ],
             reason: "each builds modules at one of the validator's fixed bounds and one past it, \
-                     a hundred thousand selections in sequence, or a construct ladder as deep as \
-                     nesting goes, so its extent is its assertion, and there it costs minutes to \
-                     hours interpreted: the samplings' bound about ten minutes, and the \
-                     sampling work's, a million samplings followed through sixteen thousand \
-                     calls, was unfinished when its shard was stopped at forty-five minutes. The \
-                     crate holds no `unsafe`, the tests kept take the same paths below each \
-                     bound at small scale, and all ten run in full under the ordinary test \
-                     matrix; the `fuzz_spirv` harness is enrolled beside the library. The `specialize_memory` integration test is excluded too: its two \
-                     tests measure what specializing holds and allocates at a size that is \
+                     a hundred thousand selections in sequence, a construct ladder as deep as \
+                     nesting goes, a guard's split at the deepest nesting, or a builder holding \
+                     two hundred thousand constants, so its extent is its assertion, and there \
+                     it costs minutes to hours interpreted: the samplings' bound about ten \
+                     minutes, the split thirty-nine, and twenty-five with the aliasing model \
+                     off; the sampling work's, a million samplings followed through sixteen \
+                     thousand calls, was unfinished when its shard was stopped at forty-five \
+                     minutes, and the constants after fifty with or without the aliasing \
+                     model. Natively each is linear in its extent: the split costs fourteen \
+                     microseconds a level unoptimized at every depth from sixty-four to the \
+                     bound, and a constant under two microseconds at every count from \
+                     twenty-five thousand to four hundred thousand. The crate holds no \
+                     `unsafe`, the tests kept take the same paths below each bound at small \
+                     scale, and all twelve run in full under the ordinary test matrix; the \
+                     `fuzz_spirv` harness is enrolled beside the library. The \
+                     `specialize_memory` integration test is excluded too: its two tests \
+                     measure what specializing holds and allocates at a size that is \
                      their assertion, a level of two million nulls and a chain of sixteen \
                      thousand operations, and the chain was unfinished after seventeen minutes \
                      interpreted; they reach no `unsafe`, the metered allocator they install is \
@@ -489,6 +501,66 @@ pub const TARGETS: &[Target] = &[
         features: &[],
         scope: Scope::Test {
             name: "fuzz_spirv",
+            reason: "a binary of its own, so it cannot share the sharded library's listing",
+        },
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-wgsl",
+        description: "the WGSL front end's lexer, template-list discovery, bounded parser, \
+                      scopes, constant evaluator, checks and emitter, and the ordered maps \
+                      and fallible collections every name is interned through, interpreted; \
+                      the crate forbids `unsafe`, so this is the plan's standing look at the \
+                      compiler between an application's source and the validator",
+        features: &[],
+        scope: Scope::LibExcept {
+            skip: &[
+                "check::graph::tests::a_long_chain_orders_without_recursion",
+                "parse::tests::a_long_else_if_chain_is_linked_without_recursing",
+                "parse::tests::a_long_chain_of_operators_or_accesses_is_read_without_recursing",
+            ],
+            reason: "each builds a chain a recursive pass would overflow the stack on — a \
+                     hundred thousand dependencies, twenty thousand arms, operators and \
+                     indexes — so its length is its assertion. Each was unfinished after \
+                     forty-five minutes interpreted, and with the aliasing model off the \
+                     dependencies still took four minutes and the operators eleven. Natively \
+                     the front end is linear in each chain's length. The crate holds no \
+                     `unsafe`, the kept tests take the same paths over short chains, all \
+                     three run in full under the ordinary test matrix, and the `run` and \
+                     `fuzz_wgsl` tests are enrolled beside the library. The \
+                     `compile_memory` integration test is excluded too: it compiles \
+                     programs of two thousand variables, or of every pointer a function \
+                     takes, at the size that is its assertion, and one of them was \
+                     unfinished after twenty-five minutes interpreted; it reaches no \
+                     `unsafe`, and the metered allocator it installs is interpreted under \
+                     `tairix-fuzzseed`'s own enrolment",
+        },
+        spread: Spread::Sharded(
+            "interpreted, its tests cost twenty-one minutes in one process, most of it \
+             compiling and admitting each test's modules",
+        ),
+    },
+    Target {
+        package: "tairix-wgsl",
+        description: "each construct compiled, admitted again and run on the software device \
+                      to the value the specification gives, interpreted",
+        features: &[],
+        scope: Scope::Test {
+            name: "run",
+            reason: "a binary of its own, so it cannot share the sharded library's listing",
+        },
+        spread: Spread::Sharded(
+            "interpreted, its tests cost fourteen minutes in one process, each lowering and \
+             running the modules it compiles",
+        ),
+    },
+    Target {
+        package: "tairix-wgsl",
+        description: "the front end held total and deterministic over mutated sources, and \
+                      generated integer programs run to WGSL's values, interpreted",
+        features: &[],
+        scope: Scope::Test {
+            name: "fuzz_wgsl",
             reason: "a binary of its own, so it cannot share the sharded library's listing",
         },
         spread: Spread::OneProcess,

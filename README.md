@@ -87,8 +87,10 @@ for filesystems, the feature section below.
 | Hardware-assisted scan-out (driver-allocated frames, cursor plane, hosted console) | ✓ virtio-gpu | ✓ virtio-gpu · ✓ Pi 4 HVS | ✓ virtio-gpu | — |
 | Display switched off when idle (desktop screensaver, login screen) | ✓ virtio-gpu | ✓ virtio-gpu · ◐ Pi 4 engine | ✓ virtio-gpu | — |
 | Desktop paced at the output's own refresh rate | ✓ virtio-gpu | ✓ virtio-gpu · ✓ Pi 4 engine | ✓ virtio-gpu | — |
+| Full-screen window laid straight from its frame onto the screen (one copy), each present's fate reported | ✓ virtio-gpu | ✓ virtio-gpu · ✓ Pi 4 HVS | ✓ virtio-gpu | — |
 | Native display engine (mode setting, several outputs, hotplug, HDMI 2.0 scrambling) | ◐ virtio-gpu | ◐ Pi 4 HVS + HDMI | ◐ virtio-gpu | — |
 | GPU served to programs (`gpu-v1` device channel) | ✓ virtio-gpu Venus | ▢ | ▢ | — |
+| Shaders a program supplies at run time (WGSL compiled in the sandbox, SPIR-V validated and guarded, held to the software device by `gpucheck --shader` and its differential corpus) | ✓ virtio-gpu Venus | ▢ | ▢ | — |
 | Sandboxed font service (`fontd`, glyph rendering) | ✓ floor | ✓ store | ✓ floor | ▢ |
 | Graphical login screen (`greeter.app`) | ◐ | ◐ | ◐ | ▢ |
 | Fast user switching (concurrent desktop sessions) | ▢ | ◐ | ▢ | ▢ |
@@ -249,6 +251,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Stack canaries / shadow stack (§19.2) | Return-address / saved-state overwrite | ◐ | ◐ | ◐ | ◐ |
 | KPTI / kernel-user address-space isolation (§19.1) | Meltdown-class kernel-memory disclosure | ◐ | ◐ | ◐ | — |
 | Minimum-capability parser sandboxes (§19.5) | Untrusted-input parser compromise (font/image/net/removable filesystems) | ◐ | ◐ | ◐ | ▢ |
+| Untrusted shader admission: compiled in the sandbox, validated, every dynamic index guarded (§5.4, §19.5) | A hostile shader reading another context's memory or past a resource it was bound, or a malformed module reaching a driver's compiler | ✓ | ✓ | ✓ | ▢ |
 | Hardware memory tagging — MTE / ADI (§19.10) | Use-after-free (hardware-enforced) | — | ▢ | ▢ | — |
 
 

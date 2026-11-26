@@ -2161,6 +2161,155 @@ OpReturn
 OpFunctionEnd
 "#;
 
+/// A fragment shader of `SampleRateShading` writing the float `%r` its
+/// `body` computes to an `R32Float` target: its inputs are `%in_value`, the
+/// location-0 vector decorated `decorations`, `%sample_id`, `%frag_coord` and
+/// `%sample_place`, each counting as read only where `body` loads it.
+fn sampling_painting(decorations: &str, body: &str) -> String {
+    format!(
+        r#"OpCapability Shader
+OpCapability SampleRateShading
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %in_value %sample_id %frag_coord %sample_place %out_value
+OpExecutionMode %main OriginUpperLeft
+OpDecorate %in_value Location 0
+OpDecorate %out_value Location 0
+OpDecorate %sample_id BuiltIn SampleId
+OpDecorate %frag_coord BuiltIn FragCoord
+OpDecorate %sample_place BuiltIn SamplePosition
+{decorations}
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%int = OpTypeInt 32 1
+%v2 = OpTypeVector %float 2
+%v4 = OpTypeVector %float 4
+%in_v4 = OpTypePointer Input %v4
+%in_v2 = OpTypePointer Input %v2
+%in_int = OpTypePointer Input %int
+%out_float = OpTypePointer Output %float
+%in_value = OpVariable %in_v4 Input
+%sample_id = OpVariable %in_int Input
+%frag_coord = OpVariable %in_v4 Input
+%sample_place = OpVariable %in_v2 Input
+%out_value = OpVariable %out_float Output
+%main = OpFunction %void None %fn
+%entry = OpLabel
+{body}
+OpStore %out_value %r
+OpReturn
+OpFunctionEnd
+"#
+    )
+}
+
+/// What a fragment stage writes to pixel `(0, 0)` of a four-sample 2×2
+/// `R32Float` target where only the samples of `mask` are covered, over a
+/// primitive whose value is its pixel's x: the mean over its four samples,
+/// those not covered nought.
+fn shaded_at(fragment: &str, mask: u32) -> f32 {
+    let device = rendering();
+    let context = context(&device);
+    let extent = (2, 2);
+    let targets = [plain(Format::R32Float)];
+    let pipeline = four_sample_pipeline(
+        &context,
+        (&targets, mask),
+        Some(fragment),
+        depth(CompareOp::Always, false),
+    );
+    let ndc = |x: f32, y: f32| ([x - 1.0, y - 1.0, 0.5, 1.0], [x, 0.0, 0.0, 1.0]);
+    let (_held, along) = floats(
+        &context,
+        &corners(&[ndc(0.0, -10.0), ndc(100.0, -10.0), ndc(0.0, 100.0)]),
+    );
+    let colour = target(&context, Format::R32Float, extent, 4);
+    let resolved = target(&context, Format::R32Float, extent, 1);
+    let depth_target = target(&context, Format::Depth32Float, extent, 4);
+    render_four(
+        &context,
+        (&colour, &resolved, &depth_target),
+        &[(&pipeline, &along, 3)],
+    );
+    read_floats(&context, &resolved)[0]
+}
+
+/// The body reading the sample index, so the stage shades each sample, and
+/// then the x of `vector` (`%in_value` or `%frag_coord`).
+fn indexed(vector: &str) -> String {
+    format!(
+        "%i = OpLoad %int %sample_id\n%v = OpLoad %v4 {vector}\n%r = OpCompositeExtract %float %v 0"
+    )
+}
+
+#[test]
+fn a_stage_reading_its_sample_index_shades_each_sample_on_its_own() {
+    let index = "%i = OpLoad %int %sample_id\n%r = OpConvertSToF %float %i";
+    let painting = sampling_painting("", index);
+    // Every sample covered: each holds its own index.
+    let mean = shaded_at(&painting, u32::MAX);
+    assert_eq!(mean.to_bits(), 1.5f32.to_bits(), "(0 + 1 + 2 + 3) / 4");
+    for (sample, index) in (0..4u32).zip([0.0f32, 1.0, 2.0, 3.0]) {
+        let got = shaded_at(&painting, 1 << sample);
+        let expected = index / 4.0;
+        assert_eq!(got.to_bits(), expected.to_bits(), "sample {sample} alone");
+    }
+}
+
+#[test]
+fn each_input_is_interpolated_where_its_sampling_says_in_a_sample_s_shading() {
+    // Sample 1 lies at x 0.875 of its pixel, the centre at 0.5.
+    let at_sample = sampling_painting("OpDecorate %in_value Sample", &indexed("%in_value"));
+    let at_centroid = sampling_painting("OpDecorate %in_value Centroid", &indexed("%in_value"));
+    let at_centre = sampling_painting("", &indexed("%in_value"));
+    let place = sampling_painting("", &indexed("%frag_coord"));
+    for (fragment, x, what) in [
+        (&at_sample, 0.875f32, "a sample input"),
+        (
+            &at_centroid,
+            0.875,
+            "a centroid input, its one sample covered",
+        ),
+        (&at_centre, 0.5, "a centre input"),
+        (&place, 0.875, "the fragment's position"),
+    ] {
+        let got = shaded_at(fragment, 0b0010);
+        assert!((got - x / 4.0).abs() < 1e-5, "{what}: {got}");
+    }
+}
+
+#[test]
+fn a_sample_s_position_and_coverage_are_its_own() {
+    let position = sampling_painting(
+        "",
+        "%p = OpLoad %v2 %sample_place\n%r = OpCompositeExtract %float %p 1",
+    );
+    // Sample 3 lies 0.875 down its pixel.
+    let got = shaded_at(&position, 0b1000);
+    assert_eq!(got.to_bits(), (0.875f32 / 4.0).to_bits(), "{got}");
+    // Each sample's shading is given its own sample's coverage alone.
+    let counting = SAMPLES_IN
+        .replace(
+            "OpCapability Shader",
+            "OpCapability Shader\nOpCapability SampleRateShading",
+        )
+        .replace("%mask_in %out_value", "%mask_in %sample_id %out_value")
+        .replace(
+            "OpDecorate %mask_in BuiltIn SampleMask",
+            "OpDecorate %mask_in BuiltIn SampleMask\nOpDecorate %sample_id BuiltIn SampleId",
+        )
+        .replace(
+            "%in_uint = OpTypePointer Input %uint",
+            "%in_uint = OpTypePointer Input %uint\n%sample_id = OpVariable %in_uint Input",
+        )
+        .replace(
+            "%m = OpLoad %uint %at",
+            "%m = OpLoad %uint %at\n%id = OpLoad %uint %sample_id",
+        );
+    let counted = shaded_at(&counting, u32::MAX);
+    assert_eq!(counted.to_bits(), 1.0f32.to_bits(), "one sample each");
+}
+
 #[test]
 fn a_fragments_sample_mask_and_centroid_are_its_coverage_before_its_tests() {
     let device = rendering();

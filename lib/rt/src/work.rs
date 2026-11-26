@@ -361,6 +361,13 @@ impl<S, Req, Ans> Worker<S, Req, Ans, JobQueue<Req, Ans>> {
         ))
     }
 
+    /// Whether one more job would be taken. Only this side's own submissions
+    /// and collections change that, so it holds until the next of them.
+    #[must_use]
+    pub fn room(&self) -> bool {
+        self.held.lock().desk.room()
+    }
+
     /// Queue `job`, answering whether its answer is already waiting — `true`
     /// only where there is no worker and it ran on this thread.
     ///
@@ -657,11 +664,14 @@ mod tests {
         let worker = queued(2);
         worker.stop();
         assert_eq!(worker.submit(job).map_err(|_| ()), Ok(true));
+        assert!(worker.room(), "one answer held of two");
         assert_eq!(worker.submit(job).map_err(|_| ()), Ok(true));
+        assert!(!worker.room(), "two answers uncollected fill it");
         assert!(worker.submit(job).is_err(), "past the room, and not run");
         let runs: alloc::vec::Vec<u32> =
             core::iter::from_fn(|| worker.collect().map(|done| done.run_number)).collect();
         assert_eq!(runs, [1, 2], "two jobs ran, in turn, the third never");
+        assert!(worker.room(), "collected, the room is free again");
         assert_eq!(worker.wait(), None, "nothing is outstanding");
     }
 

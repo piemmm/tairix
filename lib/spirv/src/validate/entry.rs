@@ -49,6 +49,17 @@ pub enum Interpolation {
     Flat,
 }
 
+/// Where in its pixel a fragment input is interpolated.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum InterpolationSampling {
+    /// At the pixel's centre.
+    Centre,
+    /// Within the samples its primitive covers.
+    Centroid,
+    /// At the sample being shaded, the entry point shading each.
+    Sample,
+}
+
 /// One location an entry point's input or output occupies.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Varying {
@@ -69,10 +80,10 @@ pub struct Varying {
     /// How many 32-bit components of the variable's value precede it in
     /// declaration order, a 64-bit value taking two.
     pub offset: u32,
-    /// How it is interpolated: a flat value takes no centroid.
+    /// How it is interpolated.
     pub interpolation: Interpolation,
-    /// Whether it is interpolated within the samples a pixel covers.
-    pub centroid: bool,
+    /// Where it is interpolated: a flat value's centre.
+    pub sampling: InterpolationSampling,
 }
 
 /// An admitted entry point: what it is, and what a pipeline must provide
@@ -90,6 +101,7 @@ pub struct EntryPoint {
     pub(crate) outputs: Vec<Varying>,
     pub(crate) globals: Vec<Id>,
     pub(crate) early_fragment_tests: bool,
+    pub(crate) per_sample: bool,
 }
 
 impl EntryPoint {
@@ -122,6 +134,14 @@ impl EntryPoint {
     #[must_use]
     pub const fn early_fragment_tests(&self) -> bool {
         self.early_fragment_tests
+    }
+
+    /// Whether a fragment entry point is shaded once for each sample its
+    /// fragment covers: it reads `SampleId` or `SamplePosition`, or an input
+    /// interpolated at its sample.
+    #[must_use]
+    pub const fn per_sample(&self) -> bool {
+        self.per_sample
     }
 
     /// The resource bindings it statically uses, by ascending set and
@@ -240,7 +260,9 @@ impl Validator<'_> {
             let interface = self.interface_list(instruction).map_err(refuse)?;
             self.complete(&reach, &interface).map_err(refuse)?;
             self.model_needs(stage, &reach).map_err(refuse)?;
-            let (inputs, outputs) = self.stage_interface(stage, &interface).map_err(refuse)?;
+            let stage_interface = self
+                .stage_interface(stage, &interface, &reach.globals)
+                .map_err(refuse)?;
             let (workgroup, early_fragment_tests) =
                 self.modes_of(function, stage, &reach).map_err(refuse)?;
             let (bindings, push_constants) = self.resources(&reach, stage).map_err(refuse)?;
@@ -266,10 +288,11 @@ impl Validator<'_> {
                     bindings,
                     samplings,
                     push_constants,
-                    inputs,
-                    outputs,
+                    inputs: stage_interface.inputs,
+                    outputs: stage_interface.outputs,
                     globals,
                     early_fragment_tests,
+                    per_sample: stage_interface.per_sample,
                 },
             )?;
         }

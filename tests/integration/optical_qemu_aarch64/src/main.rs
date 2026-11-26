@@ -42,7 +42,7 @@ mod kernel {
     use tairix_itest_witness::FixtureExit;
     use tairix_kalloc::{Arena, FreeListAllocator, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
-    use tairix_log::{Event, EventId, Sink};
+    use tairix_log::{Event, Sink};
     use tairix_test_optical::COMMAND;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
@@ -61,12 +61,9 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
-    /// `SyscallInvoked`, the audited record the sink watches for exits.
-    const SYSCALL_INVOKED_EVENT_ID: EventId = EventId(5000);
-
     /// The run's end: the fixture's exit, which only a pass lets it make,
     /// then the shell's.
-    static END: FixtureExit = FixtureExit::new(&[COMMAND], SYSCALL_INVOKED_EVENT_ID);
+    static END: FixtureExit = FixtureExit::new(&[COMMAND]);
 
     /// Replays every event to the serial console and ends the run on the
     /// shell's exit after the fixture's.

@@ -201,10 +201,17 @@ impl FrameRing {
     /// Every frame lacks all of a fresh region shaped as `mode` carrying
     /// `view`, and the first is drawn next.
     pub(crate) fn reset(&mut self, mode: &DisplayMode, view: Option<&WindowView>) {
+        self.invalidate(mode, view);
+        self.back = 0;
+    }
+
+    /// Every frame of the region, shaped as `mode` carrying `view`, lacks all
+    /// of it, and the one drawn next stays: the session may still hold the
+    /// other.
+    pub(crate) fn invalidate(&mut self, mode: &DisplayMode, view: Option<&WindowView>) {
         self.stale
             .reset(Rect::new(0, 0, mode.width_px, mode.height_px));
         self.view_stale.reset(view_bounds(view));
-        self.back = 0;
     }
 
     /// Present `damage` as window `window`'s next frame, which `draw` brings
@@ -228,26 +235,75 @@ impl FrameRing {
         damage: DamageList,
         draw: impl FnOnce(usize, Owed<'_>) -> Result<(), Errno>,
     ) -> Result<bool, Errno> {
-        let index = match client.present_state(window) {
-            PresentState::InFlight => {
-                client.owe_frame(window);
-                return Ok(false);
-            }
-            PresentState::Waiting(frame) => {
-                usize::try_from(frame).map_err(|_| Errno::OutOfRange)?
-            }
-            PresentState::Idle => self.back,
+        let Some(index) = Self::reserve(client, window, self.back)? else {
+            return Ok(false);
         };
         draw(
             index,
             (&mut self.stale, &mut self.view_stale, &mut self.changed),
         )?;
+        self.commit(client, window, index, damage)?;
+        Ok(true)
+    }
+
+    /// The frame window `window`'s next present is drawn into, the ring's
+    /// `back` while nothing waits: `None` while both frames are the
+    /// session's, the window then owed an
+    /// [`Answer::FrameReturned`](crate::client::Answer::FrameReturned).
+    fn reserve<T: WindowTransport>(
+        client: &mut WindowClient<T>,
+        window: u64,
+        back: usize,
+    ) -> Result<Option<usize>, Errno> {
+        match client.present_state(window) {
+            PresentState::InFlight => {
+                client.owe_frame(window);
+                Ok(None)
+            }
+            PresentState::Waiting(frame) => usize::try_from(frame)
+                .map(Some)
+                .map_err(|_| Errno::OutOfRange),
+            PresentState::Idle => Ok(Some(back)),
+        }
+    }
+
+    /// The frame a present is drawn into while nothing waits.
+    #[cfg(feature = "gpu")]
+    pub(crate) const fn back(&self) -> usize {
+        self.back
+    }
+
+    /// Bring frame `index`, of a window `bounds` across, up to date for a
+    /// present of `damage`: `update` is handed everything it lacks, `damage`
+    /// among it, and a refusal leaves all of that owed to it.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn bring_up_to_date(
+        &mut self,
+        index: usize,
+        (damage, bounds): (&[DamageRect], Rect),
+        update: impl FnOnce(&Region) -> Result<(), Errno>,
+    ) -> Result<(), Errno> {
+        self.changed.clear();
+        add_damage(&mut self.changed, damage, bounds);
+        self.stale
+            .bring_up_to_date(index, &self.changed, Errno::OutOfRange, update)
+    }
+
+    /// Present `damage` as window `window`'s frame `index`, brought up to
+    /// date, answering the present's serial.
+    pub(crate) fn commit<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+        window: u64,
+        index: usize,
+        damage: DamageList,
+    ) -> Result<u64, Errno> {
         let frame = u32::try_from(index).map_err(|_| Errno::OutOfRange)?;
-        client.present(window, frame, damage)?;
+        let serial = client.present(window, frame, damage)?;
         if index == self.back {
             self.back = (self.back + 1) % FRAME_COUNT as usize;
         }
-        Ok(true)
+        Ok(serial)
     }
 }
 

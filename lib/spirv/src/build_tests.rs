@@ -129,6 +129,28 @@ fn a_type_or_constant_asked_for_twice_is_one_id_and_an_aggregate_is_fresh() {
 }
 
 #[test]
+fn interning_stays_one_id_per_constant_at_a_large_module_s_scale() {
+    // Each insertion took time in the count already held, so this many took
+    // time in its square.
+    const COUNT: u32 = 200_000;
+    let mut b = Builder::new(Version::NEWEST, 0).expect("a builder");
+    let uint = b.int(32, false).expect("a type");
+    let ids: alloc::vec::Vec<Id> = (0..COUNT)
+        .map(|n| {
+            b.constant(uint, n.wrapping_mul(0x9e37_79b9))
+                .expect("a constant")
+        })
+        .collect();
+    for (n, &id) in (0..COUNT).zip(&ids).step_by(997) {
+        assert_eq!(b.constant(uint, n.wrapping_mul(0x9e37_79b9)), Ok(id));
+    }
+    let mut distinct = ids.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(distinct.len(), ids.len());
+}
+
+#[test]
 fn the_same_source_builds_the_same_bytes() {
     let build = || {
         compute(|f, shared, index| store(f, shared, index, index))

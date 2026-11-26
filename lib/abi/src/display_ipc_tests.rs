@@ -608,7 +608,11 @@ fn buffer_replies_round_trip_and_fail_closed() {
 #[test]
 fn present_replies_round_trip_and_fail_closed() {
     for presented in [Presented::Shown, Presented::Queued] {
-        let reply = PresentReply { presented, seq: 41 };
+        let reply = PresentReply {
+            presented,
+            seq: 41,
+            at_ns: u64::MAX - 3,
+        };
         assert_eq!(
             decode_present_reply(&encode_present_reply(Ok(reply))),
             Ok(reply)
@@ -621,6 +625,7 @@ fn present_replies_round_trip_and_fail_closed() {
     let good = encode_present_reply(Ok(PresentReply {
         presented: Presented::Shown,
         seq: 1,
+        at_ns: 2,
     }));
     assert_eq!(
         decode_present_reply(&good[..DISPLAY_PRESENT_REPLY_LEN - 1]),
@@ -734,7 +739,10 @@ fn a_planes_reply_decode_fails_closed() {
 
 #[test]
 fn events_round_trip_and_fail_closed() {
-    let event = DisplayEvent::Presented { seq: u64::MAX };
+    let event = DisplayEvent::Presented {
+        seq: u64::MAX,
+        at_ns: u64::MAX - 1,
+    };
     let good = event.to_le_bytes();
     assert_eq!(DisplayEvent::from_bytes(&good), Ok(event));
     assert_eq!(

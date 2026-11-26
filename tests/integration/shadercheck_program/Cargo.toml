@@ -1,0 +1,45 @@
+[package]
+name = "tairix-test-shadercheck"
+description = "plans/GPU.md GP8 / MG3 fixture: the `shadercheck` command app the x86_64 Venus shader QEMU vertical plants on its disk and runs from the scripted root shell. It hands each kernel the disk plants — honest, reaching past every memory, never ending, and refused by the front end and by the validator — to `gpucheck --shader` and holds each answer to what it must be. Never planted on a production image."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The `Run` binary's freestanding userland runtime is an optional,
+# on-by-default build feature, as for the other fixture bundles: the guest
+# kernel and `tools/xtask` take the library half alone, never the runtime's
+# `_start`, allocator and panic handler.
+[features]
+default = ["program"]
+program = ["dep:tairix-rt", "dep:tairix-abi"]
+
+# The package is both the `tairix-test-shadercheck` vocabulary library (the
+# command word, the kernels and their answers, and the records the guest gate
+# waits on) and the `Run` entry-point binary of the `shadercheck` bundle.
+[[bin]]
+name = "tairix-test-shadercheck-run"
+path = "src/run.rs"
+
+[dependencies]
+# The structured-record vocabulary the verdict is logged through.
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+# For the freestanding `Run` binary only: the userland runtime it spawns
+# `gpucheck` and logs through, and the spawn block's types.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0", optional = true }
+
+[dev-dependencies]
+# The planted kernels held to what each must be: compiled, or refused.
+tairix-spirv = { path = "../../../lib/spirv", version = "=0.0.0" }
+tairix-wgsl = { path = "../../../lib/wgsl", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }

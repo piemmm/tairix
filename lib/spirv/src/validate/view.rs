@@ -77,11 +77,12 @@ impl From<Resolved> for Scalar {
     }
 }
 
-/// An image type's operands.
+/// An image type's operands, its texels' type named by `T`: a lowering
+/// view's [`TypeId`], or a module's `Id` where a builder writes one.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct ImageType {
+pub struct ImageType<T = TypeId> {
     /// The type its texels are read as.
-    pub sampled: TypeId,
+    pub sampled: T,
     /// Its dimensionality.
     pub dim: Dim,
     /// Its depth operand: 0 not a depth image, 1 one, 2 not said.

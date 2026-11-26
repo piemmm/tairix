@@ -1,5 +1,5 @@
 //! Render pipelines and passes in a Venus context. A render pipeline is its
-//! modules, folded, its layouts and one graphics pipeline rendering without a
+//! modules, folded and guarded, its layouts and one graphics pipeline rendering without a
 //! render pass object. A pass is a rendering instance in the general layout
 //! every image is kept in; where a device checks its indirect draws' records
 //! and they outrun the slot holding them, it is several in turn, each loading
@@ -28,7 +28,7 @@ use super::super::info::Statement;
 use super::super::{stage, BIND_POINT_GRAPHICS};
 use super::images::{compare, held, host_clear};
 use super::{
-    bind_check, device_error, dispatch_check, folded, make_in, PipelineIds, Shape, VenusContext,
+    bind_check, device_error, dispatch_check, make_in, prepared, PipelineIds, Shape, VenusContext,
     VenusMemory, VenusPipeline, FEEDBACK, RECORDS_AT, RECORDS_CHECK, RECORDS_SLOT_BYTES,
 };
 
@@ -155,19 +155,22 @@ pub(super) fn make_render(
     let statement = &context.core.statement;
     let vertex = stages.vertex();
     let [vertex_id, fragment_id, layout, pipeline] = context.ids();
-    let vertex_module = folded(vertex)?;
-    let fragment_module = stages.fragment().map(folded).transpose()?;
+    let vertex_module = prepared(context, vertex)?;
+    let fragment_module = stages
+        .fragment()
+        .map(|fragment| prepared(context, fragment))
+        .transpose()?;
     let mut programs: Programs<'_> = (ArrayVec::new(), ArrayVec::new());
     add_stage(
         &mut programs,
         (stage::VERTEX, vertex_id, vertex.entry_point()),
-        vertex_module.module().bytes(),
+        vertex_module.admitted().module().bytes(),
     )?;
     if let Some((fragment, module)) = stages.fragment().zip(fragment_module.as_ref()) {
         add_stage(
             &mut programs,
             (stage::FRAGMENT, fragment_id, fragment.entry_point()),
-            module.module().bytes(),
+            module.admitted().module().bytes(),
         )?;
     }
     let (bindings, attributes) = vertex_input(statement, stages)?;

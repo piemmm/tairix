@@ -33,6 +33,10 @@ tairix-log = { path = "../log", version = "=0.0.0" }
 tairix-collections = { path = "../collections", version = "=0.0.0" }
 # The executable-container decoder the sandboxed decode service runs.
 tairix-binfmt = { path = "../binfmt", version = "=0.0.0" }
+# The WGSL front end the compile service runs, and the validator its caller
+# admits every answered module through.
+tairix-wgsl = { path = "../wgsl", version = "=0.0.0" }
+tairix-spirv = { path = "../spirv", version = "=0.0.0" }
 # The per-ISA instruction decoders the sandboxed decode service runs.
 tairix-disasm = { path = "../disasm", version = "=0.0.0" }
 # The RFC 5905 response evaluation the sandboxed timesync service runs, so
