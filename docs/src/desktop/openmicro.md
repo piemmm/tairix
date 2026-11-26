@@ -20,7 +20,11 @@ video ULA and the SAA5050, the SN76489, the uPD7002, the 6850 and the serial
 ULA, the 8271 with two double-sided drives, the cassette interface, and
 sixteen sideways slots of ROM or RAM. The drives' motors run while the 8271
 has a head loaded, so a drive left idle stops, and a disc filing system then
-finds it not ready and reads its catalogue again.
+finds it not ready and reads its catalogue again. The SN76489 takes a byte
+from the slow data bus by a 32-clock write cycle while its write enable is
+low, and runs cycle after cycle while it stays low, so a sample player that
+holds the enable low streams bytes by writing the bus alone; a pulse shorter
+than a cycle may write nothing, as on the machine.
 
 The Electron is the 6502 at 2 MHz and 32 KiB behind its ULA, cycle-exact in
 the same way: the ULA's contention of RAM (the 1 MHz modes, and the display

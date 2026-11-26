@@ -2,6 +2,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::fdc::PhysicalDrive;
+use super::sheila::{system_via, user_via};
 use super::{Machine, ROM_SIZE};
 
 /// An OS ROM whose reset vector enters `code` at `&C000`.
@@ -216,11 +217,6 @@ fn each_conversion_s_end_raises_cb1_however_the_handler_orders_its_work() {
     );
 }
 
-/// The User VIA's register `register` on the bus.
-fn user_via(register: u8) -> u16 {
-    super::sheila::USER_VIA + u16::from(register)
-}
-
 /// The regression: an acknowledge's end was checked against its start plus
 /// its width before either was bounded, so one at the top of the range
 /// overflowed.
@@ -394,6 +390,21 @@ fn a_board_is_restorable_only_with_its_events_to_come_and_its_serial_line_wired(
 }
 
 #[test]
+fn a_board_is_restorable_only_with_its_sound_generator_driven_by_the_latch_and_bus() {
+    let mut machine = Machine::new(&os_with(&[])).expect("a 16 KiB OS");
+    machine.run_until(1_000);
+    assert!(machine.board.restorable());
+    let (write_enabled, lines) = machine.board.sound.driven();
+    machine.board.sound.drive(!write_enabled, lines);
+    assert!(
+        !machine.board.restorable(),
+        "an enable the latch does not hold"
+    );
+    machine.board.sound.drive(write_enabled, !lines);
+    assert!(!machine.board.restorable(), "lines the bus does not carry");
+}
+
+#[test]
 fn the_machine_hands_out_its_sound_and_stops_keeping_it_when_asked() {
     let mut machine = Machine::new(&os_with(&[])).expect("a 16 KiB OS");
     machine.run_until(80_000);
@@ -406,6 +417,102 @@ fn the_machine_hands_out_its_sound_and_stops_keeping_it_when_asked() {
     machine.set_sound_output(true);
     machine.run_until(240_000);
     assert_eq!(machine.take_audio().count(), 10_000);
+}
+
+/// A program that gives the slow data bus to the sound generator, lets
+/// `setup` add to it, then halts.
+fn sound_program(setup: impl FnOnce(&mut crate::rom::asm::Asm)) -> Machine {
+    use crate::machine::via::reg;
+    use crate::rom::asm::{abs, imm, Asm};
+    let mut a = Asm::new(0xC000, ROM_SIZE);
+    a.sei();
+    // The latch's lines, with the sound generator's write enable high.
+    a.lda(imm(0x0F));
+    a.sta(abs(system_via(reg::DDRB)));
+    a.lda(imm(0x08));
+    a.sta(abs(system_via(reg::ORB)));
+    // The noise channel silenced as the bus turns to outputs.
+    a.lda(imm(0xFF));
+    a.sta(abs(system_via(reg::ORA_NH)));
+    a.sta(abs(system_via(reg::DDRA)));
+    setup(&mut a);
+    a.here("halt");
+    a.jmp("halt");
+    a.org(0xFFFC);
+    a.word(0xC000);
+    let image = a.finish().expect("the test ROM assembles");
+    Machine::new(&image.bytes).expect("a 16 KiB OS")
+}
+
+/// The regression: the sound generator took a byte only as its write
+/// enable fell, so a sample player holding the enable low and writing each
+/// channel's level to the slow data bus, 8 µs apart, was never heard.
+#[test]
+fn with_its_write_enable_held_low_the_sound_generator_takes_each_byte_on_the_bus() {
+    use crate::machine::via::reg;
+    use crate::rom::asm::{abs, imm};
+    let mut machine = sound_program(|a| {
+        a.lda(imm(0x00));
+        a.sta(abs(system_via(reg::ORB)));
+        for level in [0x91, 0xB2, 0xD3] {
+            a.lda(imm(level));
+            a.sta(abs(system_via(reg::ORA_NH)));
+            for _ in 0..4 {
+                a.nop();
+            }
+        }
+    });
+    machine.monitor_io(true);
+    machine.run_until(1_000);
+    let levels: Vec<u64> = machine
+        .take_io_trace()
+        .filter(|access| {
+            access.write && access.addr == system_via(reg::ORA_NH) && access.value != 0xFF
+        })
+        .map(|access| access.cycle)
+        .collect();
+    let gaps: Vec<u64> = levels.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    assert_eq!(gaps, [16, 16], "each level 8 µs after the last");
+    assert_eq!(machine.board.sound.attenuation(), [1, 2, 3, 15]);
+}
+
+/// Tone 0's attenuation once a program has put `&93` on the bus and pulsed
+/// the write enable low over `hold` NOPs, `lead` NOPs moving the pulse
+/// against the chip's updates.
+fn after_pulse(lead: usize, hold: usize) -> u8 {
+    use crate::machine::via::reg;
+    use crate::rom::asm::{abs, imm};
+    let mut machine = sound_program(|a| {
+        a.lda(imm(0x93));
+        a.sta(abs(system_via(reg::ORA_NH)));
+        for _ in 0..lead {
+            a.nop();
+        }
+        a.lda(imm(0x00));
+        a.sta(abs(system_via(reg::ORB)));
+        for _ in 0..hold {
+            a.nop();
+        }
+        a.lda(imm(0x08));
+        a.sta(abs(system_via(reg::ORB)));
+    });
+    machine.run_until(1_000);
+    machine.board.sound.attenuation()[0]
+}
+
+#[test]
+fn a_write_enable_pulse_writes_the_bus_only_where_it_spans_a_write_cycle() {
+    // Four NOPs hold the enable low for 8 µs, none for 4 µs; a lead of up
+    // to three NOPs meets each of the four 2 MHz phases a 1 MHz write takes
+    // against the chip's 4 µs updates.
+    let phases = 0..4;
+    assert!(phases.clone().all(|lead| after_pulse(lead, 4) == 3), "8 µs");
+    assert!(
+        phases.clone().all(|lead| after_pulse(lead, 0) == 15),
+        "4 µs"
+    );
+    let taken = phases.filter(|&lead| after_pulse(lead, 3) == 3).count();
+    assert_eq!(taken, 3, "7 µs misses only a fall just before an update");
 }
 
 #[test]

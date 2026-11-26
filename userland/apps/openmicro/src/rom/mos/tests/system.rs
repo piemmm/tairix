@@ -27,7 +27,7 @@ fn screen_size_writes(machine: &mut crate::machine::bbc::Machine) -> Vec<(u8, bo
     ];
     machine
         .take_io_trace()
-        .filter(|access| access.write && access.addr == sheila::SYSTEM_VIA + u16::from(reg::ORB))
+        .filter(|access| access.write && access.addr == sheila::system_via(reg::ORB))
         .map(|access| (access.value & 7, access.value & 8 != 0))
         .filter(|&(bit, _)| bits.contains(&u32::from(bit)))
         .collect()

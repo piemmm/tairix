@@ -90,6 +90,20 @@ pub mod sheila {
     pub const USER_VIA: u16 = 0xFE60;
     /// The User VIA's block.
     pub const USER_VIA_END: u16 = USER_VIA + 0x1F;
+
+    /// The address of System VIA register `register`, one of
+    /// [`crate::machine::via::reg`]'s.
+    #[must_use]
+    pub const fn system_via(register: u8) -> u16 {
+        SYSTEM_VIA + register as u16
+    }
+
+    /// The address of User VIA register `register`, one of
+    /// [`crate::machine::via::reg`]'s.
+    #[must_use]
+    pub const fn user_via(register: u8) -> u16 {
+        USER_VIA + register as u16
+    }
     /// 8271 command/status.
     pub const FDC: u16 = 0xFE80;
     /// The 8271's block.
@@ -241,6 +255,7 @@ impl Board {
         // RES is held while power comes up, so the levels the lines settle at
         // raise no flag.
         board.system_via.reset(0);
+        board.drive_sound(0);
         board
     }
 
@@ -383,8 +398,9 @@ impl Board {
     }
 
     /// Whether a restored board is one a machine could leave: no device's
-    /// next event already past, and the 6850 and the cassette wired as the
-    /// serial ULA routes them.
+    /// next event already past, the 6850 and the cassette wired as the
+    /// serial ULA routes them, and the sound generator driven as the latch
+    /// and the slow data bus drive it.
     fn restorable(&self) -> bool {
         let ula = self.serial_ula;
         let (dcd, cts) = if ula.rs423() {
@@ -397,6 +413,7 @@ impl Board {
             && self.acia.lines() == (dcd, cts)
             && self.cassette.motor() == ula.motor()
             && self.cassette.rts() == self.acia.rts()
+            && self.sound.driven() == self.sound_inputs()
     }
 
     /// A device changed what it may do next: reconsider the lines and the
@@ -563,8 +580,9 @@ impl Board {
         }
     }
 
-    /// What the slow data bus and port B present to the System VIA's pins:
-    /// PA7 is the switch in the selected column at the row PA4–6 selects.
+    /// What the slow data bus and port B present to the System VIA's pins,
+    /// and the bus and the latch to the sound generator: PA7 is the switch in
+    /// the selected column at the row PA4–6 selects.
     fn refresh_slow_bus(&mut self, now: u64) {
         let row = self.system_via.port_a() & 0x70;
         let mut pins = 0xFF;
@@ -575,22 +593,39 @@ impl Board {
         let buttons = !(self.fire << FIRE_LINES.trailing_zeros()) & FIRE_LINES;
         self.system_via
             .set_port_b_pins(now, 0x0F | buttons | SPEECH_LINES);
+        self.drive_sound(now);
+    }
+
+    /// The sound generator's write enable, held low or not, from the latch,
+    /// and its data lines, the slow data bus.
+    fn sound_inputs(&self) -> (bool, u8) {
+        (self.latch & latch::SOUND_WE == 0, self.system_via.port_a())
+    }
+
+    /// Present the sound generator's inputs as they stand at `now`.
+    fn drive_sound(&mut self, now: u64) {
+        let (write_enabled, lines) = self.sound_inputs();
+        let (was_enabled, was_lines) = self.sound.driven();
+        if (write_enabled, lines) == (was_enabled, was_lines) {
+            return;
+        }
+        // The chip reads its lines only at updates that see the enable low.
+        if write_enabled || was_enabled {
+            self.render_sound(now);
+        }
+        self.sound.drive(write_enabled, lines);
     }
 
     /// The System VIA's outputs may have moved: follow them into the latch,
-    /// and from the latch into the sound generator and the keyboard.
+    /// and from the latch and the slow data bus into the sound generator and
+    /// the keyboard.
     fn after_system_via(&mut self, now: u64) {
         let port_b = self.system_via.port_b();
         let bit = 1 << (port_b & 0x07);
-        let was = self.latch;
         if port_b & 0x08 != 0 {
             self.latch |= bit;
         } else {
             self.latch &= !bit;
-        }
-        if was & latch::SOUND_WE != 0 && self.latch & latch::SOUND_WE == 0 {
-            self.render_sound(now);
-            self.sound.write(self.system_via.port_a());
         }
         self.refresh_slow_bus(now);
         self.follow_keyboard(now);
@@ -669,12 +704,14 @@ impl Board {
         }
     }
 
-    /// Change the keys with `change`, delivering what it does to CA2.
+    /// Change the keys with `change`, delivering what it does to CA2 and to
+    /// PA7 on the slow data bus.
     fn change_keyboard(&mut self, change: impl FnOnce(&mut Keyboard)) {
         let now = self.now;
         self.update_keyboard_interrupt(now);
         change(&mut self.keyboard);
         self.follow_keyboard(now);
+        self.refresh_slow_bus(now);
         self.device_changed();
     }
 

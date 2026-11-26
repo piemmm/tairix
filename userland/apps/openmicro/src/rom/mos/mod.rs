@@ -29,7 +29,7 @@ mod tests;
 use tairix_vdu::code::Control;
 
 use crate::cpu::STACK_PAGE;
-use crate::machine::bbc::sheila;
+use crate::machine::bbc::sheila::{self, system_via as svia, user_via as uvia};
 use crate::machine::{IO_BASE, IO_END, OS_BASE, ROM_SIZE};
 use crate::rom::asm::{Asm, AsmError, Image, ERASED};
 
@@ -125,16 +125,6 @@ fn return_in_teletext(a: &mut Asm, model: Model) {
         a.lda(crate::rom::asm::abs(ws::vdu::COLOURS));
         a.beq(crate::rom::asm::RTS);
     }
-}
-
-/// A System VIA register's address.
-const fn svia(register: u8) -> u16 {
-    sheila::SYSTEM_VIA + register as u16
-}
-
-/// A User VIA register's address.
-const fn uvia(register: u8) -> u16 {
-    sheila::USER_VIA + register as u16
 }
 
 /// The System VIA port B value setting addressable latch bit `bit`, one of

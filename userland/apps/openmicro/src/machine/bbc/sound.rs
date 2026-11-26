@@ -3,6 +3,12 @@
 //! only on 250 kHz updates. That output is produced exactly, one sample per
 //! update, unipolar as the chip drives it; removing its DC and resampling it
 //! for a host is the consumer's job.
+//!
+//! A write cycle is 32 clocks, two updates, and writes the byte the data lines
+//! carry at its second. While the write enable is held low the chip runs cycle
+//! after cycle, so a program holding it low streams bytes by changing the
+//! lines alone; an update that sees the enable high abandons the cycle under
+//! way, so a pulse too short for a whole cycle writes nothing.
 
 use alloc::vec::Vec;
 
@@ -66,6 +72,12 @@ pub struct Sn76489 {
     attenuation: [u8; 4],
     /// The register the last latch byte named.
     latched: u8,
+    /// The write enable is held low.
+    write_enabled: bool,
+    /// The byte the data lines carry.
+    lines: u8,
+    /// The write cycle under way has had its first update.
+    cycle_begun: bool,
     /// Updates performed since power-on.
     updates: u64,
 }
@@ -77,7 +89,7 @@ impl Default for Sn76489 {
 }
 
 impl Sn76489 {
-    /// A chip at power-on: every channel silent.
+    /// A chip at power-on: every channel silent, its write enable high.
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -95,12 +107,34 @@ impl Sn76489 {
             lfsr: NOISE_SEED,
             attenuation: [15; 4],
             latched: 0,
+            write_enabled: false,
+            lines: 0,
+            cycle_begun: false,
             updates: 0,
         }
     }
 
-    /// The chip latches `byte` from its data bus.
-    pub fn write(&mut self, byte: u8) {
+    /// Hold the write enable low, `write_enabled`, or high, and the data lines
+    /// at `lines`, as the chip sees them from its next update.
+    pub const fn drive(&mut self, write_enabled: bool, lines: u8) {
+        self.write_enabled = write_enabled;
+        self.lines = lines;
+    }
+
+    /// The write enable and the data lines as last driven.
+    #[must_use]
+    pub const fn driven(&self) -> (bool, u8) {
+        (self.write_enabled, self.lines)
+    }
+
+    /// The attenuation of tones 0–2 and the noise, for checks to read.
+    #[cfg(test)]
+    pub(crate) const fn attenuation(&self) -> [u8; 4] {
+        self.attenuation
+    }
+
+    /// The chip takes `byte` into its registers.
+    fn write(&mut self, byte: u8) {
         let (register, data) = if byte & 0x80 != 0 {
             self.latched = (byte >> 4) & 0x07;
             (self.latched, byte & 0x0F)
@@ -139,12 +173,11 @@ impl Sn76489 {
     /// update's output to `out`: the four channels' levels, a quarter of full
     /// scale each, summed.
     pub fn render(&mut self, until: u64, out: &mut Vec<f32>) {
-        let mut levels = [0.0f32; 4];
-        for (level, &attenuation) in levels.iter_mut().zip(&self.attenuation) {
-            *level = LEVELS[usize::from(attenuation)] * 0.25;
-        }
+        let mut levels = self.levels();
         while self.updates < until {
-            self.step();
+            if self.step() {
+                levels = self.levels();
+            }
             let tones: f32 = self
                 .tones
                 .iter()
@@ -165,7 +198,16 @@ impl Sn76489 {
         }
     }
 
-    fn step(&mut self) {
+    /// Each channel's level while its output is high.
+    fn levels(&self) -> [f32; 4] {
+        self.attenuation
+            .map(|attenuation| LEVELS[usize::from(attenuation)] * 0.25)
+    }
+
+    /// Perform one update, answering whether a write cycle ended in it. The
+    /// byte it writes is heard from this update on.
+    fn step(&mut self) -> bool {
+        let wrote = self.clock_write();
         let mut tone_2_rose = false;
         for (index, tone) in self.tones.iter_mut().enumerate() {
             let rose = tone.update();
@@ -182,6 +224,18 @@ impl Sn76489 {
             self.shift_noise();
         }
         self.updates += 1;
+        wrote
+    }
+
+    /// The write side's part of an update: an update seeing the enable low
+    /// begins a cycle or ends the one begun, writing the lines.
+    fn clock_write(&mut self) -> bool {
+        let ends = self.write_enabled && self.cycle_begun;
+        self.cycle_begun = self.write_enabled && !self.cycle_begun;
+        if ends {
+            self.write(self.lines);
+        }
+        ends
     }
 
     /// Shift the noise register once: white noise feeds back bits 0 and 1,
@@ -209,6 +263,9 @@ crate::snapshot::fields!(
         lfsr,
         attenuation,
         latched,
+        write_enabled,
+        lines,
+        cycle_begun,
         updates,
     },
     check | chip,
@@ -352,11 +409,107 @@ mod tests {
     fn skipping_leaves_the_chip_where_rendering_would() {
         let mut rendered = loud_tone(0x07, 0x05);
         rendered.write(0xE5);
+        rendered.drive(true, 0xC3);
         let mut skipped = rendered.clone();
         let mut out = Vec::new();
         rendered.render(12_345, &mut out);
         skipped.skip(12_345);
         assert_eq!(rendered, skipped);
         assert_eq!(out.len(), 12_345);
+    }
+
+    #[test]
+    fn a_write_cycle_takes_the_byte_on_the_lines_at_its_second_update() {
+        let mut chip = Sn76489::new();
+        chip.drive(true, 0x93);
+        chip.skip(1);
+        assert_eq!(chip.attenuation[0], 15, "a cycle under way");
+        chip.skip(2);
+        assert_eq!(chip.attenuation[0], 3);
+    }
+
+    #[test]
+    fn an_enable_released_within_a_cycle_writes_nothing() {
+        let mut chip = Sn76489::new();
+        chip.drive(true, 0x93);
+        chip.skip(1);
+        chip.drive(false, 0x93);
+        chip.skip(64);
+        assert_eq!(chip.attenuation[0], 15);
+    }
+
+    /// The regression: the chip took a byte only as its enable fell, so bytes
+    /// streamed onto the lines under an enable held low were never heard.
+    #[test]
+    fn an_enable_held_low_writes_what_the_lines_carry_each_cycle() {
+        let mut chip = Sn76489::new();
+        for (cycle, byte) in (1..).zip([0x93, 0xB5, 0xD7, 0xFA]) {
+            chip.drive(true, byte);
+            chip.skip(2 * cycle);
+        }
+        assert_eq!(chip.attenuation, [3, 5, 7, 10]);
+    }
+
+    #[test]
+    fn a_byte_on_the_lines_between_two_cycle_ends_is_never_written() {
+        let mut chip = Sn76489::new();
+        chip.drive(true, 0x93);
+        chip.skip(1);
+        chip.drive(true, 0xB5);
+        chip.skip(2);
+        assert_eq!(chip.attenuation[..2], [15, 5], "the cycle ends on 0xB5");
+        chip.drive(true, 0x91);
+        chip.skip(3);
+        chip.drive(true, 0xD7);
+        chip.skip(4);
+        assert_eq!(chip.attenuation[..3], [15, 5, 7], "0x91 began a cycle only");
+    }
+
+    #[test]
+    fn the_enable_is_seen_only_at_updates() {
+        let mut chip = Sn76489::new();
+        chip.drive(true, 0x93);
+        chip.skip(1);
+        chip.drive(false, 0x93);
+        chip.drive(true, 0x93);
+        chip.skip(2);
+        assert_eq!(chip.attenuation[0], 3, "released and held again unseen");
+    }
+
+    #[test]
+    fn a_noise_byte_held_on_the_lines_reseeds_the_register_every_cycle() {
+        let mut chip = Sn76489::new();
+        chip.drive(true, 0xE4);
+        let mut seen = Vec::new();
+        for update in 1..=1_000 {
+            chip.skip(update);
+            if !seen.contains(&chip.lfsr) {
+                seen.push(chip.lfsr);
+            }
+        }
+        // A shift every 32 updates, a reseed every second: never further than
+        // one shift from the seed.
+        seen.sort_unstable();
+        assert_eq!(seen, [NOISE_SEED >> 1, NOISE_SEED]);
+        chip.drive(false, 0xE4);
+        let mut free = Vec::new();
+        for update in 1_001..=2_000 {
+            chip.skip(update);
+            if !free.contains(&chip.lfsr) {
+                free.push(chip.lfsr);
+            }
+        }
+        assert!(free.len() > 20, "released, it runs on: {}", free.len());
+    }
+
+    #[test]
+    fn a_written_attenuation_is_heard_from_the_update_whose_cycle_wrote_it() {
+        // The longest period: tone 0 rises at the first update and stays high.
+        let mut chip = loud_tone(0x0F, 0x3F);
+        chip.skip(10);
+        chip.drive(true, 0x9F);
+        let mut out = Vec::new();
+        chip.render(12, &mut out);
+        assert_eq!(out, [0.25, 0.0]);
     }
 }

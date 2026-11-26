@@ -218,7 +218,12 @@ its encoding.
 
 **Sound.** The SN76489 is clocked at 4 MHz, updating at 250 kHz; its exact
 250 kHz output is resampled to 48 kHz by `tairix_audio::resample` at the exact
-ratio 125:24. No second resampler exists.
+ratio 125:24. No second resampler exists. Its write enable is latch bit 0 and
+its data lines the slow data bus. A write cycle is 32 clocks, two updates, and
+writes the byte the bus carries at its second; held low, the enable runs cycle
+after cycle, so a sample player streams bytes by writing port A alone, and an
+enable seen high at an update abandons the cycle, so a pulse shorter than a
+cycle may write nothing, as on the machine.
 
 **Discs.** The 8271 runs its command set against drives modelled by rotation:
 300 rpm, ten 256-byte sectors per track of an FM single-density image, a byte
