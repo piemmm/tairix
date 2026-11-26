@@ -26,8 +26,10 @@ use tairix_fscopy::tree::Roots;
 use tairix_fuzzseed::Prng;
 use tairix_riscos_filing::hostfs::protocol::{Refusal, Reply, Request};
 use tairix_riscos_filing::hostfs::server::{Given, Server};
+use tairix_riscos_filing::session::{application_slot, SLOT_BYTES};
 use tairix_riscos_kernel::corpus::StillHost;
 use tairix_riscos_kernel::input::InputEvent;
+use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::os::{Ending, Host, Os, Pulse, Regs};
 use tairix_riscos_kernel::swi::os::{FILE, FIND, FS_CONTROL, GBPB};
 use tairix_riscos_kernel::swi::X;
@@ -355,9 +357,12 @@ fn a_session_given_damaged_replies_still_answers() {
             rng: Rc::clone(&rng),
         };
         let mut kernel = common::kernel_on(Box::new(host));
+        application_slot(&mut kernel, SLOT_BYTES);
         let mut os = kernel.os();
         let names: Vec<u32> = NAMES.iter().map(|name| claim(&mut os, name)).collect();
-        let buffer = os.rma_claim(4096).expect("room");
+        // A load writes a file whole, however long a damaged reply makes it,
+        // so the buffer is the application slot, whose end aborts it.
+        let buffer = APPLICATION;
         for _ in 0..STEPS {
             let mut rng = rng.borrow_mut();
             let (name, other) = (*rng.pick(&names), *rng.pick(&names));

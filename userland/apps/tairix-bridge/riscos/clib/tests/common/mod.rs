@@ -340,17 +340,22 @@ impl Calls {
     }
 
     fn call_through(&mut self, vector: &str, entry: u32, setup: &[&str], two: bool) -> u32 {
-        let slot = self.slot;
         for line in setup {
             self.raw(line);
         }
         self.lines.push(format!("BL {vector}+4*{entry}"));
-        self.lines.push(format!("STR r0, [r11, #{slot}]"));
-        self.slot += 4;
+        let slot = self.stored("r0");
         if two {
-            self.lines.push(format!("STR r1, [r11, #{}]", slot + 4));
-            self.slot += 4;
+            self.stored("r1");
         }
+        slot
+    }
+
+    /// `register` stored as an answer: the out area's offset it is at.
+    pub fn stored(&mut self, register: &str) -> u32 {
+        let slot = self.slot;
+        self.lines.push(format!("STR {register}, [r11, #{slot}]"));
+        self.slot += 4;
         slot
     }
 

@@ -368,25 +368,12 @@ pub(super) fn llrint(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 }
 
 /// `llround(x)` and `llroundf`: inexact where `x` is not whole, then
-/// rounded halfway away from nought and converted. `llroundf` converts the
-/// truncation and steps its low word alone, losing the borrow, so a value
-/// from −1 to −½ answers 2³² − 1.
-pub(super) fn llround<const FLOAT: bool>(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
+/// rounded halfway away from nought and converted.
+pub(super) fn llround(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let x = x_of(regs);
     give_long(os, regs, |unit| {
-        let whole = rounded(unit, x, Precision::Double, Rounding::Zero)?;
-        let nearest = half_away(x);
-        if !FLOAT {
-            return converted(unit, nearest);
-        }
-        let truncation = converted(unit, whole)?;
-        let step = match nearest.partial_cmp(&whole) {
-            Some(Ordering::Greater) => 1,
-            Some(Ordering::Less) => -1,
-            _ => 0,
-        };
-        let low = i64::from(u32::MAX);
-        Ok(truncation & !low | truncation.wrapping_add(step) & low)
+        rounded(unit, x, Precision::Double, Rounding::Zero)?;
+        converted(unit, half_away(x))
     })
 }
 

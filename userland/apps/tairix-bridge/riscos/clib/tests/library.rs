@@ -271,6 +271,137 @@ EQUB 0
 ALIGN
 "#;
 
+/// An `OS_Args` reason, whether it names the open file rather than none, its
+/// R2, and what genuine's `_kernel_osargs` answered where that does not
+/// depend on the filing system's own figures.
+type OsArgsCase = (u32, bool, u32, Option<u32>);
+
+/// The calls the K6 probe made of a ten-byte file and of no file, in order.
+const OSARGS_CASES: [OsArgsCase; 16] = [
+    (0, false, 0, Some(0x99)),
+    (0, false, 0x1234, Some(0x99)),
+    (0, true, 0, Some(10)),
+    (1, true, 3, Some(3)),
+    (0, true, 0, Some(3)),
+    (2, true, 0, Some(10)),
+    (3, true, 20, Some(20)),
+    (2, true, 0, Some(20)),
+    (4, true, 0, None),
+    (5, true, 0, Some(0)),
+    (6, true, 1000, None),
+    (254, true, 0, None),
+    (255, true, 0, Some(0)),
+    (1, false, 0, Some(OS_ERROR)),
+    (2, false, 0, Some(OS_ERROR)),
+    (255, false, 0, Some(0)),
+];
+
+/// "Channel", which `OS_Args` refuses a reason no file answers and a closed
+/// file with.
+const CHANNEL: u32 = 0xDE;
+
+/// `_kernel_osargs` beside the `OS_Args` it performs: R0 for op nought of no
+/// file, R2 for every other call, and −2 where `OS_Args` refuses, its error
+/// kept for `_kernel_last_oserror`, as recorded.
+#[test]
+fn osargs_answers_r2_but_for_the_filing_system_and_minus_two_where_refused() {
+    let mut calls = Calls::default();
+    for line in [
+        "LDR r0, Lp_chost",
+        "SWI \"XOS_CLI\"",
+        "MOV r0, #&80",
+        "LDR r1, Lp_nk6",
+        "SWI \"XOS_Find\"",
+        "STR r0, hand",
+        "MOV r1, r0",
+        "MOV r0, #2",
+        "LDR r2, Lp_ten",
+        "MOV r3, #10",
+        "SWI \"XOS_GBPB\"",
+    ] {
+        calls.raw(line);
+    }
+    let answers: Vec<_> = OSARGS_CASES
+        .iter()
+        .map(|&(op, on_file, arg, _)| osargs_beside_os_args(&mut calls, op, on_file, arg))
+        .collect();
+    for line in ["MOV r0, #0", "LDR r1, hand", "SWI \"XOS_Find\""] {
+        calls.raw(line);
+    }
+    let closed = osargs_beside_os_args(&mut calls, 2, true, 0);
+    let noted = calls.call(21, &[], false);
+    let probe = run(&Build::plain(&calls.body(OSARGS_DATA)));
+    for (&(op, on_file, arg, recorded), ([r0, r2], [v, error], answer)) in
+        OSARGS_CASES.iter().zip(&answers)
+    {
+        let case = format!("_kernel_osargs({op}, {on_file}, {arg:#X})");
+        let expected = match probe.out(*v) {
+            0 if op == 0 && !on_file => probe.out(*r0),
+            0 => probe.out(*r2),
+            _ => OS_ERROR,
+        };
+        assert_eq!(probe.out(*answer), expected, "{case}");
+        if let Some(recorded) = recorded {
+            assert_eq!(probe.out(*answer), recorded, "{case} as recorded");
+        }
+        if recorded == Some(OS_ERROR) {
+            assert_eq!(probe.out(*error), CHANNEL, "{case} refused");
+        }
+    }
+    let ([_, _], [v, error], answer) = closed;
+    assert_eq!(
+        (probe.out(v), probe.out(error), probe.out(answer)),
+        (1, CHANNEL, OS_ERROR),
+        "a closed file's extent"
+    );
+    assert_ne!(probe.out(noted), 0, "the refusal kept");
+}
+
+/// `OS_Args` of `op`, the file or none, and `arg`, then `_kernel_osargs` of
+/// the same: where the SWI's R0 and R2, its V flag and error number, and the
+/// function's answer are stored.
+fn osargs_beside_os_args(
+    calls: &mut Calls,
+    op: u32,
+    on_file: bool,
+    arg: u32,
+) -> ([u32; 2], [u32; 2], u32) {
+    let setup = [
+        calls.load("r0", op.into()),
+        if on_file {
+            "LDR r1, hand"
+        } else {
+            "MOV r1, #0"
+        }
+        .to_string(),
+        calls.load("r2", arg.into()),
+    ];
+    for line in setup.iter().map(String::as_str).chain([
+        "SWI \"XOS_Args\"",
+        "MOVVS r3, #1",
+        "LDRVS r4, [r0]",
+        "MOVVC r3, #0",
+        "MOVVC r4, #0",
+    ]) {
+        calls.raw(line);
+    }
+    let performed = [calls.stored("r0"), calls.stored("r2")];
+    let refused = [calls.stored("r3"), calls.stored("r4")];
+    let setup: Vec<&str> = setup.iter().map(String::as_str).collect();
+    (performed, refused, calls.call(19, &setup, false))
+}
+
+/// The data the `_kernel_osargs` calls name.
+const OSARGS_DATA: &str = r#"
+.hand DCD 0
+.nk6 EQUS "HostFS:$.K6File"
+EQUB 0
+.chost EQUS "HostFS"
+EQUB 0
+.ten EQUS "0123456789"
+ALIGN
+"#;
+
 /// A file written and read through `_kernel_osbput` and `_kernel_osgbpb`,
 /// and SWIs that fail through `_kernel_swi` and `_kernel_swi_c`.
 const GBPB: &str = r#"

@@ -2609,16 +2609,20 @@ chunks built: a stub naming one it does not hold is refused (&800E81).
   double-precision instructions, the hyperbolic ones by Cody and Waite's
   algorithms (*Software Manual for the Elementary Functions*, 1980). The
   errors are the exceptions the working raised: an invalid operation a
-  domain error, `-HUGE_VAL` with `EDOM`; a division by nought, an overflow
-  or an underflow to nought a range error, `±HUGE_VAL` or nought with
-  `ERANGE`. A NaN argument answers a NaN, but `modf`'s fraction of one is
-  +0; an infinity from an infinite argument is no error, but `pow`'s, which
-  the FPA's power flags. `acos`, `asin`, `cos`, `sin`, `tan`, `exp`, `pow`,
-  `fmod`, `fabs`, `frexp`, `modf`, and `atan2` of a nought or an infinity
-  leave the client's flags as they were; the rest leave the flags their
-  working raised but for an invalid operation, a division by nought or an
-  overflow, which never trap, where an underflow or an inexact result traps
-  as the client enables it.
+  domain error, `-HUGE_VAL` with `EDOM`; a division by nought or an
+  overflow a range error, `±HUGE_VAL` with `ERANGE`. A NaN argument answers
+  a NaN, but `modf`'s fraction of one is +0; an infinity from an infinite
+  argument is no error, but `pow`'s, which the FPA's power flags. `acos`,
+  `asin`, `cos`, `sin`, `tan`, `exp`, `pow`, `fmod`, `fabs`, `frexp`,
+  `modf`, and `atan2` of a nought or an infinity leave the client's flags as
+  they were, `exp` and `pow` answering an underflow — a tiny, inexact
+  result, nought among them — as a range error too; the rest leave the flags
+  their working raised but for an invalid operation, a division by nought or
+  an overflow, which never trap, where an underflow or an inexact result
+  traps as the client enables it. `ldexp` answers an underflow as a range
+  error, then raises its underflow or inexact result as the client enables
+  it, so an exact answer, however small, raises nothing; `fmod`'s remainder
+  takes the client's underflow trap where it is subnormal.
 - **`time.h`** keeps an unsigned word of seconds since 1970, every fourth
   year a leap year; `localtime` takes the zone from CMOS, `strftime` a
   territory's names and forms through the Territory Manager in its locale.
@@ -2650,19 +2654,13 @@ chunks built: a stub naming one it does not hold is refused (&800E81).
   works its double's form and narrows it, an exception it traps, or an
   overflow in the narrowing, raised with the client's flags as they were on
   entry; `tgammaf`'s overflow traps with its work's inexact flag raised.
-  `llroundf` steps only its truncation's low word, so a value from −1 to −½
-  answers 2³² − 1, and `log2f` of a power of two answers its exponent field
-  less a double's bias, `log2f(1)` −896, as RISC OS 5.30's do.
 - **Complex arithmetic** works a finite argument by its function's formula —
   Kahan's `CTANH` and his definitions of `cacos` and `cacosh` (W. Kahan,
   "Branch Cuts for Complex Elementary Functions", 1987) among them — and
   takes any other's special value from C99's Annex G, raising only the
   invalid operation the annex names. The compiler's multiply and divide
   helpers work the textbook forms at extended precision, each part rounded
-  once. As RISC OS 5.30's do, `catanh` answers `casinh` for a real part whose
-  sign bit is set, so `catan` answers `casin` where the imaginary part's is
-  clear, and `cacosh` of a NaN over an infinite imaginary part answers that
-  infinity as its own.
+  once.
 
 The crate's tests run the probe programs that recorded RISC OS 5.30 — BBC
 BASIC V assembling a C client — or replay their records through the
@@ -2703,8 +2701,22 @@ Known differences from RISC OS 5.30, each deliberate:
   OS 5.30's, which rests on FPEmulator's extended arithmetic;
 - `cpow`'s parts are within 2⁻⁶⁰ of the answer's larger part of RISC OS
   5.30's, whose sines and cosines near a multiple of π/2 are FPEmulator's;
+- `fmod` of a subnormal by a normal number answers that subnormal, where
+  RISC OS 5.30's answer is none it could be;
+- `llroundf` of −1 to −½ answers −1, where RISC OS 5.30's loses the borrow
+  and answers 2³² − 1;
+- `log2f` of a float power of two answers its power and of an infinity
+  that infinity, where RISC OS 5.30's reads the exponent less a double's
+  bias, `log2f(1)` −896;
+- `catanh` of a real part whose sign bit is set answers `catanh`'s value,
+  where RISC OS 5.30's answers `casinh`'s, so `catan` of an imaginary part
+  whose sign bit is clear answers `catan`'s, where RISC OS 5.30's answers
+  `casin`'s;
 - `cacosh(±0 ± i0)` answers `+0 ± iπ/2` as C99 gives, where RISC OS 5.30's
   real part is 1.37·10⁻¹⁶;
+- `cacosh` of a NaN over an infinite imaginary part answers `+∞ + iNaN` as
+  C99 gives, where RISC OS 5.30's answers that infinity as the imaginary
+  part;
 - `cproj` answers the projection C99 gives, where RISC OS 5.30's returns
   without answering;
 - the complex division helpers answer NaN parts for a NaN operand, where

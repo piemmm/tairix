@@ -59,9 +59,16 @@ fn disagreement(
 
 /// Genuine's answers to the later probes, flags and traps among them.
 const GENUINE: &str = include_str!("tests/genuine.txt");
+/// Genuine's answers with the client's underflow and inexact traps enabled.
+const TRAPS: &str = include_str!("tests/traps.txt");
 
-/// [`within_an_ulp`]'s known differences, by entry.
+/// The known differences, by entry: [`within_an_ulp`]'s, and `fmod` of a
+/// subnormal by a normal, which is that subnormal where genuine's is not.
 fn excused(call: &Call, key: &str, want: u64, got: u64) -> bool {
+    if (call.chunk, call.entry) == (2, 153) {
+        let x = call.x();
+        return key == "F0" && x.is_subnormal() && call.double(2).is_normal() && got == x.to_bits();
+    }
     let name = match (call.chunk, call.entry) {
         (2, 136) => "cos",
         (2, 139) => "cosh",
@@ -73,7 +80,10 @@ fn excused(call: &Call, key: &str, want: u64, got: u64) -> bool {
 
 #[test]
 fn every_function_answers_and_flags_as_genuine_s_records_say() {
-    let found = disagreements(GENUINE, excused);
+    let found: std::vec::Vec<_> = [GENUINE, TRAPS]
+        .into_iter()
+        .flat_map(|records| disagreements(records, excused))
+        .collect();
     assert!(
         found.is_empty(),
         "{} disagree:\n{}",
