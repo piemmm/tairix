@@ -119,6 +119,7 @@ an application's own documents folder, the reference harness);
 | RO41 | The Wimp: menus in the TAIRiX look | planned |
 | RO42 | The Wimp: drags, data transfer and the clipboard, bridged to the desktop | planned |
 | RO43 | The Wimp: the icon bar, interactive help, quitting with the session | planned |
+| RO64 | SharedCLibrary's chunk 3, RISC_OSLib, as RISC OS 5.30's ROM library shares it: its interface from the Acorn C/C++ manual, what that leaves open recorded from genuine RISC OS, then built whole | planned |
 | RO44 | The RISC OS look: furniture, tool sprites, menus and error boxes drawn by the emulator | planned |
 | RO45 | The Toolbox, with every object module and gadget | planned |
 | RO46.1 | The Internet module and Resolver over the front end's sockets | planned |
@@ -186,7 +187,9 @@ run of items is finished.
      components; they are guest code like any other.
 4. **The clean-room boundary.** Implementation may read:
    - the published manuals: the PRMs, the RISC OS User Guide, the BBC BASIC
-     Reference Manual and the Style Guide;
+     Reference Manual, the Style Guide, and the manuals of Acorn's and RISC
+     OS Open's development tools, the Acorn C/C++ manual's library reference
+     among them;
    - the ARM Architecture Reference Manuals and data sheets: ARM2, ARM3,
      ARM610/710, FPA10, SA-110, ARM7TDMI, and the ARMv7-A and ARMv8-A AArch32
      manuals;
@@ -1444,7 +1447,7 @@ is fuzzed.
   SaveAs, Scale, and the text gadgets.
 - **Res files.** Decoded in the worker and fuzzed.
 
-## 10. The C library and support modules (RO26, RO61–RO63)
+## 10. The C library and support modules (RO26, RO61–RO64)
 
 - **SharedCLibrary.** Every function of the ANSI library and the RISC OS
   kernel library (`_kernel_…`), through every initialisation the stubs use:
@@ -1488,14 +1491,24 @@ is fuzzed.
   - Where RISC OS 5.30 does other than the PRM describes and no program
     could rely on it — `_kernel_escape_seen` always 0, `copyargs` corrupting
     registers and branching through zero, a privileged stack extension
-    hanging, unwinding leaving SL behind — the library does as the PRM
-    describes; `docs/src/desktop/tairix-bridge.md` lists each difference.
-    The C99 chunks keep RISC OS 5.30's answers wherever they are its own
-    working, its slips among them (`catanh` answering `casinh` for a
-    negative-signed real part, `llroundf`'s lost borrow); where its answer
-    is no answer (`cproj`), or a stray value where C99 names the answer
-    (`cacosh(±0)`'s rounding, a division helper's real part for a NaN
-    operand), the library gives C99's.
+    hanging, unwinding leaving SL behind, `fmod` of a subnormal answering a
+    value it could not be — the library does as the PRM describes;
+    `docs/src/desktop/tairix-bridge.md` lists each difference. The C99
+    chunks keep RISC OS 5.30's answers wherever they are its own working,
+    and give C99's where its answer is a slip no program could rely on
+    (`catanh` answering `casinh` for a negative-signed real part, `cacosh`
+    of a NaN over an infinity, `log2f` reading a double's bias, `llroundf`'s
+    lost borrow), no answer (`cproj`), or a stray value where C99 names the
+    answer (`cacosh(±0)`'s rounding, a division helper's real part for a NaN
+    operand).
+  - Chunk 3 (RO64, after RO43) is RISC_OSLib, which RISC OS 5.30's ROM
+    library shares rather than having each program link it; its statics
+    are &990 bytes, and `LibInit` answers it as unknown until it lands. Its
+    interface is the Acorn C/C++ manual's RISC_OSLib reference; what the
+    manual leaves open — the entries a stub may ask for and their order, the
+    statics, an entry's answers the manual does not fix — is recorded from
+    genuine RISC OS before it is built, as RO26.5's chunks were. It lands
+    whole once the Wimp its desktop functions call is built.
 - **Support modules.** The FPEmulator SWIs, VFPSupport's contexts and
   CallASWI. VFPSupport and CallASWI are not in the IOMD ROM; they are listed
   after it with HostFS, as RISC OS 5's soft-loaded copies answer for them.

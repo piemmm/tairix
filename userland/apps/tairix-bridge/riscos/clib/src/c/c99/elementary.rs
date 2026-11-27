@@ -19,9 +19,7 @@ use tairix_softfloat::Binary;
 
 use super::{as_client, give_double, give_single, overflows_a_float, FRAC_3_PI_4};
 use crate::c::errno::ERANGE;
-use crate::c::fpa::{
-    biased_exponent, double, is_whole, quietly, single_bits, Extended, Unit, BIAS, FRACTION,
-};
+use crate::c::fpa::{double, is_whole, quietly, single_bits, Extended, Unit, FRACTION};
 use crate::c::math::{cosh_of, scaled, set_errno, sinh_of, tanh_of, worked_visibly, LINEAR_MOST};
 
 /// The FPA's single-precision instruction `op` of a float.
@@ -141,37 +139,38 @@ fn logarithm_base_two(unit: &mut Unit, x: f64) -> Result<f64, Exception> {
     unit.take(0)
 }
 
-/// `log2(x)`: an exact power of two's power as it stands, an infinity an
-/// infinity.
-pub(super) fn log2(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    let x = double(regs, 0);
-    give_double(os, |unit| {
-        let bits = x.to_bits();
-        let biased = biased_exponent(bits);
-        if x > 0.0 && bits & FRACTION == 0 && biased != 0 {
-            return Ok(if x.is_infinite() {
-                x
-            } else {
-                f64::from(biased - BIAS)
-            });
+/// The base-two logarithm of `x`, whose bits in `format` are `bits`, where
+/// its fields give it at once: a normal power of two's power as it stands,
+/// an infinity an infinity.
+fn logarithm_read(x: f64, bits: u64, format: Binary) -> Option<f64> {
+    let fraction_bits = format.fraction_bits();
+    let field = bits >> fraction_bits & format.exp_mask();
+    let power_of_two = x > 0.0 && bits & ((1 << fraction_bits) - 1) == 0 && field != 0;
+    power_of_two.then(|| {
+        if x.is_infinite() {
+            x
+        } else {
+            f64::from(i32::try_from(field).unwrap_or(0) - format.bias())
         }
-        logarithm_base_two(unit, x)
     })
 }
 
-/// `log2f(x)`: for an exact power of two, an infinity among them, the
-/// float's exponent field less a double's bias — the misreading RISC OS 5.30
-/// makes, `log2f(1)` minus 896 — else `log2`, narrowed.
+/// `log2(x)`.
+pub(super) fn log2(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
+    let x = double(regs, 0);
+    give_double(os, |unit| {
+        logarithm_read(x, x.to_bits(), Binary::DOUBLE)
+            .map_or_else(|| logarithm_base_two(unit, x), Ok)
+    })
+}
+
+/// `log2f(x)`: read from the float's own fields, so a subnormal float is
+/// worked as `log2` works it, then narrowed.
 pub(super) fn log2f(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let x = double(regs, 0);
     give_single(os, |unit| {
-        let bits = u64::from(single_bits(x));
-        let fraction_bits = Binary::SINGLE.fraction_bits();
-        let field = bits >> fraction_bits & Binary::SINGLE.exp_mask();
-        if x > 0.0 && bits & ((1 << fraction_bits) - 1) == 0 && field != 0 {
-            return Ok(f64::from(i32::try_from(field).unwrap_or(0) - BIAS));
-        }
-        logarithm_base_two(unit, x)
+        logarithm_read(x, u64::from(single_bits(x)), Binary::SINGLE)
+            .map_or_else(|| logarithm_base_two(unit, x), Ok)
     })
 }
 

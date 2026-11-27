@@ -1,9 +1,10 @@
 //! Genuine's recorded answers replayed through the library's own entries.
 //! A record is a line: the entry as `chunk.entry`, `R=` its four argument
 //! registers (`@E` the address of the probes' buffer E), `S=` the stacked
-//! words where not the default pointers, `F=` F0 to F3 where set, then after
-//! `->` the answers its function defines — none where it trapped — `errno`,
-//! the trap, and the FPSR's cumulative flags after.
+//! words where not the default pointers, `F=` F0 to F3 where set, `T=` the
+//! traps enabled where not a fresh FPSR's, then after `->` the answers its
+//! function defines — none where it trapped — `errno`, the trap, and the
+//! FPSR's cumulative flags after.
 
 extern crate std;
 
@@ -12,6 +13,7 @@ use std::format;
 use std::string::String;
 use std::vec::Vec;
 
+use tairix_riscos_arm::fpa::fpsr;
 use tairix_riscos_kernel::FRESH_FPSR;
 
 use super::{Client, FREE, STATICS};
@@ -40,6 +42,7 @@ pub(crate) struct Call {
     regs: [u32; 4],
     stack: [u32; 4],
     fregs: Option<[u64; 4]>,
+    traps: Option<u32>,
     answers: BTreeMap<String, u64>,
 }
 
@@ -67,6 +70,14 @@ impl Call {
     /// What genuine answered under `key`.
     pub(crate) fn answer(&self, key: &str) -> Option<u64> {
         self.answers.get(key).copied()
+    }
+
+    /// The FPSR the call was made with: a fresh one, its traps the record's
+    /// where it names them.
+    fn fpsr(&self) -> u32 {
+        self.traps.map_or(FRESH_FPSR, |traps| {
+            FRESH_FPSR & !fpsr::ENABLES | traps << fpsr::ENABLES.trailing_zeros()
+        })
     }
 }
 
@@ -103,6 +114,7 @@ fn parse(line: &str) -> Call {
                     .for_each(|(w, f)| *f = u64::from_str_radix(w, 16).expect("hex"));
                 call.fregs = Some(fregs);
             }
+            "T" => call.traps = Some(u32::from_str_radix(value, 16).expect("hex")),
             "errno" => {
                 call.answers
                     .insert(key.into(), value.parse().expect("errno"));
@@ -127,7 +139,7 @@ fn ours(client: &mut Client, call: &Call) -> BTreeMap<String, u64> {
         let mut os = client.session.kernel.os();
         let sp = os.registers().r[13];
         os.write_words(sp, &call.stack).expect("the stack");
-        os.set_fpsr(FRESH_FPSR);
+        os.set_fpsr(call.fpsr());
         for (n, bits) in (0u8..).zip(call.fregs.unwrap_or_default()) {
             os.set_fpa_double(n, bits);
         }
@@ -164,6 +176,15 @@ pub(crate) type Excused = fn(&Call, &str, u64, u64) -> bool;
 /// Every recorded call in `records` whose answers differ from ours in a way
 /// `excused` does not excuse, with what differs.
 pub(crate) fn disagreements(records: &str, excused: Excused) -> Vec<String> {
+    disagreements_among(records, |_| true, excused)
+}
+
+/// [`disagreements`] among the recorded calls `replayed` keeps.
+pub(crate) fn disagreements_among(
+    records: &str,
+    replayed: fn(&Call) -> bool,
+    excused: Excused,
+) -> Vec<String> {
     let mut client = Client::with_heap();
     let mut found = Vec::new();
     for line in records
@@ -171,6 +192,9 @@ pub(crate) fn disagreements(records: &str, excused: Excused) -> Vec<String> {
         .filter(|line| !line.starts_with('#') && !line.is_empty())
     {
         let call = parse(line);
+        if !replayed(&call) {
+            continue;
+        }
         let got = ours(&mut client, &call);
         let differing: Vec<String> = call
             .answers

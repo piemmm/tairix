@@ -6,12 +6,15 @@
 //!
 //! The errors are the exceptions the work raised: an invalid operation a
 //! domain error, `-HUGE_VAL` with `EDOM`; a division by zero or an overflow a
-//! range error, `HUGE_VAL` with the answer's sign and `ERANGE`; an underflow
-//! to nought a range error too. The first three never trap and are never
-//! left flagged. Some functions are worked on an FPA of the library's own,
-//! leaving the client's flags as they were; the rest leave the client the
-//! other flags they raise, an underflow among them, as RISC OS 5.30's do,
-//! and take the underflow or inexact trap where the client enables it.
+//! range error, `HUGE_VAL` with the answer's sign and `ERANGE`. The three
+//! never trap and are never left flagged. Some functions are worked on an
+//! FPA of the library's own, leaving the client's flags as they were, and
+//! answer an underflow — a result tiny and inexact, nought among them — as a
+//! range error too; the rest leave the client the other flags they raise, an
+//! underflow among them, and take the underflow or inexact trap where the
+//! client enables it, as RISC OS 5.30's do. `ldexp` is worked on the
+//! library's own FPA, its underflow a range error, then raises its underflow
+//! or inexact result to the client.
 //!
 //! A double comes in a register pair, its high word first, and goes back in
 //! F0.
@@ -49,8 +52,19 @@ const ERRORS: u32 = Exception::InvalidOperation.flag()
     | Exception::DivisionByZero.flag()
     | Exception::Overflow.flag();
 
+/// How a function answers an underflow its work raises: a result tiny and
+/// inexact, nought among them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tiny {
+    /// A range error, as a function whose flags the client never sees, and
+    /// `ldexp`, answer it.
+    RangeError,
+    /// The flag alone, the client's to see.
+    Flagged,
+}
+
 /// `value`, worked with the exceptions `raised`, as the library answers it.
-fn settled(os: &mut Os<'_>, regs: &Regs, value: f64, raised: u32) -> Result<f64, Fail> {
+fn settled(os: &mut Os<'_>, regs: &Regs, value: f64, raised: u32, tiny: Tiny) -> Result<f64, Fail> {
     if raised & Exception::InvalidOperation.flag() != 0 {
         set_errno(os, regs, EDOM)?;
         Ok(-HUGE_VAL)
@@ -58,7 +72,7 @@ fn settled(os: &mut Os<'_>, regs: &Regs, value: f64, raised: u32) -> Result<f64,
         set_errno(os, regs, ERANGE)?;
         Ok(HUGE_VAL.copysign(value))
     } else {
-        if value == 0.0 && raised & Exception::Underflow.flag() != 0 {
+        if tiny == Tiny::RangeError && raised & Exception::Underflow.flag() != 0 {
             set_errno(os, regs, ERANGE)?;
         }
         Ok(value)
@@ -103,8 +117,36 @@ fn give_quiet(
     work: impl FnOnce(&mut Unit) -> Result<f64, Exception>,
 ) -> Result<(), Fail> {
     let (value, raised) = quiet(work);
-    let value = settled(os, regs, value, raised)?;
+    let value = settled(os, regs, value, raised, Tiny::RangeError)?;
     answer(os, value);
+    Ok(())
+}
+
+/// A function worked on the library's own FPA and settled, then the
+/// underflow or inexact result its work raised raised to the client as an
+/// operation raises one: `errno` set before any trap, and an exact answer,
+/// however small, raising nothing.
+fn give_settled_then_raised(
+    os: &mut Os<'_>,
+    regs: &Regs,
+    work: impl FnOnce(&mut Unit) -> Result<f64, Exception>,
+) -> Result<(), Fail> {
+    let (value, raised) = quiet(work);
+    let value = settled(os, regs, value, raised, Tiny::RangeError)?;
+    let rounding = [Exception::Underflow, Exception::Inexact]
+        .into_iter()
+        .find(|exception| raised & exception.flag() != 0);
+    let trapped = rounding.and_then(|exception| {
+        let mut unit = Unit::client(os);
+        let trapped = unit.raise(exception).err();
+        os.set_fpsr(unit.fpsr());
+        trapped
+    });
+    if let Some(exception) = trapped {
+        os.floating_point(exception)?;
+    } else {
+        answer(os, value);
+    }
     Ok(())
 }
 
@@ -118,7 +160,7 @@ pub(crate) fn worked_visibly(
     let Some((value, raised)) = visible(os, work)? else {
         return Ok(None);
     };
-    settled(os, regs, value, raised).map(Some)
+    settled(os, regs, value, raised, Tiny::Flagged).map(Some)
 }
 
 /// [`worked_visibly`]'s answer given in F0.
@@ -219,12 +261,19 @@ pub(super) fn pow(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     })
 }
 
-/// `fmod(x, y)`, exactly: the FPA's remainder, whose quotient is rounded to
-/// nearest, moved by `y` where its sign is not `x`'s — a sum whose exact value
-/// is the answer, so it is not rounded.
+/// `fmod(x, y)`, exactly: `x` itself where its exponent field is below a
+/// finite `y`'s, and otherwise the FPA's remainder, whose quotient is rounded
+/// to nearest, moved by `y` where its sign is not `x`'s — a sum whose exact
+/// value is the answer, so it is not rounded. The remainder is worked as the
+/// client's FPA works it, so a subnormal one takes the client's underflow
+/// trap, as RISC OS 5.30's does; being exact, it flags nothing.
 pub(super) fn fmod(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let (x, y) = (first(regs), second(regs));
-    give_quiet(os, regs, |unit| truncated_remainder(unit, x, y))
+    if y.is_finite() && biased_exponent(x.to_bits()) < biased_exponent(y.to_bits()) {
+        answer(os, x);
+        return Ok(());
+    }
+    give_visibly(os, regs, |unit| truncated_remainder(unit, x, y))
 }
 
 /// [`fmod`]'s work on `unit`.
@@ -495,7 +544,7 @@ pub(crate) fn scaled(unit: &mut Unit, x: f64, power: i32) -> Result<f64, Excepti
 /// `ldexp(x, exp)`.
 pub(super) fn ldexp(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let (x, power) = (first(regs), regs.r[2].cast_signed());
-    give_visibly(os, regs, |unit| scaled(unit, x, power))
+    give_settled_then_raised(os, regs, |unit| scaled(unit, x, power))
 }
 
 /// `modf(value, iptr)`: the whole part stored at `iptr`, the value less it

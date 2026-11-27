@@ -7,7 +7,7 @@ extern crate std;
 use tairix_riscos_arm::fpa::Exception;
 
 use crate::c::math::LARGE_ARGUMENT;
-use crate::c::testing::replay::{disagreements, within_ulps, Call};
+use crate::c::testing::replay::{disagreements, disagreements_among, within_ulps, Call};
 
 const REAL: &str = include_str!("tests/real.txt");
 const COMPLEX: &str = include_str!("tests/complex.txt");
@@ -36,6 +36,22 @@ const ERROR_FUNCTION_SPREAD: f64 = 1e-13;
 /// A float's last place, in a double's; `erfcf` is two from genuine's.
 const FLOAT_PLACE: u64 = 1 << 29;
 const ERFCF_PLACES: u64 = 2 * FLOAT_PLACE;
+
+/// Where RISC OS 5.30's chunk 7 slips, which the replay passes over and
+/// [`DOCUMENTED`] holds the library to C99's answers in instead: `log2f` of a
+/// normal float power of two or an infinity, which it reads with a double's
+/// bias, and `llroundf` of −1 to −½, whose borrow it loses.
+fn real_slip(call: &Call) -> bool {
+    let x = call.x();
+    match (call.chunk, call.entry) {
+        (7, 27) => {
+            let fraction_clear = x.to_bits().trailing_zeros() >= f64::MANTISSA_DIGITS - 1;
+            x == f64::INFINITY || (x >= f64::from(f32::MIN_POSITIVE) && fraction_clear)
+        }
+        (7, 59) => x > -1.0 && x <= -0.5,
+        _ => false,
+    }
+}
 
 /// The known differences: `acosh` and `asinh` at [`FPEMULATOR_PLACES_OFF`],
 /// and the gamma and error functions' values by their spreads.
@@ -66,7 +82,7 @@ fn excused(call: &Call, key: &str, want: u64, got: u64) -> bool {
 
 #[test]
 fn the_real_functions_answer_as_genuine_s() {
-    let found = disagreements(REAL, excused);
+    let found = disagreements_among(REAL, |call| !real_slip(call), excused);
     assert!(
         found.is_empty(),
         "{} disagree:\n{}",
@@ -124,7 +140,7 @@ fn argument(call: &Call) -> (f64, f64) {
 /// [`HYPERBOLIC_PLACES`] past one; `cpow` within
 /// [`CPOW_SPREAD`]; and `ctanh` and `ctan`'s underflow, which genuine does not
 /// flag where both parts are nonzero numbers.
-fn complex_excused(call: &Call, key: &str, want: u64, got: u64) -> bool {
+fn complex_differences(call: &Call, key: &str, want: u64, got: u64) -> bool {
     let (x, y) = argument(call);
     let part = key == "F0" || key == "F1";
     let (wanted, ours) = (f64::from_bits(want), f64::from_bits(got));
@@ -163,9 +179,126 @@ fn complex_excused(call: &Call, key: &str, want: u64, got: u64) -> bool {
 /// The underflow flag, as a record's flags hold it.
 const UNDERFLOW: u64 = Exception::Underflow.flag() as u64;
 
+/// Where RISC OS 5.30's chunk 8 slips, which the replay passes over and
+/// [`mirrored`] and [`DOCUMENTED`] hold the library to Annex G in instead:
+/// `catanh` of a real part whose sign bit is set, which it answers as
+/// `casinh`, and so `catan` of an imaginary part whose sign bit is clear; and
+/// `cacosh` of a NaN over an infinite imaginary part, which it answers with
+/// that infinity.
+fn complex_slip(call: &Call) -> bool {
+    let (x, y) = argument(call);
+    match call.entry {
+        22 | 23 => x.is_sign_negative(),
+        10 | 11 => !y.is_sign_negative(),
+        18 | 19 => x.is_nan() && y.is_infinite(),
+        _ => false,
+    }
+}
+
+/// A double's sign bit.
+const SIGN: u64 = 1 << 63;
+
+/// How a mirror's answers are remade into the slipped call's.
+type Remade = fn(u64, u64) -> (u64, u64);
+
+/// Genuine's `catanh` and `catan` records where it slips, each remade from
+/// its record of an argument its working answers, and how many slipped
+/// records there are. `catanh` is odd and conjugation commutes with it, so
+/// at `−x + iy` it is its value at `x + iy` with the real part negated;
+/// `catan z` is `−i catanh(iz)`, so at `x + iy` it is its value at `x − iy`
+/// with the imaginary part negated, or `catanh` at `y + ix` with the parts
+/// exchanged.
+fn mirrored(records: &str) -> (std::vec::Vec<std::string::String>, usize) {
+    let recorded: std::collections::BTreeMap<&str, &str> = records
+        .lines()
+        .filter_map(|line| line.split_once(" -> "))
+        .collect();
+    let slips: std::vec::Vec<_> = recorded
+        .keys()
+        .filter_map(|&call| Some((call, mirrors_of(call)?)))
+        .collect();
+    let remade = slips
+        .iter()
+        .filter_map(|(call, mirrors)| {
+            let answers = mirrors.iter().find_map(|(mirror, remake)| {
+                recorded
+                    .get(mirror.as_str())
+                    .map(|answers| remade_answers(answers, *remake))
+            })?;
+            Some(std::format!("{call} -> {answers}"))
+        })
+        .collect();
+    (remade, slips.len())
+}
+
+/// The arguments a slipped `catanh` or `catan` call mirrors to, as record
+/// calls, each with how its answers are remade; none for any other call.
+fn mirrors_of(call: &str) -> Option<std::vec::Vec<(std::string::String, Remade)>> {
+    let (head, words) = call.split_once(" R=")?;
+    let entry: u32 = head.strip_prefix("8.")?.parse().ok()?;
+    let words: std::vec::Vec<&str> = words.split(',').collect();
+    let negative = |n: usize| u32::from_str_radix(words[n], 16).is_ok_and(|word| word >> 31 == 1);
+    let turned = |n: usize| {
+        let mut turned: std::vec::Vec<std::string::String> =
+            words.iter().map(|word| (*word).into()).collect();
+        let word = u32::from_str_radix(words[n], 16).ok()?;
+        turned[n] = std::format!("{:08X}", word ^ 1 << 31);
+        Some(std::format!("8.{entry} R={}", turned.join(",")))
+    };
+    match entry {
+        22 | 23 if negative(0) => {
+            let real_negated: Remade = |re, im| (re ^ SIGN, im);
+            Some(std::vec![(turned(0)?, real_negated)])
+        }
+        10 | 11 => {
+            let y = if entry == 10 { 2 } else { 1 };
+            if negative(y) {
+                return None;
+            }
+            let swapped = if entry == 10 {
+                [words[2], words[3], words[0], words[1]]
+            } else {
+                [words[1], words[0], words[2], words[3]]
+            };
+            let imaginary_negated: Remade = |re, im| (re, im ^ SIGN);
+            let exchanged: Remade = |re, im| (im, re);
+            Some(std::vec![
+                (turned(y)?, imaginary_negated),
+                (
+                    std::format!("8.{} R={}", entry + 12, swapped.join(",")),
+                    exchanged
+                ),
+            ])
+        }
+        _ => None,
+    }
+}
+
+/// A record's answers with F0 and F1 remade, the rest as they stand.
+fn remade_answers(answers: &str, remake: Remade) -> std::string::String {
+    let part = |key: &str| {
+        answers.split_whitespace().find_map(|field| {
+            field
+                .strip_prefix(key)
+                .and_then(|bits| u64::from_str_radix(bits, 16).ok())
+        })
+    };
+    let (Some(re), Some(im)) = (part("F0="), part("F1=")) else {
+        return answers.into();
+    };
+    let (re, im) = remake(re, im);
+    let rest: std::vec::Vec<&str> = answers
+        .split_whitespace()
+        .filter(|field| !field.starts_with("F0=") && !field.starts_with("F1="))
+        .collect();
+    std::format!("F0={re:016X} F1={im:016X} {}", rest.join(" "))
+}
+
 #[test]
-fn the_complex_functions_answer_as_genuine_s() {
-    let found = disagreements(COMPLEX, complex_excused);
+fn catanh_and_catan_answer_as_genuine_s_mirrored_records_say() {
+    let (remade, slipped) = mirrored(COMPLEX);
+    assert_eq!(remade.len(), slipped, "every slip's mirror recorded");
+    let found = disagreements(&remade.join("\n"), complex_differences);
     assert!(
         found.is_empty(),
         "{} disagree:\n{}",
@@ -174,11 +307,32 @@ fn the_complex_functions_answer_as_genuine_s() {
     );
 }
 
-/// Where chunk 8 answers as C99 gives rather than as RISC OS 5.30 does:
-/// `cproj`'s projection, `cacosh(±0 ± i0)`'s `+0 ± iπ/2`, inexact as
-/// genuine's working raises it, and a division helper's NaNs for a NaN
-/// operand.
+#[test]
+fn the_complex_functions_answer_as_genuine_s() {
+    let found = disagreements_among(COMPLEX, |call| !complex_slip(call), complex_differences);
+    assert!(
+        found.is_empty(),
+        "{} disagree:\n{}",
+        found.len(),
+        found.join("\n")
+    );
+}
+
+/// Where chunks 7 and 8 answer as C99 gives rather than as RISC OS 5.30
+/// does: `log2f` of a float power of two its power and of an infinity that
+/// infinity; `llroundf` of −1 to −½ minus one; `cproj`'s projection;
+/// `cacosh(±0 ± i0)`'s `+0 ± iπ/2`, inexact as genuine's working raises it,
+/// and `cacosh` of a NaN over an infinite imaginary part `+∞ + iNaN`; and a
+/// division helper's NaNs for a NaN operand.
 const DOCUMENTED: &str = "\
+7.27 R=3FF00000,00000000,@E,@F -> F0=0000000000000000 errno=0 trap=0 flags=00
+7.27 R=3FE00000,00000000,@E,@F -> F0=BFF0000000000000 errno=0 trap=0 flags=00
+7.27 R=7FF00000,00000000,@E,@F -> F0=7FF0000000000000 errno=0 trap=0 flags=00
+7.59 R=BFE00000,00000000,@E,@F -> R0=FFFFFFFF R1=FFFFFFFF errno=0 trap=0 flags=10
+7.59 R=BFE80000,00000000,@E,@F -> R0=FFFFFFFF R1=FFFFFFFF errno=0 trap=0 flags=10
+8.18 R=7FF80000,00000000,7FF00000,00000000 -> F0=7FF0000000000000 F1=7FF8000000000000 errno=0 trap=0 flags=00
+8.18 R=7FF80000,00000000,FFF00000,00000000 -> F0=7FF0000000000000 F1=7FF8000000000000 errno=0 trap=0 flags=00
+8.19 R=7FC00000,7F800000,@E,@F -> F0=7FF0000000000000 F1=7FF8000000000000 errno=0 trap=0 flags=00
 8.46 R=7FF00000,00000000,BFF00000,00000000 -> F0=7FF0000000000000 F1=8000000000000000 errno=0 trap=0 flags=00
 8.46 R=3FF00000,00000000,7FF00000,00000000 -> F0=7FF0000000000000 F1=0000000000000000 errno=0 trap=0 flags=00
 8.46 R=7FF80000,00000000,FFF00000,00000000 -> F0=7FF0000000000000 F1=8000000000000000 errno=0 trap=0 flags=00

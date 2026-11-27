@@ -521,15 +521,13 @@ impl Arithmetic<'_> {
         Ok(complex(signed_as(w.re, z.re), signed_as(w.im, z.im)))
     }
 
-    /// `acosh z`, Kahan's `2 log(√((z + 1)/2) + √((z − 1)/2))`. An infinite
-    /// imaginary part over a NaN answers that infinity where Annex G gives a
-    /// NaN, as RISC OS 5.30's does; a nought answers C99's `+0 ± iπ/2`, where
-    /// genuine's real part is a rounding's 1.37·10⁻¹⁶, inexact as its working
-    /// raises it.
+    /// `acosh z`, Kahan's `2 log(√((z + 1)/2) + √((z − 1)/2))`. A nought
+    /// answers C99's `+0 ± iπ/2`, inexact as RISC OS 5.30's working raises
+    /// it.
     fn acosh(&mut self, z: Complex) -> Result<Complex, Exception> {
         if z.im.is_infinite() {
             if z.re.is_nan() {
-                return Ok(complex(f64::INFINITY, z.im));
+                return Ok(complex(f64::INFINITY, z.re));
             }
             if z.re.is_infinite() {
                 let angle = if z.re > 0.0 { FRAC_PI_4 } else { FRAC_3_PI_4 };
@@ -563,14 +561,10 @@ impl Arithmetic<'_> {
         Ok(if lower { angle.conj() } else { angle })
     }
 
-    /// `atanh z = (log(1 + z) − log(1 − z))/2`, worked on `x + i|y|` and the
-    /// imaginary part's sign put back. RISC OS 5.30 answers `casinh z` for a
-    /// real part whose sign bit is set, and so does this.
+    /// `atanh z = (log(1 + z) − log(1 − z))/2`, worked on `|x| + i|y|` and
+    /// both signs put back, as an odd function conjugation commutes with.
     fn atanh(&mut self, z: Complex) -> Result<Complex, Exception> {
-        if z.re.is_sign_negative() {
-            return self.asinh(z);
-        }
-        let u = complex(z.re, z.im.abs());
+        let u = complex(z.re.abs(), z.im.abs());
         let w = if let Some(w) = atanh_special(u) {
             w
         } else {
@@ -584,7 +578,7 @@ impl Arithmetic<'_> {
             );
             self.scaled(difference, 0.5)?
         };
-        Ok(complex(w.re, signed_as(w.im, z.im)))
+        Ok(complex(signed_as(w.re, z.re), signed_as(w.im, z.im)))
     }
 
     /// `z^w = exp(w log z)`.
