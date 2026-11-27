@@ -31,6 +31,7 @@ use tairix_riscos_kernel::corpus::StillHost;
 use tairix_riscos_kernel::input::InputEvent;
 use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::os::{Ending, Host, Os, Pulse, Regs};
+use tairix_riscos_kernel::relay::{Relayed, Side};
 use tairix_riscos_kernel::swi::os::{FILE, FIND, FS_CONTROL, GBPB};
 use tairix_riscos_kernel::swi::X;
 
@@ -304,10 +305,13 @@ impl Host for Damaging {
         self.still.input()
     }
 
-    fn relay(&mut self, request: &[u8], reply: &mut Vec<u8>) -> bool {
+    fn relay(&mut self, side: Side, request: &[u8], reply: &mut Vec<u8>, parking: bool) -> Relayed {
+        if side != Side::Files {
+            return self.still.relay(side, request, reply, parking);
+        }
         let mut rng = self.rng.borrow_mut();
         if rng.below(12) == 0 {
-            return false;
+            return Relayed::Failed;
         }
         let mut out = Vec::new();
         self.server.serve(request, &mut out);
@@ -316,10 +320,7 @@ impl Host for Damaging {
         } else {
             out
         });
-        true
-    }
-    fn font(&mut self, request: &[u8], reply: &mut Vec<u8>) -> bool {
-        self.still.font(request, reply)
+        Relayed::Answered
     }
 }
 

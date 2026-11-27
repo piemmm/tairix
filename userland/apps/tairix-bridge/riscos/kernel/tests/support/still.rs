@@ -7,6 +7,7 @@ use std::rc::Rc;
 use tairix_fuzzseed::Prng;
 use tairix_riscos_kernel::input::InputEvent;
 use tairix_riscos_kernel::os::{Ending, Host, Kernel, Pulse};
+use tairix_riscos_kernel::relay::{Relayed, Side};
 
 struct Still {
     clock: Rc<Cell<u64>>,
@@ -29,12 +30,8 @@ impl Host for Still {
         None
     }
 
-    fn relay(&mut self, _request: &[u8], _reply: &mut Vec<u8>) -> bool {
-        false
-    }
-
-    fn font(&mut self, _request: &[u8], _reply: &mut Vec<u8>) -> bool {
-        false
+    fn relay(&mut self, _: Side, _request: &[u8], _reply: &mut Vec<u8>, _parking: bool) -> Relayed {
+        Relayed::Failed
     }
 
     fn wait(&mut self, until: Option<u64>, _: Ending) -> Pulse {

@@ -369,6 +369,20 @@ impl Os<'_> {
         Ok(())
     }
 
+    /// Whether `vector` holds the claim of the code at `address` with
+    /// `workspace`.
+    pub(crate) fn claims(&self, vector: Vector, address: u32, workspace: u32) -> bool {
+        self.world
+            .vectors
+            .chains
+            .get(vector.0 as usize)
+            .is_some_and(|chain| {
+                chain
+                    .iter()
+                    .any(|c| c.address == address && c.workspace == workspace)
+            })
+    }
+
     /// Whether anything but the kernel's default answers `vector`.
     pub(crate) fn vector_claimed(&self, vector: Vector) -> bool {
         let default = self.world.routine_address(Routine::Vector(vector.0));

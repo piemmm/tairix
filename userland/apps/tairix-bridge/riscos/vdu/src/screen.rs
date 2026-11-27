@@ -1,8 +1,8 @@
-//! Screen memory (`plans/RISCOS-EMULATOR.md` §3, §8): dynamic area 2,
-//! mapped twice so a screen turned by a hardware scroll reads on unbroken
-//! past its end; its banks, the one the drivers write and the one shown;
-//! and the area's handler, which keeps the current screen's banks from being
-//! taken away.
+//! Screen memory (`plans/RISCOS-EMULATOR.md` §3, §8): dynamic area 2, each
+//! context's own, mapped twice so a screen turned by a hardware scroll reads
+//! on unbroken past its end; its banks, the one the drivers write and the
+//! one shown; and the area's handler, which keeps the current screen's banks
+//! from being taken away.
 
 use tairix_riscos_arm::mmu::PAGE_SIZE;
 use tairix_riscos_kernel::memory::handler_reason as reason;
@@ -14,8 +14,7 @@ use crate::canvas::Canvas;
 use crate::mode::Format;
 use crate::state::read;
 
-/// The screen's dynamic area.
-pub(crate) const AREA: u32 = 2;
+pub(crate) use tairix_riscos_kernel::memory::SCREEN as AREA;
 /// Its flags.
 const AREA_FLAGS: u32 =
     AreaFlags::NOT_CACHEABLE | AreaFlags::DOUBLY_MAPPED | AreaFlags::NEEDS_SPECIFIC_PAGES;

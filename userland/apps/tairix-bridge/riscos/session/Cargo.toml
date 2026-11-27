@@ -1,0 +1,45 @@
+[package]
+name = "tairix-riscos-session"
+description = "TAIRiX Bridge's session: the protocol between the front end and a session's worker — commands and events each decoded whole against fixed bounds, credited input, the screens' damage ring, relays, launches and quits — the worker that runs the session's contexts in turns, and the front end's model that believes only what the worker could have sent. no_std, forbids unsafe."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The wire codec and the frame bound the protocol is carried in, the worker's
+# port and share, and how a worker's end is read from its exit.
+tairix-sandbox = { path = "../../../../../lib/sandbox", version = "=0.0.0" }
+# The kernel's input events, program endings, relay sides and error text
+# bound, which the protocol carries.
+tairix-riscos-kernel = { path = "../kernel", version = "=0.0.0" }
+# The processor's unmodelled stops, which an ending names.
+tairix-riscos-arm = { path = "../arm", version = "=0.0.0" }
+# The longest command line, which a launch carries.
+tairix-obey = { path = "../../../../../lib/obey", version = "=0.0.0" }
+# The screen a context shows: its geometry, its lines' colours and what was
+# drawn since last asked.
+tairix-riscos-vdu = { path = "../vdu", version = "=0.0.0" }
+# The worker's and the front end's maps of contexts, mailboxes, launches and
+# relays, and a screen's damaged lines.
+tairix-collections = { path = "../../../../../lib/collections", version = "=0.0.0" }
+
+[dev-dependencies]
+# The seeded generator the fuzz harness draws from.
+tairix-fuzzseed = { path = "../../../../../tests/fuzzseed", version = "=0.0.0" }
+# The modules a test's session has — the filing system and its HostFS
+# server, BASIC — and the tree its disc is served over.
+tairix-riscos-filing = { path = "../filing", version = "=0.0.0" }
+tairix-riscos-basic = { path = "../basic", version = "=0.0.0" }
+tairix-fscopy = { path = "../../../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }
+# What a test's kernel is made with: the machine's pressure, a log, a cache
+# key and a zone.
+tairix-reclaim = { path = "../../../../../lib/reclaim", version = "=0.0.0" }
+tairix-log = { path = "../../../../../lib/log", version = "=0.0.0" }
+tairix-hash = { path = "../../../../../lib/hash", version = "=0.0.0" }
+tairix-tz = { path = "../../../../../lib/tz", version = "=0.0.0" }

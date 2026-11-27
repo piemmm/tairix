@@ -20,7 +20,7 @@ use crate::time::{Nanos, NANOS_PER_SECOND as SECOND};
 use crate::video::ShownText;
 use crate::worker::port::End;
 use crate::worker::testing::{memory, TestMemory, DISCARD};
-use crate::worker::{SandboxLink, Stepped};
+use crate::worker::Stepped;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use alloc::sync::Arc;
@@ -35,6 +35,7 @@ use tairix_sandbox::link::TimedChannel;
 use tairix_sandbox::loopback::HeapShare;
 use tairix_sandbox::proto::Channel;
 use tairix_sandbox::session::{SessionDescriptors, Share};
+use tairix_sandbox::ClockedLink;
 use tairix_sandbox::WorkerLink;
 
 /// The two pipes, and the clock the worker's waits move.
@@ -304,7 +305,7 @@ fn clock() -> Nanos {
     })
 }
 
-type Worker = Stepped<SandboxLink<WorkerEnd>, HeapShare, TestMemory>;
+type Worker = Stepped<ClockedLink<WorkerEnd>, HeapShare, TestMemory>;
 
 /// The turbo XT the joined tests run, and its default disk.
 fn turbo_xt() -> (Setup, Box<dyn BlockDevice>) {
@@ -379,7 +380,7 @@ fn join(
         pipes,
         app: Rc::clone(&app),
     };
-    let link = SandboxLink::new(WorkerLink::new(channel, WORKER_INBOUND).unwrap(), clock);
+    let link = ClockedLink::new(WorkerLink::new(channel, WORKER_INBOUND).unwrap(), clock);
     let (executor, compiler) = Interpreted::new();
     app.borrow_mut().compiler = compiling.then_some(compiler);
     let worker = Worker::begin(link, share, (memory(), Box::new(executor)), &DISCARD).unwrap();

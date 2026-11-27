@@ -296,13 +296,9 @@ struct AltNumber {
     dial: bool,
 }
 
-/// InternationalKeyboard's state.
-pub(crate) struct State {
-    workspace: Option<u32>,
-    /// The handler installed before its own.
-    previous: u32,
-    /// The layout its tables were made for.
-    layout: usize,
+/// What one keyboard holds: each context's own, as each window's keys are.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Held {
     /// The Shift, Ctrl and Alt keys held, and the left Alt where it switches
     /// layers.
     shift: u8,
@@ -314,16 +310,12 @@ pub(crate) struct State {
     /// The dead key's accent awaiting a character.
     accent: Option<char>,
     entry: AltNumber,
-    /// The keyboard a callback is to select, as `OS_Byte` 71 sets it.
-    selecting: Option<u32>,
 }
 
-impl State {
+impl Held {
+    /// No key held, nothing pending.
     pub(crate) const fn new() -> Self {
         Self {
-            workspace: None,
-            previous: u32::MAX,
-            layout: FALLBACK,
             shift: 0,
             ctrl: 0,
             alt: 0,
@@ -335,6 +327,30 @@ impl State {
                 digits: false,
                 dial: false,
             },
+        }
+    }
+}
+
+/// InternationalKeyboard's state.
+pub(crate) struct State {
+    workspace: Option<u32>,
+    /// The handler installed before its own.
+    previous: u32,
+    /// The layout its tables were made for.
+    layout: usize,
+    /// The current context's keyboard.
+    pub(crate) held: Held,
+    /// The keyboard a callback is to select, as `OS_Byte` 71 sets it.
+    selecting: Option<u32>,
+}
+
+impl State {
+    pub(crate) const fn new() -> Self {
+        Self {
+            workspace: None,
+            previous: u32::MAX,
+            layout: FALLBACK,
+            held: Held::new(),
             selecting: None,
         }
     }
@@ -629,7 +645,7 @@ impl Os<'_> {
     /// `c` given, the pending accent composed onto it and used up: the
     /// character without it where the accented one has no code.
     fn give_char(&mut self, c: char, state: &mut u8, out: &mut Output) -> Result<(), Fail> {
-        let keys = &mut self.world.intkey;
+        let keys = &mut self.world.intkey.held;
         let accent = keys.accent.take();
         if keys.alt == 0 {
             *state &= !status::PENDING_ALT;
@@ -666,7 +682,7 @@ impl Os<'_> {
     /// The Alt entry ended with the last Alt key: its character, or its
     /// dialling code's keyboard.
     fn end_entry(&mut self, out: &mut Output) -> Result<(), Fail> {
-        let entry = core::mem::take(&mut self.world.intkey.entry);
+        let entry = core::mem::take(&mut self.world.intkey.held.entry);
         if !entry.digits {
             return Ok(());
         }
@@ -689,7 +705,7 @@ impl Os<'_> {
     /// A keypad key with Alt held: a digit of the entry, or the entry
     /// abandoned.
     fn entry_digit(&mut self, pad: &Pad) {
-        let entry = &mut self.world.intkey.entry;
+        let entry = &mut self.world.intkey.held.entry;
         if let Some(digit) = pad.digit {
             entry.value = entry.value.wrapping_mul(10).wrapping_add(digit);
             entry.digits = true;
@@ -873,14 +889,7 @@ fn service(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Unwind> {
 /// layer.
 #[expect(clippy::unnecessary_wraps, reason = "a key handler entry's signature")]
 fn handler_init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
-    let keys = &mut os.world.intkey;
-    keys.shift = 0;
-    keys.ctrl = 0;
-    keys.alt = 0;
-    keys.left_alt = false;
-    keys.buttons = 0;
-    keys.accent = None;
-    keys.entry = AltNumber::default();
+    os.world.intkey.held = Held::new();
     let state = regs.byte(5) & !(status::SHIFT | status::CTRL | status::PENDING_ALT);
     regs.r[5] = u32::from(state | status::NO_KANA_LOCK);
     regs.r[7] = 0;
@@ -909,9 +918,9 @@ fn pending_alt(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let mut state = regs.byte(5);
     let mut out = Output::new();
     let (alt, entry, accent) = (
-        os.world.intkey.alt > 0,
-        os.world.intkey.entry,
-        os.world.intkey.accent,
+        os.world.intkey.held.alt > 0,
+        os.world.intkey.held.entry,
+        os.world.intkey.held.accent,
     );
     let code = u8::try_from(code).unwrap_or(SPECIAL);
     let hot = alt && state & status::CTRL != 0 && action == FIRST;
@@ -921,12 +930,12 @@ fn pending_alt(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
             match key {
                 key::F1 => os.select_later(SET_KEYBOARD | crate::territory::UK)?,
                 key::F2 => os.select_later(SET_KEYBOARD)?,
-                _ => os.world.intkey.entry.dial = true,
+                _ => os.world.intkey.held.entry.dial = true,
             }
         } else if accent.is_some() && code < 0x80 {
             os.give_char(char::from(code), &mut state, &mut out)?;
         } else if !alt {
-            os.world.intkey.accent = None;
+            os.world.intkey.held.accent = None;
             state &= !status::PENDING_ALT;
             give_code(code, &mut out);
         }
@@ -945,7 +954,7 @@ fn special_key(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let first = action == FIRST;
     match Class::of(layout, key) {
         Class::Shift => {
-            let keys = &mut os.world.intkey;
+            let keys = &mut os.world.intkey.held;
             if keys.left_alt && keys.shift == 0 && action == SHIFT_DOWN {
                 state ^= status::NO_KANA_LOCK;
             }
@@ -953,19 +962,19 @@ fn special_key(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
             state = flag(state, status::SHIFT, keys.shift > 0);
         }
         Class::Ctrl => {
-            let keys = &mut os.world.intkey;
+            let keys = &mut os.world.intkey.held;
             keys.ctrl = held(keys.ctrl, action);
             state = flag(state, status::CTRL, keys.ctrl > 0);
         }
         Class::LayerAlt => {
-            os.world.intkey.left_alt = action == SHIFT_DOWN;
+            os.world.intkey.held.left_alt = action == SHIFT_DOWN;
             if action == SHIFT_DOWN && state & status::SHIFT != 0 {
                 state ^= status::NO_KANA_LOCK;
             }
         }
         Class::Alt => alt_key(os, action, &mut state, &mut out)?,
         Class::Button(bit) => {
-            let keys = &mut os.world.intkey;
+            let keys = &mut os.world.intkey.held;
             keys.buttons = flag(keys.buttons, bit, action == SHIFT_DOWN);
             let mut exit = *regs;
             exit.r[0] = u32::from(keys.buttons);
@@ -990,15 +999,15 @@ fn special_key(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         | Class::Kana => {}
         Class::Keypad(pad) => keypad_key(os, layout, pad, first, &mut state, &mut out),
         Class::Tab => {
-            if os.world.intkey.alt == 0 {
+            if os.world.intkey.held.alt == 0 {
                 let mut code = os.byte_var(var::TAB_CHAR);
                 if code >= 0x80 {
                     code = shifted(code, state);
                 }
-                if os.world.intkey.accent.is_some() && code < 0x80 {
+                if os.world.intkey.held.accent.is_some() && code < 0x80 {
                     os.give_char(char::from(code), &mut state, &mut out)?;
                 } else {
-                    os.world.intkey.accent = None;
+                    os.world.intkey.held.accent = None;
                     state &= !status::PENDING_ALT;
                     give_code(code, &mut out);
                 }
@@ -1018,7 +1027,7 @@ fn special_key(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 /// An Alt key going down or up: held, the entry begun with the first and
 /// ended with the last.
 fn alt_key(os: &mut Os<'_>, action: u32, state: &mut u8, out: &mut Output) -> Result<(), Fail> {
-    let keys = &mut os.world.intkey;
+    let keys = &mut os.world.intkey.held;
     if keys.alt == 0 {
         keys.entry = AltNumber::default();
     }
@@ -1028,7 +1037,7 @@ fn alt_key(os: &mut Os<'_>, action: u32, state: &mut u8, out: &mut Output) -> Re
         return Ok(());
     }
     os.end_entry(out)?;
-    if os.world.intkey.accent.is_none() {
+    if os.world.intkey.held.accent.is_none() {
         *state &= !status::PENDING_ALT;
     }
     Ok(())
@@ -1044,13 +1053,13 @@ fn keypad_key(
     state: &mut u8,
     out: &mut Output,
 ) {
-    if os.world.intkey.alt > 0 {
+    if os.world.intkey.held.alt > 0 {
         if first {
             os.entry_digit(pad);
         }
         return;
     }
-    os.world.intkey.accent = None;
+    os.world.intkey.held.accent = None;
     *state &= !status::PENDING_ALT;
     let value = if *state & status::NO_NUM_LOCK != 0 {
         pad.off
@@ -1082,7 +1091,7 @@ fn character(
     let Some(levels) = key_levels(layout, layer_of(layout, *state), key) else {
         return Ok(());
     };
-    let (alt, entry) = (os.world.intkey.alt > 0, os.world.intkey.entry);
+    let (alt, entry) = (os.world.intkey.held.alt > 0, os.world.intkey.held.entry);
     if alt && entry.digits {
         return Ok(());
     }
@@ -1100,7 +1109,7 @@ fn character(
     ) {
         Level::Nothing => Ok(()),
         Level::Dead(mark) => {
-            os.world.intkey.accent = Some(mark);
+            os.world.intkey.held.accent = Some(mark);
             *state |= status::PENDING_ALT;
             Ok(())
         }

@@ -18,6 +18,7 @@ use alloc::rc::Rc;
 
 use tairix_colour::Rgb;
 use tairix_riscos_arm::psr;
+use tairix_riscos_kernel::context::ContextId;
 use tairix_riscos_kernel::error::Error;
 use tairix_riscos_kernel::module::{
     Builtin, Command, CommandKind, Help, Resource, Services, Swis, VectorDefault, SWI_OUT_OF_RANGE,
@@ -218,8 +219,9 @@ pub(crate) struct State {
     workspace: u32,
     loadings: Loadings,
     /// The current mode's colours as first read since they were last made
-    /// stale: a palette changed since is not seen until then.
-    current: Option<Against>,
+    /// stale, and the context whose screen they are: a palette changed since
+    /// is not seen until then, but another context's screen is.
+    current: Option<(ContextId, Against)>,
     /// The 32K tables built, the oldest first.
     tables: alloc::vec::Vec<tables::ThirtyTwoK>,
     /// The screen's calibration and its RMA copy; none for the default.
@@ -434,18 +436,22 @@ fn loadings(os: &mut Os<'_>) -> Option<Loadings> {
 /// the guest's code, which may set the loadings. None while ColourTrans holds
 /// nothing.
 fn current<'o>(os: &'o mut Os<'_>) -> Result<Option<(&'o Against, Loadings)>, Fail> {
-    if os
-        .extension::<State>()
-        .is_some_and(|state| state.current.is_none())
-    {
+    let context = os.context();
+    if os.extension::<State>().is_some_and(|state| {
+        state
+            .current
+            .as_ref()
+            .is_none_or(|(read_for, _)| *read_for != context)
+    }) {
         let read = palettes::current(os)?.calibrated_by(screen_calibration(os));
         if let Some(state) = os.extension::<State>() {
-            state.current = Some(read);
+            state.current = Some((context, read));
         }
     }
-    Ok(os
-        .extension::<State>()
-        .and_then(|state| Some((state.current.as_ref()?, state.loadings))))
+    Ok(os.extension::<State>().and_then(|state| {
+        let (_, against) = state.current.as_ref()?;
+        Some((against, state.loadings))
+    }))
 }
 
 /// The screen's calibration; none for the default.

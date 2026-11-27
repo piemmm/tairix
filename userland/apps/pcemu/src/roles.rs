@@ -23,7 +23,7 @@ use tairix_sandbox::{
 use crate::cpu::jit::compiler::{self, Compiled};
 use crate::cpu::jit::dispatch::Execute;
 use crate::link::{Installed, WORKER_INBOUND};
-use crate::worker::{self, Memory, SandboxLink};
+use crate::worker::{self, Memory};
 
 /// The one-shot service a compiler sandbox is started to serve.
 const COMPILER_SERVICE: &[u8] = b"compiler";
@@ -107,7 +107,7 @@ fn serve_machine(share: impl ShareWrite, executor: Box<dyn Execute>) -> i32 {
     let Ok(channel) = WorkerLink::new(StdioChannel, WORKER_INBOUND) else {
         return EXIT_WORKER_ENDED;
     };
-    let link = SandboxLink::new(channel, tairix_rt::clock_get);
+    let link = tairix_sandbox::ClockedLink::new(channel, tairix_rt::clock_get);
     match worker::serve(link, share, (RtMemory, executor), &DISCARD) {
         worker::port::End::Closed => 0,
         _ => EXIT_WORKER_ENDED,

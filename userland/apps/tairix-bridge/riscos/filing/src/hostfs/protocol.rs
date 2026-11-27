@@ -534,6 +534,20 @@ impl<'a> Request<'a> {
         }
     }
 
+    /// Whether it changes what the server holds — a file, a handle — so
+    /// that asking it twice is not asking it once.
+    #[must_use]
+    pub const fn changes(&self) -> bool {
+        !matches!(
+            self,
+            Self::Roots
+                | Self::Read { .. }
+                | Self::List { .. }
+                | Self::ReadBytes { .. }
+                | Self::Space { .. }
+        )
+    }
+
     /// The request as its bytes, appended to `out`; the caller has bounded
     /// every field.
     pub fn encode(&self, out: &mut Vec<u8>) {

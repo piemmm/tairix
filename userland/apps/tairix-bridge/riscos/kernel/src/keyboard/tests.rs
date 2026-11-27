@@ -9,10 +9,11 @@ use alloc::vec::Vec;
 use tairix_riscos_arm::psr;
 
 use crate::cli::tests::session;
+use crate::memory::Bits;
 use crate::msgtrans::tests::swi;
 use crate::swi::os::{BYTE, CALL_A_VECTOR, INSTALL_KEY_HANDLER};
 use crate::testkit::asm::{self, Condition};
-use crate::testkit::{Session, DATA};
+use crate::testkit::{Session, DATA, SLOT_BYTES};
 use crate::vectors;
 
 /// `KeyV`.
@@ -45,7 +46,11 @@ const SHIFT_UP: u8 = 0x10;
 
 /// The guest handler installed: the one it replaced.
 fn install(s: &mut Session) -> u32 {
-    let h = HANDLER;
+    install_at(s, HANDLER)
+}
+
+/// The guest handler installed at `h`: the one it replaced.
+fn install_at(s: &mut Session, h: u32) -> u32 {
     s.poke(
         h,
         &[
@@ -182,7 +187,7 @@ fn a_handler_is_started_and_its_simple_keys_give_their_codes() {
         b"xXXx",
         "plain; Caps Lock; Shift-Caps, and with Shift held"
     );
-    s.kernel.os().world.keyboard.shifts = 0x40;
+    s.kernel.os().world.keyboard.raw.shifts = 0x40;
     set_status(&mut s, STARTED | 0x40);
     tap(&mut s, SIMPLE);
     assert_eq!(typed(&mut s), [0x18], "Ctrl's column");
@@ -253,6 +258,44 @@ fn the_current_key_repeats_after_the_delay_at_the_rate() {
     wait(&mut s, 100);
     press(&mut s, SIMPLE, false);
     assert_eq!(typed(&mut s), b"x", "no delay, no repeat");
+}
+
+#[test]
+fn a_key_held_in_one_context_repeats_once_another_took_the_centisecond_s_interrupt() {
+    let mut s = session();
+    // In the module area, as a handler's code is, so that each context finds it.
+    let handler = s.kernel.os().rma_claim(0x400).expect("room");
+    install_at(&mut s, handler);
+    let first = s.kernel.os().context();
+    let second = s.kernel.os().launch_context().expect("launched");
+    s.application(Bits::Bit32, SLOT_BYTES);
+    byte(&mut s, 11, 30, 0);
+    let _ = typed(&mut s);
+    press(&mut s, SIMPLE, true);
+    assert_eq!(typed(&mut s), b"x", "at once");
+    s.kernel.os().switch_context(first).expect("switched");
+    s.clock.set(s.clock.get() + 30);
+    let _ = typed(&mut s);
+    s.kernel.os().switch_context(second).expect("switched");
+    assert_eq!(
+        typed(&mut s),
+        b"x",
+        "its repeat, the first having taken the interrupt for the session"
+    );
+}
+
+#[test]
+fn a_held_key_falls_due_for_its_context_not_the_session() {
+    let mut s = session();
+    install(&mut s);
+    byte(&mut s, 11, 30, 0);
+    let _ = typed(&mut s);
+    let before = s.kernel.os().deadlines();
+    press(&mut s, SIMPLE, true);
+    let _ = typed(&mut s);
+    let held = s.kernel.os().deadlines();
+    assert_eq!(held.session, before.session);
+    assert!(held.own.is_some() && held.own != before.own, "its repeat");
 }
 
 #[test]

@@ -36,6 +36,8 @@ pub const FREE_POOL: u32 = 6;
 pub const SYSTEM_HEAP: u32 = 0;
 /// The RMA's number.
 pub const RMA: u32 = 1;
+/// The screen's number, which each context has an area of its own as.
+pub const SCREEN: u32 = 2;
 /// The free pool's flags, which its pages carry: a physical memory pool,
 /// neither cacheable nor bufferable, and read-write to privileged code only.
 pub const FREE_POOL_FLAGS: u32 =
@@ -575,6 +577,13 @@ const fn name_key(title: &[u8], sequence: u64) -> ([u8; TITLE], u64) {
     (folded(title), u64::MAX - sequence)
 }
 
+/// A dynamic area [`Memory::park_area`] set aside.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ParkedArea {
+    key: Key,
+    shrinkable: bool,
+}
+
 /// The watcher that tells a display which of an area's bytes changed: the
 /// first of the MMU's, the translator's another.
 const DISPLAY: Option<tairix_riscos_arm::mmu::Watcher> = tairix_riscos_arm::mmu::Watcher::new(0);
@@ -637,6 +646,62 @@ impl Memory {
                 }
             }
         }
+    }
+
+    /// Area `number` set aside, its pages and the addresses it reserves
+    /// kept: no number, title or enumeration finds it, nothing shrinks it,
+    /// and another may take its number until [`Self::unpark_area`] gives it
+    /// back.
+    ///
+    /// # Errors
+    ///
+    /// No such area.
+    pub fn park_area(&mut self, number: u32) -> Result<ParkedArea, AreaError> {
+        let areas = &mut self.areas;
+        let id = areas.id(number)?;
+        let area = areas.area(id).ok_or(AreaError::BadDynamicArea)?;
+        let key = Key {
+            id,
+            sequence: area.sequence,
+        };
+        let name = name_key(area.title.as_slice(), area.sequence);
+        areas.numbers.remove(&number);
+        areas.names.remove(&name);
+        let shrinkable = areas.shrinkable.contains(&id);
+        areas.shrinkable.retain(|&other| other != id);
+        Ok(ParkedArea { key, shrinkable })
+    }
+
+    /// `parked` given back its number and title, and shrunk again where it
+    /// was shrinkable.
+    ///
+    /// # Errors
+    ///
+    /// "That dynamic area exists already" where its number was taken
+    /// meanwhile, or no room to record it; it stays parked either way.
+    pub fn unpark_area(&mut self, parked: &ParkedArea) -> Result<(), AreaError> {
+        let areas = &mut self.areas;
+        let area = areas.area_at(parked.key).ok_or(AreaError::BadDynamicArea)?;
+        let (number, name) = (area.number, name_key(area.title.as_slice(), area.sequence));
+        if areas.numbers.contains_key(&number) {
+            return Err(AreaError::AreaAlreadyExists);
+        }
+        let id = parked.key.id;
+        if parked.shrinkable && areas.shrinkable.try_reserve(1).is_err() {
+            return Err(AreaError::CantAllocateArea);
+        }
+        areas
+            .numbers
+            .try_insert(number, id)
+            .map_err(|_| AreaError::CantAllocateArea)?;
+        if areas.names.try_insert(name, id).is_err() {
+            areas.numbers.remove(&number);
+            return Err(AreaError::CantAllocateArea);
+        }
+        if parked.shrinkable {
+            areas.shrinkable.push(id);
+        }
+        Ok(())
     }
 
     /// `OS_DynamicArea` 2 and 24: an area's details.

@@ -2,10 +2,28 @@
 //! register file and the FPA handed across at each switch, as one register
 //! file serves both on a processor with both programmer's models.
 
-use tairix_riscos_arm::cpu::{BadState, Cpu, State};
+use tairix_riscos_arm::cpu::{BadState, Context, Cpu, State};
 use tairix_riscos_arm::profile::{Profile, BIT26, BIT32};
 
 use crate::memory::Bits;
+
+/// A context's processors while another context's run: the profile it was
+/// running under, and each processor's context. A processor it never had
+/// is at reset when it next runs.
+pub(crate) struct Parked {
+    current: Bits,
+    cpus: [Option<Context>; 2],
+}
+
+impl Parked {
+    /// A new context's: every processor at reset, `bits` current.
+    pub(crate) const fn fresh(bits: Bits) -> Self {
+        Self {
+            current: bits,
+            cpus: [None, None],
+        }
+    }
+}
 
 const fn profile(bits: Bits) -> &'static Profile {
     match bits {
@@ -89,6 +107,37 @@ impl Processor {
             previous.set_irq(false);
         }
         self.current = bits;
+        Ok(())
+    }
+
+    /// The processors' contexts, set aside for another context's.
+    pub(crate) fn park(&self) -> Parked {
+        Parked {
+            current: self.current,
+            cpus: [&self.cpus[0], &self.cpus[1]].map(|cpu| cpu.as_ref().map(Cpu::context)),
+        }
+    }
+
+    /// `parked` made the processors' contexts, the interrupt line moved to
+    /// its current processor as it stands. A parked context holds only what
+    /// these processors gave, so neither is refused but by a kernel fault,
+    /// which leaves them part changed.
+    pub(crate) fn resume(&mut self, parked: &Parked) -> Result<(), BadState> {
+        let irq = self.irq;
+        for bits in [Bits::Bit26, Bits::Bit32] {
+            let kept = parked.cpus[index(bits)];
+            if kept.is_none() && self.cpus[index(bits)].is_none() && bits != parked.current {
+                continue;
+            }
+            let cpu = self.of(bits);
+            let context = match kept {
+                Some(context) => context,
+                None => cpu.reset_context(),
+            };
+            cpu.resume(&context)?;
+            cpu.set_irq(irq && bits == parked.current);
+        }
+        self.current = parked.current;
         Ok(())
     }
 

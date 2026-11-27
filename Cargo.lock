@@ -4824,6 +4824,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-riscos-session"
+version = "0.0.0"
+dependencies = [
+ "tairix-collections",
+ "tairix-fscopy",
+ "tairix-fuzzseed",
+ "tairix-hash",
+ "tairix-log",
+ "tairix-obey",
+ "tairix-reclaim",
+ "tairix-riscos-arm",
+ "tairix-riscos-basic",
+ "tairix-riscos-filing",
+ "tairix-riscos-kernel",
+ "tairix-riscos-vdu",
+ "tairix-sandbox",
+ "tairix-tz",
+]
+
+[[package]]
 name = "tairix-riscos-vdu"
 version = "0.0.0"
 dependencies = [

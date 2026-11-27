@@ -164,6 +164,60 @@ pub(crate) struct Buffers {
     pub(crate) start: u32,
 }
 
+/// The room the start time is given: its five bytes, a word's multiple.
+const START_TIME: u32 = 8;
+
+impl Buffers {
+    /// None claimed: an environment's before the boot gives it buffers, or
+    /// once its context has given them back.
+    pub(crate) const NONE: Self = Self {
+        error: 0,
+        dump: 0,
+        command: 0,
+        start: 0,
+    };
+
+    const BYTES: u32 = ERROR_BUFFER + DUMP + COMMAND_LINE + START_TIME;
+
+    /// A context's buffers, one after another in a node of the system heap,
+    /// the command line empty.
+    pub(crate) fn claim(os: &mut Os<'_>) -> Result<Self, Fail> {
+        let error = os.system_node(Self::BYTES)?;
+        let dump = error + ERROR_BUFFER;
+        let command = dump + DUMP;
+        let buffers = Self {
+            error,
+            dump,
+            command,
+            start: command + COMMAND_LINE,
+        };
+        if let Err(fail) = os.write_byte(command, 0) {
+            buffers.release(os);
+            return Err(fail);
+        }
+        Ok(buffers)
+    }
+
+    /// The buffers given back to the system heap.
+    pub(crate) fn release(self, os: &mut Os<'_>) {
+        if self != Self::NONE {
+            os.free_system_node(self.error);
+        }
+    }
+}
+
+impl Os<'_> {
+    /// An environment as a reset leaves one, handing out `buffers`.
+    pub(crate) fn environment_at_reset(&self, buffers: Buffers) -> Environment {
+        let world = &*self.world;
+        Environment::new(
+            buffers,
+            |handler| world.routine_address(crate::host::Routine::Handler(handler)),
+            crate::memory::layout::APPLICATION,
+        )
+    }
+}
+
 /// The environment: every handler's slot and the defaults they return to.
 pub(crate) struct Environment {
     slots: [Slot; HANDLERS as usize],

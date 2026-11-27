@@ -23,8 +23,8 @@ use tairix_riscos_arm::mmu::{
 
 pub use areas::{
     access_privilege, handler_reason, AreaError, AreaFlags, Clamps, Create, Created, Failure,
-    Handler, Info, Located, LogicalOp, PageQuery, PhysicalOp, Read, FREE_POOL, RMA, SYSTEM,
-    SYSTEM_HEAP, TITLE,
+    Handler, Info, Located, LogicalOp, PageQuery, ParkedArea, PhysicalOp, Read, FREE_POOL, RMA,
+    SCREEN, SYSTEM, SYSTEM_HEAP, TITLE,
 };
 pub(crate) use areas::{CANT_GET_PHYSICAL, PAGE_RESERVED};
 pub use guest::{Allowed, Guest, GuestError, PageEntry, Service};
@@ -207,6 +207,9 @@ pub struct Memory {
     host_next: u32,
     pages: Pages,
     slots: slots::Slots,
+    /// The space no slot's: application space mapping nothing, current
+    /// while no task's slot is.
+    no_slot: Space,
     areas: areas::Areas,
     /// 26-bit modules resident, which keep 32-bit slots out of the window
     /// as a 26-bit task does.
@@ -252,6 +255,7 @@ impl Memory {
                 mmu.release(frame)?;
             }
         }
+        let no_slot = mmu.current_space();
         let mut memory = Self {
             mmu,
             layout,
@@ -263,6 +267,7 @@ impl Memory {
             host_next: layout.host.start,
             pages,
             slots: slots::Slots::new(),
+            no_slot,
             areas: areas::Areas::new(),
             modules_26bit: 0,
         };

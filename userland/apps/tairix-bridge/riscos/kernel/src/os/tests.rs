@@ -11,8 +11,8 @@ use crate::os::{Ended, Fail, Outcome, Regs, Wait};
 use crate::swi::os::exit::ABEX;
 use crate::swi::os::{ADD_CALLBACK, SET_CALLBACK};
 use crate::swi::os::{
-    BYTE, CALL_AFTER, CALL_EVERY, CHANGE_ENVIRONMENT, CLAIM, EXIT, GENERATE_EVENT, INT_OFF, INT_ON,
-    READ_C, READ_LINE32, REMOVE_TICKER_EVENT, UPCALL,
+    BYTE, CALL_AFTER, CALL_EVERY, CHANGE_ENVIRONMENT, CLAIM, ENTER_OS, EXIT, GENERATE_EVENT,
+    INT_OFF, INT_ON, READ_C, READ_LINE32, REMOVE_TICKER_EVENT, UPCALL,
 };
 use crate::swi::X;
 use crate::testkit::{asm, with_application, Session, CODE, DATA, SWI_AT};
@@ -145,6 +145,42 @@ fn a_changed_exit_handler_is_entered_in_user_mode_with_its_workspace() {
     let (regs, _) = s.user_swi(X | CHANGE_ENVIRONMENT, registers(&[17]));
     assert!(regs.flag(psr::V));
     assert_eq!(s.peek(regs.r[0]), 0x1B0);
+}
+
+/// How many times the session showed what the guest drew.
+struct Showings(u32);
+
+fn count_showing(os: &mut super::Os<'_>) {
+    let before = os.extension::<Showings>().map_or(0, |shown| shown.0);
+    os.hold_extension(Showings(before + 1)).expect("held");
+}
+
+#[test]
+fn the_session_shows_what_was_drawn_before_its_host_waits_in_place_and_not_otherwise() {
+    let mut s = crate::testkit::boot_showing(&RISC_OS_5, count_showing);
+    s.application(Bits::Bit32, crate::testkit::SLOT_BYTES);
+    assert_eq!(
+        s.start_swi(X | READ_C, [0; 13]),
+        Outcome::Waiting(Wait::Input { until: None })
+    );
+    assert!(
+        s.kernel.os().extension::<Showings>().is_none(),
+        "a wait the program's SWI is performed again after is the session's to show"
+    );
+    s.arrive(5, InputEvent::Key(b'k'));
+    let mut regs = Regs::default();
+    s.kernel
+        .os()
+        .perform(X | READ_C, &mut regs)
+        .expect("a key read in place");
+    assert_eq!(regs.r[0], u32::from(b'k'));
+    assert!(
+        s.kernel
+            .os()
+            .extension::<Showings>()
+            .is_some_and(|shown| shown.0 >= 1),
+        "shown before the host waited"
+    );
 }
 
 #[test]
@@ -374,6 +410,42 @@ fn a_dynamic_area_change_from_an_interrupt_is_refused() {
     s.resume();
     let error = s.peek(DATA);
     assert_eq!(s.peek(error), 0x1C1, "refused from the interrupt");
+}
+
+#[test]
+fn a_swi_waiting_with_its_caller_s_interrupts_masked_takes_them_as_it_waits() {
+    let mut s = session();
+    counter(&mut s, CODE);
+    s.user_swi(X | CALL_AFTER, registers(&[5, CODE, DATA]));
+    let at = CODE + 0x80;
+    s.poke(
+        at,
+        &[
+            asm::swi(X | ENTER_OS),
+            asm::swi(X | INT_OFF),
+            asm::swi(X | READ_C),
+            asm::b(at + 12, at + 12),
+        ],
+    );
+    s.enter(Bits::Bit32, at, [0; 13]);
+    assert!(
+        matches!(s.run(1000), Outcome::Waiting(_)),
+        "waiting for a key"
+    );
+    s.clock.set(10);
+    assert!(matches!(s.run(1000), Outcome::Waiting(_)), "waiting still");
+    assert_eq!(s.peek(DATA), 1, "the timed call made while it waited");
+}
+
+#[test]
+fn a_timed_call_falls_due_for_the_session_not_the_context() {
+    let mut s = session();
+    counter(&mut s, CODE);
+    let before = s.kernel.os().deadlines();
+    s.user_swi(X | CALL_AFTER, registers(&[5, CODE, DATA]));
+    let after = s.kernel.os().deadlines();
+    assert_eq!(after.own, before.own);
+    assert!(after.session.is_some() && after.session != before.session);
 }
 
 #[test]

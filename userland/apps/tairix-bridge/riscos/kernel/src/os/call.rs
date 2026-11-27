@@ -109,6 +109,10 @@ pub enum Wait {
         /// When, in monotonic centiseconds.
         until: u64,
     },
+    /// The reply to a relay it left pending, which
+    /// [`Os::relay_answered`](crate::os::Os::relay_answered) gives it: the
+    /// SWI is performed again then.
+    Relay,
 }
 
 /// How a context's program ended.
@@ -182,18 +186,6 @@ impl Os<'_> {
     #[must_use]
     pub fn desktop_font(&self) -> crate::desktop::DesktopFont {
         self.world.desktop_font
-    }
-
-    /// `request` carried to the side holding the session's files, its reply
-    /// appended to `reply`: whether the host carried it.
-    pub fn relay(&mut self, request: &[u8], reply: &mut alloc::vec::Vec<u8>) -> bool {
-        self.world.host.relay(request, reply)
-    }
-
-    /// `request` carried to the font service, its reply appended to
-    /// `reply`: whether the host carried it.
-    pub fn font_relay(&mut self, request: &[u8], reply: &mut alloc::vec::Vec<u8>) -> bool {
-        self.world.host.font(request, reply)
     }
 
     /// Calls the guest code at `target`, entered as `entry` says with `regs`,
@@ -481,12 +473,21 @@ impl Os<'_> {
     /// nothing, and its waking is the interrupt.
     fn idle(&mut self) -> Result<(), Unwind> {
         let until = self.next_deadline();
+        self.show();
         match self.world.host.wait(until, Ending::Clock) {
             Pulse::Continue => {
                 self.world.processor.set_irq(true);
                 Ok(())
             }
             Pulse::Stop => Err(Unwind::Stopped),
+        }
+    }
+
+    /// What the guest has drawn shown, as the session does before its host
+    /// waits in place for input or the clock.
+    pub(crate) fn show(&mut self) {
+        if let Some(show) = self.world.show {
+            show(self);
         }
     }
 
@@ -522,30 +523,56 @@ impl Os<'_> {
     /// Runs the current context for at most `budget` instructions, loading
     /// each transfer it unwinds to, one a host call left first.
     pub(crate) fn run(&mut self, budget: u64) -> Outcome {
+        let outcome = self.run_program(budget);
+        if matches!(outcome, Outcome::Ended(_)) {
+            self.world.running = false;
+        }
+        outcome
+    }
+
+    fn run_program(&mut self, budget: u64) -> Outcome {
         // Host work done between runs is not this run's.
         self.world.charged = 0;
-        // The clock may have moved on while the host had the context.
-        self.tick();
+        self.tick_entering();
         if self.world.transfer.is_some() {
             if let Err(outcome) = self.load_transfer() {
                 return outcome;
             }
         }
         let mut left = budget;
+        let mut step = self.take_waiting_swi_interrupt();
         loop {
-            match self.execute(false, Some(&mut left)) {
-                Ok(_) => return Outcome::Budget,
-                Err(Unwind::Transfer) => {
+            let unwind = match step {
+                Ok(()) => match self.execute(false, Some(&mut left)) {
+                    Ok(_) => return Outcome::Budget,
+                    Err(unwind) => unwind,
+                },
+                Err(unwind) => unwind,
+            };
+            match unwind {
+                Unwind::Transfer => {
                     if let Err(outcome) = self.load_transfer() {
                         return outcome;
                     }
                 }
-                Err(Unwind::Wait(wait)) => return Outcome::Waiting(wait),
-                Err(Unwind::Stopped) => return Outcome::Stopped,
-                Err(Unwind::Unmodelled(unmodelled)) => return Outcome::Unmodelled(unmodelled),
-                Err(Unwind::Ended(ended)) => return Outcome::Ended(ended),
+                Unwind::Wait(wait) => return Outcome::Waiting(wait),
+                Unwind::Stopped => return Outcome::Stopped,
+                Unwind::Unmodelled(unmodelled) => return Outcome::Unmodelled(unmodelled),
+                Unwind::Ended(ended) => return Outcome::Ended(ended),
             }
+            step = Ok(());
         }
+    }
+
+    /// The interrupt pending for a SWI waiting to be performed again whose
+    /// caller masks it, taken first: a waiting SWI takes interrupts whatever
+    /// its caller's mask, so the run takes the one it would have.
+    fn take_waiting_swi_interrupt(&mut self) -> Result<(), Unwind> {
+        let masked = self.world.processor.cpu().cpsr() & psr::I != 0;
+        if self.world.resume.is_some() && masked {
+            self.take_interrupt()?;
+        }
+        Ok(())
     }
 
     /// Lets the processor take the interrupt the clock asserted while the
@@ -568,13 +595,16 @@ impl Os<'_> {
     fn load_transfer(&mut self) -> Result<(), Outcome> {
         self.world.resume = None;
         self.world.continuation = None;
+        self.world.relays.clear();
         let Some(transfer) = self.world.transfer.take() else {
             return Err(Outcome::Ended(Ended::Fault));
         };
         self.world
             .processor
             .load(transfer.bits, &transfer.state)
-            .map_err(|_| Outcome::Ended(Ended::Fault))
+            .map_err(|_| Outcome::Ended(Ended::Fault))?;
+        self.world.running = true;
+        Ok(())
     }
 
     /// Unwinds to `transfer`.

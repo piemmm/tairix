@@ -301,7 +301,7 @@ fn discs(os: &mut Os<'_>) -> Roots {
     let mut request = Vec::new();
     Request::Roots.encode(&mut request);
     let mut reply = Vec::new();
-    if !os.relay(&request, &mut reply) {
+    if os.relay(&request, &mut reply, false) != Ok(true) {
         return none;
     }
     match Reply::decode(&reply, &Request::Roots) {
@@ -354,7 +354,7 @@ fn exchange<'b>(
     request.encode(&mut bytes);
     buffer.clear();
     let carried = match place {
-        Place::Relay(_) => os.relay(&bytes, buffer),
+        Place::Relay(_) => os.relay(&bytes, buffer, request.changes())?,
         Place::Memory(_) => with(os, |state| state.memory.serve(&bytes, buffer)).is_ok(),
     };
     let buffer: &'b Vec<u8> = buffer;

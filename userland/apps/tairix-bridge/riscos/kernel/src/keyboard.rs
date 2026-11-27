@@ -92,18 +92,8 @@ pub(crate) struct Keyboard {
     pub(crate) id: Option<u8>,
     /// Whether `KeyV` 4 has enabled the drivers since they last were reset.
     enabled: bool,
-    /// Which low-level keys are down.
-    down: [u64; KEYS / 64],
-    current: Option<u32>,
-    old: Option<u32>,
-    /// When the current key's next code falls due.
-    due: Option<u64>,
-    /// The Shift and Ctrl bits of the status as the handler last left them
-    /// for one of their keys.
-    shifts: u8,
-    leds: Option<u32>,
-    /// What the handler keeps of a pending Alt.
-    pending: u32,
+    /// The current context's keys.
+    pub(crate) raw: Raw,
     /// The handler's workspace, an empty list and the exits, in guest memory.
     pub(crate) workspace: u32,
     pub(crate) empty: u32,
@@ -116,6 +106,35 @@ impl Keyboard {
             handler: None,
             id: None,
             enabled: false,
+            raw: Raw::new(),
+            workspace: 0,
+            empty: 0,
+            exits: 0,
+        }
+    }
+}
+
+/// One context's keys: which are down, the one repeating and the one
+/// before it, and the shifts, lights and pending Alt the handler last left.
+pub(crate) struct Raw {
+    /// Which low-level keys are down.
+    down: [u64; KEYS / 64],
+    current: Option<u32>,
+    old: Option<u32>,
+    /// When the current key's next code falls due.
+    due: Option<u64>,
+    /// The Shift and Ctrl bits of the status as the handler last left them
+    /// for one of their keys.
+    shifts: u8,
+    leds: Option<u32>,
+    /// What the handler keeps of a pending Alt.
+    pending: u32,
+}
+
+impl Raw {
+    /// Every key up.
+    pub(crate) const fn new() -> Self {
+        Self {
             down: [0; KEYS / 64],
             current: None,
             old: None,
@@ -123,9 +142,6 @@ impl Keyboard {
             shifts: 0,
             leds: None,
             pending: 0,
-            workspace: 0,
-            empty: 0,
-            exits: 0,
         }
     }
 
@@ -261,10 +277,10 @@ impl Os<'_> {
         if state & status::SCROLL_LOCK != 0 {
             leds |= SCROLL_LED;
         }
-        if !always && self.world.keyboard.leds == Some(leds) {
+        if !always && self.world.keyboard.raw.leds == Some(leds) {
             return Ok(());
         }
-        self.world.keyboard.leds = Some(leds);
+        self.world.keyboard.raw.leds = Some(leds);
         let mut regs = Regs::default();
         regs.r[..2].copy_from_slice(&[LEDS, leds]);
         self.call_vector(vectors::KEY, &mut regs, Entry::SupervisorNoIrq)
@@ -281,7 +297,7 @@ impl Os<'_> {
     ) -> Result<(), Fail> {
         regs.r[0] = handler.base;
         regs.r[5] = u32::from(self.keyboard_status());
-        regs.r[7] = self.world.keyboard.pending;
+        regs.r[7] = self.world.keyboard.raw.pending;
         regs.r[12] = self.world.keyboard.workspace;
         let bits = self
             .world
@@ -289,7 +305,7 @@ impl Os<'_> {
             .handler
             .map_or(Bits::Bit32, |(_, bits)| bits);
         let result = self.call_routine(address, bits, Entry::SupervisorNoIrq, regs);
-        self.world.keyboard.pending = regs.r[7];
+        self.world.keyboard.raw.pending = regs.r[7];
         self.set_byte_var(var::KEYBOARD_STATUS, regs.byte(5));
         self.refresh_leds(false)?;
         result?;
@@ -323,7 +339,7 @@ impl Os<'_> {
             return Ok(());
         }
         if byte == self.byte_var(var::ESCAPE_CHAR) && self.byte_var(var::ESCAPE_ACTION) == 0 {
-            self.world.keyboard.due = None;
+            self.world.keyboard.raw.due = None;
         }
         self.insert_checked(crate::input::KEYBOARD, byte)?;
         Ok(())
@@ -388,13 +404,14 @@ impl Os<'_> {
 
     /// The handler started afresh: every key up, its initialisation called,
     /// then the keyboard's drivers asked to go on.
-    fn enable_keyboard(&mut self) -> Result<(), Fail> {
+    pub(crate) fn enable_keyboard(&mut self) -> Result<(), Fail> {
         let keyboard = &mut self.world.keyboard;
-        keyboard.current = None;
-        keyboard.old = None;
-        keyboard.due = None;
-        keyboard.leds = None;
-        keyboard.down = [0; KEYS / 64];
+        let raw = &mut keyboard.raw;
+        raw.current = None;
+        raw.old = None;
+        raw.due = None;
+        raw.leds = None;
+        raw.down = [0; KEYS / 64];
         keyboard.enabled = false;
         let Some(id) = keyboard.id else {
             return Ok(());
@@ -406,7 +423,7 @@ impl Os<'_> {
         regs.r[1] = u32::from(id);
         regs.r[6] = self.world.keyboard.empty;
         self.call_handler(&handler, handler.init, &mut regs)?;
-        self.world.keyboard.shifts = self.keyboard_status() & (status::SHIFT | status::CTRL);
+        self.world.keyboard.raw.shifts = self.keyboard_status() & (status::SHIFT | status::CTRL);
         let mut enable = Regs::default();
         enable.r[0] = ENABLE;
         self.call_vector(vectors::KEY, &mut enable, Entry::SupervisorNoIrq)?;
@@ -458,7 +475,7 @@ impl Os<'_> {
 
     /// Key `key` down or up.
     fn key_transition(&mut self, key: u32, down: bool) -> Result<(), Fail> {
-        if (key as usize) < KEYS && !self.world.keyboard.note(key, down) {
+        if (key as usize) < KEYS && !self.world.keyboard.raw.note(key, down) {
             return Ok(());
         }
         let id = u32::from(self.world.keyboard.id.unwrap_or(NO_KEYBOARD));
@@ -474,7 +491,7 @@ impl Os<'_> {
         let state = self.keyboard_status();
         self.set_byte_var(
             var::KEYBOARD_STATUS,
-            (state & !held) | self.world.keyboard.shifts,
+            (state & !held) | self.world.keyboard.raw.shifts,
         );
         // Every key event shows the locks as they stand, OS_Byte 202's writes
         // included.
@@ -482,33 +499,33 @@ impl Os<'_> {
         if self.shifting(&handler, key)? {
             let action = if down { SHIFT_DOWN } else { SHIFT_UP };
             self.special(&handler, key, action)?;
-            self.world.keyboard.shifts = self.keyboard_status() & held;
+            self.world.keyboard.raw.shifts = self.keyboard_status() & held;
             return Ok(());
         }
         if down {
-            let keyboard = &mut self.world.keyboard;
-            if keyboard.current.is_some() && keyboard.old.is_some() {
+            let raw = &mut self.world.keyboard.raw;
+            if raw.current.is_some() && raw.old.is_some() {
                 return Ok(());
             }
-            keyboard.old = keyboard.current;
+            raw.old = raw.current;
             return self.start_key(key);
         }
-        if self.world.keyboard.old == Some(key) {
-            let current = self.world.keyboard.current;
+        if self.world.keyboard.raw.old == Some(key) {
+            let current = self.world.keyboard.raw.current;
             match self.rescan_with(&handler, current)? {
                 Some(next) => {
-                    self.world.keyboard.old = current;
+                    self.world.keyboard.raw.old = current;
                     self.start_key(next)?;
                 }
-                None => self.world.keyboard.old = None,
+                None => self.world.keyboard.raw.old = None,
             }
-        } else if self.world.keyboard.current == Some(key) {
-            let old = self.world.keyboard.old;
+        } else if self.world.keyboard.raw.current == Some(key) {
+            let old = self.world.keyboard.raw.old;
             if let Some(next) = self.rescan_with(&handler, old)? {
                 self.start_key(next)?;
             } else {
-                self.world.keyboard.current = None;
-                self.world.keyboard.due = None;
+                self.world.keyboard.raw.current = None;
+                self.world.keyboard.raw.due = None;
             }
         }
         Ok(())
@@ -522,11 +539,11 @@ impl Os<'_> {
     ) -> Result<Option<u32>, Fail> {
         let mut shifting = [0u64; KEYS / 64];
         for key in (0..0xA0).chain(0x220..0x300) {
-            if self.world.keyboard.is_down(key) && self.shifting(handler, key)? {
+            if self.world.keyboard.raw.is_down(key) && self.shifting(handler, key)? {
                 shifting[key as usize / 64] |= 1 << (key % 64);
             }
         }
-        Ok(self.world.keyboard.rescan(ignored, |key| {
+        Ok(self.world.keyboard.raw.rescan(ignored, |key| {
             shifting[key as usize / 64] >> (key % 64) & 1 != 0
         }))
     }
@@ -535,8 +552,8 @@ impl Os<'_> {
     /// the delay.
     fn start_key(&mut self, key: u32) -> Result<(), Fail> {
         let now = self.now();
-        self.world.keyboard.current = Some(key);
-        self.world.keyboard.due = self.repeat_after(now, var::REPEAT_DELAY);
+        self.world.keyboard.raw.current = Some(key);
+        self.world.keyboard.raw.due = self.repeat_after(now, var::REPEAT_DELAY);
         self.generate(key, FIRST)
     }
 
@@ -559,14 +576,14 @@ impl Os<'_> {
 
     /// The clock's work for the keyboard: the current key's code, if due.
     pub(crate) fn keyboard_tick(&mut self, now: u64) -> Result<(), Unwind> {
-        let Some(key) = self.world.keyboard.current else {
+        let Some(key) = self.world.keyboard.raw.current else {
             return Ok(());
         };
         self.refresh_leds(false)?;
-        if self.world.keyboard.due.is_none_or(|due| now < due) {
+        if self.world.keyboard.raw.due.is_none_or(|due| now < due) {
             return Ok(());
         }
-        self.world.keyboard.due = self.repeat_after(now, var::REPEAT_RATE);
+        self.world.keyboard.raw.due = self.repeat_after(now, var::REPEAT_RATE);
         match self.generate(key, REPEAT) {
             Err(Fail::Unwind(unwind)) => Err(unwind),
             _ => Ok(()),
@@ -577,8 +594,8 @@ impl Os<'_> {
     /// extension keys by `index` in their ranges. No handler, no key down.
     pub(crate) fn internal_key_down(&mut self, key: u32, index: u32) -> Result<bool, Fail> {
         match key {
-            EXTENSION_1 => return Ok(self.world.keyboard.is_down(0x100 + (index & 0x7F))),
-            EXTENSION_2 => return Ok(self.world.keyboard.is_down(0x200 + (index & 0x7F))),
+            EXTENSION_1 => return Ok(self.world.keyboard.raw.is_down(0x100 + (index & 0x7F))),
+            EXTENSION_2 => return Ok(self.world.keyboard.raw.is_down(0x200 + (index & 0x7F))),
             _ => {}
         }
         let Some(handler) = self.handler()? else {
@@ -592,7 +609,7 @@ impl Os<'_> {
         };
         Ok(keys
             .iter()
-            .any(|&low| low != 0xFF && self.world.keyboard.is_down(low)))
+            .any(|&low| low != 0xFF && self.world.keyboard.raw.is_down(low)))
     }
 
     /// `OS_Byte` 121 and the scans: R1 at or above &80 tests that key, below
@@ -615,7 +632,7 @@ impl Os<'_> {
             };
             if let Some((start, pseudo)) = range {
                 for low in start + index..0x300 {
-                    if self.world.keyboard.is_down(low) {
+                    if self.world.keyboard.raw.is_down(low) {
                         let pseudo = if low < 0x200 { pseudo } else { EXTENSION_2 };
                         regs.r[1] = pseudo | ((low & 0xFF) << 8);
                         regs.r[2] = 0;
@@ -656,8 +673,8 @@ impl Os<'_> {
             };
             *slot = (first != 0xFF).then_some(first);
         }
-        self.world.keyboard.current = keys[0];
-        self.world.keyboard.old = keys[1];
+        self.world.keyboard.raw.current = keys[0];
+        self.world.keyboard.raw.old = keys[1];
         Ok(())
     }
 
@@ -701,7 +718,7 @@ impl Os<'_> {
             .cpu()
             .reg(tairix_riscos_arm::reg::Reg::field(0))
             & 7;
-        let mouse = &self.world.input.mouse;
+        let mouse = &self.world.input.typing.mouse;
         let (x, y, held) = (mouse.x, mouse.y, mouse.buttons);
         self.pointer_moved(x, y, (held & !7) | buttons)?;
         self.return_to_lr();

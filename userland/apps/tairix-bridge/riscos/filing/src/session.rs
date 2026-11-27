@@ -1,8 +1,9 @@
 //! Test support for the crates above the kernel: a session made for an
 //! integration test, its host's clock moving on as the guest waits, its
 //! keyboard typing what the test gives, a wait with nothing left to type
-//! stopping the run, and HostFS serving `$` over a test's tree; and the
-//! commands run in it. Test support panics where a fixture names nothing.
+//! stopping the run, and HostFS serving `$` over a test's tree, its relays
+//! left pending where a test asks; and the commands run in it. Test support
+//! panics where a fixture names nothing.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -24,6 +25,7 @@ use tairix_riscos_kernel::os::{
     Config, Ending, Fail, Host, Kernel, Os, Outcome, Pulse, Regs, Wait, MILLENNIUM,
 };
 use tairix_riscos_kernel::output::VduDrivers;
+use tairix_riscos_kernel::relay::{Relayed, Side};
 use tairix_riscos_kernel::swi::os::{CHANGE_ENVIRONMENT, CHANGE_REDIRECTION, CLI, FIND};
 use tairix_riscos_kernel::swi::X;
 
@@ -39,15 +41,24 @@ pub const SLOT_BYTES: u32 = 0x10_0000;
 /// keys a test gives, which stops a wait with nothing left to type — unless
 /// the test lets the wait go on to the timed work due next — which stops
 /// work once the words a test allows are spent, and which serves HostFS
-/// where a test gives it a disc.
+/// where a test gives it a disc, leaving each relay that may park pending
+/// once the test asks it to.
 struct ScriptHost {
     clock: Rc<Cell<u64>>,
     keys: Rc<RefCell<VecDeque<u8>>>,
     words: Rc<Cell<Option<u32>>>,
     timed: Rc<Cell<bool>>,
-    disc: Option<Server<Handle>>,
+    disc: Disc,
+    parking: Rc<Cell<bool>>,
+    parked: Parked,
     fonts: Fonts,
 }
+
+/// The server of a test's disc, which the session answers parked relays by.
+type Disc = Rc<RefCell<Option<Server<Handle>>>>;
+
+/// The request a relay left pending.
+type Parked = Rc<RefCell<Option<Vec<u8>>>>;
 
 /// The font service a test's session serves font requests through, if it
 /// has been given one.
@@ -97,20 +108,32 @@ impl Host for ScriptHost {
         self.keys.borrow_mut().pop_front().map(InputEvent::Key)
     }
 
-    fn relay(&mut self, request: &[u8], reply: &mut Vec<u8>) -> bool {
-        match &mut self.disc {
-            Some(server) => {
+    fn relay(&mut self, side: Side, request: &[u8], reply: &mut Vec<u8>, parking: bool) -> Relayed {
+        match side {
+            Side::Files => {
+                let mut disc = self.disc.borrow_mut();
+                let Some(server) = disc.as_mut() else {
+                    return Relayed::Failed;
+                };
+                if parking && self.parking.get() {
+                    *self.parked.borrow_mut() = Some(request.to_vec());
+                    return Relayed::Pending;
+                }
                 server.serve(request, reply);
-                true
+                Relayed::Answered
             }
-            None => false,
-        }
-    }
-
-    fn font(&mut self, request: &[u8], reply: &mut Vec<u8>) -> bool {
-        match self.fonts.borrow_mut().as_mut() {
-            Some(service) => service(request, reply),
-            None => false,
+            Side::Fonts => {
+                let answered = self
+                    .fonts
+                    .borrow_mut()
+                    .as_mut()
+                    .is_some_and(|service| service(request, reply));
+                if answered {
+                    Relayed::Answered
+                } else {
+                    Relayed::Failed
+                }
+            }
         }
     }
 }
@@ -129,18 +152,28 @@ pub struct Setup<'a> {
     pub disc: Option<&'a Tree>,
 }
 
-/// A test's session: its kernel, and the clock, words, timed waking and
-/// font service its host keeps.
+/// A test's session: its kernel, and the clock, words, timed waking, disc,
+/// parked relay and font service its host keeps.
 pub struct Session {
     /// Its kernel.
     pub kernel: Kernel,
     clock: Rc<Cell<u64>>,
     words: Rc<Cell<Option<u32>>>,
     timed: Rc<Cell<bool>>,
+    disc: Disc,
+    parking: Rc<Cell<bool>>,
+    parked: Parked,
+    relays_parked: u32,
     fonts: Fonts,
 }
 
 impl Session {
+    /// How many relays [`Self::run`] has answered that a SWI parked on.
+    #[must_use]
+    pub const fn relays_parked(&self) -> u32 {
+        self.relays_parked
+    }
+
     /// Lets a wait for input go on, from now on, to the timed work due next
     /// — a ticker, an event — where there is some, as a real host's would,
     /// rather than stopping the run.
@@ -159,14 +192,33 @@ impl Session {
         self.words.set(words);
     }
 
+    /// Leaves each relay the kernel lets park pending from now on, as a
+    /// worker leaves one whose reply is on its way, or answers every relay
+    /// at once again.
+    pub fn park_relays(&self, park: bool) {
+        self.parking.set(park);
+    }
+
     /// Runs the session for at most `budget` instructions a turn, a turn
     /// that leaves it waiting for the clock taken again once the clock is
-    /// moved on to then: its outcome otherwise.
+    /// moved on to then, and one that leaves it waiting on a relay taken
+    /// again once the disc has answered it: its outcome otherwise.
     pub fn run(&mut self, budget: u64) -> Outcome {
         loop {
             match self.kernel.run(budget) {
                 Outcome::Waiting(Wait::Clock { until }) => {
                     self.clock.set(self.clock.get().max(until));
+                }
+                Outcome::Waiting(Wait::Relay) => {
+                    let request = self.parked.borrow_mut().take().expect("a parked relay");
+                    let mut reply = Vec::new();
+                    self.disc
+                        .borrow_mut()
+                        .as_mut()
+                        .expect("a disc")
+                        .serve(&request, &mut reply);
+                    assert!(self.kernel.os().relay_answered(&reply), "its reply taken");
+                    self.relays_parked += 1;
                 }
                 outcome => return outcome,
             }
@@ -182,14 +234,16 @@ pub fn session(setup: &Setup<'_>) -> Session {
     let timed = Rc::new(Cell::new(false));
     let fonts: Fonts = Rc::new(RefCell::new(None));
     let keys = Rc::new(RefCell::new(setup.keys.iter().copied().collect()));
-    let disc = setup.disc.map(|tree| {
+    let disc: Disc = Rc::new(RefCell::new(setup.disc.map(|tree| {
         let given = Given {
             dir: tree.open_dir(DISC, false).expect("the disc's folder"),
             name: "Disc".to_string(),
             writable: true,
         };
         Server::new(None, vec![given], [9; 16], 1)
-    });
+    })));
+    let parking = Rc::new(Cell::new(false));
+    let parked: Parked = Rc::new(RefCell::new(None));
     let config = Config {
         layout: &RISC_OS_5,
         ceiling: Ceiling::derive(256 * 1024 * 1024),
@@ -199,7 +253,9 @@ pub fn session(setup: &Setup<'_>) -> Session {
             keys,
             words: Rc::clone(&words),
             timed: Rc::clone(&timed),
-            disc,
+            disc: Rc::clone(&disc),
+            parking: Rc::clone(&parking),
+            parked: Rc::clone(&parked),
             fonts: Rc::clone(&fonts),
         }),
         vdu: setup.vdu,
@@ -209,6 +265,7 @@ pub fn session(setup: &Setup<'_>) -> Session {
         pressure: &tairix_reclaim::pressure::Unpressured,
         log: &tairix_log::DiscardSink,
         cache_key: tairix_hash::HashSeed::UNKEYED,
+        show: None,
     };
     let mut kernel = Kernel::new(config).expect("a kernel");
     application_slot(&mut kernel, setup.bytes);
@@ -217,6 +274,10 @@ pub fn session(setup: &Setup<'_>) -> Session {
         clock,
         words,
         timed,
+        disc,
+        parking,
+        parked,
+        relays_parked: 0,
         fonts,
     }
 }

@@ -45,6 +45,9 @@ impl Decimal {
 
 /// The longest text a reading takes from the guest.
 const LONGEST_TEXT: usize = 1 << 16;
+/// R2's bits below GSTrans's flags: `OS_GSTrans`'s buffer size, and the
+/// generation of the string `OS_GSInit` began.
+const BELOW_FLAGS: u32 = 0x1FFF_FFFF;
 /// The most of a number's text `OS_ReadUnsigned` reads: its spaces, base
 /// and 64 binary digits, with room to spare.
 const NUMBER_TEXT: usize = 256;
@@ -509,16 +512,18 @@ impl Os<'_> {
         let empty = reader.is_empty();
         let position = reader.position();
         let progress = reader.into_progress();
+        let generation = self.world.gs_generation.wrapping_add(1) & BELOW_FLAGS;
+        self.world.gs_generation = generation;
         self.world.gs = Some(crate::os::GsState {
             base,
             text,
             flags,
             progress,
-            generation: self.world.gs_generation,
+            generation,
         });
         regs.r[0] = base.wrapping_add(len32(position));
         regs.r[1] = u32::from(first);
-        regs.r[2] = flags.bits() | (self.world.gs_generation & 0x1FFF_FFFF);
+        regs.r[2] = flags.bits() | generation;
         regs.set_flag(psr::Z, empty);
         Ok(())
     }
@@ -527,11 +532,12 @@ impl Os<'_> {
     /// it and C clear, or C set at the end.
     pub(crate) fn gs_read(&mut self, regs: &mut Regs) -> Result<(), Fail> {
         let flags = Flags::from_bits(regs.r[2]);
+        let named = regs.r[2] & BELOW_FLAGS;
         let state = match self.world.gs.take() {
-            Some(state) if state.generation & 0x1FFF_FFFF == regs.r[2] & 0x1FFF_FFFF => state,
+            Some(state) if state.generation == named => state,
             _ => {
                 // A string begun elsewhere, or no longer held: read on from
-                // R0 with nothing part way through.
+                // R0 with nothing part way through, as the string R2 names.
                 let base = regs.r[0];
                 let text = self.terminated_text(base)?;
                 let progress = Reader::new(&text, flags.union(Flags::NO_QUOTES)).into_progress();
@@ -540,7 +546,7 @@ impl Os<'_> {
                     text,
                     flags,
                     progress,
-                    generation: self.world.gs_generation,
+                    generation: named,
                 }
             }
         };
@@ -560,7 +566,7 @@ impl Os<'_> {
                 regs.r[1] = c & 0xFF;
                 regs.set_flag(psr::C, false);
                 regs.r[0] = base.wrapping_add(len32(position));
-                regs.r[2] = flags.bits() | (generation & 0x1FFF_FFFF);
+                regs.r[2] = flags.bits() | generation;
                 self.world.gs = Some(crate::os::GsState {
                     base,
                     text,
@@ -587,7 +593,7 @@ impl Os<'_> {
     /// leaves it: here zero.
     pub(crate) fn gs_trans(&mut self, regs: &mut Regs) -> Result<(), Fail> {
         let flags = Flags::from_bits(regs.r[2]);
-        let room = (regs.r[2] & 0x1FFF_FFFF) as usize;
+        let room = (regs.r[2] & BELOW_FLAGS) as usize;
         let text = self.terminated_text(regs.r[0])?;
         let mut buffer = Vec::new();
         if buffer.try_reserve_exact(room.min(LONGEST_TEXT)).is_err() {

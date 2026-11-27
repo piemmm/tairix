@@ -1,7 +1,7 @@
 //! What a front end shows of a session's screen: the bank on display and
 //! its geometry, its pixels as colours through the palette in its flash
-//! state now, the lines written since last asked, and the text cursor and
-//! pointer to draw over it. The cursor is drawn over the screen rather than
+//! state now and what that palette is, the lines written since last asked,
+//! and the text cursor and pointer to draw over it. The cursor is drawn over the screen rather than
 //! into its memory, so a program reading its screen never finds it there.
 
 use alloc::vec::Vec;
@@ -12,6 +12,7 @@ use tairix_riscos_arm::mmu::GRANULE_SIZE;
 use tairix_riscos_kernel::os::{len32, Fail, Os};
 
 use crate::colour::Direct;
+use crate::palette::EIGHT_BIT_COLOURS;
 use crate::screen::AREA;
 use crate::state::read;
 
@@ -61,6 +62,23 @@ pub struct PointerView {
     pub at: (i32, i32),
     /// Its active point within it.
     pub active: (u32, u32),
+}
+
+/// What turns the screen's pixels into colours: the palette in both flash
+/// states, and which is showing. Where it changes, every line looks
+/// different though none was written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shown {
+    entries: [[u32; 2]; EIGHT_BIT_COLOURS],
+    second: bool,
+}
+
+/// The screen's [`Shown`] as it stands.
+pub fn shown(os: &mut Os<'_>) -> Option<Shown> {
+    read(os, |vdu, _| Shown {
+        entries: vdu.palette.entries,
+        second: vdu.palette.second,
+    })
 }
 
 /// The screen on display.

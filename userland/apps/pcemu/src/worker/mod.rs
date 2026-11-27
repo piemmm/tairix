@@ -50,13 +50,14 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use cache::SectorCache;
 use core::cell::RefCell;
-use port::{End, Link, Port, RemoteDisk};
+use port::{End, Port, RemoteDisk};
 use tairix_hash::HashSeed;
 use tairix_log::Sink;
 use tairix_reclaim::{shrink_target, CacheBudget, PressureBand, PressureGauge, ReclaimClass};
 use tairix_sandbox::link::Waited;
 use tairix_sandbox::session::ShareWrite;
 use tairix_sandbox::wire::Writer;
+use tairix_sandbox::WorkerPort;
 use typist::Typist;
 
 /// The most emulated time one slice runs, so input is taken between slices
@@ -234,7 +235,7 @@ struct Worker<L, S, M> {
 ///
 /// Its machine runs the blocks `executor` adopts, the code the front-end
 /// installs in it.
-pub fn serve<L: Link + 'static, S: ShareWrite, M: Memory>(
+pub fn serve<L: WorkerPort + 'static, S: ShareWrite, M: Memory>(
     link: L,
     share: S,
     (memory, executor): (M, Box<dyn Execute>),
@@ -247,7 +248,7 @@ pub fn serve<L: Link + 'static, S: ShareWrite, M: Memory>(
 }
 
 /// The worker for the start the front-end sends first, its machine built.
-fn begin<L: Link + 'static, S: ShareWrite, M: Memory>(
+fn begin<L: WorkerPort + 'static, S: ShareWrite, M: Memory>(
     mut link: L,
     share: S,
     (memory, executor): (M, Box<dyn Execute>),
@@ -274,7 +275,7 @@ fn begin<L: Link + 'static, S: ShareWrite, M: Memory>(
 pub(crate) struct Stepped<L, S, M>(Worker<L, S, M>);
 
 #[cfg(test)]
-impl<L: Link + 'static, S: ShareWrite, M: Memory> Stepped<L, S, M> {
+impl<L: WorkerPort + 'static, S: ShareWrite, M: Memory> Stepped<L, S, M> {
     /// The worker for the start the front-end sends first.
     pub(crate) fn begin(
         link: L,
@@ -298,7 +299,7 @@ impl<L: Link + 'static, S: ShareWrite, M: Memory> Stepped<L, S, M> {
 
 /// The drives of the fixed disks `disks` describes, each image named to
 /// `port`, and the last name taken.
-fn name_fixed<L: Link>(
+fn name_fixed<L: WorkerPort>(
     port: &Rc<RefCell<Port<L>>>,
     disks: &[Option<FixedDisk>; 2],
 ) -> Result<([Option<Drive>; 2], Option<u16>), Unstarted> {
@@ -366,7 +367,7 @@ fn zeroed<T: Clone + Default>(len: usize) -> Option<Vec<T>> {
     Some(buffer)
 }
 
-impl<L: Link + 'static, S: ShareWrite, M: Memory> Worker<L, S, M> {
+impl<L: WorkerPort + 'static, S: ShareWrite, M: Memory> Worker<L, S, M> {
     /// The worker for `setup`, its machine built and [`Event::Ready`] sent,
     /// or why it could not start, [`Event::Refused`] sent where the machine
     /// was refused.
@@ -1276,7 +1277,7 @@ fn fingerprint(config: &BoardConfig, fixed: &[Option<Drive>; 2]) -> Option<Vec<u
 
 /// The `len` bytes of the snapshot being resumed, recalled a piece at a
 /// time; none once the session ends or the heap will not hold them.
-fn recalled<L: Link>(port: &Rc<RefCell<Port<L>>>, len: u32) -> Option<Vec<u8>> {
+fn recalled<L: WorkerPort>(port: &Rc<RefCell<Port<L>>>, len: u32) -> Option<Vec<u8>> {
     let mut kept = Vec::new();
     kept.try_reserve_exact(usize::try_from(len).ok()?).ok()?;
     kept.resize(usize::try_from(len).ok()?, 0);
@@ -1308,7 +1309,7 @@ fn restored(machine: &mut Machine, kept: &[u8], print: &[u8]) -> bool {
 }
 
 /// The machine `config` describes, its fixed disks attached through `port`.
-fn build<L: Link + 'static>(
+fn build<L: WorkerPort + 'static>(
     port: &Rc<RefCell<Port<L>>>,
     config: &BoardConfig,
     fixed: &[Option<Drive>; 2],
@@ -1330,41 +1331,6 @@ fn build<L: Link + 'static>(
             .map_err(|error| Refusal::Fixed(u8::try_from(n).unwrap_or(0), error))?;
     }
     Ok(machine)
-}
-
-/// A [`Link`] over the sandbox's timed worker end, measured by `clock`.
-pub struct SandboxLink<C> {
-    link: tairix_sandbox::WorkerLink<C>,
-    clock: fn() -> Nanos,
-}
-
-impl<C> SandboxLink<C> {
-    /// The link over `link`, its waits measured by `clock`.
-    pub const fn new(link: tairix_sandbox::WorkerLink<C>, clock: fn() -> Nanos) -> Self {
-        Self { link, clock }
-    }
-}
-
-impl<C: tairix_sandbox::TimedChannel> Link for SandboxLink<C> {
-    fn recv<R>(
-        &mut self,
-        wait: Option<Nanos>,
-        take: impl FnOnce(&[u8]) -> R,
-    ) -> Result<Waited<R>, tairix_sandbox::ProtoError> {
-        self.link.recv(wait, take)
-    }
-
-    fn queue(&mut self, payload: &[u8]) -> Result<(), tairix_sandbox::ProtoError> {
-        self.link.queue(payload)
-    }
-
-    fn flush(&mut self) -> Result<(), tairix_sandbox::ProtoError> {
-        self.link.flush()
-    }
-
-    fn now(&self) -> Nanos {
-        (self.clock)()
-    }
 }
 
 /// What a test that runs the worker in its own process stands in for it

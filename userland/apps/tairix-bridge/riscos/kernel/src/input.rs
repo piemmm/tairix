@@ -63,6 +63,15 @@ struct Ring {
 }
 
 impl Ring {
+    /// An empty ring of `size` bytes, if there is room for one.
+    fn empty(size: usize) -> Option<Self> {
+        Some(Self {
+            data: tairix_util::fallible::zeroed(size)?,
+            head: 0,
+            len: 0,
+        })
+    }
+
     fn capacity(&self) -> usize {
         self.data.len().saturating_sub(1)
     }
@@ -95,14 +104,32 @@ pub(crate) const BLOCK: u32 = 1 << 31;
 
 /// The kernel's own buffers and what reading them holds over between calls.
 pub(crate) struct Input {
-    /// The keyboard's buffer, then the sound and speech buffers.
+    /// What the current context types.
+    pub(crate) typing: Typing,
+    /// The sound and speech buffers.
     rings: Vec<Ring>,
-    /// What is left of a function key's expansion.
+}
+
+/// What one context types: its keyboard buffer, what is left of a function
+/// key's expansion, a code owed after its NUL, and its mouse.
+pub(crate) struct Typing {
+    keyboard: Ring,
     soft: VecDeque<u8>,
-    /// A key code owed after the NUL that announced it.
     owed: Option<u8>,
     /// Where the mouse is and which buttons are held.
     pub(crate) mouse: crate::mouse::Mouse,
+}
+
+impl Typing {
+    /// Nothing typed; none where there is no room for its buffer.
+    pub(crate) fn new() -> Option<Self> {
+        Some(Self {
+            keyboard: Ring::empty(KEYBOARD_SIZE)?,
+            soft: VecDeque::new(),
+            owed: None,
+            mouse: crate::mouse::Mouse::new(),
+        })
+    }
 }
 
 /// An input event the host delivers.
@@ -143,42 +170,32 @@ pub enum InputEvent {
 
 impl Input {
     pub(crate) fn new() -> Result<Self, crate::os::BootError> {
-        let sizes = core::iter::once(KEYBOARD_SIZE).chain(SOUND_AND_SPEECH.map(|_| SOUND_SIZE));
+        let typing = Typing::new().ok_or(crate::os::BootError::NoMemory)?;
         let mut rings = Vec::new();
         rings
-            .try_reserve_exact(1 + SOUND_AND_SPEECH.count())
+            .try_reserve_exact(SOUND_AND_SPEECH.count())
             .map_err(|_| crate::os::BootError::NoMemory)?;
-        for size in sizes {
-            let data = tairix_util::fallible::zeroed(size).ok_or(crate::os::BootError::NoMemory)?;
-            rings.push(Ring {
-                data,
-                head: 0,
-                len: 0,
-            });
+        for _ in SOUND_AND_SPEECH {
+            rings.push(Ring::empty(SOUND_SIZE).ok_or(crate::os::BootError::NoMemory)?);
         }
-        Ok(Self {
-            rings,
-            soft: VecDeque::new(),
-            owed: None,
-            mouse: crate::mouse::Mouse::new(),
-        })
+        Ok(Self { typing, rings })
     }
 
     /// Buffer `buffer`, where it is one of the kernel's own.
     fn ring(&mut self, buffer: u32) -> Option<&mut Ring> {
-        let index = if buffer == KEYBOARD {
-            0
-        } else if SOUND_AND_SPEECH.contains(&buffer) {
-            (buffer - SOUND_AND_SPEECH.start()) as usize + 1
-        } else {
+        if buffer == KEYBOARD {
+            return Some(&mut self.typing.keyboard);
+        }
+        if !SOUND_AND_SPEECH.contains(&buffer) {
             return None;
-        };
-        self.rings.get_mut(index)
+        }
+        self.rings
+            .get_mut((buffer - SOUND_AND_SPEECH.start()) as usize)
     }
 
     /// Ends a function key's expansion part way.
     pub(crate) fn end_soft_key(&mut self) {
-        self.soft.clear();
+        self.typing.soft.clear();
     }
 }
 
@@ -557,11 +574,11 @@ impl Os<'_> {
             if self.escape_set() {
                 return Ok(None);
             }
-            if let Some(c) = self.world.input.owed.take() {
+            if let Some(c) = self.world.input.typing.owed.take() {
                 return Ok(Some(c));
             }
-            if let Some(c) = self.world.input.soft.pop_front() {
-                let left = u8::try_from(self.world.input.soft.len()).unwrap_or(u8::MAX);
+            if let Some(c) = self.world.input.typing.soft.pop_front() {
+                let left = u8::try_from(self.world.input.typing.soft.len()).unwrap_or(u8::MAX);
                 self.set_byte_var(var::SOFT_KEY_LEN, left);
                 return Ok(Some(c));
             }
@@ -585,7 +602,7 @@ impl Os<'_> {
             if code == 0 {
                 let literal = self.remove(buffer, false)?.unwrap_or(0);
                 if literal == 0 && self.codes_read_as_nul_and_code() {
-                    self.world.input.owed = Some(0);
+                    self.world.input.typing.owed = Some(0);
                 }
                 return Ok(Some(literal));
             }
@@ -679,7 +696,7 @@ impl Os<'_> {
                 Ok(None)
             }
             2 => {
-                self.world.input.owed = Some(code);
+                self.world.input.typing.owed = Some(code);
                 Ok(Some(0))
             }
             base => Ok(Some(base.wrapping_add(nibble))),
@@ -697,7 +714,7 @@ impl Os<'_> {
             .variable_text(&name[..4 + digits.len()])?
             .unwrap_or_default();
         let left = u8::try_from(value.len()).unwrap_or(u8::MAX);
-        self.world.input.soft = VecDeque::from(value);
+        self.world.input.typing.soft = VecDeque::from(value);
         self.set_byte_var(var::SOFT_KEY_LEN, left);
         Ok(())
     }
@@ -722,17 +739,27 @@ impl Os<'_> {
         self.host_wait(deadline)
     }
 
+    /// Whether the SWI being performed may be performed again: a program's
+    /// own `SWI` that has run no guest code, is not one the kernel performs
+    /// for another, and has relayed nothing it could not relay again.
+    pub(crate) fn resumable(&self) -> bool {
+        let world = &*self.world;
+        world.depth == 0
+            && !world.guest_called
+            && world.kernel_calls == 0
+            && world.frame.is_some_and(|frame| frame.swi.is_some())
+            && !world.relays.unrepeatable()
+    }
+
     /// The SWI being performed left to be performed again when `wait` is
-    /// over, carrying on from `continuation`, where it is a program's own
-    /// `SWI` that has run no guest code and is not one the kernel performs
-    /// for another: the unwind that leaves it.
+    /// over, carrying on from `continuation`, where it [`Self::resumable`]:
+    /// the unwind that leaves it.
     pub(crate) fn suspended(
         &mut self,
         wait: Wait,
         continuation: Option<Continuation>,
     ) -> Option<Fail> {
-        let resumable =
-            self.world.depth == 0 && !self.world.guest_called && self.world.kernel_calls == 0;
+        let resumable = self.resumable();
         let number = self
             .world
             .frame
@@ -780,6 +807,7 @@ impl Os<'_> {
         } else {
             Ending::Input
         };
+        self.show();
         if self.world.host.wait(until, ending) == crate::os::Pulse::Stop {
             return Err(Fail::Unwind(Unwind::Stopped));
         }

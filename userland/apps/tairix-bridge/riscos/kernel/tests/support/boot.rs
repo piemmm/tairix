@@ -30,6 +30,7 @@ pub fn boot_with(rng: &mut Prng, host: Box<dyn Host>) -> Kernel {
         pressure: &tairix_reclaim::pressure::Unpressured,
         log: &tairix_log::DiscardSink,
         cache_key: tairix_hash::HashSeed::UNKEYED,
+        show: None,
     };
     let mut kernel = Kernel::new(config).expect("a kernel boots");
     let memory = kernel.memory();

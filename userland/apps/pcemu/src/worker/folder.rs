@@ -5,11 +5,12 @@
 //! and a read reaching past it always asks, so a file another program grows
 //! is read to its new end.
 
-use super::port::{Link, Port};
+use super::port::Port;
 use crate::folder::{Folder, Op, Refusal, Reply, IO_MOST};
 use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use tairix_sandbox::WorkerPort;
 
 /// What one fetch brings ahead of a small read: a whole piece.
 const AHEAD: usize = IO_MOST;
@@ -48,7 +49,7 @@ pub struct RemoteFolder<L> {
     out: Vec<u8>,
 }
 
-impl<L: Link> RemoteFolder<L> {
+impl<L: WorkerPort> RemoteFolder<L> {
     /// Share `slot`, reached through `port`.
     pub fn new(port: Rc<RefCell<Port<L>>>, slot: u8) -> Self {
         Self {
@@ -133,7 +134,7 @@ impl<L: Link> RemoteFolder<L> {
     }
 }
 
-impl<L: Link> Folder for RemoteFolder<L> {
+impl<L: WorkerPort> Folder for RemoteFolder<L> {
     fn call(&mut self, op: &Op<'_>) -> Result<Reply<'_>, Refusal> {
         match *op {
             Op::Read {

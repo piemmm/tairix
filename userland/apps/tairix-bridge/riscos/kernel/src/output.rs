@@ -45,6 +45,9 @@ pub struct VduDrivers {
     /// Readies them at reset, before any module starts: their state, the
     /// screen's memory and the configured mode.
     pub start: for<'a, 'b> fn(&'a mut Os<'b>) -> Result<(), Fail>,
+    /// Readies a new context's screen: its state, its screen area and the
+    /// configured mode, held for the context as its own.
+    pub screen: for<'a, 'b> fn(&'a mut Os<'b>) -> Result<(), Fail>,
     /// Takes bytes of the VDU stream.
     pub write: for<'a, 'b, 'c> fn(&'a mut Os<'b>, &'c [u8]) -> Result<(), Fail>,
     /// Whether the stream is part way through a control sequence's
@@ -102,6 +105,8 @@ pub mod workspace {
     /// The changed box `OS_ChangedBox` hands out: its flag and four
     /// coordinates.
     pub const CHANGED_BOX: u32 = 0x165C;
+    /// The changed box's bytes.
+    pub const CHANGED_BOX_BYTES: u32 = 5 * 4;
 }
 
 /// The name the serial stream opens.

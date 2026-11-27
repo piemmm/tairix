@@ -1,6 +1,8 @@
 //! State the session's other crates keep for their built-in modules: one
 //! value of each type, which a module's initialisation holds and its
-//! finalisation lets go of, as a RISC OS module claims its workspace.
+//! finalisation lets go of, as a RISC OS module claims its workspace. A value
+//! is the session's or the current context's; a context's own are set aside
+//! with it while another context runs, and given back when it ends.
 //!
 //! A session holds a handful, one or two for each crate, so a scan of their
 //! types finds one faster than a map would.
@@ -11,36 +13,144 @@ use core::any::{Any, TypeId};
 
 use crate::os::{Fail, Os, World};
 
-/// The values, each with its type.
-pub(crate) struct Extensions {
-    values: Vec<(TypeId, Box<dyn Any>)>,
+/// What a context's end does with a value held for it: gives back what the
+/// value has in the guest. It runs while the ending context is still
+/// current, its other values already taken from it.
+pub type End = for<'a, 'b> fn(&'a mut Os<'b>, Box<dyn Any>);
+
+struct Held {
+    id: TypeId,
+    value: Box<dyn Any>,
+    end: Option<End>,
 }
 
-impl Extensions {
+/// Values, each with its type.
+pub(crate) struct Values(Vec<Held>);
+
+impl Values {
     pub(crate) const fn new() -> Self {
-        Self { values: Vec::new() }
+        Self(Vec::new())
     }
 
     fn place<T: Any>(&self) -> Option<usize> {
         let id = TypeId::of::<T>();
-        self.values.iter().position(|(held, _)| *held == id)
+        self.0.iter().position(|held| held.id == id)
+    }
+
+    fn get_mut<T: Any>(&mut self) -> Option<&mut T> {
+        let place = self.place::<T>()?;
+        self.0.get_mut(place)?.value.downcast_mut()
+    }
+
+    /// `value` held as the `T`, in place of any before: false where there
+    /// is no room to hold it.
+    fn hold<T: Any>(&mut self, value: Box<dyn Any>, end: Option<End>) -> bool {
+        if let Some(place) = self.place::<T>() {
+            self.0[place] = Held {
+                id: TypeId::of::<T>(),
+                value,
+                end,
+            };
+            return true;
+        }
+        if self.0.try_reserve(1).is_err() {
+            return false;
+        }
+        self.0.push(Held {
+            id: TypeId::of::<T>(),
+            value,
+            end,
+        });
+        true
+    }
+
+    /// The `T` taken out with its end, a placeholder left that no lookup of
+    /// a `T` finds.
+    fn set_aside<T: Any>(&mut self) -> Option<(Box<T>, Option<End>)> {
+        let place = self.place::<T>()?;
+        let held = self.0.get_mut(place)?;
+        match core::mem::replace(&mut held.value, Box::new(())).downcast::<T>() {
+            Ok(value) => Some((value, held.end)),
+            Err(other) => {
+                held.value = other;
+                None
+            }
+        }
+    }
+
+    fn remove<T: Any>(&mut self) -> Option<T> {
+        let place = self.place::<T>()?;
+        let held = self.0.swap_remove(place);
+        held.value.downcast().ok().map(|boxed| *boxed)
+    }
+
+    /// Each value given to its end, the values with none dropped.
+    pub(crate) fn end(self, os: &mut Os<'_>) {
+        for held in self.0 {
+            if let Some(end) = held.end {
+                end(os, held.value);
+            }
+        }
+    }
+}
+
+/// Which values hold a type.
+#[derive(Clone, Copy)]
+enum Holder {
+    Session,
+    Context,
+}
+
+/// The session's values, and the current context's.
+pub(crate) struct Extensions {
+    session: Values,
+    context: Values,
+}
+
+impl Extensions {
+    pub(crate) const fn new() -> Self {
+        Self {
+            session: Values::new(),
+            context: Values::new(),
+        }
+    }
+
+    fn holder<T: Any>(&self) -> Option<Holder> {
+        if self.session.place::<T>().is_some() {
+            Some(Holder::Session)
+        } else {
+            self.context.place::<T>().map(|_| Holder::Context)
+        }
+    }
+
+    const fn values(&mut self, holder: Holder) -> &mut Values {
+        match holder {
+            Holder::Session => &mut self.session,
+            Holder::Context => &mut self.context,
+        }
     }
 
     pub(crate) fn get_mut<T: Any>(&mut self) -> Option<&mut T> {
-        let place = self.place::<T>()?;
-        self.values.get_mut(place)?.1.downcast_mut()
+        let holder = self.holder::<T>()?;
+        self.values(holder).get_mut()
+    }
+
+    /// The current context's values exchanged for `other`'s, as a switch
+    /// sets one context aside for another.
+    pub(crate) const fn exchange_context(&mut self, other: &mut Values) {
+        core::mem::swap(&mut self.context, other);
     }
 }
 
 impl World {
-    /// The session's value of type `T`, while one is held.
+    /// The value of type `T` the session or the current context holds.
     pub fn extension<T: Any>(&mut self) -> Option<&mut T> {
         self.extensions.get_mut()
     }
 }
 
 impl Os<'_> {
-    /// The session's value of type `T`, while one is held.
+    /// The value of type `T` the session or the current context holds.
     pub fn extension<T: Any>(&mut self) -> Option<&mut T> {
         self.world.extension()
     }
@@ -51,62 +161,58 @@ impl Os<'_> {
     ///
     /// "Not enough memory" where the host has no room for it.
     pub fn hold_extension<T: Any>(&mut self, value: T) -> Result<(), Fail> {
+        self.hold_in(Holder::Session, value, None)
+    }
+
+    /// Holds `value` as the current context's `T`, in place of any it held
+    /// before: each context has its own, which another context's work never
+    /// finds, and `end` is given it when the context ends.
+    ///
+    /// # Errors
+    ///
+    /// "Not enough memory" where the host has no room for it.
+    pub fn hold_context_extension<T: Any>(&mut self, value: T, end: End) -> Result<(), Fail> {
+        self.hold_in(Holder::Context, value, Some(end))
+    }
+
+    fn hold_in<T: Any>(&mut self, holder: Holder, value: T, end: Option<End>) -> Result<(), Fail> {
         let Ok(boxed) = tairix_collections::try_box(value) else {
             return Err(self.no_memory());
         };
-        let extensions = &mut self.world.extensions;
-        if let Some(slot) = extensions
-            .place::<T>()
-            .and_then(|place| extensions.values.get_mut(place))
-        {
-            slot.1 = boxed;
-            return Ok(());
+        if self.world.extensions.values(holder).hold::<T>(boxed, end) {
+            Ok(())
+        } else {
+            Err(self.no_memory())
         }
-        if extensions.values.try_reserve(1).is_err() {
-            return Err(self.no_memory());
-        }
-        extensions.values.push((TypeId::of::<T>(), boxed));
-        Ok(())
     }
 
-    /// `work` on the session's `T` and the rest of the session together,
-    /// while a `T` is held. The value is set aside meanwhile, so nothing
-    /// `work` calls finds it, and `work` must neither hold nor release a `T`.
+    /// `work` on the `T` held and the rest of the session together, while a
+    /// `T` is held. The value is set aside meanwhile, so nothing `work`
+    /// calls finds it, and `work` must neither hold nor release a `T`.
     pub fn with_extension<T: Any, R>(
         &mut self,
         work: impl FnOnce(&mut T, &mut Self) -> R,
     ) -> Option<R> {
-        let place = self.world.extensions.place::<T>()?;
-        let aside: Box<dyn Any> = Box::new(());
-        let slot = &mut self.world.extensions.values[place].1;
-        let mut value = match core::mem::replace(slot, aside).downcast::<T>() {
-            Ok(value) => value,
-            Err(other) => {
-                *slot = other;
-                return None;
-            }
-        };
+        let holder = self.world.extensions.holder::<T>()?;
+        let (mut value, end) = self.world.extensions.values(holder).set_aside::<T>()?;
         let answer = work(&mut value, self);
-        let extensions = &mut self.world.extensions;
-        match extensions.place::<T>() {
-            Some(place) => extensions.values[place].1 = value,
-            // Only `work` releasing its own `T` empties the slot; the value
-            // it set aside is the session's again.
-            None => {
-                if extensions.values.try_reserve(1).is_ok() {
-                    extensions.values.push((TypeId::of::<T>(), value));
-                }
-            }
-        }
+        // Only `work` letting go of its own `T` empties the place; the value
+        // set aside is its holder's again.
+        let _ = self.world.extensions.values(holder).hold::<T>(value, end);
         Some(answer)
     }
 
-    /// Lets go of the session's `T`, handing it back.
+    /// Lets go of the session's `T`, or of every context's, handing back the
+    /// session's or the current context's. Another context's is dropped
+    /// without its end, as the module that held it is going.
     pub fn release_extension<T: Any>(&mut self) -> Option<T> {
-        let extensions = &mut self.world.extensions;
-        let place = extensions.place::<T>()?;
-        let (_, value) = extensions.values.swap_remove(place);
-        value.downcast().ok().map(|boxed| *boxed)
+        if let Some(value) = self.world.extensions.session.remove::<T>() {
+            return Some(value);
+        }
+        for parked in self.world.contexts.parked_extensions() {
+            drop(parked.remove::<T>());
+        }
+        self.world.extensions.context.remove::<T>()
     }
 }
 

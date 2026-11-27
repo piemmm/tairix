@@ -21,9 +21,10 @@ use tairix_fsmeta::preset::acorn::RISC_OS_EPOCH_TO_UNIX_SECS;
 use tairix_riscos_arm::cpu::State;
 use tairix_riscos_arm::psr;
 
+pub use crate::clock::Deadlines;
 pub use access::Reach;
 pub use call::{Ended, Entry, Returned, Target, Transfer, Unwind, Wait};
-pub(crate) use processor::Processor;
+pub(crate) use processor::{Parked, Processor};
 
 use crate::memory::layout::Layout;
 use crate::memory::policy::Ceiling;
@@ -135,16 +136,18 @@ pub trait Host {
     /// The next input event the host holds for the guest, if any.
     fn input(&mut self) -> Option<crate::input::InputEvent>;
 
-    /// `request` carried to the side holding the session's files, its reply
-    /// appended to `reply`; false where the session has no such side or the
-    /// relay failed, which the guest sees as a filing system with no discs.
-    fn relay(&mut self, request: &[u8], reply: &mut Vec<u8>) -> bool;
-
-    /// `request`, a font service request, carried to the font service, its
-    /// reply appended to `reply`; false where the session has no font
-    /// service or the relay failed, which the guest sees as RISC OS's own
-    /// fonts having no glyphs.
-    fn font(&mut self, request: &[u8], reply: &mut Vec<u8>) -> bool;
+    /// `request` carried to `side`, its reply appended to `reply`. Where
+    /// `parking`, the host may leave it [`Relayed::Pending`](crate::relay::Relayed::Pending)
+    /// and give the reply later; otherwise it answers before returning. A
+    /// relay [`Relayed::Failed`](crate::relay::Relayed::Failed) is seen as a
+    /// filing system with no discs, or RISC OS's own fonts with no glyphs.
+    fn relay(
+        &mut self,
+        side: crate::relay::Side,
+        request: &[u8],
+        reply: &mut Vec<u8>,
+        parking: bool,
+    ) -> crate::relay::Relayed;
 }
 
 /// What a session is made with.
@@ -175,7 +178,15 @@ pub struct Config {
     /// The key a session's cache hashes the keys a guest chooses under:
     /// the host process's own, drawn from its CSPRNG.
     pub cache_key: tairix_hash::HashSeed,
+    /// What the session does before its host waits in place for input or
+    /// the clock, the guest drawing nothing more until it is woken: shows
+    /// what it has drawn.
+    pub show: Option<Show>,
 }
+
+/// What a session does before its host waits in place for input or the
+/// clock.
+pub type Show = for<'a, 'b> fn(&'a mut Os<'b>);
 
 /// The control register's soft copy at reset: the MMU, caches and write
 /// buffer on.
@@ -387,6 +398,15 @@ pub struct World {
     pub(crate) log: &'static (dyn tairix_log::Sink + Sync),
     pub(crate) cache_key: tairix_hash::HashSeed,
     pub(crate) extensions: crate::extension::Extensions,
+    /// The session's contexts: the current one's own are the rest of the
+    /// world's, every other's set aside here.
+    pub(crate) contexts: crate::context::Contexts,
+    /// The current context runs a program: from a transfer's load to the
+    /// program's end.
+    pub(crate) running: bool,
+    /// The current context's relays for the SWI it performs.
+    pub(crate) relays: crate::relay::Relays,
+    pub(crate) show: Option<Show>,
 }
 
 impl World {
@@ -449,12 +469,6 @@ impl Kernel {
         let rom_resources = crate::resources::install(&mut memory, &builtins)?;
         let dictionaries = crate::dictionary::install(&mut memory)?;
         let bits = config.layout.kernel_bits();
-        let placeholder = crate::env::Buffers {
-            error: 0,
-            dump: 0,
-            command: 0,
-            start: 0,
-        };
         let mut host = config.host;
         let locale = crate::territory::uk::locale(config.zone, host.real_time());
         let world = World {
@@ -475,7 +489,7 @@ impl Kernel {
             swi_passing: false,
             in_interrupt: false,
             env: crate::env::Environment::new(
-                placeholder,
+                crate::env::Buffers::NONE,
                 |handler| address(crate::host::Routine::Handler(handler)),
                 crate::memory::layout::APPLICATION,
             ),
@@ -530,6 +544,10 @@ impl Kernel {
             log: config.log,
             cache_key: config.cache_key,
             extensions: crate::extension::Extensions::new(),
+            contexts: crate::context::Contexts::new().ok_or(BootError::NoMemory)?,
+            running: false,
+            relays: crate::relay::Relays::new(),
+            show: config.show,
         };
         let mut kernel = Self { memory, world };
         kernel.world.modules.install(installed)?;
@@ -573,22 +591,12 @@ impl Kernel {
             |os: &mut Os<'_>, bytes: u32| os.system_node(bytes).map_err(|_| BootError::NoMemory);
         let ring = claim(&mut os, crate::error::BUFFERS * crate::error::BUFFER_SIZE)?;
         os.world.errors = crate::error::Ring::at(ring);
-        let buffers = crate::env::Buffers {
-            error: claim(&mut os, crate::env::ERROR_BUFFER)?,
-            dump: claim(&mut os, crate::env::DUMP)?,
-            command: claim(&mut os, crate::env::COMMAND_LINE)?,
-            start: claim(&mut os, 8)?,
-        };
+        let buffers = crate::env::Buffers::claim(&mut os).map_err(|_| BootError::NoMemory)?;
         os.world.scratch = claim(&mut os, len32(SCRATCH))?;
         let ring = claim(&mut os, crate::cli::State::size())?;
         let expansion = claim(&mut os, len32(crate::cli::LONGEST))?;
         os.world.cli = crate::cli::State::at(ring, expansion);
-        let routines = os.world.routines;
-        os.world.env = crate::env::Environment::new(
-            buffers,
-            |handler| routines + 4 * crate::host::Routine::Handler(handler).number(),
-            crate::memory::layout::APPLICATION,
-        );
+        os.world.env = os.environment_at_reset(buffers);
         for (slot, text) in [
             (0, crate::release::OS_NAME),
             (1, crate::release::BUILD_DATE),
@@ -603,8 +611,6 @@ impl Kernel {
                 _ => os.world.strings.platform = at,
             }
         }
-        os.write_byte(buffers.command, 0)
-            .map_err(|_| BootError::NoMemory)?;
         os.reset_byte_vars();
         os.reset_mouse();
         os.world.vars.buffer = claim(&mut os, crate::vars::preset::BUFFER)?;

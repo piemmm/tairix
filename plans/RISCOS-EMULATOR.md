@@ -99,7 +99,11 @@ an application's own documents folder, the reference harness);
 | RO26.7 | VFPSupport's contexts and the lazy context switch; CallASWI as RISC OS 5 answers for it | done |
 | RO26.8 | Squash's two SWIs as RISC OS 5.30's module answers them, over `lib/compress::squash`, and a Squash file a volume of its one file (`plans/ARCHIVES.md` AR13); MimeMap from TAIRiX's shared type tables | done |
 | RO26.9 | BufferManager; DeviceFS with SystemDevices' devices; PipeFS | done |
-| RO27 | The session worker and its protocol: contexts, scheduling, pacing, the relays, containment | planned |
+| RO27.1 | Contexts: one world for the session, and each context's processor, slot, environment, input, screen and suspended SWI its own, switched only where RISC OS could take a callback | done |
+| RO27.2 | Relays that park: a pending relay suspends the program's SWI that made it, performed again with the reply; one inside a nested call waits in place | done |
+| RO27.3 | The protocol: one total codec both ways over `lib/sandbox`, credited input, the screens' damage ring, the relays, launches and quits | done |
+| RO27.4 | The worker: contexts scheduled in turns of emulated instructions, the deadline wait, pacing to the host's clock | done |
+| RO27.5 | Containment: a frame that fails validation, a crash or a memory overrun ends the session, reported with the contexts that were running | done |
 | RO28 | The front end: launches, single-tasking screens, fullscreen, input, settings, the session window, the bundle | planned |
 | RO61 | Hourglass, whole: its SWIs and the pointer it shows, bridged as the desktop's busy cursor | planned |
 | RO29 | Sound: SoundDMA, SoundChannels, SoundScheduler, SharedSound, the voices, `audio-v1` | planned |
@@ -2012,17 +2016,92 @@ management stays the window manager's; identity stays manifest-attested.
 
 - **One worker per session.** It is `Run` re-entered in its session role over
   a `lib/sandbox` duplex session, single-threaded, with one spawn share.
-- **Scheduling.** It runs contexts in slices of emulated time and waits on its
-  pipe with the next deadline in between (decision 12).
-- **Crashes.** A worker that crashes, overruns its memory or sends a frame
-  that fails validation ends its session. The front end tells the user why and
-  which tasks were running. Nothing is silently restarted, because a fresh
-  worker would not be the world the user had.
+- **Contexts (RO27.1).** The kernel holds a session's contexts in one world
+  (`kernel/src/context.rs`); the current one's own are the world's, each
+  other's set aside and exchanged at a switch.
+  - A context's own: its processors (register banks, FPA, VFP registers,
+    CP15's thread registers, its profile), its application slot, its program
+    environment with buffers of its own, its input (the keyboard buffer, soft
+    keys, the raw keyboard and the key handler's workspace, the mouse and the
+    mouse buffer), its VDU state and a dynamic area 2 of its own, the zero
+    page RISC OS keeps per task and screen (escape, redirection, the VDU's
+    colour blocks and changed box, the library words, the domain), the
+    `OS_Byte` variables of its screen, keyboard and streams, its GSTrans
+    state, its FPEmulator context and default context, VFPSupport's active
+    context, its scripts, and a SWI suspended in a wait. Another crate holds
+    a value for a context with `hold_context_extension`, whose end gives back
+    what the value held.
+  - The session's: system variables, the RMA and system heap, the module
+    chain and workspaces, vectors, callbacks, events, every other dynamic
+    area, the clock, CMOS, files, and the machine's `OS_Byte` variables.
+  - A switch happens between slices, where RISC OS could take a callback: no
+    SWI, call or interrupt in progress and the program in USR mode (or about
+    to be replaced by a pending transfer, or not running). It clears the
+    exclusive monitor and saves and lets go of the VFP unit while its
+    context's area is mapped.
+  - A session-wide cache of the screen records whose screen it read:
+    ColourTrans's palette.
+- **Relays that park (RO27.2).** `Host::relay` answers a request at once or,
+  where the kernel lets it, leaves it pending (`kernel/src/relay.rs`). A
+  pending request suspends a SWI the program called directly, as an input
+  wait does (`Wait::Relay`), and the SWI is performed again once the reply
+  comes (`Os::relay_answered`), every relay its earlier performance made
+  answered again from the context's replay of them, in order. Only a request
+  that changes nothing the other side holds may park (HostFS's
+  `Request::changes`), and only while the SWI has made no request that does,
+  so a performance again never repeats a change: the filing systems leave no
+  trace of the unwound attempt, which `filing/tests/relays.rs` holds a
+  program's filing SWIs to against an at-once host. A changing request, every
+  relay after it, a relay inside a nested call and the Font Manager's glyph
+  requests (made part way through a paint) wait in place. A SWI's replay is
+  bounded; past the bound its relays wait in place.
+- **Scheduling (RO27.4).** The worker (`session/src/worker.rs`) gives each
+  context that can run a turn of `TURN` instructions in turn, and waits on its
+  port with the soonest deadline when none can (decision 12). A waiting
+  context is woken by what it waits for or its own timed work
+  (`Os::deadlines`' `own`: its key repeating, its screen's next frame), one
+  parked on a relay only by its reply; the session's (`session`: the timed
+  calls, the interval timer, the zone's change) wakes one waiting context to
+  take the clock's interrupt, the current one where it can. While the current
+  context cannot be set aside it alone may run, and the wait counts only the
+  deadlines of contexts that may, so a deadline passing always gives a turn.
+  A context entered with its own work due takes the interrupt in the same
+  centisecond another took it, and a SWI waiting to be performed again takes
+  a pending interrupt whatever its caller's mask. The guest's clock is the
+  port's since the session began; the kernel makes up a second of a late
+  clock's work at most. Lines a context drew that the ring had no room for are
+  sent, each such context visited in turn, while others run.
+- **The worker's lifecycle.** Run and hold apply as they come; while held,
+  nothing runs, a context waiting in place or part way through its turn
+  included, and no launch is made. A launch makes the context, its slot and
+  its mailbox, tells the front end, then runs its command line, so every event
+  of a context follows its `Launched`; what its making does before that is the
+  session's own. A context's end runs before the front end is told of it, so
+  nothing of it follows its `Ended`; the end closes the files its spool, exec
+  and redirection handles held, and a relay it makes then is waited for in
+  place, though the context is parked on another. Each context's input, kept
+  commands and parked reply have their room from the start; a switch there is
+  no memory for ends the session as `End::NoMemory`.
+- **Crashes (RO27.5).** A worker that crashes, overruns its memory or sends a
+  frame that fails validation ends its session. The front end's model
+  (`session/src/front.rs`) believes an event only where the worker could
+  have sent it, its refusal the reason the session is condemned with
+  (`SandboxSession::condemn`); a session that ends is reported by `Why` (the
+  sandbox's `WorkerEnd`, or what could not be believed) with the command lines
+  of the contexts running. The front end tells the user (RO28). Nothing is
+  silently restarted, because a fresh worker would not be the world the user
+  had.
 
-### 15.2 The protocol
+### 15.2 The protocol (RO27.3)
 
 The protocol is one total codec both ways, every message decoded whole against
-fixed bounds:
+fixed bounds (`session/src/protocol.rs`). RO27.3 carries the run loop, credited
+input (`session/src/credit.rs`), the screens and their damage ring
+(`session/src/ring.rs`: 8 MiB, records of a quarter of it at most, placed alike
+on both sides), the file and glyph relays, launches and quits; each later item
+adds the messages its part needs — windows, menus and the rest of the
+interaction with the Wimp's (RO33–RO43), sockets with §11.2's, sound with
+RO29, grants with RO32's activation:
 
 - **The run loop:** run and stop; input events, credited so a context that
   reads no input never closes the window behind them; timers.
@@ -2032,12 +2111,17 @@ fixed bounds:
 - **Interaction:** menus and their answers, slots, drags, the clipboard,
   alerts and their answers, tooltips.
 - **The relays:** file requests on minted handles; socket requests; glyph
-  requests; sound frames.
+  requests; sound frames. Each relay carries what the frame bound allows, so
+  a load makes few, and names the context it is for and whether that context
+  is parked on it: a context is parked on one at most, and one is waited for
+  in place at a time. Launches and quits unanswered are bounded by
+  `WAITING_MOST`, which the front end's model keeps to.
 - **The session:** launches with the grants they bring, quitting a task,
   settings, diagnostics.
 
 The front end believes a reply only when it answers what was asked, within what
-that request could produce.
+that request could produce, and an event only where the worker could have sent
+it (`front::Front`, §15.1).
 
 ### 15.3 The front end
 

@@ -10,6 +10,7 @@ use tairix_riscos_filing::hostfs::protocol::Request;
 use tairix_riscos_filing::hostfs::server::{Given, Server};
 use tairix_riscos_kernel::input::InputEvent;
 use tairix_riscos_kernel::os::{Ending, Host, Kernel, Pulse};
+use tairix_riscos_kernel::relay::{Relayed, Side};
 
 /// The host's real time: 2020, in centiseconds since 1900.
 pub const NOW: u64 = 0x58_0000_0000;
@@ -41,12 +42,12 @@ impl<F: FnMut(&[u8], &mut Vec<u8>) -> bool> Host for Relay<F> {
         None
     }
 
-    fn relay(&mut self, request: &[u8], reply: &mut Vec<u8>) -> bool {
-        (self.answer)(request, reply)
-    }
-
-    fn font(&mut self, _request: &[u8], _reply: &mut Vec<u8>) -> bool {
-        false
+    fn relay(&mut self, side: Side, request: &[u8], reply: &mut Vec<u8>, _: bool) -> Relayed {
+        if side == Side::Files && (self.answer)(request, reply) {
+            Relayed::Answered
+        } else {
+            Relayed::Failed
+        }
     }
 }
 

@@ -164,6 +164,75 @@ impl<C: TimedChannel> WorkerLink<C> {
     }
 }
 
+/// A worker's end of its session and the clock its waits are measured by:
+/// what a worker's run loop is written against, so a test stands in for
+/// both.
+pub trait WorkerPort {
+    /// Lend the next whole frame's payload to `take`, making at most one
+    /// read that waits at most `wait_ns` — for ever where it is `None`.
+    ///
+    /// # Errors
+    ///
+    /// The session's failure; the worker ends on it.
+    fn recv<R>(
+        &mut self,
+        wait_ns: Option<u64>,
+        take: impl FnOnce(&[u8]) -> R,
+    ) -> Result<Waited<R>, ProtoError>;
+
+    /// Queue one payload to go with the next flush.
+    ///
+    /// # Errors
+    ///
+    /// The session's failure; the worker ends on it.
+    fn queue(&mut self, payload: &[u8]) -> Result<(), ProtoError>;
+
+    /// Write every payload queued, waiting for room.
+    ///
+    /// # Errors
+    ///
+    /// The session's failure; the worker ends on it.
+    fn flush(&mut self) -> Result<(), ProtoError>;
+
+    /// The host's monotonic clock, in nanoseconds.
+    fn now(&self) -> u64;
+}
+
+/// A [`WorkerPort`] over a [`WorkerLink`], measured by `clock`.
+pub struct ClockedLink<C> {
+    link: WorkerLink<C>,
+    clock: fn() -> u64,
+}
+
+impl<C> ClockedLink<C> {
+    /// The port over `link`, its waits measured by `clock`.
+    pub const fn new(link: WorkerLink<C>, clock: fn() -> u64) -> Self {
+        Self { link, clock }
+    }
+}
+
+impl<C: TimedChannel> WorkerPort for ClockedLink<C> {
+    fn recv<R>(
+        &mut self,
+        wait_ns: Option<u64>,
+        take: impl FnOnce(&[u8]) -> R,
+    ) -> Result<Waited<R>, ProtoError> {
+        self.link.recv(wait_ns, take)
+    }
+
+    fn queue(&mut self, payload: &[u8]) -> Result<(), ProtoError> {
+        self.link.queue(payload)
+    }
+
+    fn flush(&mut self) -> Result<(), ProtoError> {
+        self.link.flush()
+    }
+
+    fn now(&self) -> u64 {
+        (self.clock)()
+    }
+}
+
 #[cfg(test)]
 #[path = "link_tests.rs"]
 mod tests;

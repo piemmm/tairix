@@ -41,12 +41,14 @@ impl Host for StillHost {
         None
     }
 
-    fn relay(&mut self, _request: &[u8], _reply: &mut alloc::vec::Vec<u8>) -> bool {
-        false
-    }
-
-    fn font(&mut self, _request: &[u8], _reply: &mut alloc::vec::Vec<u8>) -> bool {
-        false
+    fn relay(
+        &mut self,
+        _side: crate::relay::Side,
+        _request: &[u8],
+        _reply: &mut alloc::vec::Vec<u8>,
+        _parking: bool,
+    ) -> crate::relay::Relayed {
+        crate::relay::Relayed::Failed
     }
 
     fn wait(&mut self, _: Option<u64>, _: Ending) -> Pulse {

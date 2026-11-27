@@ -31,7 +31,7 @@ struct Front {
 
 struct ServeLink(Rc<RefCell<Front>>);
 
-impl Link for ServeLink {
+impl WorkerPort for ServeLink {
     fn recv<R>(
         &mut self,
         _wait: Option<Nanos>,

@@ -1642,6 +1642,96 @@ fn a_cleared_monitor_fails_the_exclusive_store_it_marked() {
     assert_eq!(cpu.reg(r(2)), 1, "a context switch spent the mark");
 }
 
+/// `cpu` changed in every part a context holds, `mark` telling it apart:
+/// banked registers, the FPA, the VFP, CPACR and TPIDRURW, which an `MCR`
+/// at &9000 writes from R1.
+fn marked(cpu: &mut Cpu, ram: &mut Ram, mark: u32) {
+    ram.program(
+        &BIT32,
+        0x9000,
+        &[(0xEE0D_1F50, "MCR     CP15,0,R1,C13,C0,2")],
+    );
+    cpu.set_reg(Reg::PC, 0x9000);
+    cpu.set_reg(r(1), mark);
+    run(cpu, ram, 1);
+    let mut state = cpu.state();
+    state.user[3] = mark;
+    state.fiq[6] = mark ^ 1;
+    state.banked[1] = [mark ^ 2, mark ^ 3];
+    state.spsr[2] = Mode::User.bits();
+    cpu.set_state(&state).expect("its own mode");
+    cpu.fpa_mut().write_fpsr(mark & 0x1F);
+    cpu.set_fpa_active(mark & 1 == 0);
+    cpu.vfp_mut().set_d(5, u64::from(mark) << 20);
+    cpu.grant_simdfp(if mark & 1 == 0 {
+        crate::vfp::Access::Full
+    } else {
+        crate::vfp::Access::Denied
+    });
+}
+
+#[test]
+fn a_resumed_context_gives_back_the_registers_fpa_vfp_and_task_registers() {
+    let mut ram = Ram::new();
+    let mut cpu = processor(&BIT32, Mode::User, 0x8000);
+    let first = 0x1234_0012;
+    marked(&mut cpu, &mut ram, first);
+    let context = cpu.context();
+    marked(&mut cpu, &mut ram, 0x5678_0001);
+    cpu.resume(&context).expect("its own context");
+    assert_eq!(cpu.context(), context);
+    assert_eq!(cpu.fpa().fpsr() & 0x1F, first & 0x1F);
+    assert!(cpu.fpa_active());
+    assert_eq!(cpu.vfp().d(5), u64::from(first) << 20);
+    ram.program(
+        &BIT32,
+        0x9100,
+        &[(0xEE1D_2F50, "MRC     CP15,0,R2,C13,C0,2")],
+    );
+    cpu.set_reg(Reg::PC, 0x9100);
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.reg(r(2)), first, "TPIDRURW");
+}
+
+#[test]
+fn resuming_a_context_spends_the_exclusive_monitor_s_mark() {
+    let mut ram = Ram::new();
+    ram.program(
+        &BIT32,
+        0x8000,
+        &[
+            (0xE190_1F9F, "LDREX   R1,[R0]"),
+            (0xE180_2F93, "STREX   R2,R3,[R0]"),
+        ],
+    );
+    let mut cpu = processor(&BIT32, Mode::User, 0x8000);
+    cpu.set_reg(r(0), 0x4000);
+    run(&mut cpu, &mut ram, 1);
+    let context = cpu.context();
+    cpu.resume(&context).expect("its own context");
+    run(&mut cpu, &mut ram, 1);
+    assert_eq!(cpu.reg(r(2)), 1, "the switch spent the mark");
+}
+
+#[test]
+fn a_processor_s_reset_context_is_a_fresh_one_s() {
+    let mut ram = Ram::new();
+    let mut cpu = processor(&BIT32, Mode::User, 0x8000);
+    marked(&mut cpu, &mut ram, 0x1234_0000);
+    assert_eq!(cpu.reset_context(), Cpu::new(&BIT32, 4).context());
+}
+
+#[test]
+fn a_context_in_a_mode_the_profile_lacks_is_refused_and_changes_nothing() {
+    let older = processor(&BIT26, Mode::User26, 0x8000).context();
+    let mut ram = Ram::new();
+    let mut cpu = processor(&BIT32, Mode::User, 0x8000);
+    marked(&mut cpu, &mut ram, 0x1234_0000);
+    let before = cpu.context();
+    assert_eq!(cpu.resume(&older), Err(BadState::Mode));
+    assert_eq!(cpu.context(), before);
+}
+
 #[test]
 fn a_mode_the_32_bit_profile_lacks_is_refused_by_msr_and_by_an_exception_return() {
     let mut ram = Ram::new();

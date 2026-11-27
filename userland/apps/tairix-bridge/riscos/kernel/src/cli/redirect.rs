@@ -5,6 +5,7 @@
 
 use alloc::vec::Vec;
 
+use crate::byte::var;
 use crate::os::{Fail, Os, Regs};
 use crate::swi::os::args::{READ_EXTENT, WRITE_POINTER};
 use crate::swi::os::find::{INPUT, MUST_OPEN, OUTPUT, UPDATE};
@@ -153,6 +154,21 @@ impl Os<'_> {
         });
         self.change_redirection(&mut change)?;
         Ok(if input { change.r[0] } else { change.r[1] })
+    }
+
+    /// The files the current context's streams hold — its spool and exec
+    /// files, its redirection's — closed: they are its own, so nothing could
+    /// reach them once it ends.
+    pub(crate) fn close_streams(&mut self) {
+        for held in [var::SPOOL_HANDLE, var::EXEC_HANDLE] {
+            // Written as nought, the handle it held answered.
+            let mut byte = Regs::default();
+            byte.r[0] = u32::from(held);
+            if self.perform(X | crate::swi::os::BYTE, &mut byte).is_ok() {
+                let _ = self.close_handle(byte.r[1]);
+            }
+        }
+        self.end_redirection();
     }
 
     /// Ends all redirection, `WrchV` given up before both files are closed.

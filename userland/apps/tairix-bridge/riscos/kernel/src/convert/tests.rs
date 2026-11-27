@@ -38,7 +38,8 @@ mod swis {
     use crate::memory::Bits;
     use crate::os::Regs;
     use crate::swi::os::{
-        BINARY_TO_DECIMAL, EVALUATE_EXPRESSION, GS_TRANS, READ_UNSIGNED, SUBSTITUTE_ARGS,
+        BINARY_TO_DECIMAL, EVALUATE_EXPRESSION, GS_INIT, GS_READ, GS_TRANS, READ_UNSIGNED,
+        SUBSTITUTE_ARGS,
     };
     use crate::swi::X;
     use crate::testkit::{with_application, Session, DATA};
@@ -177,6 +178,25 @@ mod swis {
         let regs = call(&mut s, EVALUATE_EXPRESSION, &[DATA, OUT, u32::MAX]);
         assert!(regs.flag(psr::V));
         assert_eq!(s.read(OUT, 8), b"abcd----");
+    }
+
+    /// A string an earlier `OS_GSInit` began reads on from its own R0 and
+    /// R2, whatever string a later one began.
+    #[test]
+    fn gsread_continues_the_string_its_state_names_after_another_is_begun() {
+        let mut s = session();
+        s.write(DATA, b"abc\0");
+        s.write(DATA + 0x40, b"xyz\0");
+        let first = call(&mut s, GS_INIT, &[DATA, 0, 0]);
+        assert_eq!(first.r[1], u32::from(b'a'));
+        let first = call(&mut s, GS_READ, &[first.r[0], 0, first.r[2]]);
+        assert_eq!(first.r[1], u32::from(b'a'));
+        let second = call(&mut s, GS_INIT, &[DATA + 0x40, 0, 0]);
+        assert_eq!(second.r[1], u32::from(b'x'));
+        let first = call(&mut s, GS_READ, &[first.r[0], 0, first.r[2]]);
+        assert_eq!(first.r[1], u32::from(b'b'), "the first string's own next");
+        let second = call(&mut s, GS_READ, &[second.r[0], 0, second.r[2]]);
+        assert_eq!(second.r[1], u32::from(b'x'));
     }
 
     #[test]

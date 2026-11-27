@@ -99,9 +99,11 @@ pub mod var {
 /// variable n is at &8FA + n, the address `OS_Byte` 166 and 167 give, as
 /// genuine RISC OS 5 keeps them.
 const TABLE: u32 = 0x9A0;
-/// The variables at reset, from &A6 to &FF, and the serial input handle
-/// beside &FF, before the configuration's are read from CMOS.
-const INITIAL: [u8; 0x5B] = [
+/// The table's bytes: the variables from &A6 to &FF and the serial input
+/// handle beside &FF.
+const TABLE_BYTES: usize = 0x5B;
+/// The variables at reset, before the configuration's are read from CMOS.
+const INITIAL: [u8; TABLE_BYTES] = [
     0, 0, // &A6, &A7: read as the table's address
     0, 0, 0, 0, 0, 0, 0, 0, // &A8–&AF
     0, 0, 0xFF, 0, 0x80, 1, 0, 0, // &B0–&B7
@@ -116,6 +118,55 @@ const INITIAL: [u8; 0x5B] = [
     0, 0, 0, 0, 0xFF, 1, 0x0F, 8, // &F8–&FF
     0, // the serial input handle
 ];
+
+/// The variables of a context's own screen, keyboard and streams. The rest
+/// are the machine's: the tables' addresses, the serial port and printer,
+/// the country, sound and speech, the clock's switch and start-up.
+pub(crate) const CONTEXT_VARIABLES: [core::ops::RangeInclusive<u8>; 11] = [
+    0xB1..=0xB2,
+    0xB8..=0xB9,
+    0xC1..=0xCA,
+    0xD3..=0xD6,
+    0xD8..=0xE6,
+    0xEC..=0xEF,
+    0xF1..=0xF1,
+    0xF4..=0xF4,
+    0xF7..=0xF7,
+    0xFA..=0xFB,
+    0xFE..=0xFE,
+];
+
+/// Where variable `number` is, from zero page's start.
+pub(crate) const fn variable_offset(number: u8) -> u32 {
+    TABLE + (number - var::FIRST) as u32
+}
+
+/// The table at reset, the configuration's variables read from `cmos`.
+pub(crate) fn reset_table(cmos: &crate::cmos::Cmos) -> [u8; TABLE_BYTES] {
+    let mut table = INITIAL;
+    let mut set = |number: u8, value: u8| table[usize::from(number - var::FIRST)] = value;
+    let print_serial = cmos.read(crate::cmos::PRINT_SERIAL);
+    set(var::NO_IGNORE, if print_serial & 2 != 0 { 0x80 } else { 0 });
+    set(var::REPEAT_DELAY, cmos.read(crate::cmos::KEY_DELAY));
+    set(var::REPEAT_RATE, cmos.read(crate::cmos::KEY_REPEAT));
+    let start = cmos.read(crate::cmos::START);
+    let locks = if start & (1 << 5) != 0 {
+        0x20
+    } else if start & (1 << 4) != 0 {
+        0x30
+    } else {
+        0xA0
+    };
+    let num_lock = if start & 0x80 != 0 { 0x04 } else { 0 };
+    set(var::KEYBOARD_STATUS, locks | num_lock);
+    let dbtb = cmos.read(crate::cmos::DBTB);
+    set(var::BELL_VOLUME, if dbtb & 2 != 0 { 0x90 } else { 0xD0 });
+    set(var::COUNTRY, cmos.read(crate::cmos::COUNTRY));
+    set(var::PRINTER_TYPE, print_serial >> 5);
+    set(var::PRINTER_IGNORE, cmos.read(crate::cmos::PRINTER_IGNORE));
+    set(var::START_OPTIONS, if dbtb & (1 << 4) != 0 { 0 } else { 8 });
+    table
+}
 
 /// The OS identifier `OS_Byte` 129 gives: RISC OS 5's.
 pub(crate) const OS_IDENTIFIER: u32 = 0xAA;
@@ -132,7 +183,7 @@ const VERSION: Error = Error {
 impl Os<'_> {
     /// The address of `OS_Byte` variable `number` in high zero page.
     const fn byte_address(number: u8) -> u32 {
-        HIGH_ZERO_PAGE + TABLE + (number - var::FIRST) as u32
+        HIGH_ZERO_PAGE + variable_offset(number)
     }
 
     /// `OS_Byte` variable `number`.
@@ -163,40 +214,10 @@ impl Os<'_> {
 
     /// The variables at reset, then those the CMOS configures.
     pub(crate) fn reset_byte_vars(&mut self) {
-        for (offset, &value) in (0..).zip(INITIAL.iter()) {
+        let table = reset_table(&self.world.cmos);
+        for (offset, value) in (0..).zip(table) {
             let _ = self.poke_byte(HIGH_ZERO_PAGE + TABLE + offset, value);
         }
-        let cmos = &self.world.cmos;
-        let ignore = if cmos.read(crate::cmos::PRINT_SERIAL) & 2 != 0 {
-            0x80
-        } else {
-            0
-        };
-        let delay = cmos.read(crate::cmos::KEY_DELAY);
-        let rate = cmos.read(crate::cmos::KEY_REPEAT);
-        let start = cmos.read(crate::cmos::START);
-        let dbtb = cmos.read(crate::cmos::DBTB);
-        let country = cmos.read(crate::cmos::COUNTRY);
-        let printer = cmos.read(crate::cmos::PRINT_SERIAL) >> 5;
-        let pig = cmos.read(crate::cmos::PRINTER_IGNORE);
-        self.set_byte_var(var::NO_IGNORE, ignore);
-        self.set_byte_var(var::REPEAT_DELAY, delay);
-        self.set_byte_var(var::REPEAT_RATE, rate);
-        let locks = if start & (1 << 5) != 0 {
-            0x20
-        } else if start & (1 << 4) != 0 {
-            0x30
-        } else {
-            0xA0
-        };
-        let num_lock = if start & 0x80 != 0 { 0x04 } else { 0 };
-        self.set_byte_var(var::KEYBOARD_STATUS, locks | num_lock);
-        self.set_byte_var(var::BELL_VOLUME, if dbtb & 2 != 0 { 0x90 } else { 0xD0 });
-        self.set_byte_var(var::COUNTRY, country);
-        self.set_byte_var(var::PRINTER_TYPE, printer);
-        self.set_byte_var(var::PRINTER_IGNORE, pig);
-        let boot = if dbtb & (1 << 4) != 0 { 0 } else { 8 };
-        self.set_byte_var(var::START_OPTIONS, boot);
     }
 
     /// `OS_Byte`, through `ByteV` with interrupts disabled; the C and V the

@@ -61,6 +61,7 @@ use tairix_riscos_kernel::output::VduDrivers;
 /// The VDU drivers, for the session's `Config::vdu`.
 pub const DRIVERS: VduDrivers = VduDrivers {
     start: select::start,
+    screen: select::start_screen,
     write: stream::write,
     queued: stream::queued,
     swi: Some(swis::perform),

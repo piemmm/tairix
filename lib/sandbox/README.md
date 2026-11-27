@@ -61,7 +61,10 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   own between its parent's frames. `WorkerLink` reads the parent's frames
   whole across bounded waits over a `TimedChannel`, into the same committed
   accumulator the owner's side uses, so a read that gives up mid-frame loses
-  nothing; what it sends goes in one write at each flush.
+  nothing; what it sends goes in one write at each flush. A worker's run
+  loop is written against `WorkerPort` — that end and the clock its waits
+  are measured by — which `ClockedLink` is over a `WorkerLink`, so a test
+  stands in for both.
 - **The supervised session** (`supervise`): the duplex seam for a worker
   that serves a *service* rather than one connection, so a failed one is
   replaced. `SupervisedSession` starts each worker through a

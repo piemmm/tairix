@@ -1792,3 +1792,50 @@ fn a_reserved_page_is_taken_only_by_a_handler_saying_so_and_locked_only_knowingl
         "a page the kernel chooses is one no one reserved"
     );
 }
+
+/// Every area numbers enumeration finds, the free pool's among them.
+fn enumerated(memory: &Memory) -> Vec<u32> {
+    let mut found = Vec::new();
+    let mut after = None;
+    while let Some(number) = memory.enumerate_areas(after).unwrap() {
+        found.push(number);
+        after = Some(number);
+    }
+    found
+}
+
+#[test]
+fn a_parked_area_is_found_by_nothing_and_its_number_is_free_until_it_is_given_back() {
+    let mut memory = shared();
+    let mut guest = Recorder::new();
+    let screen = Create {
+        number: Some(2),
+        ..request(0x1000, 0x10_0000)
+    };
+    let first = memory.create_kernel_area(&screen, &mut guest).unwrap();
+    store(&mut memory, first.base, 0x1111);
+    let parked = memory.park_area(first.number).unwrap();
+    assert_eq!(
+        memory.area_info(first.number).err(),
+        Some(AreaError::BadDynamicArea)
+    );
+    assert!(!enumerated(&memory).contains(&first.number));
+    assert_eq!(word(&mut memory, first.base), Ok(0x1111), "its pages kept");
+    let second = memory.create_kernel_area(&screen, &mut guest).unwrap();
+    assert_eq!(second.number, first.number);
+    assert_ne!(second.base, first.base, "its addresses still reserved");
+    assert_eq!(
+        memory.unpark_area(&parked),
+        Err(AreaError::AreaAlreadyExists),
+        "its number taken"
+    );
+    let other = memory.park_area(second.number).unwrap();
+    memory.unpark_area(&parked).unwrap();
+    assert_eq!(memory.area_info(first.number).unwrap().base, first.base);
+    assert!(enumerated(&memory).contains(&first.number));
+    assert_eq!(word(&mut memory, first.base), Ok(0x1111));
+    assert_eq!(
+        memory.unpark_area(&other),
+        Err(AreaError::AreaAlreadyExists)
+    );
+}

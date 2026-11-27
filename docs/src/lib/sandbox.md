@@ -102,7 +102,10 @@ Stability tier: **experimental**.
   transport write at each `flush`, so a worker that ends each piece of work
   with a handful of frames pays one write for them; the write blocks until
   the parent has room, which the parent's never-blocking side guarantees
-  comes. The PC emulator's machine worker (`PCEmulator.app`) runs on it.
+  comes. A worker's run loop is written against `WorkerPort`, the end and
+  the clock its waits are measured by; `ClockedLink` is one over a
+  `WorkerLink`, and a test stands in for both. The PC emulator's machine
+  worker (`PCEmulator.app`) and TAIRiX Bridge's session worker run on it.
 - **`loopback`** — the public in-process fakes: for the one-shot seam each
   "worker" is a fresh `Service` run inline; `LoopbackSession` is the same
   for the duplex one, running a `SessionService` behind a

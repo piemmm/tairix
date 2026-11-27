@@ -6,7 +6,7 @@ mod common;
 
 use common::{call, command, read, run_out, save, session, text, variable, EXITS, FAILS};
 use tairix_riscos_kernel::os::{Ended, Fail, Os, Outcome, Regs, Unwind};
-use tairix_riscos_kernel::swi::os::{fs_control, FILE, FS_CONTROL};
+use tairix_riscos_kernel::swi::os::{fs_control, CHANGE_REDIRECTION, FILE, FIND, FS_CONTROL};
 use tairix_riscos_kernel::swi::X;
 
 /// `OS_FSControl` 4 on `name`, as it comes back.
@@ -111,6 +111,87 @@ fn an_obey_file_goes_on_once_a_program_it_ran_exits() {
     );
     let mut os = kernel.os();
     assert_eq!(variable(&mut os, b"Probe$B").as_deref(), Some(&b"2"[..]));
+}
+
+#[test]
+fn a_context_s_scripts_are_its_own_and_close_with_it() {
+    let mut kernel = common::kernel();
+    session(&mut kernel, 0x1_0000);
+    let mut os = kernel.os();
+    save(&mut os, b"RAM:$.Abs", 0xFF8, &EXITS).expect("saved");
+    save(
+        &mut os,
+        b"RAM:$.A",
+        0xFEB,
+        b"Run RAM:$.Abs\nSet Probe$A on\n",
+    )
+    .expect("saved");
+    save(
+        &mut os,
+        b"RAM:$.B",
+        0xFEB,
+        b"Run RAM:$.Abs\nSet Probe$B on\n",
+    )
+    .expect("saved");
+    let started = command(&mut os, b"Obey RAM:$.A");
+    assert!(matches!(started, Err(Fail::Unwind(Unwind::Transfer))));
+    let first = os.context();
+    os.launch_context().expect("launched");
+    tairix_riscos_filing::session::application_slot(&mut kernel, 0x1_0000);
+    let mut os = kernel.os();
+    let started = command(&mut os, b"Obey RAM:$.B");
+    assert!(matches!(started, Err(Fail::Unwind(Unwind::Transfer))));
+    assert!(
+        command(&mut os, b"Delete RAM:$.B").is_err(),
+        "its Obey file open while its script waits"
+    );
+    os.end_context(first).expect("ended");
+    let mut os = kernel.os();
+    command(&mut os, b"Delete RAM:$.B").expect("closed as its context ended");
+    assert_eq!(
+        run_out(&mut kernel),
+        Outcome::Ended(Ended::Exit { code: 0 })
+    );
+    let mut os = kernel.os();
+    assert_eq!(
+        variable(&mut os, b"Probe$A").as_deref(),
+        Some(&b"on"[..]),
+        "the first context's script went on, whatever the second began"
+    );
+    assert_eq!(variable(&mut os, b"Probe$B"), None);
+}
+
+#[test]
+fn a_context_s_spool_exec_and_redirection_files_close_with_it() {
+    const HELD: [&[u8]; 3] = [
+        b"Delete RAM:$.Spooled",
+        b"Delete RAM:$.In",
+        b"Delete RAM:$.Redirected",
+    ];
+    let mut kernel = common::kernel();
+    session(&mut kernel, 0x1_0000);
+    let mut os = kernel.os();
+    save(&mut os, b"RAM:$.In", 0xFFF, b"PRINT\r").expect("saved");
+    let first = os.context();
+    os.launch_context().expect("launched");
+    tairix_riscos_filing::session::application_slot(&mut kernel, 0x1_0000);
+    let mut os = kernel.os();
+    command(&mut os, b"Spool RAM:$.Spooled").expect("spooling");
+    command(&mut os, b"Exec RAM:$.In").expect("its input to come from the file");
+    let name = text(&mut os, b"RAM:$.Redirected");
+    let handle = call(&mut os, FIND, &[0x80, name]).expect("opened").r[0];
+    call(&mut os, CHANGE_REDIRECTION, &[0x100, handle]).expect("redirected");
+    for delete in HELD {
+        assert!(
+            command(&mut os, delete).is_err(),
+            "held open while its context runs"
+        );
+    }
+    os.end_context(first).expect("ended");
+    let mut os = kernel.os();
+    for delete in HELD {
+        command(&mut os, delete).expect("closed as its context ended");
+    }
 }
 
 #[test]

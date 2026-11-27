@@ -1,8 +1,9 @@
 //! The worker's timed end of a session: frames arrive whole across bounded
-//! waits, a burst is drained without reading again, and the stream's ends and
-//! oversize declarations are refused as the owner's seam refuses them.
+//! waits, a burst is drained without reading again, the stream's ends and
+//! oversize declarations are refused as the owner's seam refuses them, and a
+//! clocked port is its link read against its clock.
 
-use super::{TimedChannel, Waited, WorkerLink};
+use super::{ClockedLink, TimedChannel, Waited, WorkerLink, WorkerPort};
 use crate::proto::{Channel, ProtoError, FRAME_HEADER_LEN, MAX_FRAME};
 use crate::session::{SessionError, MIN_QUEUE_BYTES};
 use alloc::collections::VecDeque;
@@ -247,4 +248,27 @@ fn a_bound_too_small_for_any_frame_is_refused() {
         Err(SessionError::BoundTooSmall)
     ));
     assert!(WorkerLink::new(Scripted::new([]), MIN_QUEUE_BYTES).is_ok());
+}
+
+#[test]
+fn a_clocked_link_is_its_link_read_against_its_clock() {
+    const fn clock() -> u64 {
+        1_234
+    }
+    let mut port = ClockedLink::new(link([Step::Wait, Step::Bytes(framed(b"in"))]), clock);
+    assert_eq!(port.now(), 1_234);
+    assert_eq!(port.recv(Some(5), <[u8]>::to_vec), Ok(Waited::Nothing));
+    assert_eq!(
+        port.recv(None, <[u8]>::to_vec),
+        Ok(Waited::Frame(b"in".to_vec()))
+    );
+    assert_eq!(
+        port.link.chan.waits,
+        [Some(5), None],
+        "each wait asked of it"
+    );
+    port.queue(b"out").unwrap();
+    assert!(port.link.chan.written.is_empty());
+    port.flush().unwrap();
+    assert_eq!(port.link.chan.written, framed(b"out"));
 }

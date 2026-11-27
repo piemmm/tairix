@@ -1,5 +1,5 @@
-//! The VDU drivers' state for the session's screen, held as a kernel
-//! extension, and the one way every part reaches it.
+//! The VDU drivers' state for the current context's screen, held as the
+//! context's own kernel extension, and the one way every part reaches it.
 //!
 //! The state is set aside while a part works on it, so a part that calls
 //! out — a service, a vector, a SWI — does so between two uses of it,

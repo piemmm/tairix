@@ -357,6 +357,7 @@ members = [
     "userland/apps/tairix-bridge/riscos/draw",
     "userland/apps/tairix-bridge/riscos/font",
     "userland/apps/tairix-bridge/riscos/clib",
+    "userland/apps/tairix-bridge/riscos/session",
     "userland/apps/seq",
     "userland/apps/setcap",
     "userland/apps/settings",

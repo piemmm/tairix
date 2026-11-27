@@ -1,7 +1,8 @@
 //! Selecting a mode (`plans/RISCOS-EMULATOR.md` §8): `VDU 22`,
 //! `OS_ScreenMode` and `OS_CheckModeValid`; the monitor's modes, a mode it
 //! lacks traded for the one RISC OS 5 trades it for, as recorded; the
-//! services around a change; and the drivers' start at reset.
+//! services around a change; and the drivers' start at reset, and each
+//! context's screen's.
 //!
 //! The current monitor type starts as the configured one. On a VGA monitor,
 //! type 3, a numbered mode it lacks becomes the 640 by 480 mode of the same
@@ -10,7 +11,9 @@
 //! A file's monitor, type 7, has no numbered mode of its own: one is traded
 //! for the mode a module offers by `Service_ModeTranslation`.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::any::Any;
 
 use tairix_riscos_arm::psr;
 use tairix_riscos_kernel::error::Error;
@@ -834,9 +837,41 @@ pub(crate) fn set_monitor(os: &mut Os<'_>, monitor: u32) {
     let _ = crate::state::read(os, |vdu, _| vdu.monitor = monitor);
 }
 
-/// The drivers readied at reset: their state, the screen's area sized for
-/// the configured screen and mode, and the configured mode selected.
+/// The drivers readied at reset: the first context's screen, then the
+/// system sprite area every context shares.
 pub(crate) fn start(os: &mut Os<'_>) -> Result<(), Fail> {
+    start_screen(os)?;
+    let sprite_handler = os
+        .vdu_routine(crate::routine::SYSTEM_SPRITES)
+        .ok_or_else(|| os.no_memory())?;
+    crate::sprite::make_system_area(os, sprite_handler)
+}
+
+/// Two blocks of the RMA for the mode selector's copies, or neither.
+fn selector_copies(os: &mut Os<'_>) -> Result<(u32, u32), Fail> {
+    let selector = os.rma_claim(SELECTOR_BYTES)?;
+    match os.rma_claim(SELECTOR_BYTES) {
+        Ok(check) => Ok((selector, check)),
+        Err(fail) => {
+            os.free_rma_quietly(selector);
+            Err(fail)
+        }
+    }
+}
+
+/// A context's screen at its end: the RMA its mode selector's copies took
+/// given back. The kernel removes its screen area itself.
+fn end_screen(os: &mut Os<'_>, value: Box<dyn Any>) {
+    if let Ok(vdu) = value.downcast::<Vdu>() {
+        os.free_rma_quietly(vdu.screen.selector_copy);
+        os.free_rma_quietly(vdu.screen.check_copy);
+    }
+}
+
+/// The current context's screen readied: the drivers' state, held as its
+/// own, its screen area sized for the configured screen and mode, and the
+/// configured mode selected.
+pub(crate) fn start_screen(os: &mut Os<'_>) -> Result<(), Fail> {
     let [mode, monitor, _] = os.configured_display()?;
     let mut info = Regs::default();
     os.perform(X | READ_SYS_INFO, &mut info)?;
@@ -855,8 +890,7 @@ pub(crate) fn start(os: &mut Os<'_>) -> Result<(), Fail> {
         .ok_or_else(|| os.no_memory())?;
     let needed = resolved.format.screen_bytes();
     let (base, size) = screen::make_area(os, configured_size.max(needed), handler)?;
-    let selector_copy = os.rma_claim(SELECTOR_BYTES)?;
-    let check_copy = os.rma_claim(SELECTOR_BYTES)?;
+    let (selector_copy, check_copy) = selector_copies(os)?;
     let format = resolved.format;
     let (text, graphics, colours) = fresh_state(&format, 0);
     let palette = Palette::for_mode(&format);
@@ -892,11 +926,11 @@ pub(crate) fn start(os: &mut Os<'_>) -> Result<(), Fail> {
         shadow: false,
         cursors_removed: 0,
     };
-    os.hold_extension(vdu)?;
-    let sprite_handler = os
-        .vdu_routine(crate::routine::SYSTEM_SPRITES)
-        .ok_or_else(|| os.no_memory())?;
-    crate::sprite::make_system_area(os, sprite_handler)?;
+    if let Err(fail) = os.hold_context_extension(vdu, end_screen) {
+        os.free_rma_quietly(selector_copy);
+        os.free_rma_quietly(check_copy);
+        return Err(fail);
+    }
     let named = name(os, &resolved.spec)?;
     with(os, |vdu, os| apply(vdu, os, &resolved, named, false))?;
     bound_mouse(os, &resolved.format);

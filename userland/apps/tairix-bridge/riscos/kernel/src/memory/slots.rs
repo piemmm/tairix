@@ -222,6 +222,18 @@ impl Memory {
         self.slots.current
     }
 
+    /// Makes no task's slot current: application space maps nothing, as
+    /// before the first slot was.
+    ///
+    /// # Errors
+    ///
+    /// None in practice: the space is the MMU's first, which it keeps.
+    pub fn leave_slot(&mut self) -> Result<(), MemoryError> {
+        self.mmu.switch(self.no_slot)?;
+        self.slots.current = None;
+        Ok(())
+    }
+
     /// The program's addressing a slot was made for.
     #[must_use]
     pub fn slot_bits(&self, slot: Slot) -> Option<Bits> {

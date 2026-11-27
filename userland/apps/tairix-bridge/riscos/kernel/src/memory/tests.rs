@@ -578,3 +578,25 @@ fn a_range_grants_rights_exactly_where_its_report_has_them_all() {
         }
     }
 }
+
+#[test]
+fn leaving_every_slot_maps_no_application_space_until_one_is_switched_to() {
+    let mut memory = shared();
+    let slot = memory.create_slot(Bits::Bit32).unwrap();
+    memory.set_slot_size(slot, 0x1000).unwrap();
+    memory.switch_slot(slot).unwrap();
+    memory
+        .bus()
+        .write(APPLICATION, Width::Word, 0xA, false)
+        .unwrap();
+    memory.leave_slot().unwrap();
+    assert_eq!(memory.current_slot(), None);
+    assert_eq!(
+        read(&mut memory, APPLICATION, false),
+        Err(Abort::Translation)
+    );
+    memory.switch_slot(slot).unwrap();
+    assert_eq!(read(&mut memory, APPLICATION, false), Ok(0xA));
+    memory.leave_slot().unwrap();
+    memory.destroy_slot(slot).unwrap();
+}

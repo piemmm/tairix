@@ -35,6 +35,7 @@ fn capture(os: &mut Os<'_>, bytes: &[u8]) -> Result<(), Fail> {
 /// with output redirected to a file keeps it, and nothing else answered.
 const VDU: VduDrivers = VduDrivers {
     start: |_| Ok(()),
+    screen: |_| Ok(()),
     write: capture,
     queued: |_| false,
     swi: None,

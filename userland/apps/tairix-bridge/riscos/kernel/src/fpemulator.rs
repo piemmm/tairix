@@ -7,6 +7,8 @@
 //! register's three words in FPEmulator's internal format and a nought, then
 //! the FPSR and a nought. While a context is current its state is the
 //! processor's FPA; with none current, the FPA's instructions are undefined.
+//! Each of the session's contexts has its own current context and its own
+//! default one, FPEmulator's.
 
 use tairix_riscos_arm::fpa::{fpsr, Exception, Format, Fpa};
 
@@ -44,23 +46,44 @@ pub const FRESH_FPSR: u32 = fpsr::SYSTEM_ID
     | Exception::DivisionByZero.enable()
     | Exception::Overflow.enable();
 
-/// The workspace: the exception dump, then the default context.
+/// The workspace: the exception dump.
 const DUMP_AT: u32 = 0;
-const DEFAULT_AT: u32 = DUMP_AT + 4 * SAVED_WORDS;
-const WORKSPACE: u32 = DEFAULT_AT + CONTEXT_BYTES;
+const WORKSPACE: u32 = DUMP_AT + 4 * SAVED_WORDS;
 
-/// FPEmulator's state: its workspace, and the context current.
+/// FPEmulator's state: its workspace, and the current context's own.
 pub(crate) struct State {
     workspace: Option<u32>,
-    current: u32,
+    pub(crate) own: Own,
 }
 
 impl State {
     pub(crate) const fn new() -> Self {
         Self {
             workspace: None,
-            current: NO_CONTEXT,
+            own: Own::NONE,
         }
+    }
+}
+
+/// What each context has of FPEmulator's: the floating point context
+/// current, and a default context of its own, which no other context's
+/// work can reach.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Own {
+    current: u32,
+    default: Context,
+}
+
+impl Own {
+    /// No context current: the FPA's instructions are undefined.
+    pub(crate) const NONE: Self = Self {
+        current: NO_CONTEXT,
+        default: Context::FRESH,
+    };
+
+    /// Whether a context is current, so the FPA has one to work in.
+    pub(crate) const fn active(&self) -> bool {
+        self.current != NO_CONTEXT
     }
 }
 
@@ -197,21 +220,33 @@ fn workspace(os: &mut Os<'_>) -> Result<u32, Fail> {
         .ok_or_else(|| os.error_with(SWI_OUT_OF_RANGE, &[FP_EMULATOR.title.as_bytes()]))
 }
 
-/// Where the context `pointer` is kept: the default's in the workspace.
-fn block(os: &mut Os<'_>, pointer: u32) -> Result<u32, Fail> {
+/// The context `pointer` names as its block keeps it, the default context
+/// the current kernel context's own.
+fn kept(os: &mut Os<'_>, pointer: u32) -> Result<Context, Fail> {
     if pointer == DEFAULT {
-        return Ok(workspace(os)? + DEFAULT_AT);
+        workspace(os)?;
+        return Ok(os.world.fp_emulator.own.default);
     }
-    Ok(pointer)
+    Context::read(os, pointer)
+}
+
+/// `context` kept in the block `pointer` names.
+fn keep(os: &mut Os<'_>, pointer: u32, context: Context) -> Result<(), Fail> {
+    if pointer == DEFAULT {
+        workspace(os)?;
+        os.world.fp_emulator.own.default = context;
+        return Ok(());
+    }
+    context.write(os, pointer)
 }
 
 /// The current context's state kept in its block: the context, nought for
 /// none.
 fn deactivate(os: &mut Os<'_>) -> Result<u32, Fail> {
-    let current = os.world.fp_emulator.current;
+    let current = os.world.fp_emulator.own.current;
     if current != NO_CONTEXT {
-        let at = block(os, current)?;
-        Context::of(os.world.processor.cpu().fpa()).write(os, at)?;
+        let state = Context::of(os.world.processor.cpu().fpa());
+        keep(os, current, state)?;
     }
     Ok(current)
 }
@@ -220,22 +255,33 @@ fn deactivate(os: &mut Os<'_>) -> Result<u32, Fail> {
 /// FPA's instructions undefined.
 fn activate(os: &mut Os<'_>, pointer: u32) -> Result<(), Fail> {
     if pointer != NO_CONTEXT {
-        let at = block(os, pointer)?;
-        let context = Context::read(os, at)?;
+        let context = kept(os, pointer)?;
         context.put_into(os.world.processor.cpu().fpa_mut());
     }
     os.world
         .processor
         .cpu()
         .set_fpa_active(pointer != NO_CONTEXT);
-    os.world.fp_emulator.current = pointer;
+    os.world.fp_emulator.own.current = pointer;
     Ok(())
+}
+
+/// A new context's floating point, as FPEmulator's start leaves it: its own
+/// default context fresh and current, or none while FPEmulator is not
+/// running.
+pub(crate) fn start_context(os: &mut Os<'_>) -> Result<(), Fail> {
+    os.world.fp_emulator.own = Own::NONE;
+    if os.world.fp_emulator.workspace.is_none() {
+        os.world.processor.cpu().set_fpa_active(false);
+        return Ok(());
+    }
+    activate(os, DEFAULT)
 }
 
 /// The context `pointer` names, the current one for [`CURRENT`]: whether it
 /// is current.
 fn resolved(os: &Os<'_>, pointer: u32) -> (u32, bool) {
-    let current = os.world.fp_emulator.current;
+    let current = os.world.fp_emulator.own.current;
     let pointer = if pointer == CURRENT { current } else { pointer };
     (pointer, pointer == current)
 }
@@ -247,10 +293,7 @@ fn save(os: &mut Os<'_>, pointer: u32, into: u32) -> Result<u32, Fail> {
     let context = match (pointer, current) {
         (NO_CONTEXT, _) => return Ok(0),
         (_, true) => Context::of(os.world.processor.cpu().fpa()),
-        (_, false) => {
-            let at = block(os, pointer)?;
-            Context::read(os, at)?
-        }
+        (_, false) => kept(os, pointer)?,
     };
     os.write_words(into, &context.saved())?;
     Ok(0)
@@ -270,8 +313,7 @@ fn load(os: &mut Os<'_>, pointer: u32, from: u32) -> Result<(), Fail> {
         context.put_into(os.world.processor.cpu().fpa_mut());
         return Ok(());
     }
-    let at = block(os, pointer)?;
-    context.write(os, at)
+    keep(os, pointer, context)
 }
 
 fn swi(os: &mut Os<'_>, offset: u32, regs: &mut Regs) -> Result<(), Fail> {
@@ -285,10 +327,7 @@ fn swi(os: &mut Os<'_>, offset: u32, regs: &mut Regs) -> Result<(), Fail> {
             regs.r[0] = old;
         }
         4 => regs.r[0] = CONTEXT_BYTES,
-        5 => {
-            let at = block(os, regs.r[0])?;
-            Context::FRESH.write(os, at)?;
-        }
+        5 => keep(os, regs.r[0], Context::FRESH)?,
         6 => regs.r[0] = workspace(os)? + DUMP_AT,
         // An FPA instruction is never left partly done, so there is nothing
         // to abandon and no frame to answer.
@@ -313,14 +352,16 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let workspace = os.rma_claim(WORKSPACE)?;
     os.write_word(regs.r[12], workspace)?;
     os.write_words(workspace + DUMP_AT, &Context::FRESH.saved())?;
-    Context::FRESH.write(os, workspace + DEFAULT_AT)?;
     os.world.fp_emulator = State {
         workspace: Some(workspace),
-        current: NO_CONTEXT,
+        own: Own::NONE,
     };
     activate(os, DEFAULT)
 }
 
+/// Its finalisation: every context's floating point context let go of, a
+/// context set aside meanwhile included, as their state went with the
+/// FPEmulator that held it.
 #[expect(
     clippy::unnecessary_wraps,
     reason = "a module's finalisation's signature"
@@ -328,6 +369,9 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 fn finalise(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     os.world.processor.cpu().set_fpa_active(false);
     os.world.fp_emulator = State::new();
+    for kept in os.world.contexts.parked() {
+        kept.fp = Own::NONE;
+    }
     Ok(())
 }
 

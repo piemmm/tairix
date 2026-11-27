@@ -5,12 +5,14 @@
 //! While a script runs, FileSwitch's resume routine is the exit handler, so
 //! a program one of its lines starts hands the script back its turn when it
 //! exits, as RISC OS 5's Obey and Repeat take theirs back. A script's state
-//! is held by the session, not the Rust stack the program's start unwound,
+//! is held by its context, not the Rust stack the program's start unwound,
 //! and scripts nest, each its depth's. A program that ends in an error ends
 //! every script it was started from, as on RISC OS 5.
 
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
+use core::any::Any;
 
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
 use tairix_riscos_kernel::swi::os::{self as swi, environment};
@@ -204,10 +206,11 @@ fn exit_handler(os: &mut Os<'_>, handler: [u32; 3]) -> Result<[u32; 3], Fail> {
     Ok([regs.r[1], regs.r[2], regs.r[3]])
 }
 
-/// `work` on the session's scripts, held from the first one on.
+/// `work` on the current context's scripts, held from its first one on:
+/// they go on through its own exit handler.
 fn with<T>(os: &mut Os<'_>, work: impl FnOnce(&mut Scripts) -> T) -> Result<T, Fail> {
     if os.extension::<Scripts>().is_none() {
-        os.hold_extension(Scripts::default())?;
+        os.hold_context_extension(Scripts::default(), ended)?;
     }
     match os.extension::<Scripts>() {
         Some(scripts) => Ok(work(scripts)),
@@ -333,6 +336,13 @@ fn close_all(os: &mut Os<'_>, scripts: Vec<Script>) {
     for script in scripts.into_iter().rev() {
         // A script that will not go on has no one to tell of its file's close.
         let _ = script.source.close(os);
+    }
+}
+
+/// A context's scripts at its end: each one's file closed.
+fn ended(os: &mut Os<'_>, value: Box<dyn Any>) {
+    if let Ok(scripts) = value.downcast::<Scripts>() {
+        close_all(os, scripts.stack);
     }
 }
 

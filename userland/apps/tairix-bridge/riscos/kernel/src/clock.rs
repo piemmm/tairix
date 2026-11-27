@@ -42,6 +42,23 @@ const BAD_TIME: Error = Error {
     token: "BadTimeInterval",
 };
 
+/// When timed work next falls due on the monotonic clock.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Deadlines {
+    /// The session's — the timed calls, the interval timer, the zone's next
+    /// change — which whichever context next takes the clock's interrupt
+    /// does.
+    pub session: Option<u64>,
+    /// The current context's own: the key held repeating, its screen's next
+    /// frame.
+    pub own: Option<u64>,
+}
+
+/// The soonest of `deadlines`.
+fn soonest<const N: usize>(deadlines: [Option<u64>; N]) -> Option<u64> {
+    deadlines.into_iter().flatten().min()
+}
+
 /// A timed call.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Ticker {
@@ -137,9 +154,19 @@ impl Os<'_> {
         }
     }
 
-    /// When the next timed work falls due, for a guest with nothing to do
-    /// until then.
-    pub(crate) fn next_deadline(&mut self) -> Option<u64> {
+    /// As the current context is entered for a run: the interrupt asserted
+    /// where the clock has moved on, or where the context's own timed work
+    /// has fallen due since another context took this centisecond's.
+    pub(crate) fn tick_entering(&mut self) {
+        let now = self.now();
+        if now > self.world.clock.taken || self.own_deadline().is_some_and(|due| due <= now) {
+            self.world.processor.set_irq(true);
+        }
+    }
+
+    /// When timed work next falls due on the monotonic clock, for a guest
+    /// with nothing to do until then.
+    pub fn deadlines(&mut self) -> Deadlines {
         let ticker = self
             .world
             .clock
@@ -147,13 +174,24 @@ impl Os<'_> {
             .first_key_value()
             .map(|(&(due, _), _)| due);
         let interval = self.world.clock.interval_due;
-        let key = self.world.keyboard.due();
         let zone = self.world.clock.zone_due;
+        Deadlines {
+            session: soonest([ticker, interval, zone]),
+            own: self.own_deadline(),
+        }
+    }
+
+    /// [`Deadlines::own`].
+    fn own_deadline(&mut self) -> Option<u64> {
+        let key = self.world.keyboard.raw.due();
         let frame = self.world.vdu.and_then(|vdu| (vdu.deadline)(self));
-        [ticker, interval, key, zone, frame]
-            .into_iter()
-            .flatten()
-            .min()
+        soonest([key, frame])
+    }
+
+    /// The soonest of [`Self::deadlines`].
+    pub(crate) fn next_deadline(&mut self) -> Option<u64> {
+        let deadlines = self.deadlines();
+        soonest([deadlines.session, deadlines.own])
     }
 
     /// The IRQ vector's entry: the clock's work, then a return to the

@@ -2,7 +2,7 @@
 //! every fetch and store from images it holds, hands each frame slot straight
 //! back, and keeps a clock that moves only by the waits the worker asks for.
 
-use super::port::{End, Link};
+use super::port::End;
 use super::*;
 use crate::chips::keyboard::Scan;
 use crate::cpu::jit::cache::Request;
@@ -35,6 +35,7 @@ use tairix_sandbox::loopback::HeapShare;
 use tairix_sandbox::session::Share;
 use tairix_sandbox::wire::Writer;
 use tairix_sandbox::ProtoError;
+use tairix_sandbox::WorkerPort;
 
 use super::testing::{memory, TestMemory, DISCARD};
 use crate::folder::server::Server;
@@ -301,7 +302,7 @@ fn encoded(command: &Command<'_>) -> Vec<u8> {
 
 struct TestLink(Rc<RefCell<Front>>);
 
-impl Link for TestLink {
+impl WorkerPort for TestLink {
     fn recv<R>(
         &mut self,
         wait: Option<Nanos>,

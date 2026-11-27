@@ -77,16 +77,8 @@ impl Os<'_> {
         let output_at = HIGH_ZERO_PAGE + zeropage::REDIRECT_OUT;
         let old_in = u32::from(self.read_byte(input_at)?);
         let old_out = u32::from(self.read_byte(output_at)?);
-        let routine = self
-            .world
-            .routine_address(crate::host::Routine::RedirectOutput);
         if regs.r[1] < 0x100 {
-            let mut claim = Regs::new([vectors::WRCH.0, routine, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-            match (old_out, regs.r[1]) {
-                (0, new) if new != 0 => self.claim(&mut claim)?,
-                (old, 0) if old != 0 => self.release(&mut claim)?,
-                _ => {}
-            }
+            self.claim_for_redirection(regs.r[1] != 0)?;
             self.write_byte(output_at, regs.byte(1))?;
         }
         if regs.r[0] < 0x100 {
@@ -97,17 +89,37 @@ impl Os<'_> {
         Ok(())
     }
 
+    /// `WrchV` claimed for output redirection while the current context's
+    /// output is to be `redirected` or another context's is, and given up
+    /// once none is: each context's redirection is its own, the vector the
+    /// session's.
+    fn claim_for_redirection(&mut self, redirected: bool) -> Result<(), Fail> {
+        let routine = self
+            .world
+            .routine_address(crate::host::Routine::RedirectOutput);
+        let wanted = redirected || self.world.contexts.redirect_output_parked();
+        let mut claim = Regs::new([vectors::WRCH.0, routine, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        match (wanted, self.claims(vectors::WRCH, routine, 0)) {
+            (true, false) => self.claim(&mut claim),
+            (false, true) => self.release(&mut claim),
+            _ => Ok(()),
+        }
+    }
+
     /// The output redirection's `WrchV` claimant: the character to the
     /// redirection's file, the call claimed. A write the file refuses ends
-    /// all redirection, the character's write failing with its error.
+    /// all redirection, the character's write failing with its error. The
+    /// call is passed on for a context whose output is not redirected,
+    /// another's holding the vector.
     pub(crate) fn redirect_output(&mut self) -> Result<(), crate::os::Unwind> {
         let cpu = self.world.processor.cpu();
-        let c = cpu.reg(Reg::field(0));
-        let sp = cpu.reg(Reg::SP);
+        let (c, sp, pass_on) = (cpu.reg(Reg::field(0)), cpu.reg(Reg::SP), cpu.reg(Reg::LR));
         let handle = self
             .peek_byte(HIGH_ZERO_PAGE + zeropage::REDIRECT_OUT)
             .unwrap_or(0);
-        if handle != 0 {
+        let back = if handle == 0 {
+            pass_on
+        } else {
             let mut put = Regs::new([c, u32::from(handle), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
             match self.perform(crate::swi::X | crate::swi::os::BPUT, &mut put) {
                 Ok(()) => {}
@@ -119,12 +131,16 @@ impl Os<'_> {
                     cpu.set_nzcv(cpu.cpsr() | psr::V);
                 }
             }
-        }
-        let back = self
-            .peek_word(sp)
-            .ok_or(crate::os::Unwind::Ended(crate::os::Ended::Fault))?;
+            let claimed = self
+                .peek_word(sp)
+                .ok_or(crate::os::Unwind::Ended(crate::os::Ended::Fault))?;
+            self.world
+                .processor
+                .cpu()
+                .set_reg(Reg::SP, sp.wrapping_add(4));
+            claimed
+        };
         let cpu = self.world.processor.cpu();
-        cpu.set_reg(Reg::SP, sp.wrapping_add(4));
         let target = if cpu.mode().is_26bit() {
             back & psr::R15_PC
         } else {

@@ -50,7 +50,7 @@ use tairix_pcemu::machine::Template;
 use tairix_pcemu::storage::SECTOR;
 use tairix_pcemu::time::Nanos;
 use tairix_pcemu::video::Unread;
-use tairix_pcemu::worker::port::{End, Link};
+use tairix_pcemu::worker::port::End;
 use tairix_pcemu::worker::{serve, Memory};
 use tairix_reclaim::{PressureBand, PressureGauge, ReportedPressure};
 use tairix_sandbox::link::Waited;
@@ -58,6 +58,7 @@ use tairix_sandbox::loopback::HeapShare;
 use tairix_sandbox::session::{SessionDescriptors, SessionTransport, Share};
 use tairix_sandbox::wire::{Reader, Writer};
 use tairix_sandbox::ProtoError;
+use tairix_sandbox::WorkerPort;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 200;
@@ -782,7 +783,7 @@ struct Hostile {
 
 struct HostileLink(Rc<RefCell<Hostile>>);
 
-impl Link for HostileLink {
+impl WorkerPort for HostileLink {
     fn recv<R>(
         &mut self,
         wait: Option<Nanos>,

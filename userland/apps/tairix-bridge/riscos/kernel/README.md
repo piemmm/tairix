@@ -15,6 +15,8 @@ Stability: `experimental`.
   run.
 - `memory` — the address space: its two layouts, the memory policy, task
   slots, and the dynamic-area manager.
+- `context` — the session's contexts: what each program has of its own, set
+  aside while another runs, launched, switched and ended.
 - `swi` — SWI dispatch, names and numbers.
 - `module` — the module chain: the `Builtin` seam the session's other crates
   implement their modules through, `Config::modules` passing them in, the

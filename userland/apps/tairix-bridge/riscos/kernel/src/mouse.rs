@@ -120,7 +120,7 @@ impl Os<'_> {
     /// The multipliers at reset: the configured mouse step, both ways.
     pub(crate) fn reset_mouse(&mut self) {
         let step = i32::from(self.world.cmos.read(crate::cmos::MOUSE_STEP).cast_signed());
-        self.world.input.mouse.multipliers = (step, step);
+        self.world.input.typing.mouse.multipliers = (step, step);
     }
 
     /// The graphics origin the VDU drivers keep, which the mouse is read
@@ -132,7 +132,7 @@ impl Os<'_> {
     /// The mouse at `x`, `y` on the screen with `buttons`, kept within its
     /// box: a change of buttons buffered as a packet, with the mouse event.
     pub(crate) fn pointer_moved(&mut self, x: i32, y: i32, buttons: u32) -> Result<(), Unwind> {
-        let mouse = &mut self.world.input.mouse;
+        let mouse = &mut self.world.input.typing.mouse;
         let (x, y) = mouse.bounds.clamp(x, y);
         let changed = mouse.buttons != buttons;
         (mouse.x, mouse.y, mouse.buttons) = (x, y, buttons);
@@ -174,7 +174,7 @@ impl Os<'_> {
     /// The mouse moved by `dx`, `dy` as the host measured it, which the
     /// multipliers scale, with `buttons`.
     pub(crate) fn mouse_moved_by(&mut self, dx: i32, dy: i32, buttons: u32) -> Result<(), Unwind> {
-        let mouse = &self.world.input.mouse;
+        let mouse = &self.world.input.typing.mouse;
         let (mx, my) = mouse.multipliers;
         let x = mouse.x.saturating_add(dx.saturating_mul(mx));
         let y = mouse.y.saturating_add(dy.saturating_mul(my));
@@ -188,10 +188,10 @@ impl Os<'_> {
         let (x, y, buttons, time) = if let Some(packet) = self.take_mouse_packet()? {
             (packet.x, packet.y, packet.buttons, packet.time)
         } else {
-            let mouse = &self.world.input.mouse;
+            let mouse = &self.world.input.typing.mouse;
             (mouse.x, mouse.y, mouse.buttons, self.now32())
         };
-        let (x, y) = self.world.input.mouse.bounds.clamp(x, y);
+        let (x, y) = self.world.input.typing.mouse.bounds.clamp(x, y);
         let (ox, oy) = self.mouse_origin();
         regs.r[0] = x.wrapping_sub(ox).cast_unsigned();
         regs.r[1] = y.wrapping_sub(oy).cast_unsigned();
@@ -204,14 +204,14 @@ impl Os<'_> {
     /// what a pointer linked to it follows.
     #[must_use]
     pub fn mouse_position(&self) -> (i32, i32) {
-        let mouse = &self.world.input.mouse;
+        let mouse = &self.world.input.typing.mouse;
         (mouse.x, mouse.y)
     }
 
     /// Bounds the mouse to `bounds`, homing it to the nearest point within:
     /// what a mode change does with the whole screen.
     pub fn set_mouse_bounds(&mut self, bounds: Bounds) {
-        let mouse = &mut self.world.input.mouse;
+        let mouse = &mut self.world.input.typing.mouse;
         mouse.bounds = bounds;
         (mouse.x, mouse.y) = bounds.clamp(mouse.x, mouse.y);
     }
@@ -237,13 +237,13 @@ impl Os<'_> {
             2 => {
                 let across = i32::from(self.read_byte(block.wrapping_add(1))?.cast_signed());
                 let up = i32::from(self.read_byte(block.wrapping_add(2))?.cast_signed());
-                self.world.input.mouse.multipliers = (across, up);
+                self.world.input.typing.mouse.multipliers = (across, up);
             }
             3 => {
                 let (ox, oy) = self.mouse_origin();
                 let (x, y) = self.read_coordinates(block.wrapping_add(1))?;
                 let (x, y) = (x + ox, y + oy);
-                let mouse = &mut self.world.input.mouse;
+                let mouse = &mut self.world.input.typing.mouse;
                 if mouse.bounds.holds(x, y) {
                     (mouse.x, mouse.y) = (x, y);
                 }

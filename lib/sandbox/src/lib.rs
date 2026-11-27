@@ -152,7 +152,7 @@ pub mod wire;
 pub mod worker;
 
 pub use host::{Launcher, ParserSandbox, SandboxError, Unbelieved, WorkerEnd};
-pub use link::{TimedChannel, Waited, WorkerLink};
+pub use link::{ClockedLink, TimedChannel, Waited, WorkerLink, WorkerPort};
 pub use memory::WorkerMemory;
 pub use proto::{Channel, ProtoError, MAX_FRAME};
 pub use session::{

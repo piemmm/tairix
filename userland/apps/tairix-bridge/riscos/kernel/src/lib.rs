@@ -8,6 +8,8 @@
 //! - [`swi`]: SWI numbers, names and dispatch.
 //! - [`module`]: modules: the seam built-in modules join through, the
 //!   inventory, and the module chain.
+//! - [`context`]: the session's contexts, each a program's own processors,
+//!   memory, input and screen, and the switches between them.
 //! - `cli`: the command line interpreter and the kernel's `*` commands.
 //! - [`corpus`]: the recorded observation corpus's scenarios and fixtures.
 //!
@@ -30,6 +32,7 @@ mod cli;
 pub use cli::table::parameters as command_parameters;
 mod clock;
 pub mod cmos;
+pub mod context;
 mod convert;
 pub mod desktop;
 pub use convert::Decimal;
@@ -61,6 +64,7 @@ pub mod msgtrans;
 pub mod os;
 pub mod output;
 pub mod ramdisc;
+pub mod relay;
 pub mod release;
 pub mod resourcefs;
 mod resources;
@@ -76,6 +80,12 @@ pub mod vectors;
 mod vfpsupport;
 pub mod word;
 mod zeropage;
+
+/// Every request the unit tests make, metered per thread, so a test can
+/// refuse a call the room it asks for.
+#[cfg(test)]
+#[global_allocator]
+static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
 #[cfg(test)]
 mod testkit;

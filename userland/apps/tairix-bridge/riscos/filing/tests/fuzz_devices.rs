@@ -30,6 +30,7 @@ use tairix_riscos_filing::session::{application_slot, SLOT_BYTES};
 use tairix_riscos_kernel::input::InputEvent;
 use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::os::{Ending, Fail, Host, Kernel, Os, Pulse, Regs, Unwind};
+use tairix_riscos_kernel::relay::{Relayed, Side};
 use tairix_riscos_kernel::swi::device_fs::{
     CALL_DEVICE, DEREGISTER, DEREGISTER_OBJECTS, RECEIVED_CHARACTER, REGISTER, REGISTER_OBJECTS,
     THRESHOLD, TRANSMIT_CHARACTER,
@@ -127,12 +128,8 @@ impl Host for Budgeted {
         None
     }
 
-    fn relay(&mut self, _request: &[u8], _reply: &mut Vec<u8>) -> bool {
-        false
-    }
-
-    fn font(&mut self, _request: &[u8], _reply: &mut Vec<u8>) -> bool {
-        false
+    fn relay(&mut self, _: Side, _request: &[u8], _reply: &mut Vec<u8>, _parking: bool) -> Relayed {
+        Relayed::Failed
     }
 
     fn wait(&mut self, _: Option<u64>, _: Ending) -> Pulse {

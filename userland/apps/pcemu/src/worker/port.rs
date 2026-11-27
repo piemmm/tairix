@@ -22,39 +22,7 @@ use tairix_collections::ByteQueue;
 use tairix_reclaim::PressureBand;
 use tairix_sandbox::link::Waited;
 use tairix_sandbox::wire::Writer;
-use tairix_sandbox::ProtoError;
-
-/// The worker's end of its session, and the clock its waits are measured by.
-pub trait Link {
-    /// Lend the next whole command's payload to `take`, making at most one
-    /// read that waits at most `wait` (for ever where it is `None`).
-    ///
-    /// # Errors
-    ///
-    /// The session's failure; the worker ends on it.
-    fn recv<R>(
-        &mut self,
-        wait: Option<Nanos>,
-        take: impl FnOnce(&[u8]) -> R,
-    ) -> Result<Waited<R>, ProtoError>;
-
-    /// Queue one event's payload to go with the next flush.
-    ///
-    /// # Errors
-    ///
-    /// The session's failure; the worker ends on it.
-    fn queue(&mut self, payload: &[u8]) -> Result<(), ProtoError>;
-
-    /// Write every event queued, waiting for room.
-    ///
-    /// # Errors
-    ///
-    /// The session's failure; the worker ends on it.
-    fn flush(&mut self) -> Result<(), ProtoError>;
-
-    /// The host's monotonic clock.
-    fn now(&self) -> Nanos;
-}
+use tairix_sandbox::{ProtoError, WorkerPort};
 
 /// Why the worker stops: the front-end closed the session, the session
 /// failed, or the front-end broke the protocol.
@@ -171,7 +139,7 @@ pub struct Port<L> {
     out: Vec<u8>,
 }
 
-impl<L: Link> Port<L> {
+impl<L: WorkerPort> Port<L> {
     /// The port over `link`, keeping fetched sectors in `cache`.
     ///
     /// # Errors
@@ -621,7 +589,7 @@ pub struct RemoteDisk<L> {
     read_only: bool,
 }
 
-impl<L: Link> RemoteDisk<L> {
+impl<L: WorkerPort> RemoteDisk<L> {
     /// The disk reaching `medium`, of `sectors`, through `port`.
     pub fn new(port: Rc<RefCell<Port<L>>>, medium: u16, sectors: u64, read_only: bool) -> Self {
         Self {
@@ -633,7 +601,7 @@ impl<L: Link> RemoteDisk<L> {
     }
 }
 
-impl<L: Link> BlockDevice for RemoteDisk<L> {
+impl<L: WorkerPort> BlockDevice for RemoteDisk<L> {
     fn sectors(&self) -> u64 {
         self.sectors
     }

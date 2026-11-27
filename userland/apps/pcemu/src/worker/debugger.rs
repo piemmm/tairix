@@ -5,7 +5,7 @@
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-use super::{Link, Memory, Worker};
+use super::{Memory, Worker};
 use crate::cpu::{linear, Bus as _, Seg};
 use crate::debug::disasm::{listing, Reading};
 use crate::debug::probe::Probe;
@@ -13,6 +13,7 @@ use crate::debug::Registers;
 use crate::link::debug::{Debug, Listing, Look, Said, Seen};
 use crate::link::Event;
 use tairix_sandbox::session::ShareWrite;
+use tairix_sandbox::WorkerPort;
 
 /// The debugger's hold on the machine.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -26,7 +27,7 @@ pub(super) struct Debugging {
     pub breaking: bool,
 }
 
-impl<L: Link + 'static, S: ShareWrite, M: Memory> Worker<L, S, M> {
+impl<L: WorkerPort + 'static, S: ShareWrite, M: Memory> Worker<L, S, M> {
     /// Does what the debugger asks, the order it asks in kept: any request
     /// out of turn ends the session.
     pub(super) fn debug(&mut self, debug: &Debug) {

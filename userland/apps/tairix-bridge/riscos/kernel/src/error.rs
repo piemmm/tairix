@@ -69,8 +69,8 @@ pub(crate) const MESSAGES: &[u8] = include_bytes!("../resources/Kernel/Messages"
 pub(crate) const BUFFERS: u32 = 16;
 /// Each buffer's size: the number, and the longest text an error block has.
 pub(crate) const BUFFER_SIZE: u32 = 256;
-/// The longest text, with room for its terminator.
-pub(crate) const TEXT: usize = (BUFFER_SIZE - 4 - 1) as usize;
+/// The longest text an error block holds, with room for its terminator.
+pub const TEXT: usize = (BUFFER_SIZE - 4 - 1) as usize;
 
 /// The ring of error buffers, made when the system heap is.
 pub(crate) struct Ring {

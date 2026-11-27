@@ -1012,6 +1012,12 @@ impl Mmu {
         Ok(())
     }
 
+    /// The space current.
+    #[must_use]
+    pub const fn current_space(&self) -> Space {
+        self.current
+    }
+
     /// Makes `space` current.
     pub fn switch(&mut self, space: Space) -> Result<(), MmuError> {
         let extent = self.extent(space).ok_or(MmuError::Space)?;

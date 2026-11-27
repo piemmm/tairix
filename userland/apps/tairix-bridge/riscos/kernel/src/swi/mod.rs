@@ -1085,8 +1085,11 @@ impl Os<'_> {
         let outermost = self.world.depth == 0 && self.world.frame.is_none();
         let mut regs = caller_regs(self);
         if outermost {
-            if self.world.resume.take() != Some((at, number)) {
+            if self.world.resume.take() == Some((at, number)) {
+                self.world.relays.again();
+            } else {
                 self.world.continuation = None;
+                self.world.relays.clear();
             }
             self.world.guest_called = false;
             let back = self.world.processor.cpu().pc();
@@ -1105,6 +1108,7 @@ impl Os<'_> {
             self.world.frame = None;
             if !waiting {
                 self.world.continuation = None;
+                self.world.relays.clear();
             }
         }
         completed

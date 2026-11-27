@@ -50,6 +50,7 @@ fn configured(host: Box<dyn Host>, bytes: u64) -> Kernel {
         pressure: &tairix_reclaim::pressure::Unpressured,
         log: &tairix_log::DiscardSink,
         cache_key: tairix_hash::HashSeed::UNKEYED,
+        show: None,
     };
     Kernel::new(config).expect("a kernel")
 }

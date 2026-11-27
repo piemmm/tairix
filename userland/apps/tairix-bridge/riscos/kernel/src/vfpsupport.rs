@@ -9,6 +9,9 @@
 //! or one awaiting lazy activation, CPACR grants it to none, so the unit's
 //! next instruction takes the undefined instruction exception VFPSupport
 //! claims: the context awaiting is activated and the instruction run again.
+//! Each of the session's contexts has its own active context, and a switch
+//! between them saves and lets go of the unit while the area it saves to is
+//! still mapped, so a context's next instruction activates its own.
 //!
 //! A context's layout is VFPSupport's own, as the wiki allows, and
 //! `ExamineContext`'s descriptor gives it: a mark, its flags and register
@@ -37,7 +40,7 @@ use crate::swi::chunk::VFP_SUPPORT as CHUNK;
 const VERSION: u32 = crate::module::inventory::VFP_SUPPORT_ROM.version as u32;
 
 /// The context pointer naming none, the null context.
-const NO_CONTEXT: u32 = 0;
+pub(crate) const NO_CONTEXT: u32 = 0;
 
 /// What marks a context's first word.
 const MARK: u32 = u32::from_le_bytes(*b"VFPC");
@@ -191,8 +194,8 @@ pub(crate) struct State {
     /// The undefined instruction vector's owner before VFPSupport claimed
     /// it; none while it holds no claim.
     passes_to: Option<u32>,
-    /// The context active, or awaiting lazy activation.
-    active: u32,
+    /// The current context's context active, or awaiting lazy activation.
+    pub(crate) active: u32,
     /// The context whose state the unit holds, and its header.
     loaded: Option<(u32, Header)>,
     /// The exception dump: the copy kept in the RMA, and the context it was
@@ -467,6 +470,16 @@ fn unload(os: &mut Os<'_>) -> Result<(), Fail> {
     }
     grant(os, Access::Denied);
     Ok(())
+}
+
+/// The unit let go of as the current context is set aside: the context it
+/// holds saved while its area is mapped, then the unit denied. An area that
+/// refuses the save loses only what it would have kept.
+pub(crate) fn release_unit(os: &mut Os<'_>) {
+    if let Some((held, header)) = os.world.vfp_support.loaded.take() {
+        let _ = save(os, held, header);
+    }
+    grant(os, Access::Denied);
 }
 
 /// The context at `context` made active, now or on the unit's next
@@ -987,6 +1000,9 @@ fn finalise(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
     }
     os.world.vfp_support = State::new();
     os.world.processor.with_vfp().vfp_mut().set_fpexc(0);
+    for kept in os.world.contexts.parked() {
+        kept.vfp_active = NO_CONTEXT;
+    }
     Ok(())
 }
 

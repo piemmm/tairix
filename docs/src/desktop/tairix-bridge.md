@@ -569,6 +569,81 @@ caches its modules keep give way to and record their decisions in.
   them. No callback runs while a SWI waits. The host is told whether only
   input can end a wait, so a scripted host with nothing left to type stops
   one rather than running the clock on through the timed work due meanwhile.
+- **Relays.** `Host::relay` carries a request to the side holding the
+  session's files or to the font service. A file relay from a program's own
+  SWI that can be performed again may be left pending: the context waits
+  (`Wait::Relay`), the reply comes with `Os::relay_answered`, and the SWI is
+  performed again, every relay its earlier performance made answered as it
+  was then, so it sees what that one saw. Only a request that changes nothing
+  the other side holds parks, and only while the SWI has made no request that
+  does, so a SWI performed again never repeats a change; a request that
+  changes something, every relay after it, and a relay inside a nested call
+  wait in place for their replies. HostFS says which of its requests change
+  the server; the Font Manager's glyph requests always wait in place, as a
+  paint asks for them part way through its string. What a SWI's
+  performances keep is bounded: past the bound, or with no room to keep an
+  answer, its relays wait in place. An answer there is no room to give again
+  fails, and every relay after it waits in place, so no later performance
+  sees it answered.
+
+### Contexts
+
+A session runs its programs as contexts in one world: the Wimp's task set,
+each TaskWindow and each single-tasking screen is one. The boot's context is
+the first; `Os::launch_context` makes another, `switch_context` changes which
+runs, and `end_context` ends the current one for another.
+
+- **A context's own.** Its processors' registers, FPA, VFP registers and CP15
+  thread registers; its application slot; its environment, with buffers of
+  its own; its keyboard buffer, function-key expansion, keys held and mouse,
+  and the mouse's buffer; its screen — the VDU drivers' state and a screen
+  area of its own; the zero page RISC OS keeps for a task and a screen — the
+  escape condition, the redirection handles, the VDU drivers' colour blocks
+  and changed box, the library words and the domain; the `OS_Byte` variables
+  of its screen, keyboard and streams; the key handler's workspace; its
+  GSTrans string; its FPEmulator context and a default context of its own;
+  VFPSupport's active context; its scripts under way; and a SWI suspended in
+  a wait.
+- **The session's.** Everything else: system variables, the heaps, the
+  module chain and every module's workspace, vectors, callbacks, events, the
+  other dynamic areas, the clock, CMOS and the files, and the `OS_Byte`
+  variables of the machine — the serial port and printer, the country, sound,
+  the clock's switch and start-up.
+- **Switching.** The current context is set aside only where RISC OS could
+  take a callback: no SWI, call or interrupt in progress, and its program in
+  USR mode, about to be replaced by a pending transfer, or not running. The
+  supervisor stack every context shares is then empty and no module is part
+  way through anything. A switch clears the exclusive monitor and saves and
+  lets go of the VFP unit while its context's area is still mapped, so the
+  next instruction of either context activates its own. A switch takes
+  nothing from the host's heap — the screen area set aside gives up the room
+  the other's takes — so no shortage fails one.
+- **A new context** starts as the boot's did: its stacks empty, its mouse
+  and floating point fresh, the key handler started for its keys, its screen
+  made in the configured mode, and the `OS_Byte` variables as the
+  configuration stands. It has no slot until one is made for it. A launch
+  refused its room makes nothing.
+- **Ending.** A context's end gives back what it had: the files its spool,
+  exec and redirection handles hold, which nothing could reach after it; the
+  values other crates held for it (its screen's mode selector copies, its
+  scripts' files); its screen area, its buffers and its slot. A context's name
+  is never given to another, so a stale one names nothing. Like a switch, an
+  end takes nothing from the host's heap.
+- **Output redirection.** Each context's is its own, but `WrchV` is the
+  session's: the redirection's claim is held while any context's output is
+  redirected and given up when none is, and a character written in a context
+  whose output is not redirected is passed on.
+- **Timed work.** `Os::deadlines` gives when the session's timed work — its
+  timed calls, the interval timer, the zone's next change — falls due apart
+  from the current context's own, its key repeating and its screen's next
+  frame. The session's is done by whichever context next takes the clock's
+  interrupt. A context entered with its own work due takes the interrupt
+  even where another took this centisecond's, and a SWI waiting to be
+  performed again takes a pending interrupt whatever its caller's mask, as a
+  waiting SWI takes interrupts, so each context's work is done when it falls
+  due.
+- **Caches of the screen.** ColourTrans's palette cache records the context
+  whose screen it read, so another context's matching reads its own.
 
 ### SWIs and errors
 
@@ -2754,7 +2829,9 @@ the module keeps the floating point contexts its state is switched between.
   context it replaced. −1 names the default context, the module's own and
   current from the start; −2 the current context, where a call takes it; 0
   none, under which every FPA instruction is an undefined instruction on
-  either profile's processor.
+  either profile's processor. Each of the session's contexts has its own
+  current context and its own default context, started fresh with it; one
+  set aside while FPEmulator is killed has no context when it runs again.
 - **A fresh context**, as `InitContext` lays one and the default starts, has
   every register nought and its invalid operation, division by zero and
   overflow traps enabled.
@@ -2949,6 +3026,117 @@ Known differences from RISC OS 5.30, each deliberate:
   each field from the first line of its file holding one;
 - a type number past &FFF maps nothing, where a file's `*` line maps every
   number.
+
+## The session
+
+`tairix-riscos-session` is what crosses between the front end and a
+session's worker, over a `lib/sandbox` duplex session whose spawn share is
+the screens' damage ring, and the two sides that speak it. Every message is
+decoded whole against fixed bounds, and the side that reads one that is not
+ends the session.
+
+- **Commands**, from the front end: run and hold, each applied as it comes;
+  an input event for a context; the damage ring's oldest bytes given back; a
+  relay's reply, or its failure; a launch, a new context running a command
+  line of at most 1,023 characters, none a control character, which waits
+  while the session is held; and a quit, which ends a context. No more than
+  `WAITING_MOST` (64) launches and quits are ever unanswered.
+- **Events**, from the worker: the input a context has taken in; a launch's
+  context, told before its command line runs, or the error that refused a
+  launch that made none; a context's screen — its size, eigen factors,
+  border and whether it is blanked; a run of its lines damaged, each pixel an
+  `&RRGGBB` word, in the ring; a relay to carry to the files or the font
+  service, of at most a mebibyte, naming the context it is for and whether
+  that context is parked on it; and a context's end — its exit code, its
+  error and text, a fault, a reset, an unmodelled instruction, or the front
+  end's quit — told once its end has run, so that nothing of the context
+  follows it.
+- **Relays unanswered.** A relay the worker waits for in place is the only
+  one of its kind unanswered: the worker does nothing else until its answer
+  comes. A context is parked on one at most; while it is, any other it makes
+  — its end's closing a file, say — is waited for in place.
+- **The damage ring** is 8 MiB. A record is contiguous and at most a quarter
+  of it; one that would pass the end starts again at the start, the bytes
+  passed over given back with it. Both sides move a `Ring` alike, so the
+  front end believes a record only where the worker could have put it.
+- **Credited input.** The front end sends a context at most 64 events beyond
+  those the worker last said it took in, so a context that reads none holds
+  only those, and closes no other context's window.
+
+### The worker
+
+`worker::serve` runs the kernel and every context of the session, with
+nothing but its port to the front end and the ring in its share.
+
+- **Turns.** Each context that can run has a turn of `TURN` (2²⁰)
+  instructions in turn. One waiting on input or the clock runs again once
+  that comes or its own timed work — its key repeating, its screen's next
+  frame — falls due; one parked on a relay, only once its reply comes. The
+  session's timed work wakes one waiting context to take the clock's
+  interrupt, the current one where it can, never every one. While the
+  current context cannot be set aside — its program in a privileged mode — it
+  alone may have a turn. With none to run the worker waits on its port
+  until the soonest deadline of a context that may, so an idle session costs
+  nothing and a deadline passing always gives a turn.
+- **Held.** While the front end holds the session nothing runs: a context
+  waiting in place, or part way through its turn, holds where it stands, and
+  no launch is made.
+- **Time.** The guest's monotonic clock is the port's since the session
+  began, and its real time the host's when the worker started, moved on by
+  it. The kernel makes up a second of a late clock's ticks at most and gives
+  up the rest rather than racing them.
+- **Screens.** After each turn, and before the kernel waits in place for
+  input or the clock, the current context's screen is set beside what the
+  front end was told: a new or changed one described first, then the lines
+  drawn since put in the ring as its room allows. Lines it had no room for go
+  once room comes back, each context with lines waiting visited in turn while
+  others run, so a busy context never keeps another's screen stale.
+- **Relays.** One the kernel lets park leaves its context parked while
+  others run, and its reply is given to the kernel when the context is next
+  entered, which readies it. Any other waits in place: every command that
+  comes meanwhile is taken, launches and quits kept for after. An answer to a
+  relay whose context has ended, or that the kernel went on from, is dropped.
+- **Launches and quits.** A launch makes a context, a slot of
+  `Setup::slot_bytes` with the memory limit at its top, and its mailbox,
+  tells the front end, then runs the command line there: the context ends at
+  once where the command needs no program, and with its error where it fails.
+  What the making does before the front end is told is the session's own. A
+  quit or the program's end ends it. Neither is applied while the current
+  context cannot be set aside, and those waiting keep their order; a quit of
+  a context that has ended is let go as it comes, or with the context.
+- **Room.** Each context's inbox holds its whole credit window, and the
+  commands kept their bound, from the start, so a failed allocation never
+  loses a command: a reply there is no room to copy fails its relay, and a
+  launch whose line there is no room to keep is refused.
+- **Containment.** A command that does not decode, input beyond a context's
+  credit, an answer to no relay or to one waited on elsewhere, more of the
+  ring given back than it held, a quit of a context never launched, or more
+  than 64 launches and quits waiting ends the worker with `End::Violation`
+  and why. A port that fails or closes ends it, and so do a fault switching
+  contexts (`End::Fault`) and a switch there is no memory for
+  (`End::NoMemory`).
+
+### The front end's model
+
+`front::Front` is the front end's side of the session: what it has asked of
+the worker and been told. The worker runs guest code, so the model believes
+an event only where the worker could have sent it — a credit for input that
+was sent; a launch that was asked, its context numbered above every one
+before; a screen, damage or a relay only for a context running, damage within
+its screen and where the ring takes the next record; a relay parked on only
+by a context parked on no other, and one waited for in place only while no
+other is; and an end only of a context running. An event it refuses is
+`Unbelievable`, with the reason the front end condemns the session with, and
+changes nothing. The room each event needs is held when the launch it follows
+is asked, so a refusal is only ever the worker's doing. The model asks a
+launch or a quit only while fewer than `WAITING_MOST` wait, so an honest
+front end never sends what the worker would refuse.
+
+A session that ends is reported by its `Why` — the worker's end as the
+sandbox reads its exit, crashed, out of memory or killed, or what it sent
+that could not be believed — and the command lines of the contexts that were
+running. Nothing is restarted: a fresh worker would not be the world the user
+had.
 
 ## The reference harness
 

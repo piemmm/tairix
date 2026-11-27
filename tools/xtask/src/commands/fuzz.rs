@@ -250,6 +250,11 @@ pub const TARGETS: &[Target] = &[
         description: "userland/apps/tairix-bridge/riscos/clib SharedCLibrary: the LibInit SWIs with hostile stub descriptions — chunks held and not, vectors and statics of any size and place, lists without an end — workspaces and stack requests, then guest code calling each library entry through a sound client's vector with hostile registers, SL above a real stack chunk or anywhere and pointers past the application space; every refusal a value, a guest run stopped at its budget, the kernel still answering, the library re-initialised holding none of the RMA it took",
     },
     Target {
+        package: "tairix-riscos-session",
+        test: "fuzz_protocol",
+        description: "userland/apps/tairix-bridge/riscos/session protocol: commands and events, sound ones changed, cut and replaced by noise, decoded by a side that cannot trust the other; the damage ring, credited input and the front end's model of the session driven by a hostile worker beside an honest one; every refusal a value, whatever decodes re-encoding to its own bytes, a ring believing only records the worker could have put and both sides of an honest exchange alike, every honest event believed and a refused one changing nothing, never more than a window of input outstanding",
+    },
+    Target {
         package: "tairix-riscos-filing",
         test: "fuzz_hostfs",
         description: "userland/apps/tairix-bridge/riscos/filing HostFS relay: hostile requests from the session worker against the server, over a tree with roots and files beside them, each answered by a reply that answers it and nothing changed outside the writable root; every message that decodes re-encoding to its own bytes; a session whose relay fails or damages its replies still answering",

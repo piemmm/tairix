@@ -9,11 +9,14 @@
 //! architecturally, through the profile's vectors.
 
 mod alu;
+mod context;
 mod execute;
 mod fpa;
 mod memo;
 mod memory;
 mod simdfp;
+
+pub use context::Context;
 
 use crate::bus::{Abort, Bus};
 use crate::cond::Condition;

@@ -95,6 +95,47 @@ const TOO_SMALL: Error = Error {
     token: "BufferTooSmall",
 };
 
+/// The mouse buffer's bytes.
+const MOUSE_BYTES: u32 = 64;
+
+/// One context's mouse buffer while another's is the manager's: its bytes,
+/// and where the next goes in and comes out.
+pub(crate) struct MouseBuffer {
+    bytes: [u8; MOUSE_BYTES as usize],
+    insert: u32,
+    remove: u32,
+}
+
+impl MouseBuffer {
+    pub(crate) const EMPTY: Self = Self {
+        bytes: [0; MOUSE_BYTES as usize],
+        insert: 0,
+        remove: 0,
+    };
+}
+
+impl Os<'_> {
+    /// The mouse buffer's packets exchanged for `other`'s: none while the
+    /// manager holds no mouse buffer of the kernel's own.
+    pub(crate) fn exchange_mouse_buffer(&mut self, other: &mut MouseBuffer) -> Result<(), Fail> {
+        let Some(at) = self.world.buffers.find(MOUSE) else {
+            return Ok(());
+        };
+        let buffer = buffer_at(self, at);
+        if buffer.memory != Memory::Created || buffer.size != MOUSE_BYTES {
+            return Ok(());
+        }
+        let mut live = [0; MOUSE_BYTES as usize];
+        self.read_bytes(buffer.start, &mut live)?;
+        self.write_bytes(buffer.start, &other.bytes)?;
+        other.bytes = live;
+        let held = &mut self.world.buffers.buffers[at];
+        core::mem::swap(&mut held.insert, &mut other.insert);
+        core::mem::swap(&mut held.remove, &mut other.remove);
+        Ok(())
+    }
+}
+
 /// How big one of the kernel's buffers the manager holds is.
 #[derive(Clone, Copy)]
 enum Size {
@@ -107,7 +148,7 @@ enum Size {
 /// output, the printer's — in the order RISC OS 5 registers them, so their
 /// internal IDs are its; each with its flags and size.
 const SYSTEM: [(u32, u32, Size); 4] = [
-    (MOUSE, flag::INPUT_FULL, Size::Bytes(64)),
+    (MOUSE, flag::INPUT_FULL, Size::Bytes(MOUSE_BYTES)),
     (
         SERIAL_IN,
         flag::INPUT_FULL | flag::UPCALLS,

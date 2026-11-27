@@ -1,6 +1,6 @@
-//! What the kernel's tests share: a host whose clock and input they set, a
-//! session with an application slot, guest code put in it, and ARM code
-//! built with the processor's encoder.
+//! What the kernel's tests share: a host whose clock, input and relays they
+//! set, a session with an application slot, guest code put in it, and ARM
+//! code built with the processor's encoder.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -23,6 +23,16 @@ use crate::vectors;
 /// Input events and the times they arrive.
 type Arrivals = Rc<RefCell<VecDeque<(u64, InputEvent)>>>;
 
+/// How the test host answers relays: every request asked, with its side
+/// and whether it might park, and for each relay that might, in turn,
+/// whether to leave it pending. A request is answered with its bytes
+/// reversed.
+#[derive(Default)]
+pub(crate) struct Relays {
+    pub(crate) asked: Vec<(crate::relay::Side, Vec<u8>, bool)>,
+    pub(crate) pend: VecDeque<bool>,
+}
+
 /// A host whose clock the test sets, whose input arrives when the test
 /// says, and which stops a run once told to.
 struct TestHost {
@@ -32,6 +42,7 @@ struct TestHost {
     /// armed: a test that types a script ends when the script does.
     stop_without_input: Rc<Cell<bool>>,
     input: Arrivals,
+    relays: Rc<RefCell<Relays>>,
     /// The real time at the monotonic clock's nought.
     epoch: u64,
 }
@@ -65,12 +76,20 @@ impl Host for TestHost {
         input.pop_front().map(|(_, event)| event)
     }
 
-    fn relay(&mut self, _request: &[u8], _reply: &mut alloc::vec::Vec<u8>) -> bool {
-        false
-    }
-
-    fn font(&mut self, _request: &[u8], _reply: &mut alloc::vec::Vec<u8>) -> bool {
-        false
+    fn relay(
+        &mut self,
+        side: crate::relay::Side,
+        request: &[u8],
+        reply: &mut alloc::vec::Vec<u8>,
+        parking: bool,
+    ) -> crate::relay::Relayed {
+        let mut relays = self.relays.borrow_mut();
+        relays.asked.push((side, request.to_vec(), parking));
+        if parking && relays.pend.pop_front() == Some(true) {
+            return crate::relay::Relayed::Pending;
+        }
+        reply.extend(request.iter().rev());
+        crate::relay::Relayed::Answered
     }
 
     fn wait(&mut self, until: Option<u64>, _: Ending) -> Pulse {
@@ -94,6 +113,7 @@ pub(crate) struct Session {
     pub(crate) clock: Rc<Cell<u64>>,
     pub(crate) stop_after: Rc<Cell<Option<u32>>>,
     pub(crate) stop_without_input: Rc<Cell<bool>>,
+    pub(crate) relays: Rc<RefCell<Relays>>,
     input: Arrivals,
 }
 
@@ -135,15 +155,32 @@ pub(crate) fn boot_with(
     seconds: u64,
     modules: &'static [&'static crate::module::Builtin],
 ) -> Session {
+    boot_made(layout, zone, seconds, modules, None)
+}
+
+/// A session on `layout` that does `show` before its host waits in place.
+pub(crate) fn boot_showing(layout: &'static Layout, show: crate::os::Show) -> Session {
+    boot_made(layout, tairix_tz::Zone::UTC, 0, &[], Some(show))
+}
+
+fn boot_made(
+    layout: &'static Layout,
+    zone: tairix_tz::Zone<'static>,
+    seconds: u64,
+    modules: &'static [&'static crate::module::Builtin],
+    show: Option<crate::os::Show>,
+) -> Session {
     let clock = Rc::new(Cell::new(0));
     let stop_after = Rc::new(Cell::new(None));
     let stop_without_input = Rc::new(Cell::new(false));
     let input = Rc::new(RefCell::new(VecDeque::new()));
+    let relays = Rc::new(RefCell::new(Relays::default()));
     let host = TestHost {
         clock: Rc::clone(&clock),
         stop_after: Rc::clone(&stop_after),
         stop_without_input: Rc::clone(&stop_without_input),
         input: Rc::clone(&input),
+        relays: Rc::clone(&relays),
         epoch: MILLENNIUM + 100 * seconds,
     };
     let config = Config {
@@ -158,6 +195,7 @@ pub(crate) fn boot_with(
         pressure: &tairix_reclaim::pressure::Unpressured,
         log: &tairix_log::DiscardSink,
         cache_key: tairix_hash::HashSeed::UNKEYED,
+        show,
     };
     let kernel = match Kernel::new(config) {
         Ok(kernel) => kernel,
@@ -168,6 +206,7 @@ pub(crate) fn boot_with(
         clock,
         stop_after,
         stop_without_input,
+        relays,
         input,
     }
 }
@@ -287,6 +326,18 @@ impl Session {
 
     /// Claims `WrchV` with code that keeps every character written.
     pub(crate) fn capture_output(&mut self) {
+        self.capture_here();
+        let (regs, _) = self.user_swi(
+            0x2_001F,
+            [3, CAPTURE_CODE, CAPTURED, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        );
+        assert!(!regs.flag(psr::V), "WrchV claimed");
+    }
+
+    /// [`Session::capture_output`]'s code and store put in the current
+    /// slot, the claim it made left where it is: for a context launched
+    /// after it was made.
+    pub(crate) fn capture_here(&mut self) {
         self.poke(
             CAPTURE_CODE,
             &[
@@ -297,11 +348,6 @@ impl Session {
             ],
         );
         self.poke(CAPTURED, &[CAPTURED + 4]);
-        let (regs, _) = self.user_swi(
-            0x2_001F,
-            [3, CAPTURE_CODE, CAPTURED, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        );
-        assert!(!regs.flag(psr::V), "WrchV claimed");
     }
 
     /// What has been written since [`Session::capture_output`], cleared.

@@ -147,6 +147,15 @@ const ARMV7_CRYPTO: u32 = 0x0000_1120;
 /// CPACR's access fields for coprocessors 10 and 11.
 const VFP_ACCESS: u32 = 0x00F0_0000;
 
+/// What a task keeps of CP15: CONTEXTIDR, TPIDRURW, TPIDRURO and TPIDRPRW,
+/// and CPACR.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Task {
+    context: u32,
+    thread: [u32; 3],
+    access: u32,
+}
+
 /// The coprocessor's state.
 #[derive(Clone, Debug)]
 pub(crate) struct Cp15 {
@@ -215,6 +224,22 @@ impl Cp15 {
     pub(crate) const fn set_simdfp_access(&mut self, field: u32) {
         let field = field & 3;
         self.access = (field << 20 | field << 22) & self.access_mask;
+    }
+
+    /// The registers a task switch saves.
+    pub(crate) const fn task(&self) -> Task {
+        Task {
+            context: self.context,
+            thread: self.thread,
+            access: self.access,
+        }
+    }
+
+    /// The registers a task switch gives back.
+    pub(crate) const fn set_task(&mut self, task: Task) {
+        self.context = task.context;
+        self.thread = task.thread;
+        self.access = task.access & self.access_mask;
     }
 
     /// Records a data abort at `address`.
