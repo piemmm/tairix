@@ -131,10 +131,10 @@ pub use image::{
     ViewDimension, MAX_BYTES_PER_ROW,
 };
 pub use info::{
-    BufferUsage, DeviceInfo, Features, FormatTable, Limits, MemoryHeap, MemoryProperties,
-    MemoryType, QueueCapabilities, QueueFamily, MAX_BINDING_NUMBER, MAX_CAPABILITIES,
-    MAX_MEMORY_HEAPS, MAX_MEMORY_TYPES, MAX_QUEUES_PER_FAMILY, MAX_QUEUE_FAMILIES,
-    MAX_SUBGROUP_SIZE,
+    BufferUsage, DeviceInfo, Features, FormatTable, Granularity, Limits, MemoryHeap,
+    MemoryProperties, MemoryType, QueueCapabilities, QueueFamily, MAX_BINDING_NUMBER,
+    MAX_CAPABILITIES, MAX_GRANULARITY_LOG2, MAX_MEMORY_HEAPS, MAX_MEMORY_TYPES,
+    MAX_QUEUES_PER_FAMILY, MAX_QUEUE_FAMILIES, MAX_SUBGROUP_SIZE,
 };
 pub use memory::MemoryUse;
 pub use objects::{BufferView, Image, ImageView, Sampler};

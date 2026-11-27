@@ -9,8 +9,8 @@ use crate::backend::tests::Test;
 use crate::backend::{Backend, NoPool};
 use crate::command::Command;
 use crate::info::{
-    BufferUsage, DeviceInfo, Features, FormatTable, Limits, MemoryHeap, MemoryProperties,
-    MemoryType, QueueCapabilities, QueueFamily,
+    BufferUsage, DeviceInfo, Features, FormatTable, Granularity, Limits, MemoryHeap,
+    MemoryProperties, MemoryType, QueueCapabilities, QueueFamily,
 };
 use crate::room::Room;
 use crate::{Error, Loss};
@@ -42,6 +42,7 @@ fn info(queues: u32) -> DeviceInfo {
     let _ = queue_families.try_push(QueueFamily {
         capabilities: QueueCapabilities::TRANSFER,
         queues,
+        granularity: Granularity::TEXEL,
     });
     DeviceInfo {
         heaps,
@@ -593,6 +594,7 @@ fn work_a_queue_s_family_does_not_run_is_refused() {
     let _ = families.try_push(QueueFamily {
         capabilities: QueueCapabilities::COMPUTE,
         queues: 1,
+        granularity: Granularity::TEXEL,
     });
     let info = DeviceInfo {
         queue_families: families,

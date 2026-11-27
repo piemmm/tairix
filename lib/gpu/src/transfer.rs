@@ -15,7 +15,7 @@ use crate::command::{buffer, Op};
 use crate::format::Aspects;
 use crate::image::ImageUsage;
 use crate::image::{BufferImageCopy, ClearValue, Extent3d, ImageCopy, ImageRange, Origin3d};
-use crate::info::BufferUsage;
+use crate::info::{BufferUsage, QueueFamily};
 use crate::memory::overlaps;
 use crate::model::{BufferKey, BufferState, ContextState, ImageKey};
 use crate::resource::ImageState;
@@ -332,6 +332,50 @@ pub(crate) fn image_image<B: Backend>(
     })
 }
 
+/// Refuse a transfer a queue of `family` does not run (Vulkan's rules for its
+/// queue families): a colour clear where it neither computes nor draws; a
+/// depth or stencil plane cleared, copied to or from a buffer, or copied
+/// between multisampled images where it does not draw; and an image's side of
+/// a copy off its granularity, or, on a copy engine, a buffer's side off a
+/// whole word.
+pub(crate) fn runs_on<B: Backend>(family: &QueueFamily, op: &Op<B>) -> Result<(), Error> {
+    // A family whose engine draws runs every transfer, a texel at a time.
+    if family.transfers_depth_stencil() {
+        return Ok(());
+    }
+    let refuse = |refused: bool, error: Error| if refused { Err(error) } else { Ok(()) };
+    let on_grid = |image: &ImageState<B>, level: u32, (origin, extent): (Origin3d, Extent3d)| {
+        family
+            .granularity
+            .admits(origin, extent, image.desc.level_extent(level))
+    };
+    match op {
+        Op::ClearImage { image, .. } => refuse(
+            image.desc.format.aspects() != Aspects::COLOR || family.copies_alone(),
+            Error::Unsupported,
+        ),
+        Op::BufferImage { image, regions, .. } => regions.iter().try_for_each(|region| {
+            refuse(region.image.aspect != Aspects::COLOR, Error::Unsupported)?;
+            let worded = !family.copies_alone() || region.buffer_offset.is_multiple_of(4);
+            let placed = on_grid(image, region.image.level, (region.origin, region.extent));
+            refuse(!(worded && placed), Error::Misaligned)
+        }),
+        Op::CopyImage { src, dst, regions } => {
+            let multisampled = src.desc.samples > 1;
+            regions.iter().try_for_each(|region| {
+                refuse(
+                    region.src.aspect != Aspects::COLOR && multisampled,
+                    Error::Unsupported,
+                )?;
+                let placed = on_grid(src, region.src.level, (region.src_origin, region.extent))
+                    && on_grid(dst, region.dst.level, (region.dst_origin, region.extent));
+                refuse(!placed, Error::Misaligned)
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 /// A clear checked whole: a value of the kind the format holds, every range
 /// within the image.
 pub(crate) fn clear<B: Backend>(
@@ -356,3 +400,7 @@ pub(crate) fn clear<B: Backend>(
 #[cfg(test)]
 #[path = "transfer_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "family_tests.rs"]
+mod family_tests;

@@ -18,7 +18,7 @@ use tairix_gpu::{
 };
 use tairix_spirv::{Access, BindingKind, Component};
 
-use super::{Entries, Host, HostState, Object, Offered, Words, SECOND};
+use super::{shared, Entries, Host, HostState, Object, Offered, Words, SECOND};
 use crate::three_d::Context;
 use crate::venus::encode::{
     BufferImageRegion, ImageRegion, Layers, LayoutEntry, SamplerInfo, Subresources, ViewInfo,
@@ -98,6 +98,8 @@ pub(super) struct HostImage {
     pub(super) bound: Option<(u64, u64)>,
     /// Whether it has left the undefined layout for the general one.
     pub(super) general: bool,
+    /// Whether every family of the device uses it at once.
+    pub(super) concurrent: bool,
 }
 
 /// A texel buffer as the renderer keeps it.
@@ -592,8 +594,8 @@ fn subresources(words: &mut Words<'_>) -> Option<Subresources> {
 }
 
 /// The image a create info describes, read from its type to its first
-/// layout.
-fn described(words: &mut Words<'_>) -> Option<HostImage> {
+/// layout, shared as a device of `families` shares it.
+fn described(words: &mut Words<'_>, families: &[u32]) -> Option<HostImage> {
     (words.i32()? == Structure::ImageCreateInfo as i32).then_some(())?;
     let view_formats = listed_formats(words)?;
     let flags = words.u32()?;
@@ -603,10 +605,7 @@ fn described(words: &mut Words<'_>) -> Option<HostImage> {
     let samples = words.u32()?;
     (words.i32()? == image::OPTIMAL).then_some(())?;
     let usage = words.u32()?;
-    // Exclusive, naming no queue family.
-    (words.i32()? == 0).then_some(())?;
-    words.word(0)?;
-    words.is(0)?;
+    let concurrent = shared(words, families)?;
     (words.i32()? == image::UNDEFINED).then_some(())?;
     Some(HostImage {
         flags,
@@ -620,6 +619,7 @@ fn described(words: &mut Words<'_>) -> Option<HostImage> {
         view_formats,
         bound: None,
         general: false,
+        concurrent,
     })
 }
 
@@ -823,7 +823,7 @@ impl Host {
             c if c == Command::CreateImage as i32 => {
                 Self::has(state, context, words.u64()?)?;
                 words.is(1)?;
-                let image = described(words)?;
+                let image = described(words, &state.contexts.get(context)?.families)?;
                 words.is(0)?;
                 words.is(1)?;
                 let id = words.u64()?;
@@ -840,7 +840,7 @@ impl Host {
                 words.is(1)?;
                 words.structure(Structure::DeviceImageMemoryRequirements)?;
                 words.is(1)?;
-                let image = described(words)?;
+                let image = described(words, &state.contexts.get(context)?.families)?;
                 // No plane of a disjoint image.
                 (words.i32()? == 0).then_some(())?;
                 words.is(1)?;

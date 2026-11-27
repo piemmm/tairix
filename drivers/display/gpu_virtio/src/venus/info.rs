@@ -5,10 +5,12 @@
 //!
 //! A host-visible memory type is stated only where it is coherent, since the
 //! renderer maps nothing and flushes nothing; a type of any property the seam
-//! does not name is left out, as is a heap of no bytes. One queue family is
-//! stated, running transfers and dispatches, so the model refuses a draw
-//! before the backend is asked: one running graphics work too where the host
-//! has one, as no other copies or clears depth and stencil. A shader
+//! does not name is left out, as is a heap of no bytes. The family stated
+//! first runs transfers and dispatches, so the model refuses a draw before
+//! the backend is asked: one running graphics work too where the host has
+//! one, as no other copies or clears depth and stencil. Beside it is the
+//! host's copy engine where it has one: a family running transfers alone
+//! (`plans/GPU.md` GD7). A shader
 //! capability other than a subgroup one is stated where the host runs it, and
 //! the feature it needs is enabled, as is each sampler feature stated. A limit the host states is its value, held
 //! to the seam's bound; one it has no counterpart for gates only work the
@@ -32,8 +34,8 @@
 
 use tairix_abi::{DriverError, Duration64};
 use tairix_gpu::{
-    Aspects, DeviceInfo, Features, Format, FormatFeatures, FormatTable, Limits, MemoryHeap,
-    MemoryProperties, MemoryRequirements, MemoryType, QueueCapabilities, QueueFamily,
+    Aspects, DeviceInfo, Features, Format, FormatFeatures, FormatTable, Granularity, Limits,
+    MemoryHeap, MemoryProperties, MemoryRequirements, MemoryType, QueueCapabilities, QueueFamily,
     MAX_BINDING_NUMBER, MAX_CAPABILITIES, MAX_DRAW_VERTEX_BUFFERS, MAX_LOD_BIAS,
     MAX_PASS_ATTACHMENTS, MAX_PUSH_BYTES, MAX_QUEUES_PER_FAMILY, MAX_SUBGROUP_SIZE,
     MAX_VERTEX_ATTRIBUTES,
@@ -43,7 +45,7 @@ use tairix_spirv::enumerant::Capability;
 use tairix_spirv::Version;
 use tairix_util::mathf;
 
-use super::encode::Chained;
+use super::encode::{Chained, Sharing};
 use super::reply::{
     HostExtensions, HostFeatures, HostFormatFeatures, HostImageLimits, HostMemory, HostProperties,
     HostQueueFamily, HostRequirements, RobustAlignments, ASKED, MAX_CHAINED, MAX_CHAINED_MEMBERS,
@@ -427,16 +429,22 @@ impl Enables {
     }
 }
 
+/// The most queue families a Venus device states: the one running
+/// dispatches, and the host's copy engine beside it.
+pub(crate) const STATED_FAMILIES: usize = 2;
+
 /// What a Venus device states, which of the host's memory types and queue
-/// family each stated one is, each format as the host holds it, and what the
-/// device is made with.
+/// families each stated one is, each format as the host holds it, and what
+/// the device is made with.
 #[derive(Clone, Debug)]
 pub(crate) struct Statement {
     pub(crate) info: DeviceInfo,
     /// The host's index of each stated memory type, in order.
     pub(crate) memory_types: ArrayVec<u32, MAX_MEMORY_TYPES>,
-    /// The host's index of the stated queue family.
-    pub(crate) family: u32,
+    /// The host's index of each stated queue family, in order.
+    pub(crate) families: ArrayVec<u32, STATED_FAMILIES>,
+    /// How a buffer or an image is shared among the stated families.
+    pub(crate) sharing: Sharing,
     /// Each of the seam's formats as the host holds it, in
     /// [`Format::ALL`]'s order.
     pub(crate) formats: [HostFormat; Format::ALL.len()],
@@ -710,18 +718,20 @@ pub(crate) fn narrow(host: &HostDevice<'_>) -> Result<Statement, DriverError> {
         .unwrap_or(0);
     let minor = minor_version(properties.api_version);
     let drawing = if graphics { draws(host, minor) } else { None };
-    let capabilities = if drawing.is_some() {
-        QueueCapabilities::ALL
-    } else {
-        QueueCapabilities::TRANSFER.with(QueueCapabilities::COMPUTE)
+    // A family running graphics work reaches depth and stencil whether or not
+    // the seam states its draws.
+    let first = QueueFamily {
+        capabilities: match (graphics, drawing.is_some()) {
+            (_, true) => QueueCapabilities::ALL,
+            (true, false) => QueueCapabilities::TRANSFER
+                .with(QueueCapabilities::COMPUTE)
+                .with(QueueCapabilities::DEPTH_STENCIL),
+            (false, false) => QueueCapabilities::TRANSFER.with(QueueCapabilities::COMPUTE),
+        },
+        queues: queues.min(MAX_QUEUE_RINGS).min(MAX_QUEUES_PER_FAMILY),
+        granularity: Granularity::TEXEL,
     };
-    let mut queue_families = ArrayVec::new();
-    queue_families
-        .try_push(QueueFamily {
-            capabilities,
-            queues: queues.min(MAX_QUEUE_RINGS).min(MAX_QUEUES_PER_FAMILY),
-        })
-        .map_err(full)?;
+    let (queue_families, families) = stated_families(host.families, (family, first))?;
     let (capabilities, features, enables) = runs_and_enables(host, minor, drawing)?;
     let unstated =
         (!states_format_features(properties.api_version, host.extensions)).then(|| Unstated {
@@ -780,13 +790,75 @@ pub(crate) fn narrow(host: &HostDevice<'_>) -> Result<Statement, DriverError> {
             formats: table,
         },
         memory_types: memory.host_types,
-        family: u32::try_from(family).map_err(|_| DriverError::DeviceFault)?,
+        sharing: Sharing::of(&families)?,
+        families,
         formats,
         format_lists: minor >= 2,
         device_requirements: minor >= 3,
         image_granularity: image_granularity(properties.limits.buffer_image_granularity)?,
         rectangular_lines: drawing.is_some_and(|drawing| drawing.rectangular_lines.is_some()),
         enables,
+    })
+}
+
+/// The families a device states, the host's index of each beside it: `first`,
+/// the host's family `index`, then the host's copy engine where it has one.
+fn stated_families(
+    host: &[HostQueueFamily],
+    (index, first): (usize, QueueFamily),
+) -> Result<
+    (
+        ArrayVec<QueueFamily, { tairix_gpu::MAX_QUEUE_FAMILIES }>,
+        ArrayVec<u32, STATED_FAMILIES>,
+    ),
+    DriverError,
+> {
+    let mut stated = ArrayVec::new();
+    let mut indices = ArrayVec::new();
+    stated.try_push(first).map_err(full)?;
+    indices
+        .try_push(u32::try_from(index).map_err(|_| DriverError::DeviceFault)?)
+        .map_err(full)?;
+    if let Some((index, engine)) = copy_engine(host, MAX_QUEUE_RINGS.saturating_sub(first.queues)) {
+        stated.try_push(engine).map_err(full)?;
+        indices.try_push(index).map_err(full)?;
+    }
+    Ok((stated, indices))
+}
+
+/// The host's first copy engine — a family running transfers and nothing
+/// else, with a queue — and how the seam states it: its queues within the
+/// `rings` the family before it leaves and its granularity the host's; none
+/// where there are no rings left or Vulkan's rules make no granularity of
+/// the host's.
+fn copy_engine(families: &[HostQueueFamily], rings: u32) -> Option<(u32, QueueFamily)> {
+    let (index, family) = families.iter().enumerate().find(|(_, family)| {
+        family.flags & queue::TRANSFER != 0
+            && family.flags & !(queue::TRANSFER | queue::SPARSE_BINDING) == 0
+            && family.queues > 0
+    })?;
+    let queues = family.queues.min(rings).min(MAX_QUEUES_PER_FAMILY);
+    let stated = QueueFamily {
+        capabilities: QueueCapabilities::TRANSFER,
+        queues,
+        granularity: granularity(family.granularity)?,
+    };
+    (queues > 0).then_some((u32::try_from(index).ok()?, stated))
+}
+
+/// A host's image transfer granularity as the seam states it: whole levels
+/// for nought, blocks for powers of two along each axis.
+fn granularity(sides: [u32; 3]) -> Option<Granularity> {
+    if sides == [0; 3] {
+        return Some(Granularity::Levels);
+    }
+    let log2 = |side: u32| {
+        side.is_power_of_two()
+            .then(|| u8::try_from(side.trailing_zeros()).ok())
+            .flatten()
+    };
+    Some(Granularity::Blocks {
+        log2: [log2(sides[0])?, log2(sides[1])?, log2(sides[2])?],
     })
 }
 

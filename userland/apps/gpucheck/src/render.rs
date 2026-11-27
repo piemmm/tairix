@@ -25,9 +25,9 @@ use tairix_gpu::{
     ContextDesc, CullMode, DepthStencilAttachment, DepthStencilState, Device, Draw, Error,
     Extent3d, Features, Format, FormatFeatures, FrontFace, Image, ImageDesc, ImageDimension,
     ImageRange, ImageUsage, ImageView, IndexFormat, Indices, Indirect, Load, Multisample, Pass,
-    PipelineLayout, PushConstants, QueueCapabilities, Rasterization, Rect, RenderPipeline,
-    RenderPipelineDesc, ShaderModule, StageDesc, StencilFaceState, StencilOp, Topology,
-    VertexAttribute, VertexBuffer, VertexStep, Viewport, DRAW_RECORD_BYTES,
+    PipelineLayout, PushConstants, QueueCapabilities, QueueFamily, Rasterization, Rect,
+    RenderPipeline, RenderPipelineDesc, ShaderModule, StageDesc, StencilFaceState, StencilOp,
+    Topology, VertexAttribute, VertexBuffer, VertexStep, Viewport, DRAW_RECORD_BYTES,
 };
 use tairix_spirv::enumerant::{
     BuiltIn, Capability, Decoration, ExecutionMode, ExecutionModel, StorageClass,
@@ -35,7 +35,7 @@ use tairix_spirv::enumerant::{
 use tairix_spirv::{Admitted, Arg, BuildError, Builder, Function, Id, Op, Version};
 
 use super::images::{packed, placed, read_back, whole_view};
-use super::{buffer, bytes_of, family, states_uses, submit, Rendered};
+use super::{buffer, bytes_of, family, family_where, states_uses, submit, Rendered};
 
 /// The colour target's format.
 const COLOUR: Format = Format::Rgba8Unorm;
@@ -833,7 +833,10 @@ pub(crate) fn work(device: &Device, near: u32) -> Result<Option<Rendered>, Error
     if !states_uses(device, &USES) {
         return Ok(None);
     }
-    let queues = (near, family(device, QueueCapabilities::TRANSFER)?, graphics);
+    let Ok(transfer) = family_where(device, QueueFamily::transfers_depth_stencil) else {
+        return Ok(None);
+    };
+    let queues = (near, transfer, graphics);
     let context = device.create_context(&ContextDesc::default())?;
     let programs = Programs::new(&context)?;
     let sources = Sources::new(&context, near)?;

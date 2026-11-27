@@ -14,8 +14,8 @@ use tairix_gpu::{
     BufferViewDesc, ClearValue, CompareOp, ComputePipeline, ComputePipelineDesc, Context,
     ContextDesc, DescriptorType, Device, Error, Extent3d, Filter, Format, FormatFeatures, Image,
     ImageCopy, ImageDesc, ImageDimension, ImageRange, ImageSubresource, ImageUsage, ImageView,
-    ImageViewDesc, LayoutBinding, Origin3d, PushConstants, QueueCapabilities, Resource, SampleType,
-    Sampler, SamplerDesc, SamplerType, ViewDimension,
+    ImageViewDesc, LayoutBinding, Origin3d, PushConstants, QueueCapabilities, QueueFamily,
+    Resource, SampleType, Sampler, SamplerDesc, SamplerType, ViewDimension,
 };
 use tairix_spirv::enumerant::{
     BuiltIn, Capability, Decoration, Dim, ExecutionMode, ExecutionModel, ImageFormat,
@@ -26,7 +26,7 @@ use tairix_spirv::{
     Stages, Version,
 };
 
-use super::{buffer, family, in_binding_order, states_uses, submit};
+use super::{buffer, family, family_where, in_binding_order, states_uses, submit};
 
 /// What the work asks of each format it uses, beside copying it.
 const USES: [(Format, FormatFeatures); 4] = [
@@ -55,10 +55,12 @@ const WORDS: u32 = 3;
 /// type `near`; `None` where the device states not every use it makes of
 /// the formats it reads.
 pub(crate) fn work(device: &Device, near: u32) -> Result<Option<Vec<u8>>, Error> {
+    let Ok(transfer) = family_where(device, QueueFamily::transfers_depth_stencil) else {
+        return Ok(None);
+    };
     if !states_uses(device, &USES) {
         return Ok(None);
     }
-    let transfer = family(device, QueueCapabilities::TRANSFER)?;
     let compute = family(device, QueueCapabilities::COMPUTE)?;
     let context = device.create_context(&ContextDesc::default())?;
     let mut left = transfers(&context, (near, transfer))?;

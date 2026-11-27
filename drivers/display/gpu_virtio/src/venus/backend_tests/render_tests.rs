@@ -885,7 +885,7 @@ fn a_record_naming_a_first_instance_loses_its_context_on_a_host_drawing_none() {
             .contains(Unsent::FIRST_INSTANCED),
         "the host never read a record naming a first instance"
     );
-    rig.wait_for(|state| state.contexts.iter().count() == 2);
+    rig.wait_for(|state| state.contexts.iter().count() == 1);
     goes_on(&kept);
     drop((
         commands, pipeline, vertices, named, colour, context, kept, device,

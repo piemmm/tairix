@@ -17,7 +17,7 @@ use tairix_spirv::Component;
 
 use super::super::encode::{
     BufferImageRegion, Encoder, FormatQuery, HostClear, ImageInfo, ImageRegion, Layers,
-    SamplerInfo, Subresources, ViewInfo,
+    SamplerInfo, Sharing, Subresources, ViewInfo,
 };
 use super::super::info::{host_format, HostFormat, Statement};
 use super::super::reply::{HostFormatFeatures, HostImageLimits, Reader};
@@ -224,6 +224,16 @@ fn image_info(
         samples: i32::try_from(desc.samples).map_err(|_| DriverError::OutOfRange)?,
         usage: usage_of(desc.usage),
         view_formats,
+        // Only an image made for copies reaches a copy engine; the rest stay
+        // the first family's, its clear on placing them run there.
+        sharing: if desc
+            .usage
+            .intersects(ImageUsage::TRANSFER_SRC.with(ImageUsage::TRANSFER_DST))
+        {
+            statement.sharing
+        } else {
+            Sharing::default()
+        },
     })
 }
 

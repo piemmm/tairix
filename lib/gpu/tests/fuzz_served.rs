@@ -53,7 +53,7 @@ use tairix_abi::reply::decode_status_reply;
 use tairix_abi::Duration64;
 use tairix_fuzzseed::Prng;
 use tairix_gpu::testing::{Answered, Loopback, Step};
-use tairix_gpu::{AllocationDesc, Attachable, ContextDesc, Device};
+use tairix_gpu::{AllocationDesc, Attachable, ContextDesc, Device, QueueFamily};
 use tairix_parallel::JobRunner;
 
 /// The region each client grants: room for every module the sweeps make.
@@ -73,8 +73,8 @@ const CHANGED_CLOCK_STEP: u64 = 1_000_000_000;
 /// A served software device whose room for contexts is already what two
 /// clients at their bound take, so a round that leaves the heap above where
 /// it starts left something a client made.
-fn loopback(runner: Arc<dyn JobRunner + Send>) -> Arc<Loopback> {
-    let loopback = Loopback::new(MEMORY, runner).expect("a served device");
+fn loopback(runner: Arc<dyn JobRunner + Send>, second: Option<QueueFamily>) -> Arc<Loopback> {
+    let loopback = Loopback::new(MEMORY, runner, second).expect("a served device");
     let device = loopback.device();
     let contexts: Vec<tairix_gpu::Context> = (0..2 * MAX_CLIENT_CONTEXTS)
         .map(|_| {
@@ -87,9 +87,12 @@ fn loopback(runner: Arc<dyn JobRunner + Send>) -> Arc<Loopback> {
     loopback
 }
 
-/// A client of a served device of its own.
-fn served(runner: Arc<dyn JobRunner + Send>) -> Device {
-    loopback(runner).connect(1, REGION).expect("connected")
+/// A client of a served device of its own, stating `second` beside its own
+/// family where given.
+fn served(runner: Arc<dyn JobRunner + Send>, second: Option<QueueFamily>) -> Device {
+    loopback(runner, second)
+        .connect(1, REGION)
+        .expect("connected")
 }
 
 #[test]
@@ -125,6 +128,8 @@ fn served_passes_draws_and_dispatches_agree_with_their_rules_and_their_twins() {
 struct Journal {
     /// The width of the runner the device shared its work across.
     width: usize,
+    /// The family the device stated beside its own, if any.
+    second: Option<QueueFamily>,
     /// Who granted each region, and its bytes, in grant order.
     grants: Vec<(u8, usize)>,
     steps: Vec<Step>,
@@ -133,11 +138,11 @@ struct Journal {
 /// What one served round's clients sent.
 fn journals(rng: &mut Prng) -> Vec<Journal> {
     let loopbacks = RefCell::new(Vec::new());
-    let connect = |runner: Arc<dyn JobRunner + Send>| {
+    let connect = |runner: Arc<dyn JobRunner + Send>, second: Option<QueueFamily>| {
         let width = runner.width();
-        let loopback = loopback(runner);
+        let loopback = loopback(runner, second);
         let client = loopback.connect(1, REGION).expect("connected");
-        loopbacks.borrow_mut().push((width, loopback));
+        loopbacks.borrow_mut().push((width, second, loopback));
         client
     };
     match rng.below(4) {
@@ -148,8 +153,9 @@ fn journals(rng: &mut Prng) -> Vec<Journal> {
     loopbacks
         .into_inner()
         .into_iter()
-        .map(|(width, loopback)| Journal {
+        .map(|(width, second, loopback)| Journal {
             width,
+            second,
             grants: loopback.grants(),
             steps: loopback.take_journal(),
         })
@@ -183,7 +189,7 @@ impl Attachable for Granted {
 fn waiting_session() -> Journal {
     let runner = runner(1);
     let width = runner.width();
-    let loopback = loopback(runner);
+    let loopback = loopback(runner, None);
     {
         let client = loopback.connect(1, REGION).expect("connected");
         let context = client
@@ -217,6 +223,7 @@ fn waiting_session() -> Journal {
     }
     Journal {
         width,
+        second: None,
         grants: loopback.grants(),
         steps: loopback.take_journal(),
     }
@@ -454,10 +461,11 @@ fn send(
 fn replay(rng: &mut Prng, journal: &Journal, tally: &mut Tally, misuse: bool) {
     let Journal {
         width,
+        second,
         ref grants,
         ref steps,
     } = *journal;
-    let loopback = loopback(runner(width));
+    let loopback = loopback(runner(width), second);
     let idle = loopback.heap_taken();
     for &(proc, len) in grants {
         loopback.grant(proc, len);

@@ -141,8 +141,8 @@ mod present {
     use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
     use tairix_abi::window_ipc::{WindowEvent, WindowSizeState, WindowSizing};
     use tairix_abi::Errno;
-    use tairix_gpu::{Context, ContextDesc, Device, Queue, QueueCapabilities, Submission};
-    use tairix_gpucheck::{family, memory_for, software, Scene};
+    use tairix_gpu::{Context, ContextDesc, Device, Queue, Submission};
+    use tairix_gpucheck::{clearing, memory_for, software, Scene};
     use tairix_window::app::{self, RtWindowTransport, Wake};
     use tairix_window::swapchain::{PresentMode, Refused, Swapchain, Waits, WindowSpec};
     use tairix_window::{
@@ -214,10 +214,11 @@ mod present {
         Ok((device, String::from("the software device")))
     }
 
-    /// The first queue of `context`'s device that copies.
-    fn copying(device: &Device, context: &Context) -> Result<Queue, String> {
-        let family = family(device, QueueCapabilities::TRANSFER)
-            .map_err(|_| String::from("the device has no queue that copies"))?;
+    /// The first queue of `context`'s device that clears and copies, as the
+    /// scene is recorded.
+    fn clearing_queue(device: &Device, context: &Context) -> Result<Queue, String> {
+        let family = clearing(device)
+            .map_err(|_| String::from("the device has no queue that clears and copies"))?;
         context
             .queue(family, 0)
             .map_err(|why| format!("the device gave no queue: {why}"))
@@ -414,7 +415,7 @@ mod present {
         let context = device
             .create_context(&ContextDesc::default())
             .map_err(|why| format!("the device gave no context: {why}"))?;
-        let queue = copying(&device, &context)?;
+        let queue = clearing_queue(&device, &context)?;
         let spec = WindowSpec {
             event_endpoint: binding.endpoint(),
             title: TITLE,

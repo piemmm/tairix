@@ -21,7 +21,7 @@ A `Device` is described by a `DeviceInfo`:
 |---|---|
 | `heaps` | pools of memory, each with its size and whether it is the device's own |
 | `memory_types` | the kinds of memory an allocation is made in, each over one heap, with its `MemoryProperties`: device-local, host-visible, host-coherent, host-cached |
-| `queue_families` | sets of queues running one kind of work — `QueueCapabilities::TRANSFER`, `COMPUTE`, `GRAPHICS` — and how many queues of each a context has, at most `MAX_QUEUES_PER_FAMILY` |
+| `queue_families` | sets of queues running one kind of work — `QueueCapabilities::TRANSFER`, `COMPUTE`, `GRAPHICS`, and `DEPTH_STENCIL` for transfers an engine that draws makes of depth and stencil, whether or not the device states its draws — how many queues of each a context has, at most `MAX_QUEUES_PER_FAMILY`, and the least its image copies move (`Granularity`): single texels for any family but a copy engine — one running transfers alone — whose copies move blocks of a power of two along each axis or whole levels |
 | `limits` | the bounds it puts on what is asked of it: the largest allocation, the alignments a buffer and a binding's offset take and the granularity a binding's size takes, image sizes and layers, bind sets, push-constant bytes, binding ranges and texel-buffer elements, workgroup sizes, counts and memory, per-invocation memory, its subgroup size, the longest a submission may run, a render pipeline's vertex attributes, buffers, offsets, strides and stage components, its colour targets, viewports, point sizes and line widths, and the records an indirect draw reads |
 | `capabilities` | the shader capabilities of `lib/spirv`'s allow-list it runs |
 | `spirv_version` | the newest SPIR-V version it takes, 1.3 to the newest `lib/spirv` admits |
@@ -31,7 +31,10 @@ A `Device` is described by a `DeviceInfo`:
 The portable core is what Vulkan 1.1 requires of every device; anything past
 it is a feature a device states, and creation refuses what it has not stated.
 A description with a memory type over a missing heap, an empty heap, a family
-with no queues, too many or no capability, an alignment or size granularity
+with no queues, too many or no capability, a family stating depth and
+stencil without transfers, or drawing and transferring without depth and
+stencil, any family but a copy engine copying more than single texels or a
+block wider than `1 << MAX_GRANULARITY_LOG2`, an alignment or size granularity
 that is not a power of two, binding numbers past `MAX_BINDING_NUMBER`, a
 SPIR-V version older than 1.3 or newer than `lib/spirv` admits, a subgroup
 size that is not a power of two up to `MAX_SUBGROUP_SIZE`,
@@ -46,7 +49,8 @@ machine's memory, a clock, the process's `JobRunner`, what starts its worker
 it runs at, `DEFAULT_SUBGROUP_SIZE` unless the reference is being run at the
 width of a device it is compared with. It has one heap of half the machine's
 memory, one memory type that is every kind at once, and one queue family
-running transfers, dispatches and passes one job at a time. It states every
+running transfers, dispatches and passes one job at a time; it states no copy
+engine, as its one worker would run that family too. It states every
 capability a module may declare, every feature, and every use of each format
 its encoding can mean: a colour format of float or unsigned normalised
 channels renders, blends and resolves, but for the shared-exponent one, which
@@ -387,8 +391,8 @@ Recording checks only that what is named belongs to the context. Everything
 else is checked when a `Submission` carries the buffer to `Queue::submit`,
 **whole and before anything is queued**: every buffer and image is live and
 made for the use, every range is within what it names, no region is empty,
-every command is work the queue's family runs (`Error::Unsupported`), every
-signal advances its timeline, the deadline is neither zero nor past the
+every command is work the queue's family runs (`Error::Unsupported`, below),
+every signal advances its timeline, the deadline is neither zero nor past the
 device's longest, and no fixed bound is passed — `MAX_SUBMISSION_BUFFERS`
 command buffers, `MAX_SUBMISSION_COMMANDS` commands, `MAX_SUBMISSION_POINTS`
 waits and as many signals. A refusal is a `SubmitError` naming the command,
@@ -396,6 +400,20 @@ counted across the submission's command buffers, and changes nothing but the
 room its queues made ahead of it: no byte is written, no signal is queued, no
 fence is used. Nothing is clamped into range. A pass counts as a command and
 each of its draws as another, so a refusal names the draw.
+
+What a family runs is Vulkan's meaning of its capabilities, on every device
+(`plans/GPU.md` GD7). A family running transfers copies between buffers,
+fills and updates. It clears colour where it is no copy engine
+(`QueueFamily::clears_colour`), and copies a depth or stencil plane to or from
+a buffer, copies one between multisampled images, or clears one only where it
+states `DEPTH_STENCIL`, its engine one that draws
+(`QueueFamily::transfers_depth_stencil`); anything else is
+`Error::Unsupported`. A copy engine starts a buffer's side of a copy with an
+image on a whole word, and every family keeps an image's side to its
+`Granularity` — each offset whole blocks, each extent whole blocks too or
+reaching the level's edge, or for whole levels the level itself
+(`Error::Misaligned`). A consumer that queues its uploads and read-backs on a
+copy engine has them run beside the work of the device's other families.
 
 A draw's scissor is held to its pass's area, and its samples to its viewport.
 Its vertex attributes and indices
@@ -1020,17 +1038,18 @@ fill of the whole heap runs far past a deadline.
   reference. One asks the device's verdict of image descriptions of every
   shape and format, places images in memory of their own and beside each
   other, and copies between them and buffers and clears them, every level,
-  layer, place and buffer layout drawn inside, across and past what they
-  name, held to a texel reference and read back whole. One makes bind sets
-  over ranges and views fit and not, and submits dispatches and passes,
-  direct and indirect, their draws direct, indexed and indirect, each sound or
-  carrying faults from a stated catalogue: a refusal is at the first command
-  carrying faults, with one of its refusals, and changes nothing; an admitted
-  submission runs on a device of one participant and on a twin of several
-  drawing each record as the direct draw it names, every byte of the two
-  alike, every buffer byte the reference's, and an image's bytes changed only
-  where a pass renders or a clear writes; and an indirect dispatch's counts
-  past the device's lose the context.
+  layer, place and buffer layout drawn inside, across and past what they name,
+  held to a texel reference and read back whole — half its rounds on a copy
+  engine of a drawn granularity, its rules restated in the reference. One
+  makes bind sets over ranges and views fit and not, and submits dispatches
+  and passes, direct and indirect, their draws direct, indexed and indirect,
+  each sound or carrying faults from a stated catalogue: a refusal is at the
+  first command carrying faults, with one of its refusals, and changes
+  nothing; an admitted submission runs on a device of one participant and on a
+  twin of several drawing each record as the direct draw it names, every byte
+  of the two alike, every buffer byte the reference's, and an image's bytes
+  changed only where a pass renders or a clear writes; and an indirect
+  dispatch's counts past the device's lose the context.
 - `tests/fuzz_shader.rs` (in `cargo xtask fuzz`) generates compute modules the
   validator admits — every scalar kind, vectors, selections and data-dependent
   loops with early breaks, calls, barriers, subgroup operations, and memory
@@ -1060,13 +1079,13 @@ fill of the whole heap runs far past a deadline.
   refused, clients served at once seeing only their own work, and every
   command but a pass fitting the smallest region.
 - `tests/fuzz_served.rs` (in `cargo xtask fuzz`) runs the submission sweeps
-  over a served device against the same references, and sends what a served
-  round's client sent again, changed and by another client: every request is
-  answered once by a reply naming its op, an unchanged journal as it was
-  answered, and the device holds nothing once its clients are gone. A fixed
-  session waiting on its timeline is sent first, whole and then misused, so
-  each run reaches every kind of answer — held, refused, foreign and
-  unframed — whatever it draws. Its
+  over a served device against the same references, a copy engine stated where
+  a round asks for one, and sends what a served round's client sent again,
+  changed and by another client: every request is answered once by a reply
+  naming its op, an unchanged journal as it was answered, and the device holds
+  nothing once its clients are gone. A fixed session waiting on its timeline
+  is sent first, whole and then misused, so each run reaches every kind of
+  answer — held, refused, foreign and unframed — whatever it draws. Its
   loopback runs every request on the caller's thread and adds no `unsafe`, so
   it is left to the ordinary matrix.
 - `cargo xtask miri` interprets the crate's tests and the submission fuzz

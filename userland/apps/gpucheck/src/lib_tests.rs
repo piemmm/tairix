@@ -19,8 +19,8 @@ use tairix_gpu::{
 use tairix_shaders::SET;
 
 use super::{
-    command, compare, family, reference, work, Answer, Command, CommandError, Difference, Refusal,
-    Rendered, DEFAULT_WORDS, MAX_WORDS, PAST_COUNTS,
+    clearing, command, compare, family, reference, work, Answer, Command, CommandError, Difference,
+    Refusal, Rendered, DEFAULT_WORDS, MAX_WORDS, PAST_COUNTS, TRANSFERS,
 };
 
 struct Still;
@@ -209,6 +209,22 @@ fn transferring_first() -> Device {
 }
 
 #[test]
+fn a_clear_is_never_given_a_family_that_transfers_nothing() {
+    let mut info: DeviceInfo = software().info().clone();
+    let every = info.queue_families[0];
+    info.queue_families.clear();
+    for capabilities in [QueueCapabilities::COMPUTE, QueueCapabilities::ALL] {
+        let mut family = every;
+        family.capabilities = capabilities;
+        info.queue_families
+            .try_push(family)
+            .expect("room for two families");
+    }
+    let device = Device::hardware(Transfers, info, &[1, 1], Arc::new(Still)).expect("a device");
+    assert_eq!(clearing(&device), Ok(1));
+}
+
+#[test]
 fn each_step_runs_on_the_first_queue_family_stating_its_work() {
     let device = transferring_first();
     assert_eq!(family(&device, QueueCapabilities::TRANSFER), Ok(0));
@@ -219,6 +235,12 @@ fn each_step_runs_on_the_first_queue_family_stating_its_work() {
         Err(Error::Unsupported)
     );
     let answer = work(&device).expect("every dispatch is submitted to the second family");
+    let families: Vec<u32> = answer.transfers.iter().map(|left| left.family).collect();
+    assert_eq!(
+        families,
+        [0, 1],
+        "the transfers run on every family stating them"
+    );
     for (pinned, left) in SET.iter().zip(&answer.passes) {
         let sample = (pinned.sample)().expect("a sample");
         assert_eq!(*left, sample.buffers, "{} ran, doing nothing", pinned.name);
@@ -417,19 +439,65 @@ fn a_draw_naming_its_first_instance_is_held_to_what_the_device_states() {
 #[test]
 fn the_work_leaves_its_pattern_its_fill_and_both_copied_back() {
     let answer = expected();
-    assert_eq!(&answer.bytes[..4096], super::pattern(4096).as_slice());
-    assert_eq!(&answer.bytes[4096..4100], &0x5a5a_a5a5_u32.to_le_bytes());
+    let [only] = answer.transfers.as_slice() else {
+        panic!("the reference's one family runs the transfers");
+    };
+    let bytes = &only.bytes;
+    assert_eq!(&bytes[..4096], super::pattern(4096).as_slice());
+    assert_eq!(&bytes[4096..4100], &0x5a5a_a5a5_u32.to_le_bytes());
     // Copied out at 400 and back from 0, so the copy begins 400 bytes of
     // zeroes before the pattern.
     let back = 16 << 10;
-    assert!(answer.bytes[back..back + 400].iter().all(|&byte| byte == 0));
+    assert!(bytes[back..back + 400].iter().all(|&byte| byte == 0));
     assert_eq!(
-        &answer.bytes[back + 400..back + 400 + 4096],
+        &bytes[back + 400..back + 400 + 4096],
         super::pattern(4096).as_slice()
     );
-    assert!(
-        answer.refused.is_some(),
-        "a fill past its buffer is refused"
+    assert!(only.refused.is_some(), "a fill past its buffer is refused");
+}
+
+/// A device whose first queue family runs every kind of work and whose
+/// second is a copy engine, stating no format's use beside copying it.
+fn copying_beside() -> Device {
+    let mut info: DeviceInfo = software().info().clone();
+    info.formats = FormatTable::from_fn(|_| FormatFeatures::NONE);
+    let mut engine = info.queue_families[0];
+    engine.capabilities = QueueCapabilities::TRANSFER;
+    info.queue_families
+        .try_push(engine)
+        .expect("room for a copy engine");
+    Device::hardware(Transfers, info, &[1, 1], Arc::new(Still)).expect("a device")
+}
+
+#[test]
+fn the_transfers_run_on_every_family_stating_them_each_held_to_the_reference() {
+    let answer = work(&copying_beside()).expect("the work ran");
+    let held = &expected().transfers[0];
+    let families: Vec<u32> = answer.transfers.iter().map(|left| left.family).collect();
+    assert_eq!(families, [0, 1], "the copy engine among them");
+    for left in &answer.transfers {
+        assert_eq!(
+            (&left.bytes, left.refused),
+            (&held.bytes, held.refused),
+            "family {}",
+            left.family
+        );
+    }
+    let mut copied = answer.clone();
+    copied.transfers[1].bytes[9] ^= 2;
+    let reference = Answer {
+        transfers: alloc::vec![held.clone()],
+        ..answer
+    };
+    assert_eq!(
+        compare(&copied, &reference),
+        Err(Difference::Byte {
+            family: 1,
+            at: 9,
+            device: held.bytes[9] ^ 2,
+            reference: held.bytes[9],
+        }),
+        "the copy engine's difference names it"
     );
 }
 
@@ -589,9 +657,10 @@ fn a_device_running_transfers_alone_is_refused_at_the_first_pass() {
 fn every_difference_is_found_where_it_first_is() {
     let expected = expected();
     let mut byte = expected.clone();
-    byte.bytes[16 << 10] ^= 1;
+    byte.transfers[0].bytes[16 << 10] ^= 1;
     byte.passes[3][0][5] ^= 1;
     let Err(Difference::Byte {
+        family,
         at,
         device,
         reference,
@@ -599,13 +668,17 @@ fn every_difference_is_found_where_it_first_is() {
     else {
         panic!("a byte, the first difference");
     };
-    assert_eq!((at, device ^ reference), (16 << 10, 1));
+    assert_eq!((family, at, device ^ reference), (0, 16 << 10, 1));
 
     let mut refusal = expected.clone();
-    refusal.refused = None;
+    refusal.transfers[0].refused = None;
     assert!(matches!(
         compare(&refusal, &expected),
-        Err(Difference::Refusal { device: None, .. })
+        Err(Difference::Refusal {
+            family: 0,
+            device: None,
+            ..
+        })
     ));
 
     let mut word = expected.clone();
@@ -644,30 +717,54 @@ fn every_difference_is_found_where_it_first_is() {
 }
 
 #[test]
-fn a_difference_reads_as_what_each_device_did() {
-    let refused = expected().refused;
+fn a_refusal_names_its_step_and_a_transfer_difference_its_queue_family() {
+    let refused = expected().transfers[0].refused;
     let text = alloc::format!(
         "{}",
         Difference::Refusal {
+            family: 1,
             device: None,
             reference: refused,
         }
     );
     assert!(
         text.starts_with(
-            "a fill past its buffer was run where the software device's was refused ("
+            "on queue family 1, a fill past its buffer was run where the software device's was refused ("
         ),
         "{text}"
     );
     let byte = Difference::Byte {
+        family: 0,
         at: 7,
         device: 1,
         reference: 0x10,
     };
     assert_eq!(
         alloc::format!("{byte}"),
-        "byte 7 reads 0x01 where the software device left 0x10"
+        "on queue family 0, byte 7 reads 0x01 where the software device left 0x10"
     );
+    let step = Difference::Refused(Refusal {
+        step: PAST_COUNTS,
+        family: None,
+        why: Error::Unsupported,
+    });
+    assert!(
+        alloc::format!("{step}").starts_with("refused a dispatch past the device's counts: "),
+        "{step}"
+    );
+    let on_family = Refusal {
+        step: TRANSFERS,
+        family: Some(1),
+        why: Error::Unsupported,
+    };
+    assert!(
+        alloc::format!("{on_family}").starts_with("the transfers on queue family 1: "),
+        "{on_family}"
+    );
+}
+
+#[test]
+fn a_difference_reads_as_what_each_device_did() {
     let pass = Difference::Pass {
         name: "fill",
         binding: 0,
@@ -733,14 +830,6 @@ fn a_difference_reads_as_what_each_device_did() {
     assert!(
         text.starts_with("a draw naming its first instance was run where it must be answered ("),
         "{text}"
-    );
-    let step = Difference::Refused(Refusal {
-        step: PAST_COUNTS,
-        why: Error::Unsupported,
-    });
-    assert!(
-        alloc::format!("{step}").starts_with("refused a dispatch past the device's counts: "),
-        "{step}"
     );
 }
 

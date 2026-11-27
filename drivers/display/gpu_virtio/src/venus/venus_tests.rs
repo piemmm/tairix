@@ -10,8 +10,8 @@ use tairix_abi::DriverError;
 use super::encode::{
     AttachmentInfo, AttributeInfo, BufferImageRegion, Chained, CopyRegion, DescriptorWrite,
     DrawInfo, Enabled, Encoder, FormatQuery, GraphicsInfo, HostClear, ImageInfo, ImageRegion,
-    Layers, LayoutEntry, RasterInfo, SamplerInfo, StageInfo, StencilInfo, StreamSpan, Subresources,
-    TargetInfo, ViewInfo, Written,
+    Layers, LayoutEntry, RasterInfo, SamplerInfo, Sharing, StageInfo, StencilInfo, StreamSpan,
+    Subresources, TargetInfo, ViewInfo, Written,
 };
 use super::reply::{
     HostExtensions, HostFeatures, HostFormatFeatures, HostImageLimits, HostMemoryHeap,
@@ -276,7 +276,7 @@ fn a_device_is_made_with_its_extensions_and_features_chained() {
     .u64(1)
     .u64(10);
     assert_eq!(
-        encoded(|e| e.create_device(8, 10, (3, 2), &enabled)),
+        encoded(|e| e.create_device(8, 10, &[(3, 2)], &enabled)),
         device.0
     );
 }
@@ -305,7 +305,47 @@ fn a_device_of_no_extension_chains_its_core_features_alone_and_binds_a_queue_to_
     .u64(0)
     .u64(1)
     .u64(10);
-    assert_eq!(encoded(|e| e.create_device(8, 10, (3, 2), &bare)), alone.0);
+    assert_eq!(
+        encoded(|e| e.create_device(8, 10, &[(3, 2)], &bare)),
+        alone.0
+    );
+    let engines = Grammar::default()
+        .command(Command::CreateDevice, true)
+        .u64(8)
+        .u64(1)
+        .i32(Structure::DeviceCreateInfo as i32)
+        .u64(1)
+        .structure(Structure::PhysicalDeviceFeatures2)
+        .booleans(&core)
+        .u32(0)
+        .u32(2)
+        .u64(2)
+        .structure(Structure::DeviceQueueCreateInfo)
+        .u32(0)
+        .u32(3)
+        .u32(2)
+        .u64(2)
+        .f32(1.0)
+        .f32(1.0)
+        .structure(Structure::DeviceQueueCreateInfo)
+        .u32(0)
+        .u32(5)
+        .u32(1)
+        .u64(1)
+        .f32(1.0)
+        .u32(0)
+        .u64(0)
+        .u32(0)
+        .u64(0)
+        .u64(0)
+        .u64(0)
+        .u64(1)
+        .u64(10);
+    assert_eq!(
+        encoded(|e| e.create_device(8, 10, &[(3, 2), (5, 1)], &bare)),
+        engines.0,
+        "a queue of each family"
+    );
     let queue = Grammar::default()
         .command(Command::GetDeviceQueue2, false)
         .u64(10)
@@ -353,8 +393,35 @@ fn memory_and_the_buffer_over_it_are_made_sized_and_bound() {
         .u64(1)
         .u64(13);
     assert_eq!(
-        encoded(|e| e.create_buffer(10, 13, (4096, 0x1ff))),
+        encoded(|e| e.create_buffer(10, 13, (4096, 0x1ff), Sharing::default())),
         buffer.0
+    );
+    let concurrent = Grammar::default()
+        .command(Command::CreateBuffer, true)
+        .u64(10)
+        .u64(1)
+        .structure(Structure::BufferCreateInfo)
+        .u32(0)
+        .u64(4096)
+        .u32(0x1ff)
+        .i32(1)
+        .u32(2)
+        .u64(2)
+        .u32(3)
+        .u32(5)
+        .u64(0)
+        .u64(1)
+        .u64(13);
+    let both = Sharing::of(&[3, 5]).expect("two families");
+    assert_eq!(
+        encoded(|e| e.create_buffer(10, 13, (4096, 0x1ff), both)),
+        concurrent.0,
+        "used by both of the device's families at once"
+    );
+    assert_eq!(
+        Sharing::of(&[3]),
+        Ok(Sharing::default()),
+        "a device of one family has it alone"
     );
     let required = Grammar::default()
         .command(Command::GetBufferMemoryRequirements2, true)
@@ -916,9 +983,10 @@ fn an_image_is_made_with_the_formats_its_views_read_it_as_asked_its_needs_and_bo
         samples: 1,
         usage: 2 | 4,
         view_formats: Some([37, 43]),
+        sharing: Sharing::default(),
     };
-    let made = |grammar: Grammar, flags: u32| {
-        grammar
+    let made = |grammar: Grammar, flags: u32, families: &[u32]| {
+        let described = grammar
             .u32(flags)
             .i32(1)
             .i32(37)
@@ -929,14 +997,17 @@ fn an_image_is_made_with_the_formats_its_views_read_it_as_asked_its_needs_and_bo
             .u32(6)
             .i32(1)
             .i32(0)
-            .u32(2 | 4)
-            .i32(0)
-            .u32(0)
-            .u64(0)
-            .i32(0)
-            .u64(0)
-            .u64(1)
-            .u64(40)
+            .u32(2 | 4);
+        let shared = if families.is_empty() {
+            described.i32(0).u32(0).u64(0)
+        } else {
+            families
+                .iter()
+                .fold(described.i32(1).u32(2).u64(2), |grammar, &family| {
+                    grammar.u32(family)
+                })
+        };
+        shared.i32(0).u64(0).u64(1).u64(40)
     };
     let listed = Grammar::default()
         .command(Command::CreateImage, true)
@@ -952,7 +1023,7 @@ fn an_image_is_made_with_the_formats_its_views_read_it_as_asked_its_needs_and_bo
         .i32(43);
     assert_eq!(
         encoded(|e| e.create_image(10, 40, &info)),
-        made(listed, 8 | 16).0
+        made(listed, 8 | 16, &[]).0
     );
     let alone = Grammar::default()
         .command(Command::CreateImage, true)
@@ -966,7 +1037,16 @@ fn an_image_is_made_with_the_formats_its_views_read_it_as_asked_its_needs_and_bo
     };
     assert_eq!(
         encoded(|e| e.create_image(10, 40, &unlisted)),
-        made(alone, 16).0
+        made(alone.clone(), 16, &[]).0
+    );
+    let shared = ImageInfo {
+        sharing: Sharing::of(&[3, 5]).expect("two families"),
+        ..unlisted
+    };
+    assert_eq!(
+        encoded(|e| e.create_image(10, 40, &shared)),
+        made(alone, 16, &[3, 5]).0,
+        "used by both of the device's families at once"
     );
     let required = Grammar::default()
         .command(Command::GetImageMemoryRequirements2, true)
@@ -1007,6 +1087,7 @@ fn an_image_s_needs_are_asked_of_its_description_before_it_is_made() {
         samples: 1,
         usage: 2 | 4,
         view_formats: Some([37, 43]),
+        sharing: Sharing::default(),
     };
     let asked = Grammar::default()
         .command(Command::GetDeviceImageMemoryRequirements, true)
@@ -1672,11 +1753,17 @@ fn queue_families_are_read() {
         .structure(Structure::QueueFamilyProperties2)
         .u32(7)
         .u32(1)
-        .words(4)
+        .words(1)
+        .u32(1)
+        .u32(1)
+        .u32(1)
         .structure(Structure::QueueFamilyProperties2)
         .u32(4)
         .u32(2)
-        .words(4)
+        .words(1)
+        .u32(8)
+        .u32(4)
+        .u32(0)
         .0;
     let (count, read) = Reader::new(&families).queue_families(2).expect("read");
     assert_eq!(count, 2);
@@ -1685,11 +1772,13 @@ fn queue_families_are_read() {
         &[
             HostQueueFamily {
                 flags: 7,
-                queues: 1
+                queues: 1,
+                granularity: [1; 3]
             },
             HostQueueFamily {
                 flags: 4,
-                queues: 2
+                queues: 2,
+                granularity: [8, 4, 0]
             }
         ]
     );

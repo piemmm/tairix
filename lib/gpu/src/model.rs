@@ -20,7 +20,7 @@ use crate::binding::{BindSetLayoutState, BindSetState, PipelineLayoutState};
 use crate::command::{resolve, Command, Op};
 use crate::device::AllocationDesc;
 use crate::info::{
-    BufferUsage, DeviceInfo, Features, MemoryProperties, QueueCapabilities, MAX_MEMORY_HEAPS,
+    BufferUsage, DeviceInfo, Features, MemoryProperties, QueueFamily, MAX_MEMORY_HEAPS,
     MAX_QUEUE_FAMILIES,
 };
 use crate::memory::{Budget, Charge, Held, MemoryUse};
@@ -1348,12 +1348,13 @@ impl<B: Backend> Model<B> {
                 return Err(Error::TimelineOrder.into());
             }
         }
-        let runs = self
+        let family = self
             .info
             .queue_families
             .get(queue.engine)
-            .map_or(QueueCapabilities::NONE, |family| family.capabilities);
-        resolve_all(&self.info, (context, runs), request.buffers, resolved)?;
+            .copied()
+            .ok_or(Error::NoSuchQueue)?;
+        resolve_all(&self.info, (context, &family), request.buffers, resolved)?;
         let wider = <B::Pool as Pool>::wider;
         let need = resolved
             .iter()
@@ -1872,11 +1873,11 @@ fn lose<B: Backend>(
 }
 
 /// Resolve every command of `buffers` against `context`, each run by a
-/// family running `runs`, into `resolved`: a refusal names the command, a
-/// pass's draws counted after it.
+/// queue of `family`, into `resolved`: a refusal names the command, a pass's
+/// draws counted after it.
 fn resolve_all<B: Backend>(
     info: &DeviceInfo,
-    (context, runs): (&ContextState<B>, QueueCapabilities),
+    (context, family): (&ContextState<B>, &QueueFamily),
     buffers: &[&[Command]],
     resolved: &mut Vec<Op<B>>,
 ) -> Result<(), SubmitError> {
@@ -1888,13 +1889,13 @@ fn resolve_all<B: Backend>(
             command: Some(index.saturating_add(at)),
             error,
         };
-        if !runs.contains(command.needs()) {
+        if !family.capabilities.contains(command.needs()) {
             return Err(refused(0, Error::Unsupported));
         }
-        resolved.push(
-            resolve(info, context, command)
-                .map_err(|refusal| refused(refusal.at, refusal.error))?,
-        );
+        let op = resolve(info, context, command)
+            .map_err(|refusal| refused(refusal.at, refusal.error))?;
+        crate::transfer::runs_on(family, &op).map_err(|error| refused(0, error))?;
+        resolved.push(op);
         index = index.saturating_add(command.count());
     }
     Ok(())

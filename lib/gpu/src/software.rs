@@ -22,8 +22,8 @@ use crate::fair::{Fair, FairGuard};
 use crate::format::Format;
 use crate::image::{BufferViewDesc, ImageDesc, ImageViewDesc};
 use crate::info::{
-    DeviceInfo, Features, FormatTable, Limits, MemoryHeap, MemoryProperties, MemoryType,
-    QueueCapabilities, QueueFamily,
+    DeviceInfo, Features, FormatTable, Granularity, Limits, MemoryHeap, MemoryProperties,
+    MemoryType, QueueCapabilities, QueueFamily,
 };
 use crate::memory::Charge;
 use crate::model::{Model, Woken};
@@ -193,7 +193,9 @@ pub(crate) fn software_shared(
 ) -> Result<Arc<Shared<Software>>, Error> {
     let mut pool = dispatch::Workspaces::new()?;
     pool.set_width(runner.width());
-    let model = Model::new(info, &[1], pool)?;
+    // The one worker runs a job of any engine at a time.
+    let engines = info.engines(1);
+    let model = Model::new(info, &engines, pool)?;
     let wake = crate::shared(Wake::new())?;
     let shared = crate::shared(Shared {
         info: model.info().clone(),
@@ -524,6 +526,7 @@ pub(crate) fn info(total_ram_bytes: u64) -> Result<DeviceInfo, Error> {
             .try_push(QueueFamily {
                 capabilities: QueueCapabilities::ALL,
                 queues: 1,
+                granularity: Granularity::TEXEL,
             })
             .is_ok();
     if filed {

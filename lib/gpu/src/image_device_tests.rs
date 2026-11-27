@@ -41,7 +41,7 @@ pub(crate) fn image(context: &Context, desc: &ImageDesc) -> (crate::Allocation, 
     (allocation, image)
 }
 
-fn whole(aspect: Aspects, layers: u32) -> ImageSubresource {
+pub(crate) const fn whole(aspect: Aspects, layers: u32) -> ImageSubresource {
     ImageSubresource {
         aspect,
         level: 0,

@@ -23,8 +23,10 @@ SH7): every instruction the validator admits, written with the builder into
 kernels — and a draw's fragment stage — whose inputs are words of their
 buffer, each word they leave held to the software device's within the
 precision Vulkan states for the instruction that computed it. Every value is
-one every conforming device defines alike, and each step runs on the first
-queue family stating its kind of work. Two devices agree when they leave the
+one every conforming device defines alike. The transfers run on every queue
+family stating them, a copy engine among them, each held to the software
+device's; every other step runs on the first family running each command it
+records. Two devices agree when they leave the
 same bytes and words, refuse that fill for the same reason, answer those
 draws and that dispatch alike, and leave every word of the corpus within
 what it is held to. A device stating less than a step or a kernel uses is not

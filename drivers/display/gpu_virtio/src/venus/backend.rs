@@ -49,7 +49,7 @@ use super::encode::{
 };
 use super::info::{
     feature_chain, host_format, narrow, states_format_features, HostDevice, Statement,
-    CHECKED_RECORDS,
+    CHECKED_RECORDS, STATED_FAMILIES,
 };
 use super::reply::{HostExtensions, HostFormatFeatures, Reader, MAX_QUEUE_FAMILIES};
 use super::{
@@ -123,7 +123,7 @@ const fn feedback_bytes(checks_records: bool) -> u64 {
     }
 }
 
-/// The jobs the device's one engine runs at once.
+/// The jobs each of the device's engines runs at once.
 pub(crate) const ENGINE_DEPTH: usize = 16;
 
 /// Bounds on the bytes of a job's stream, which the encoder's tests hold its
@@ -162,9 +162,11 @@ mod stream {
     pub(super) const RECORDS: u64 = 640;
 }
 
-// Every job running holds a feedback slot of its own beside the zero-fill's,
-// and the slots held are one word of claims.
-const _: () = assert!(ENGINE_DEPTH < FEEDBACK_SLOTS as usize && FEEDBACK_SLOTS <= u64::BITS);
+// Every job running on every engine holds a feedback slot of its own beside
+// the zero-fill's, and the slots held are one word of claims.
+const _: () = assert!(
+    ENGINE_DEPTH * STATED_FAMILIES < FEEDBACK_SLOTS as usize && FEEDBACK_SLOTS <= u64::BITS
+);
 
 /// `VK_WHOLE_SIZE`: to the end of the buffer.
 const WHOLE_SIZE: u64 = u64::MAX;
@@ -319,7 +321,10 @@ pub(crate) struct VenusContext {
     context: Context,
     /// The resource id of the shared memory, which streams name.
     resource: u32,
-    queues: ArrayVec<u64, { MAX_QUEUE_RINGS as usize }>,
+    /// Each queue, in the device's order, and the stated family it is of.
+    queues: ArrayVec<(u64, usize), { MAX_QUEUE_RINGS as usize }>,
+    /// Each stated family's command pool.
+    pools: ArrayVec<u64, STATED_FAMILIES>,
     shared_memory: Mutex<Option<Mapped>>,
     feedback_memory: Mutex<Option<Mapped>>,
     /// The feedback slots held, a bit each: jobs finish in any order across
@@ -336,7 +341,9 @@ struct ContextState {
     next_id: u64,
     /// The job area's spans with the device.
     spans: RangeMap<u64, ()>,
-    free_commands: Vec<u64>,
+    /// Each stated family's command buffers that ran, to be recorded again:
+    /// no more than its engine's jobs, each holding one at most.
+    free_commands: [ArrayVec<u64, ENGINE_DEPTH>; STATED_FAMILIES],
     /// Work waiting for room in the job area, in the order it came.
     pending: VecDeque<Item>,
     in_flight: usize,
@@ -370,6 +377,19 @@ impl ContextState {
             Admits::Full
         } else {
             Admits::Room
+        }
+    }
+
+    /// A command buffer of family `family`'s pool that ran, to record again.
+    fn reused(&mut self, family: usize) -> Option<u64> {
+        self.free_commands.get_mut(family).and_then(ArrayVec::pop)
+    }
+
+    /// Keep `commands`, of family `family`'s pool, to record again.
+    fn recycle(&mut self, family: usize, commands: u64) {
+        if let Some(free) = self.free_commands.get_mut(family) {
+            // Room for every command buffer its engine's jobs hold.
+            let _ = free.try_push(commands);
         }
     }
 }
@@ -973,8 +993,8 @@ pub(crate) fn device(
 ) -> Result<Device, DriverError> {
     let core = bring_up(desk, shared, threads)?;
     let info = core.statement.info.clone();
-    Device::hardware(VenusDevice(core), info, &[ENGINE_DEPTH], clock)
-        .map_err(|_| DriverError::DeviceFault)
+    let engines = info.engines(ENGINE_DEPTH);
+    Device::hardware(VenusDevice(core), info, &engines, clock).map_err(|_| DriverError::DeviceFault)
 }
 
 /// The host probed and its statement narrowed, the pinned check folded, and
@@ -1163,6 +1183,11 @@ impl VenusContext {
         seq
     }
 
+    /// The stated family queue `queue` is of.
+    fn family_of(&self, queue: usize) -> Option<usize> {
+        self.queues.get(queue).map(|&(_, family)| family)
+    }
+
     /// A feedback slot nothing holds, held until [`Self::release_slot`].
     fn claim_slot(&self) -> Option<u32> {
         let map = core::slice::from_ref(&self.slots);
@@ -1199,7 +1224,11 @@ fn make_context(core: &Arc<Core>) -> Result<VenusContext, DriverError> {
         area: Area::Owned(mapped),
         owner: None,
     };
-    let queues = make_device(core, at)?;
+    let Made {
+        queues,
+        pools,
+        next_id,
+    } = make_device(core, at)?;
     let ask = |commands: &[u8], reply_len| exchange(at, commands, (0, false, reply_len));
     let size = make_feedback(core, &ask)?;
     make_check(&ask, &COUNTS_CHECK, core.counts.admitted().module().bytes())?;
@@ -1214,12 +1243,12 @@ fn make_context(core: &Arc<Core>) -> Result<VenusContext, DriverError> {
     };
     making.mapped(context, spec)?;
     let mut mapped = making.keep().into_iter();
-    let next_id = FIRST_QUEUE + queues.len() as u64;
     Ok(VenusContext {
         core: Arc::clone(core),
         context,
         resource,
         queues,
+        pools,
         shared_memory: Mutex::new(mapped.next()),
         feedback_memory: Mutex::new(mapped.next()),
         slots: AtomicU64::new(1 << UTILITY_SLOT),
@@ -1228,7 +1257,7 @@ fn make_context(core: &Arc<Core>) -> Result<VenusContext, DriverError> {
         state: Mutex::new(ContextState {
             next_id,
             spans: RangeMap::new(),
-            free_commands: Vec::new(),
+            free_commands: Default::default(),
             pending: VecDeque::new(),
             in_flight: 0,
             next_seq: 1,
@@ -1239,19 +1268,34 @@ fn make_context(core: &Arc<Core>) -> Result<VenusContext, DriverError> {
     })
 }
 
+/// A context's queues, in the device's order, each with the stated family it
+/// is of, each stated family's command pool, and the id the context's next
+/// object takes.
+struct Made {
+    queues: ArrayVec<(u64, usize), { MAX_QUEUE_RINGS as usize }>,
+    pools: ArrayVec<u64, STATED_FAMILIES>,
+    next_id: u64,
+}
+
 /// A context's instance, the host's physical device, the device made as the
-/// statement says with its queues, the command pool and the utility command
-/// buffer, made through `at`, whose first exchange points the renderer at the
-/// context's reply area: the queues.
-fn make_device(
-    core: &Core,
-    at: Channel<'_>,
-) -> Result<ArrayVec<u64, { MAX_QUEUE_RINGS as usize }>, DriverError> {
+/// statement says with its queues, each family's command pool and the
+/// utility command buffer, made through `at`, whose first exchange points the
+/// renderer at the context's reply area.
+fn make_device(core: &Core, at: Channel<'_>) -> Result<Made, DriverError> {
     let ask_one = |commands: &Encoder, first: bool, reply_len: usize| {
         exchange(at, commands.as_bytes(), (0, first, reply_len))
     };
-    let family = core.statement.family;
-    let queue_count = core.statement.info.queue_families[0].queues;
+    let statement = &core.statement;
+    let mut families = ArrayVec::<(u32, u32), STATED_FAMILIES>::new();
+    for (&host, stated) in statement
+        .families
+        .iter()
+        .zip(&statement.info.queue_families)
+    {
+        families
+            .try_push((host, stated.queues))
+            .map_err(|_| DriverError::OutOfRange)?;
+    }
     let mut encoder = Encoder::default();
     encoder.create_instance(INSTANCE)?;
     succeeded(
@@ -1270,7 +1314,7 @@ fn make_device(
     encoder.create_device(
         PHYSICAL,
         DEVICE,
-        (family, queue_count),
+        &families,
         &Enabled {
             extensions: &enables.extensions,
             core: &enables.core,
@@ -1282,32 +1326,53 @@ fn make_device(
     )?;
     encoder.clear();
     let mut queues = ArrayVec::new();
-    for index in 0..queue_count {
-        let queue = FIRST_QUEUE + u64::from(index);
-        encoder.get_device_queue2(DEVICE, (family, index), index + 1, queue)?;
-        queues
-            .try_push(queue)
-            .map_err(|_| DriverError::OutOfRange)?;
+    for (family, &(host, count)) in families.iter().enumerate() {
+        for index in 0..count {
+            let slot = queues.len();
+            let queue = FIRST_QUEUE + slot as u64;
+            encoder.get_device_queue2(DEVICE, (host, index), u32::from(ring(slot)?), queue)?;
+            queues
+                .try_push((queue, family))
+                .map_err(|_| DriverError::OutOfRange)?;
+        }
     }
-    encoder.create_command_pool(DEVICE, POOL, (family, RESET_COMMAND_BUFFER))?;
-    succeeded(
-        Reader::new(&ask_one(&encoder, false, SHORT_REPLY)?)
-            .made(Command::CreateCommandPool, POOL)?,
-    )?;
-    encoder.clear();
+    // The first family's pool is the context's own; each other's takes the
+    // ids after the queues'.
+    let mut next_id = FIRST_QUEUE + queues.len() as u64;
+    let mut pools = ArrayVec::new();
+    for (family, &(host, _)) in families.iter().enumerate() {
+        let pool = if family == 0 { POOL } else { next_id };
+        next_id += u64::from(family != 0);
+        encoder.create_command_pool(DEVICE, pool, (host, RESET_COMMAND_BUFFER))?;
+        succeeded(
+            Reader::new(&ask_one(&encoder, false, SHORT_REPLY)?)
+                .made(Command::CreateCommandPool, pool)?,
+        )?;
+        encoder.clear();
+        pools.try_push(pool).map_err(|_| DriverError::OutOfRange)?;
+    }
     encoder.allocate_command_buffers(DEVICE, POOL, &[UTILITY])?;
     succeeded(
         Reader::new(&ask_one(&encoder, false, SHORT_REPLY)?)
             .allocated(Command::AllocateCommandBuffers, &[UTILITY])?,
     )?;
-    Ok(queues)
+    Ok(Made {
+        queues,
+        pools,
+        next_id,
+    })
 }
 
 /// The feedback buffer and the memory it is bound to: the memory's size.
 fn make_feedback(core: &Core, ask: Ask<'_>) -> Result<u64, DriverError> {
     let bytes = feedback_bytes(core.records.is_some());
     let mut encoder = Encoder::default();
-    encoder.create_buffer(DEVICE, FEEDBACK, (bytes, BUFFER_USAGE_ALL))?;
+    encoder.create_buffer(
+        DEVICE,
+        FEEDBACK,
+        (bytes, BUFFER_USAGE_ALL),
+        core.statement.sharing,
+    )?;
     succeeded(
         Reader::new(&ask(encoder.as_bytes(), SHORT_REPLY)?)
             .made(Command::CreateBuffer, FEEDBACK)?,
@@ -1979,7 +2044,12 @@ fn allocate(
         .checked_next_multiple_of(4)
         .ok_or(DriverError::LengthOutOfRange)?;
     let mut encoder = Encoder::default();
-    encoder.create_buffer(DEVICE, buffer, (bytes, BUFFER_USAGE_ALL))?;
+    encoder.create_buffer(
+        DEVICE,
+        buffer,
+        (bytes, BUFFER_USAGE_ALL),
+        core.statement.sharing,
+    )?;
     succeeded(
         Reader::new(&context.exchange(encoder.as_bytes(), 0, SHORT_REPLY)?)
             .made(Command::CreateBuffer, buffer)?,
@@ -2083,7 +2153,7 @@ fn utility(
     context: &VenusContext,
     record: impl FnOnce(&mut Encoder) -> Result<(), DriverError>,
 ) -> Result<(), DriverError> {
-    let queue = *context.queues.first().ok_or(DriverError::DeviceFault)?;
+    let (queue, _) = *context.queues.first().ok_or(DriverError::DeviceFault)?;
     let _utility = context.utility.lock();
     let seq = context.next_seq();
     context.mark(UTILITY_SLOT, !seq)?;
@@ -2130,6 +2200,8 @@ fn queue_job(
     context: &Arc<VenusContext>,
     job: Job<VenusDevice>,
 ) -> Result<(), (Job<VenusDevice>, Loss)> {
+    let placed = context.queues.get(job.queue()).copied();
+    let family = placed.map(|(_, family)| family);
     let (commands, fresh) = {
         let mut state = context.state.lock();
         if state.lost {
@@ -2138,7 +2210,7 @@ fn queue_job(
             drop(job);
             return Ok(());
         }
-        if let Some(commands) = state.free_commands.pop() {
+        if let Some(commands) = family.and_then(|family| state.reused(family)) {
             (commands, false)
         } else {
             let id = state.next_id;
@@ -2149,7 +2221,8 @@ fn queue_job(
     let seq = context.next_seq();
     let slot = context.claim_slot();
     let encoded = slot.ok_or(DriverError::OutOfMemory).and_then(|slot| {
-        let mut parts = encode_job(context, &job, (commands, fresh), (seq, slot))?;
+        let queue = placed.ok_or(DriverError::OutOfRange)?;
+        let mut parts = encode_job(context, (&job, queue), (commands, fresh), (seq, slot))?;
         let next = parts.pop_front().ok_or(DriverError::DeviceFault)?;
         let ring = ring(job.queue())?;
         context.mark(slot, !seq)?;
@@ -2183,8 +2256,8 @@ fn queue_job(
         },
     };
     // Never sent, so the next job may record into it and take its slot.
-    if !fresh && state.free_commands.try_reserve(1).is_ok() {
-        state.free_commands.push(commands);
+    if let (false, Some(family)) = (fresh, family) {
+        state.recycle(family, commands);
     }
     drop(state);
     if let Some(slot) = slot {
@@ -2298,14 +2371,11 @@ fn dispatch_check(
 /// [`PART_MAX`].
 fn encode_job(
     context: &VenusContext,
-    job: &Job<VenusDevice>,
+    (job, (queue, family)): (&Job<VenusDevice>, (u64, usize)),
     (commands, fresh): (u64, bool),
     (seq, slot): (u32, u32),
 ) -> Result<VecDeque<Vec<u8>>, DriverError> {
-    let queue = *context
-        .queues
-        .get(job.queue())
-        .ok_or(DriverError::OutOfRange)?;
+    let pool = *context.pools.get(family).ok_or(DriverError::OutOfRange)?;
     let mut parts = VecDeque::new();
     let mut part = Encoder::default();
     let mut one = Encoder::default();
@@ -2320,7 +2390,7 @@ fn encode_job(
         Ok::<(), DriverError>(())
     };
     if fresh {
-        one.allocate_command_buffers(DEVICE, POOL, &[commands])?;
+        one.allocate_command_buffers(DEVICE, pool, &[commands])?;
     }
     one.begin_command_buffer(commands, ONE_TIME_SUBMIT)?;
     add(&mut one, &mut part)?;
@@ -2627,11 +2697,8 @@ impl Then {
                     && context.reads(finishing.slot, finishing.seq)
                     && context.unfaulted(finishing.slot);
                 context.release_slot(finishing.slot);
-                if ran {
-                    let mut state = context.state.lock();
-                    if state.free_commands.try_reserve(1).is_ok() {
-                        state.free_commands.push(finishing.commands);
-                    }
+                if let (true, Some(family)) = (ran, context.family_of(finishing.job.queue())) {
+                    context.state.lock().recycle(family, finishing.commands);
                 }
                 // Without the context's lock: the model may start the next job.
                 finishing

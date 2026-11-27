@@ -13,10 +13,9 @@ use tairix_gpu::{
     Allocation, AllocationDesc, Aspects, Buffer, BufferDesc, BufferImageCopy, BufferUsage,
     ClearValue, CommandBuffer, Context, ContextDesc, Device, Error, Extent3d, Format, Image,
     ImageCopy, ImageDesc, ImageDimension, ImageRange, ImageSubresource, ImageUsage, Origin3d,
-    QueueCapabilities,
 };
 
-use crate::{family, near, software, submit, REFERENCE_MEMORY};
+use crate::{clearing, near, software, submit, REFERENCE_MEMORY};
 
 /// The ground, as the clear writes it: opaque blue.
 const GROUND: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
@@ -356,11 +355,7 @@ pub fn rendered(
             extent: extent3d(extent.0, extent.1),
         }],
     )?;
-    submit(
-        &context,
-        family(&device, QueueCapabilities::TRANSFER)?,
-        &commands,
-    )?;
+    submit(&context, clearing(&device)?, &commands)?;
     readback_memory.read(0, &mut bytes)?;
     Ok(bytes)
 }

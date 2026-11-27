@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::DriverError;
 
+use super::info::STATED_FAMILIES;
 use super::{
     image, Command, Structure, ACCESS_HOST_READ, ACCESS_MEMORY_READ, ACCESS_MEMORY_WRITE,
     API_VERSION, CORE_FEATURES, MAX_MEMORY_HEAPS, MAX_MEMORY_TYPES, STAGE_ALL_COMMANDS, STAGE_HOST,
@@ -18,6 +19,40 @@ use super::{
 
 /// A queue family index no ownership transfer names.
 const QUEUE_FAMILY_IGNORED: u32 = u32::MAX;
+
+/// `VK_SHARING_MODE_EXCLUSIVE` and `VK_SHARING_MODE_CONCURRENT`.
+const SHARING_EXCLUSIVE: i32 = 0;
+const SHARING_CONCURRENT: i32 = 1;
+
+/// The host's queue families a buffer or an image is used by: one family at
+/// a time where the device states one, else every stated family at once, so
+/// what one writes another reads with no ownership transfer.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Sharing {
+    families: [u32; STATED_FAMILIES],
+    count: usize,
+}
+
+impl Sharing {
+    /// Use by the host's `families`, the device's stated ones.
+    pub(crate) fn of(families: &[u32]) -> Result<Self, DriverError> {
+        let mut sharing = Self::default();
+        if families.len() > 1 {
+            sharing
+                .families
+                .get_mut(..families.len())
+                .ok_or(DriverError::LengthOutOfRange)?
+                .copy_from_slice(families);
+            sharing.count = families.len();
+        }
+        Ok(sharing)
+    }
+
+    /// The families named: none for use by one at a time.
+    fn named(&self) -> &[u32] {
+        self.families.get(..self.count).unwrap_or(&[])
+    }
+}
 
 /// A command's flag asking the renderer to write its reply.
 const GENERATE_REPLY: u32 = 1;
@@ -79,8 +114,8 @@ pub(crate) struct DescriptorWrite {
     pub(crate) written: Written,
 }
 
-/// How an image is made: laid out as the device chooses, used by one queue
-/// family at a time and starting undefined, beside what this names.
+/// How an image is made: laid out as the device chooses and starting
+/// undefined, beside what this names.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ImageInfo {
     pub(crate) flags: u32,
@@ -94,6 +129,7 @@ pub(crate) struct ImageInfo {
     /// Its own format and the other its views may read it as, where the
     /// host takes such a list.
     pub(crate) view_formats: Option<[i32; 2]>,
+    pub(crate) sharing: Sharing,
 }
 
 /// Planes, levels and layers of an image.
@@ -360,6 +396,20 @@ impl Encoder {
         self.u32(u32::try_from(count).map_err(|_| DriverError::LengthOutOfRange)?)
     }
 
+    /// A buffer's or an image's sharing mode and the families it names.
+    fn sharing(&mut self, sharing: Sharing) -> Result<(), DriverError> {
+        let named = sharing.named();
+        if named.is_empty() {
+            self.i32(SHARING_EXCLUSIVE)?;
+            self.u32(0)?;
+            return self.null();
+        }
+        self.i32(SHARING_CONCURRENT)?;
+        self.count32(named.len())?;
+        self.count(named.len())?;
+        named.iter().try_for_each(|&family| self.u32(family))
+    }
+
     /// A string: its length with its terminator, then its bytes and the
     /// terminator, padded to whole granules.
     fn string(&mut self, text: &str) -> Result<(), DriverError> {
@@ -541,13 +591,13 @@ impl Encoder {
         self.count(MAX_MEMORY_HEAPS)
     }
 
-    /// The device `device` of the physical device, with `queues` queues of
-    /// family `family`, no layer, and what `enabled` enables.
+    /// The device `device` of the physical device, with each of `families`'
+    /// queues of its family, no layer, and what `enabled` enables.
     pub(crate) fn create_device(
         &mut self,
         physical: u64,
         device: u64,
-        (family, queues): (u32, u32),
+        families: &[(u32, u32)],
         enabled: &Enabled<'_>,
     ) -> Result<(), DriverError> {
         self.command(Command::CreateDevice, true)?;
@@ -578,14 +628,16 @@ impl Encoder {
                 .try_for_each(|&member| encoder.boolean(member)),
         })?;
         self.u32(0)?;
-        self.u32(1)?;
-        self.count(1)?;
-        self.structure(Structure::DeviceQueueCreateInfo)?;
-        self.u32(0)?;
-        self.u32(family)?;
-        self.u32(queues)?;
-        self.count(queues as usize)?;
-        (0..queues).try_for_each(|_| self.f32(1.0))?;
+        self.count32(families.len())?;
+        self.count(families.len())?;
+        for &(family, queues) in families {
+            self.structure(Structure::DeviceQueueCreateInfo)?;
+            self.u32(0)?;
+            self.u32(family)?;
+            self.u32(queues)?;
+            self.count(queues as usize)?;
+            (0..queues).try_for_each(|_| self.f32(1.0))?;
+        }
         // No layers.
         self.u32(0)?;
         self.null()?;
@@ -653,13 +705,14 @@ impl Encoder {
         self.null()
     }
 
-    /// The buffer `buffer` of `size` bytes, made for `usage`, used by one
-    /// queue family at a time.
+    /// The buffer `buffer` of `size` bytes, made for `usage`, used by its
+    /// `sharing` families.
     pub(crate) fn create_buffer(
         &mut self,
         device: u64,
         buffer: u64,
         (size, usage): (u64, u32),
+        sharing: Sharing,
     ) -> Result<(), DriverError> {
         self.command(Command::CreateBuffer, true)?;
         self.u64(device)?;
@@ -668,9 +721,7 @@ impl Encoder {
         self.u32(0)?;
         self.u64(size)?;
         self.u32(usage)?;
-        self.i32(0)?;
-        self.u32(0)?;
-        self.null()?;
+        self.sharing(sharing)?;
         self.null()?;
         self.present()?;
         self.u64(buffer)
@@ -1210,10 +1261,7 @@ impl Encoder {
         self.i32(info.samples)?;
         self.i32(image::OPTIMAL)?;
         self.u32(info.usage)?;
-        // Exclusive to a queue family at a time, so no family is named.
-        self.i32(0)?;
-        self.u32(0)?;
-        self.null()?;
+        self.sharing(info.sharing)?;
         self.i32(image::UNDEFINED)
     }
 

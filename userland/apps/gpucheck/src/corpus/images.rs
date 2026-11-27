@@ -8,7 +8,8 @@ use alloc::vec::Vec;
 
 use tairix_gpu::{
     Aspects, BufferUsage, ComputePipelineDesc, ContextDesc, DescriptorType, Device, Error, Format,
-    FormatFeatures, ImageDesc, ImageUsage, PushConstants, QueueCapabilities, Resource, SampleType,
+    FormatFeatures, ImageDesc, ImageUsage, PushConstants, QueueCapabilities, QueueFamily, Resource,
+    SampleType,
 };
 use tairix_spirv::enumerant::{
     Capability, Dim, ImageFormat, ImageOperands, MemorySemantics, Scope, StorageClass,
@@ -19,7 +20,7 @@ use tairix_spirv::{
 
 use super::{declare_sampled, exact, layout, op, sampled_bindings, through_buffer, Family, Io};
 use crate::images::{image_type, packed, placed, square, whole_view, Sampled, SampledTypes, SIDE};
-use crate::{buffer, family, in_binding_order, near, states_uses, submit};
+use crate::{buffer, family, family_where, in_binding_order, near, states_uses, submit};
 
 pub(super) const FAMILY: Family =
     Family::compute("the corpus's images", &[Capability::IMAGE_QUERY], images).binding_images();
@@ -290,11 +291,12 @@ pub(super) fn dispatch(
     if !states_uses(device, &USES) {
         return Ok(None);
     }
+    // A depth image is filled from memory.
+    let Ok(transfer) = family_where(device, QueueFamily::transfers_depth_stencil) else {
+        return Ok(None);
+    };
     let near = near(device)?;
-    let (transfer, compute) = (
-        family(device, QueueCapabilities::TRANSFER)?,
-        family(device, QueueCapabilities::COMPUTE)?,
-    );
+    let compute = family(device, QueueCapabilities::COMPUTE)?;
     let context = device.create_context(&ContextDesc::default())?;
     let sampled = Sampled::new(&context, (near, transfer))?;
     let (_storage_memory, storage) = placed(

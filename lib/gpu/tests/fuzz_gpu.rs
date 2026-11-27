@@ -9,7 +9,8 @@
 //! - `images`: images of every shape a description may take, refused or made
 //!   as the device's rules say, and the copies between them and buffers and
 //!   their clears, ranges inside, across and past every level, layer and
-//!   texel, held to a texel reference.
+//!   texel, held to a texel reference — half the rounds on a copy engine of a
+//!   drawn granularity, its family's rules restated.
 //! - `work`: bind sets made over ranges and views both fit and not,
 //!   dispatches and render passes, direct and indirect, their draws direct,
 //!   indexed and indirect, each sound or carrying faults drawn from a stated
@@ -47,7 +48,7 @@ use std::sync::Arc;
 
 use common::{below, draw_word_extent, index_of, sweep, MEMORY};
 use tairix_abi::time::MonotonicClock;
-use tairix_gpu::{Device, NoThreads, SoftwareDesc, DEFAULT_SUBGROUP_SIZE};
+use tairix_gpu::{Device, NoThreads, QueueFamily, SoftwareDesc, DEFAULT_SUBGROUP_SIZE};
 
 /// A clock that never moves: nothing here overruns its deadline.
 struct Still;
@@ -58,15 +59,22 @@ impl MonotonicClock for Still {
     }
 }
 
-/// A software device of [`MEMORY`] sharing its work across `runner`.
-fn software(runner: Arc<dyn tairix_parallel::JobRunner + Send>) -> Device {
-    Device::software(&SoftwareDesc {
-        memory_bytes: MEMORY,
-        clock: Arc::new(Still),
-        runner,
-        threads: &NoThreads,
-        subgroup_size: DEFAULT_SUBGROUP_SIZE,
-    })
+/// A software device of [`MEMORY`] sharing its work across `runner`,
+/// stating `second` beside its own family where given.
+fn software(
+    runner: Arc<dyn tairix_parallel::JobRunner + Send>,
+    second: Option<QueueFamily>,
+) -> Device {
+    match second {
+        None => Device::software(&SoftwareDesc {
+            memory_bytes: MEMORY,
+            clock: Arc::new(Still),
+            runner,
+            threads: &NoThreads,
+            subgroup_size: DEFAULT_SUBGROUP_SIZE,
+        }),
+        Some(_) => tairix_gpu::testing::software(MEMORY, runner, second),
+    }
     .expect("a software device")
 }
 

@@ -522,7 +522,7 @@ fn a_resize_with_no_room_for_its_frames_tells_the_session_nothing() {
 #[test]
 fn a_served_devices_frame_reaches_the_region_its_driver_maps_as_the_image_held_it() {
     let window = Loopback::with_regions(&[(FIRST_GRANT, 2 * FRAME)]);
-    let gpu = ServedGpu::new(1 << 26, Arc::new(Serial)).expect("served");
+    let gpu = ServedGpu::new(1 << 26, Arc::new(Serial), None).expect("served");
     let (device, context, queue) = on(gpu.connect(APP, 1 << 20).expect("connected"));
     let mut client = WindowClient::new(Served {
         window: Rc::clone(&window),

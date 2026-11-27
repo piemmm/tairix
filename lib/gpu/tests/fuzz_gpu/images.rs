@@ -11,8 +11,9 @@ use tairix_abi::Duration64;
 use tairix_fuzzseed::Prng;
 use tairix_gpu::{
     AllocationDesc, Aspects, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, CommandBuffer,
-    ContextDesc, DeviceInfo, Error, Extent3d, Format, FormatFeatures, ImageCopy, ImageDesc,
-    ImageDimension, ImageRange, ImageSubresource, ImageUsage, Origin3d, Submission, SubmitError,
+    ContextDesc, DeviceInfo, Error, Extent3d, Format, FormatFeatures, Granularity, ImageCopy,
+    ImageDesc, ImageDimension, ImageRange, ImageSubresource, ImageUsage, Origin3d,
+    QueueCapabilities, QueueFamily, Submission, SubmitError,
 };
 
 use super::buffers::{self, Shape};
@@ -30,8 +31,10 @@ const DESCRIPTIONS_PER_ROUND: usize = if cfg!(miri) { 6 } else { 40 };
 
 /// The formats of the images the transfers move: integer colours, whose
 /// texels a copy moves byte for byte and a clear writes channel by channel,
-/// each keeping a value's low bits.
-const FORMATS: [Format; 4] = [
+/// each keeping a value's low bits; a byte's texels start a buffer's side of
+/// a copy anywhere, a copy engine refusing it off a whole word.
+const FORMATS: [Format; 5] = [
+    Format::R8Uint,
     Format::R32Uint,
     Format::Rg32Uint,
     Format::Rgba32Uint,
@@ -41,8 +44,48 @@ const FORMATS: [Format; 4] = [
 /// The bits of the channels of `format`, one of [`FORMATS`].
 const fn channel_bits(format: Format) -> u32 {
     match format {
-        Format::Rgba8Uint => 8,
+        Format::R8Uint | Format::Rgba8Uint => 8,
         _ => 32,
+    }
+}
+
+/// A copy engine's granularity: single texels, whole levels, or blocks of up
+/// to eight texels along an axis.
+fn draw_granularity(rng: &mut Prng) -> Granularity {
+    match rng.below(4) {
+        0 => Granularity::TEXEL,
+        1 => Granularity::Levels,
+        _ => {
+            let mut log2 = || u8::try_from(rng.below(4)).unwrap_or(0);
+            Granularity::Blocks {
+                log2: [log2(), log2(), log2()],
+            }
+        }
+    }
+}
+
+/// A queue family's rules for an image copy's region, written out again:
+/// whole levels, or each offset whole blocks and each extent too or reaching
+/// the level's edge.
+fn on_grid(granularity: Granularity, origin: Origin3d, extent: Extent3d, level: Extent3d) -> bool {
+    match granularity {
+        Granularity::Levels => {
+            (origin.x, origin.y, origin.z) == (0, 0, 0)
+                && (extent.width, extent.height, extent.depth)
+                    == (level.width, level.height, level.depth)
+        }
+        Granularity::Blocks { log2 } => [
+            (origin.x, extent.width, level.width),
+            (origin.y, extent.height, level.height),
+            (origin.z, extent.depth, level.depth),
+        ]
+        .iter()
+        .zip(log2)
+        .all(|(&(start, length, edge), log2)| {
+            let block = 1u64 << log2;
+            let (start, length) = (u64::from(start), u64::from(length));
+            start % block == 0 && (length % block == 0 || start + length == u64::from(edge))
+        }),
     }
 }
 
@@ -635,6 +678,8 @@ struct Round {
     info: DeviceInfo,
     context: tairix_gpu::Context,
     queue: tairix_gpu::Queue,
+    /// The family the round's queue is of.
+    family: QueueFamily,
     allocations: Vec<tairix_gpu::Allocation>,
     buffers: Vec<tairix_gpu::Buffer>,
     shapes: Vec<Shape>,
@@ -648,16 +693,25 @@ struct Round {
 
 impl Round {
     fn new(rng: &mut Prng, make: Make<'_>) -> Self {
-        let device = make(Arc::new(tairix_parallel::Serial));
+        // Half the rounds move texels on a copy engine of a drawn granularity.
+        let engine = (rng.below(2) == 0).then(|| QueueFamily {
+            capabilities: QueueCapabilities::TRANSFER,
+            queues: 1,
+            granularity: draw_granularity(rng),
+        });
+        let device = make(Arc::new(tairix_parallel::Serial), engine);
+        let engine = u32::from(engine.is_some());
         let info = device.info().clone();
+        let family = info.queue_families[engine as usize];
         let context = device
             .create_context(&ContextDesc::default())
             .expect("a context");
-        let queue = context.queue(0, 0).expect("the transfer queue");
+        let queue = context.queue(engine, 0).expect("the transfer queue");
         let mut round = Self {
             info,
             context,
             queue,
+            family,
             allocations: Vec::new(),
             buffers: Vec::new(),
             shapes: Vec::new(),
@@ -975,6 +1029,7 @@ impl Round {
                 if self.aliases(*buffer, *image) || twice {
                     return Err(Error::Overlap);
                 }
+                self.on_family(moved)?;
                 if let Some(stored) = &mut levels[*image] {
                     for (from, level, at) in moved_texels(shape, held, regions) {
                         stored[level][at..at + held.texel]
@@ -1000,6 +1055,7 @@ impl Round {
                 if self.aliases(*buffer, *image) || twice {
                     return Err(Error::Overlap);
                 }
+                self.on_family(moved)?;
                 let stored = levels[*image].as_ref().expect("a single-sample image");
                 for (to, level, at) in moved_texels(shape, held, regions) {
                     memories[shape.memory][to..to + held.texel]
@@ -1009,6 +1065,7 @@ impl Round {
             }
             Moved::Between { src, dst, regions } => {
                 self.judge_between((*src, *dst), regions)?;
+                self.on_family(moved)?;
                 self.copy_between(levels, (*src, *dst), regions);
                 Ok(())
             }
@@ -1016,12 +1073,88 @@ impl Round {
                 image,
                 value,
                 ranges,
-            } => clear(&self.held[*image], &mut levels[*image], *value, ranges),
+            } => {
+                // Its own rules first, applying nothing, then its family's.
+                clear(&self.held[*image], &mut None, *value, ranges)?;
+                self.on_family(moved)?;
+                clear(&self.held[*image], &mut levels[*image], *value, ranges)
+            }
             Moved::Buffers(recorded) => {
                 let planned = buffers::judge(memories, &self.shapes, recorded)?;
                 buffers::land(memories, planned);
                 Ok(())
             }
+        }
+    }
+
+    /// The rules of the round's queue family for `moved`, written out again
+    /// (Vulkan's for a family of its capabilities): a colour clear on any but
+    /// a copy engine, a depth or stencil plane cleared, copied with a buffer
+    /// or between multisampled images only on one whose engine draws, a
+    /// buffer's side of a copy on a whole word on a copy engine, and an
+    /// image's side on the family's granularity.
+    fn on_family(&self, moved: &Moved) -> Result<(), Error> {
+        let runs = self.family.capabilities;
+        let reaches = runs.contains(QueueCapabilities::DEPTH_STENCIL);
+        let clears = runs.intersects(
+            QueueCapabilities::COMPUTE
+                .with(QueueCapabilities::GRAPHICS)
+                .with(QueueCapabilities::DEPTH_STENCIL),
+        );
+        let grid = self.family.granularity;
+        let level = |held: &Held, level: u32| held.desc.level_extent(level);
+        match moved {
+            Moved::ToImage { image, regions, .. } | Moved::ToBuffer { image, regions, .. } => {
+                let held = &self.held[*image];
+                for region in regions {
+                    if region.image.aspect != Aspects::COLOR && !reaches {
+                        return Err(Error::Unsupported);
+                    }
+                    let worded = clears || region.buffer_offset % 4 == 0;
+                    let placed = on_grid(
+                        grid,
+                        region.origin,
+                        region.extent,
+                        level(held, region.image.level),
+                    );
+                    if !(worded && placed) {
+                        return Err(Error::Misaligned);
+                    }
+                }
+                Ok(())
+            }
+            Moved::Between { src, dst, regions } => {
+                let (from, into) = (&self.held[*src], &self.held[*dst]);
+                for copy in regions {
+                    if copy.src.aspect != Aspects::COLOR && from.desc.samples > 1 && !reaches {
+                        return Err(Error::Unsupported);
+                    }
+                    let placed = on_grid(
+                        grid,
+                        copy.src_origin,
+                        copy.extent,
+                        level(from, copy.src.level),
+                    ) && on_grid(
+                        grid,
+                        copy.dst_origin,
+                        copy.extent,
+                        level(into, copy.dst.level),
+                    );
+                    if !placed {
+                        return Err(Error::Misaligned);
+                    }
+                }
+                Ok(())
+            }
+            Moved::Clear { image, .. } => {
+                let colour = self.held[*image].desc.format.aspects() == Aspects::COLOR;
+                if (colour && clears) || (!colour && reaches) {
+                    Ok(())
+                } else {
+                    Err(Error::Unsupported)
+                }
+            }
+            Moved::Buffers(_) => Ok(()),
         }
     }
 
@@ -1245,7 +1378,11 @@ impl Round {
             commands
                 .copy_image_to_buffer(image, &buffer, &regions)
                 .expect("recorded");
-            self.queue
+            // On the family running everything: its levels lie back to back,
+            // off the whole words a copy engine starts them on.
+            self.context
+                .queue(0, 0)
+                .expect("the first family's queue")
                 .submit(&Submission {
                     command_buffers: &[&commands],
                     waits: &[],

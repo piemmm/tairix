@@ -246,7 +246,7 @@ fn set_layouts(context: &Context) -> (BindSetLayout, BindSetLayout) {
 
 impl World {
     fn new(runner: Arc<dyn tairix_parallel::JobRunner + Send>, make: Make<'_>) -> Self {
-        let device = make(runner);
+        let device = make(runner, None);
         let context = device
             .create_context(&ContextDesc::default())
             .expect("a context");

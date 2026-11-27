@@ -6,7 +6,7 @@ use tairix_spirv::enumerant::{Capability, Dim, ImageFormat};
 use tairix_spirv::{Access, Component, ImageShape, SpecValue, Stages, Version};
 
 use super::{wire_enum, wire_flags, Reader, Wire, Writer};
-use crate::info::{FormatTable, MemoryHeap, MemoryType, QueueFamily};
+use crate::info::{FormatTable, Granularity, MemoryHeap, MemoryType, QueueFamily};
 use crate::{
     AddressMode, AllocationDesc, Aspects, Blend, BlendFactor, BlendOp, BorderColor, BufferDesc,
     BufferImageCopy, BufferUsage, BufferViewDesc, ClearValue, ColourMask, ColourTarget, CompareOp,
@@ -542,9 +542,25 @@ impl Wire for DepthStencilState {
 
 wire_struct!(MemoryHeap { size, device_local });
 wire_struct!(MemoryType { heap, properties });
+
+impl Wire for Granularity {
+    fn put(&self, writer: &mut Writer<'_>) -> Result<(), Error> {
+        match self {
+            Self::Blocks { log2 } => Some(*log2).put(writer),
+            Self::Levels => None::<[u8; 3]>.put(writer),
+        }
+    }
+
+    fn take(reader: &mut Reader<'_>) -> Result<Self, Error> {
+        Ok(<Option<[u8; 3]> as Wire>::take(reader)?
+            .map_or(Self::Levels, |log2| Self::Blocks { log2 }))
+    }
+}
+
 wire_struct!(QueueFamily {
     capabilities,
-    queues
+    queues,
+    granularity
 });
 wire_struct!(Limits {
     max_allocation_size,

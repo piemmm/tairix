@@ -111,7 +111,7 @@ fn an_attachment_of_no_bytes_or_of_another_device_is_refused() {
 
 #[test]
 fn a_served_device_copies_straight_into_and_out_of_the_region_it_maps() {
-    let loopback = Loopback::new(MEMORY, Arc::new(tairix_parallel::Serial)).expect("served");
+    let loopback = Loopback::new(MEMORY, Arc::new(tairix_parallel::Serial), None).expect("served");
     let device = loopback.connect(1, REGION).expect("connected");
     let context = context(&device);
     let memory = memory(&context, 64);
@@ -145,7 +145,7 @@ fn a_served_device_copies_straight_into_and_out_of_the_region_it_maps() {
 
 #[test]
 fn served_attachments_are_bounded_their_own_and_let_go() {
-    let loopback = Loopback::new(MEMORY, Arc::new(tairix_parallel::Serial)).expect("served");
+    let loopback = Loopback::new(MEMORY, Arc::new(tairix_parallel::Serial), None).expect("served");
     let device = loopback.connect(1, REGION).expect("connected");
     assert_eq!(
         device.attach(vec![0u8; 8]).err(),

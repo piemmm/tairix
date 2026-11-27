@@ -579,20 +579,31 @@ fn drawn_memory(draw: &mut dyn FnMut() -> u64) -> HostMemory {
     memory
 }
 
-/// Queue families a device might state: plausible half the time.
+/// Queue families a device might state: plausible half the time, a copy
+/// engine's granularity among them whole levels, single texels, or blocks a
+/// power of two along each axis, seldom anything else.
 fn drawn_families(draw: &mut dyn FnMut() -> u64) -> Vec<HostQueueFamily> {
     let plausible = draw() & 1 == 0;
     (0..=below(draw, MAX_QUEUE_FAMILIES))
         .map(|_| {
             if plausible {
+                let side = |draw: &mut dyn FnMut() -> u64| 1 << below(draw, 4);
+                let granularity = match below(draw, 8) {
+                    0 => [0; 3],
+                    1 => [side(draw), side(draw), side(draw)],
+                    2 => [3, 1, 1],
+                    _ => [1; 3],
+                };
                 HostQueueFamily {
-                    flags: word(draw) & 0x7,
+                    flags: word(draw) & 0xf,
                     queues: 1 + u32::try_from(below(draw, 4)).unwrap_or(0),
+                    granularity,
                 }
             } else {
                 HostQueueFamily {
                     flags: word(draw),
                     queues: word(draw),
+                    granularity: [word(draw), word(draw), word(draw)],
                 }
             }
         })
@@ -695,11 +706,15 @@ fn queue_families(draw: &mut dyn FnMut() -> u64, made: &mut Vec<Vec<u8>>) -> Vec
                 .u32(counted)
                 .u64(count(families.len())),
             |grammar, family| {
+                let [width, height, depth] = family.granularity;
                 grammar
                     .structure(Structure::QueueFamilyProperties2)
                     .u32(family.flags)
                     .u32(family.queues)
-                    .words(4)
+                    .words(1)
+                    .u32(width)
+                    .u32(height)
+                    .u32(depth)
             },
         )
         .0;
@@ -897,8 +912,8 @@ fn properties(
     made.push(properties);
 }
 
-/// A narrowed statement names the host's own memory types and family, and
-/// the seam takes it.
+/// A narrowed statement names the host's own memory types and families, each
+/// family's queues within the context's rings, and the seam takes it.
 fn check_statement(
     statement: &super::info::Statement,
     memory: &HostMemory,
@@ -912,9 +927,29 @@ fn check_statement(
         .memory_types
         .iter()
         .all(|&host| usize::try_from(host).is_ok_and(|host| host < memory.types.len())));
-    assert!(usize::try_from(statement.family).is_ok_and(|family| family < families.len()));
+    assert_eq!(
+        statement.families.len(),
+        statement.info.queue_families.len()
+    );
+    assert!(statement
+        .families
+        .iter()
+        .all(|&host| usize::try_from(host).is_ok_and(|host| host < families.len())));
+    let queues: u32 = statement
+        .info
+        .queue_families
+        .iter()
+        .map(|family| family.queues)
+        .sum();
+    assert!(queues <= super::MAX_QUEUE_RINGS, "{statement:?}");
     assert!(
-        Device::hardware(Idle, statement.info.clone(), &[1], Arc::new(Still)).is_ok(),
+        Device::hardware(
+            Idle,
+            statement.info.clone(),
+            &statement.info.engines(1),
+            Arc::new(Still)
+        )
+        .is_ok(),
         "a statement the seam refuses: {statement:?}"
     );
 }

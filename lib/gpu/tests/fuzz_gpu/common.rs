@@ -5,10 +5,12 @@
 use std::sync::Arc;
 
 use tairix_fuzzseed::Prng;
-use tairix_gpu::Device;
+use tairix_gpu::{Device, QueueFamily};
 
-/// What makes a round's device, its work shared across a runner.
-pub(crate) type Make<'a> = &'a dyn Fn(Arc<dyn tairix_parallel::JobRunner + Send>) -> Device;
+/// What makes a round's device, its work shared across a runner, stating a
+/// second family beside its own where given.
+pub(crate) type Make<'a> =
+    &'a dyn Fn(Arc<dyn tairix_parallel::JobRunner + Send>, Option<QueueFamily>) -> Device;
 
 /// The machine memory a round's device has: its heap is half of it.
 pub(crate) const MEMORY: u64 = 64 << 20;

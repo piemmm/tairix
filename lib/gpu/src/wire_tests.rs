@@ -8,7 +8,10 @@ use tairix_spirv::enumerant::{Dim, ImageFormat};
 use tairix_spirv::{Access, Component, Disagreement, ImageShape, SpecError, Stages};
 
 use super::{put_error, take_error, Reader, Wire, Writer};
-use crate::{DescriptorType, Error, LayoutBinding, Loss, SampleType, SamplerType};
+use crate::{
+    DescriptorType, Error, Granularity, LayoutBinding, Loss, QueueCapabilities, QueueFamily,
+    SampleType, SamplerType,
+};
 
 /// `value` written, read back whole, and refused from every shorter prefix.
 fn round_trips<T: Wire + PartialEq + Debug + Copy>(value: T) {
@@ -158,4 +161,30 @@ fn every_refusal_crosses_with_its_detail() {
         assert_eq!(take_error(code, &mut reader), Ok(error), "{error:?}");
         reader.finish().expect("nothing left");
     }
+}
+
+#[test]
+fn a_queue_family_crosses_with_its_granularity_and_an_unknown_one_is_refused() {
+    let family = |granularity| QueueFamily {
+        capabilities: QueueCapabilities::TRANSFER,
+        queues: 2,
+        granularity,
+    };
+    for granularity in [
+        Granularity::TEXEL,
+        Granularity::Blocks { log2: [3, 2, 1] },
+        Granularity::Levels,
+    ] {
+        round_trips(family(granularity));
+    }
+    let mut bytes = Vec::new();
+    family(Granularity::Levels)
+        .put(&mut Writer::new(&mut bytes))
+        .expect("written");
+    // The granularity's kind follows the capabilities' and the count's words.
+    bytes[8] = 2;
+    assert_eq!(
+        QueueFamily::take(&mut Reader::new(&bytes)),
+        Err(Error::Malformed)
+    );
 }

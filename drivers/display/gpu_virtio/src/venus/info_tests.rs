@@ -6,8 +6,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::DriverError;
 use tairix_gpu::{
-    Aspects, Device, Features, Format, FormatFeatures, MemoryProperties, QueueCapabilities,
-    MAX_BINDING_NUMBER, MAX_LOD_BIAS, MAX_SUBGROUP_SIZE,
+    Aspects, Device, Features, Format, FormatFeatures, Granularity, MemoryProperties,
+    QueueCapabilities, QueueFamily, MAX_BINDING_NUMBER, MAX_LOD_BIAS, MAX_SUBGROUP_SIZE,
 };
 use tairix_inline::ArrayVec;
 use tairix_spirv::enumerant::Capability;
@@ -129,10 +129,12 @@ fn families() -> [HostQueueFamily; 2] {
         HostQueueFamily {
             flags: 0,
             queues: 4,
+            granularity: [1; 3],
         },
         HostQueueFamily {
             flags: queue::GRAPHICS | queue::COMPUTE | queue::TRANSFER,
             queues: 2,
+            granularity: [1; 3],
         },
     ]
 }
@@ -259,7 +261,7 @@ fn the_host_is_narrowed_to_coherent_memory_and_one_family_running_dispatches() {
         &[2, 4],
         "the host's own indices"
     );
-    assert_eq!(statement.family, 1);
+    assert_eq!(statement.families.as_slice(), &[1]);
     assert_eq!(info.queue_families.len(), 1);
     assert_eq!(
         info.queue_families[0].capabilities,
@@ -557,6 +559,7 @@ fn a_host_the_backend_cannot_serve_or_whose_statement_is_none_is_refused() {
     transfers.families = alloc::vec![HostQueueFamily {
         flags: queue::TRANSFER,
         queues: 2,
+        granularity: [1; 3],
     }];
     assert_eq!(
         refused(&transfers),
@@ -663,6 +666,100 @@ fn a_buffer_s_start_keeps_every_copy_s_texel_where_the_bindings_ask_less() {
     assert_eq!(limits.buffer_alignment, 16, "a four-channel float texel");
 }
 
+/// A host's families as an NVIDIA host states them: one running everything,
+/// two copy engines, compute beside it, and a video engine whose transfers
+/// are its own.
+fn engines() -> Vec<HostQueueFamily> {
+    let family = |flags, queues| HostQueueFamily {
+        flags,
+        queues,
+        granularity: [1; 3],
+    };
+    alloc::vec![
+        family(
+            queue::GRAPHICS | queue::COMPUTE | queue::TRANSFER | queue::SPARSE_BINDING,
+            16
+        ),
+        family(queue::TRANSFER | queue::SPARSE_BINDING, 2),
+        family(queue::COMPUTE | queue::TRANSFER | queue::SPARSE_BINDING, 8),
+        family(queue::TRANSFER | queue::VIDEO_DECODE, 1),
+    ]
+}
+
+#[test]
+fn the_host_s_copy_engine_is_stated_beside_the_family_running_dispatches() {
+    let mut host = Host::every();
+    host.families = engines();
+    let statement = host.narrowed().expect("stated");
+    assert_eq!(statement.families.as_slice(), &[0, 1]);
+    assert_eq!(
+        statement.info.queue_families.as_slice(),
+        &[
+            QueueFamily {
+                capabilities: QueueCapabilities::ALL,
+                queues: 16,
+                granularity: Granularity::TEXEL,
+            },
+            QueueFamily {
+                capabilities: QueueCapabilities::TRANSFER,
+                queues: 2,
+                granularity: Granularity::TEXEL,
+            },
+        ]
+    );
+    host.families.remove(1);
+    assert_eq!(
+        host.narrowed().expect("stated").families.as_slice(),
+        &[0],
+        "a video engine's or a compute family's transfers are not a copy engine's"
+    );
+}
+
+#[test]
+fn a_copy_engine_moves_what_the_host_says_and_has_the_rings_the_first_family_leaves() {
+    let mut host = Host::every();
+    host.families = engines();
+    for (sides, stated) in [
+        ([0; 3], Some(Granularity::Levels)),
+        ([8, 8, 1], Some(Granularity::Blocks { log2: [3, 3, 0] })),
+        ([1; 3], Some(Granularity::TEXEL)),
+        ([3, 1, 1], None),
+        ([0, 1, 1], None),
+    ] {
+        host.families[1].granularity = sides;
+        let statement = host.narrowed().expect("stated");
+        assert_eq!(
+            statement
+                .info
+                .queue_families
+                .get(1)
+                .map(|family| family.granularity),
+            stated,
+            "{sides:?}"
+        );
+    }
+    host.families[1].granularity = [3, 1, 1];
+    host.families.push(HostQueueFamily {
+        flags: queue::TRANSFER,
+        queues: 1,
+        granularity: [1; 3],
+    });
+    assert_eq!(
+        host.narrowed().expect("stated").families.as_slice(),
+        &[0],
+        "the first copy engine or none, never a later one"
+    );
+    host.families.pop();
+    host.families[1].granularity = [1; 3];
+    for (first, second) in [(64, None), (63, None), (62, Some(1)), (61, Some(2))] {
+        host.families[0].queues = first;
+        let statement = host.narrowed().expect("stated");
+        let queues = |family: usize| statement.info.queue_families.get(family).map(|f| f.queues);
+        assert_eq!(queues(0), Some(first.min(63)), "{first} queues");
+        assert_eq!(queues(1), second, "beside {first} queues");
+    }
+}
+
 #[test]
 fn depth_and_stencil_are_stated_only_of_a_family_running_graphics_work_chosen_where_one_is() {
     let mut host = Host::every();
@@ -670,17 +767,23 @@ fn depth_and_stencil_are_stated_only_of_a_family_running_graphics_work_chosen_wh
         HostQueueFamily {
             flags: queue::COMPUTE | queue::TRANSFER,
             queues: 4,
+            granularity: [1; 3],
         },
         HostQueueFamily {
             flags: queue::GRAPHICS | queue::COMPUTE | queue::TRANSFER,
             queues: 2,
+            granularity: [1; 3],
         },
     ];
     let with_graphics = host.narrowed().expect("stated");
-    assert_eq!(with_graphics.family, 1, "the one running graphics work too");
+    assert_eq!(
+        with_graphics.families.as_slice(),
+        &[1],
+        "the one running graphics work too"
+    );
     host.families.truncate(1);
     let compute_only = host.narrowed().expect("stated");
-    assert_eq!(compute_only.family, 0);
+    assert_eq!(compute_only.families.as_slice(), &[0]);
     assert_eq!(
         compute_only.info.queue_families[0].capabilities,
         QueueCapabilities::TRANSFER.with(QueueCapabilities::COMPUTE),
@@ -943,6 +1046,27 @@ fn a_host_stating_1_3_s_format_features_has_a_depth_compared_and_storage_unforma
         .enables
         .extensions
         .contains(&extension::FORMAT_FEATURE_FLAGS2));
+}
+
+#[test]
+fn a_family_running_graphics_work_the_seam_does_not_draw_with_still_reaches_depth_and_stencil() {
+    let statement = older(2, false, true).narrowed().expect("stated");
+    let [first] = statement.info.queue_families.as_slice() else {
+        panic!("one family: {:?}", statement.info.queue_families);
+    };
+    assert_eq!(
+        first.capabilities,
+        QueueCapabilities::TRANSFER
+            .with(QueueCapabilities::COMPUTE)
+            .with(QueueCapabilities::DEPTH_STENCIL),
+        "a host older than Vulkan 1.3 draws nothing the seam states, but its engine draws"
+    );
+    assert!(first.transfers_depth_stencil());
+    assert!(statement
+        .info
+        .formats
+        .get(Format::Depth32Float)
+        .contains(FormatFeatures::SAMPLED));
 }
 
 #[test]

@@ -55,7 +55,9 @@ process sees it.
   backend runs, through `tairix_gpu`'s model, which the runtime hosts for
   every client. Each context is a virtio-gpu context of its own, reaching
   no other's memory, so the GPU exports none, holding a
-  Vulkan instance, device and queues, one shared blob its replies and
+  Vulkan instance, device and queues — the family running dispatches and,
+  where the host has one, its copy engine beside it, every buffer and every
+  image made for copies shared by both — one shared blob its replies and
   commands cross, and a feedback page each job's last command writes its
   number into, in a slot the job holds until the number is read: a retired
   fence alone proves nothing. Memory is zeroed before

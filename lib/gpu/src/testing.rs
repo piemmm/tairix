@@ -18,7 +18,7 @@ use crate::remote::{Link, Remote};
 use crate::serve::{Channel, Region, Server};
 use crate::software::{info, software_shared, Software};
 use crate::wire::ops::ExportToken;
-use crate::{Error, NoThreads};
+use crate::{DeviceInfo, Error, NoThreads, QueueFamily};
 
 /// A clock that moves only when the harness moves it, and by its step at each
 /// reading once given one: a wait's timeout passes when the caller says, and
@@ -41,6 +41,38 @@ impl MonotonicClock for Manual {
             Ok(now) | Err(now) => now,
         }
     }
+}
+
+/// The software device's statement for a machine of `memory` bytes, `second`
+/// stated beside its own family where given: an engine its one worker runs as
+/// it runs the first, so a harness holds a copy engine's rules on a device
+/// that keeps the texels it moves.
+fn stating(memory: u64, second: Option<QueueFamily>) -> Result<DeviceInfo, Error> {
+    let mut stated = info(memory)?;
+    if let Some(second) = second {
+        stated
+            .queue_families
+            .try_push(second)
+            .map_err(|_| Error::Malformed)?;
+    }
+    Ok(stated)
+}
+
+/// The software device of a machine of `memory` bytes, its work shared across
+/// `runner` and run on the thread that readies it, `second` stated beside its
+/// own family where given.
+///
+/// # Errors
+///
+/// The software device's refusal, or [`Error::Malformed`] for a family no
+/// device states.
+pub fn software(
+    memory: u64,
+    runner: Arc<dyn JobRunner + Send>,
+    second: Option<QueueFamily>,
+) -> Result<Device, Error> {
+    let clock = Arc::new(Manual::default());
+    software_shared(stating(memory, second)?, clock, runner, &NoThreads).map(Device::local)
 }
 
 /// One request as a client sent it.
@@ -186,15 +218,20 @@ pub struct Loopback {
 
 impl Loopback {
     /// The software device of a machine of `memory` bytes, its work shared
-    /// across `runner` and run on the thread that readies it, served.
+    /// across `runner` and run on the thread that readies it, `second` stated
+    /// beside its own family where given, served.
     ///
     /// # Errors
     ///
     /// The software device's refusal.
-    pub fn new(memory: u64, runner: Arc<dyn JobRunner + Send>) -> Result<Arc<Self>, Error> {
+    pub fn new(
+        memory: u64,
+        runner: Arc<dyn JobRunner + Send>,
+        second: Option<QueueFamily>,
+    ) -> Result<Arc<Self>, Error> {
         let clock = Arc::new(Manual::default());
         let shared = software_shared(
-            info(memory)?,
+            stating(memory, second)?,
             Arc::clone(&clock) as Arc<dyn MonotonicClock + Send + Sync>,
             runner,
             &NoThreads,

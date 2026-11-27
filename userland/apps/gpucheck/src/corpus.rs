@@ -162,6 +162,7 @@ pub(crate) fn run(device: &Device) -> Result<Vec<Ran>, Refusal> {
         } = family.build().map_err(refusal)?;
         let left = left_by(device, run, &start).map_err(|why| Refusal {
             step: family.name,
+            family: None,
             why,
         })?;
         answers.push(Ran {
@@ -175,7 +176,11 @@ pub(crate) fn run(device: &Device) -> Result<Vec<Ran>, Refusal> {
 }
 
 const fn refusal(why: Error) -> Refusal {
-    Refusal { step: CORPUS, why }
+    Refusal {
+        step: CORPUS,
+        family: None,
+        why,
+    }
 }
 
 /// The words a kernel run as `run` left on `device`, its buffer starting as

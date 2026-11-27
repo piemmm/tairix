@@ -25,9 +25,9 @@ use tairix_abi::{DriverError, Duration64, PAGE_SIZE};
 use tairix_collections::SlotMap;
 use tairix_gpu::{
     AllocationDesc, BindSet, BindSetEntry, BindSetLayout, BufferDesc, BufferUsage,
-    ComputePipelineDesc, ContextDesc, CopyRegion, Device, Error, LayoutBinding, Loss,
-    MemoryProperties, NoThreads, PushConstants, QueueCapabilities, Resource, SoftwareDesc, Spawn,
-    Submission, DEFAULT_SUBGROUP_SIZE, MAX_UPDATE_BYTES,
+    ComputePipelineDesc, ContextDesc, CopyRegion, Device, Error, Granularity, LayoutBinding, Loss,
+    MemoryProperties, NoThreads, PushConstants, QueueCapabilities, QueueFamily, Resource,
+    SoftwareDesc, Spawn, Submission, DEFAULT_SUBGROUP_SIZE, MAX_UPDATE_BYTES,
 };
 use tairix_rt::sync::Mutex;
 use tairix_shaders::compose::fill;
@@ -186,8 +186,11 @@ struct Offered {
     image_extent: u32,
     /// The version of Vulkan it states.
     api_version: u32,
-    /// What its one queue family runs.
+    /// What its first queue family runs.
     family_flags: u32,
+    /// A second family running transfers alone, a copy engine: its queues
+    /// and the least its image copies move.
+    copy_engine: Option<(u32, [u32; 3])>,
     /// The formats, by the host's name, it makes no image of able to be seen
     /// as a cube.
     uncubed: Vec<i32>,
@@ -225,6 +228,7 @@ impl Default for Offered {
             image_extent: 16384,
             api_version: API_VERSION,
             family_flags: queue::GRAPHICS | queue::COMPUTE | queue::TRANSFER,
+            copy_engine: None,
             uncubed: Vec::new(),
             strict_lines: true,
             lacks: Vec::new(),
@@ -397,11 +401,36 @@ enum Object {
     Texels(HostTexels),
 }
 
+/// The queues of the host's first family.
+const FIRST_QUEUES: u32 = 2;
+
+/// The sharing a buffer or an image is made with, whether concurrent: by one
+/// family at a time, or by every one of a device's several `families`.
+fn shared(words: &mut Words<'_>, families: &[u32]) -> Option<bool> {
+    let mode = words.i32()?;
+    let named = words.u32()?;
+    if mode == 0 {
+        (named == 0).then_some(())?;
+        words.is(0)?;
+        return Some(false);
+    }
+    (mode == 1 && families.len() > 1 && named as usize == families.len()).then_some(())?;
+    words.is(u64::from(named))?;
+    families.iter().try_for_each(|&family| words.word(family))?;
+    Some(true)
+}
+
 struct HostContext {
     reply: Option<(u32, u64, u64)>,
     reply_at: u64,
     objects: BTreeMap<u64, Object>,
     dead: bool,
+    /// The families the device was made with.
+    families: Vec<u32>,
+    /// The family each queue, command pool and command buffer is of.
+    family_of: BTreeMap<u64, u32>,
+    /// The rings its queues are bound to, one queue each.
+    rings: Vec<u32>,
 }
 
 struct HostBlob {
@@ -546,6 +575,9 @@ impl Host {
                     reply_at: 0,
                     objects: BTreeMap::new(),
                     dead: false,
+                    families: Vec::new(),
+                    family_of: BTreeMap::new(),
+                    rings: Vec::new(),
                 };
                 Answer::Context(state.contexts.try_insert(context).expect("room"))
             }
@@ -846,6 +878,27 @@ impl Host {
         Some(())
     }
 
+    /// `family`, where the device was made with it.
+    fn family(state: &HostState, context: Context, family: u32) -> Option<u32> {
+        state
+            .contexts
+            .get(context)?
+            .families
+            .contains(&family)
+            .then_some(family)
+    }
+
+    /// Note `id` as of `family`.
+    fn of_family(state: &mut HostState, context: Context, id: u64, family: u32) -> Option<()> {
+        state
+            .contexts
+            .get_mut(context)?
+            .family_of
+            .insert(id, family)
+            .is_none()
+            .then_some(())
+    }
+
     fn has(state: &HostState, context: Context, id: u64) -> Option<()> {
         state
             .contexts
@@ -1027,14 +1080,26 @@ impl Host {
                 for _ in 0..capacity {
                     words.structure(Structure::QueueFamilyProperties2)?;
                 }
-                let read = u64::from(capacity.min(1));
-                let mut reply = Grammar::default().i32(command).u64(1).u32(1).u64(read);
-                for _ in 0..read {
+                let mut families = alloc::vec![(state.offered.family_flags, FIRST_QUEUES, [1; 3])];
+                if let Some((queues, granularity)) = state.offered.copy_engine {
+                    families.push((queue::TRANSFER | queue::SPARSE_BINDING, queues, granularity));
+                }
+                let read = families.len().min(capacity as usize);
+                let counted = u32::try_from(families.len()).ok()?;
+                let mut reply = Grammar::default()
+                    .i32(command)
+                    .u64(1)
+                    .u32(counted)
+                    .u64(read as u64);
+                for &(flags, queues, [width, height, depth]) in &families[..read] {
                     reply = reply
                         .structure(Structure::QueueFamilyProperties2)
-                        .u32(state.offered.family_flags)
-                        .u32(2)
-                        .words(4);
+                        .u32(flags)
+                        .u32(queues)
+                        .words(1)
+                        .u32(width)
+                        .u32(height)
+                        .u32(depth);
                 }
                 Some(reply.0)
             }
@@ -1094,16 +1159,28 @@ impl Host {
                 features.reverse();
                 (features.first()?.0 == Structure::PhysicalDeviceFeatures2 as i32).then_some(())?;
                 words.word(0)?;
-                words.word(1)?;
-                words.is(1)?;
-                words.structure(Structure::DeviceQueueCreateInfo)?;
-                words.word(0)?;
-                words.u32()?;
-                let queues = words.u32()?;
-                words.is(u64::from(queues))?;
-                for _ in 0..queues {
-                    words.u32()?;
+                let count = words.u32()?;
+                words.is(u64::from(count))?;
+                let mut families = Vec::new();
+                for _ in 0..count {
+                    words.structure(Structure::DeviceQueueCreateInfo)?;
+                    words.word(0)?;
+                    let family = words.u32()?;
+                    let queues = words.u32()?;
+                    let offered = match family {
+                        0 => FIRST_QUEUES,
+                        1 => state.offered.copy_engine?.0,
+                        _ => return None,
+                    };
+                    (!families.contains(&family) && (1..=offered).contains(&queues))
+                        .then_some(())?;
+                    words.is(u64::from(queues))?;
+                    for _ in 0..queues {
+                        words.u32()?;
+                    }
+                    families.push(family);
                 }
+                (!families.is_empty()).then_some(())?;
                 words.word(0)?;
                 words.is(0)?;
                 let named = words.u32()?;
@@ -1124,6 +1201,7 @@ impl Host {
                 words.is(1)?;
                 let id = words.u64()?;
                 Self::insert(state, context, id, Object::Device)?;
+                state.contexts.get_mut(context)?.families = families;
                 state.enabled = Some(Enablement {
                     extensions,
                     features,
@@ -1137,13 +1215,16 @@ impl Host {
                 words.is(1)?;
                 words.structure(Structure::DeviceQueueTimelineInfoMesa)?;
                 let ring = words.u32()?;
-                (1..=63).contains(&ring).then_some(())?;
+                let rings = &mut state.contexts.get_mut(context)?.rings;
+                ((1..=63).contains(&ring) && !rings.contains(&ring)).then_some(())?;
+                rings.push(ring);
                 words.u32()?;
-                words.u32()?;
+                let family = Self::family(state, context, words.u32()?)?;
                 words.u32()?;
                 words.is(1)?;
                 let id = words.u64()?;
                 Self::insert(state, context, id, Object::Queue)?;
+                Self::of_family(state, context, id, family)?;
                 None
             }
             c if c == Command::CreateCommandPool as i32 => {
@@ -1151,18 +1232,20 @@ impl Host {
                 words.is(1)?;
                 words.structure(Structure::CommandPoolCreateInfo)?;
                 words.u32()?;
-                words.u32()?;
+                let family = Self::family(state, context, words.u32()?)?;
                 words.is(0)?;
                 words.is(1)?;
                 let id = words.u64()?;
                 Self::insert(state, context, id, Object::Pool)?;
+                Self::of_family(state, context, id, family)?;
                 Some(Self::made(Command::CreateCommandPool, id))
             }
             c if c == Command::AllocateCommandBuffers as i32 => {
                 Self::has(state, context, words.u64()?)?;
                 words.is(1)?;
                 words.structure(Structure::CommandBufferAllocateInfo)?;
-                Self::has(state, context, words.u64()?)?;
+                let pool = words.u64()?;
+                let family = *state.contexts.get(context)?.family_of.get(&pool)?;
                 (words.i32()? == 0).then_some(())?;
                 let count = words.u32()?;
                 words.is(u64::from(count))?;
@@ -1170,6 +1253,7 @@ impl Host {
                 for _ in 0..count {
                     let id = words.u64()?;
                     Self::insert(state, context, id, Object::Commands(Vec::new()))?;
+                    Self::of_family(state, context, id, family)?;
                     reply = reply.u64(id);
                 }
                 Some(reply.0)
@@ -1181,9 +1265,9 @@ impl Host {
                 words.u32()?;
                 let size = words.u64()?;
                 words.u32()?;
-                words.i32()?;
-                (words.u32()? == 0).then_some(())?;
-                words.is(0)?;
+                // Every buffer is made for every use, a copy engine's among them.
+                let families = &state.contexts.get(context)?.families;
+                (shared(words, families)? == (families.len() > 1)).then_some(())?;
                 words.is(0)?;
                 words.is(1)?;
                 let id = words.u64()?;
@@ -1315,7 +1399,8 @@ impl Host {
                 None
             }
             c if c == Command::QueueSubmit as i32 => {
-                Self::has(state, context, words.u64()?)?;
+                let queue = words.u64()?;
+                Self::has(state, context, queue)?;
                 (words.u32()? == 1).then_some(())?;
                 words.is(1)?;
                 words.structure(Structure::SubmitInfo)?;
@@ -1331,6 +1416,13 @@ impl Host {
                 (words.u32()? == 0).then_some(())?;
                 words.is(0)?;
                 words.is(0)?;
+                // A command buffer runs only on a queue of its pool's family.
+                let held = state.contexts.get(context)?;
+                let family = held.family_of.get(&queue)?;
+                buffers
+                    .iter()
+                    .all(|id| held.family_of.get(id) == Some(family))
+                    .then_some(())?;
                 for id in buffers {
                     self.execute(state, context, id)?;
                 }
@@ -2789,18 +2881,18 @@ fn submit_by(
     commands: &tairix_gpu::CommandBuffer,
     deadline: Duration64,
 ) -> Result<(), Error> {
-    queued(context, 0, commands, deadline)?.wait(deadline)
+    queued(context, (0, 0), commands, deadline)?.wait(deadline)
 }
 
-/// `commands` submitted to queue `index` of the context's one family, to end
-/// by `deadline`.
+/// `commands` submitted to queue `index` of the context's family `family`,
+/// to end by `deadline`.
 fn queued(
     context: &tairix_gpu::Context,
-    index: u32,
+    (family, index): (u32, u32),
     commands: &tairix_gpu::CommandBuffer,
     deadline: Duration64,
 ) -> Result<tairix_gpu::Fence, Error> {
-    let queue = context.queue(0, index).expect("a queue");
+    let queue = context.queue(family, index).expect("a queue");
     queue
         .submit(&Submission {
             command_buffers: &[commands],
@@ -2948,6 +3040,16 @@ fn filled(
         })
         .collect();
     bytes_of(&words)
+}
+
+/// Whether a pipeline just made has let its modules and its sets' layouts go,
+/// as it does behind the context's work once made: no module is left.
+fn pipeline_settled(state: &HostState) -> bool {
+    state
+        .contexts
+        .iter()
+        .flat_map(|(_, host)| host.objects.values())
+        .all(|object| !matches!(object, Object::Module(_)))
 }
 
 /// The objects pipelines and sets are made of, across every context.
@@ -3329,6 +3431,7 @@ fn a_pipeline_or_set_the_host_refuses_is_answered_so_and_leaves_nothing_behind()
     rig.misbehave(Misbehaviour::Nothing);
     rig.wait_for(|state| compute_objects(state) == baseline);
     let (pipeline, layout) = pass(&context, fill::SPIRV).expect("a pipeline");
+    rig.wait_for(pipeline_settled);
     let made = compute_objects(&rig.host.state.lock().expect("unpoisoned"));
     rig.misbehave(Misbehaviour::RefuseSets);
     assert!(matches!(
@@ -3433,6 +3536,57 @@ fn copies_fills_and_updates_land_through_device_local_memory() {
         "the device-local memory was zeroed"
     );
     drop((commands, visible, staging, local, deep, context, device));
+    let_go(&rig.finish());
+}
+
+#[test]
+fn a_host_s_copy_engine_runs_the_transfers_queued_on_it_beside_the_first_family() {
+    let rig = Rig::new();
+    rig.offer(|offered| offered.copy_engine = Some((2, [1; 3])));
+    let device = rig.device();
+    assert_eq!(
+        device.info().queue_families.get(1),
+        Some(&QueueFamily {
+            capabilities: QueueCapabilities::TRANSFER,
+            queues: 2,
+            granularity: Granularity::TEXEL,
+        })
+    );
+    let context = context(&device);
+    let (visible, staging) = buffer(&context, 1, 256);
+    let (local, deep) = buffer(&context, 0, 256);
+    visible.write(0, &[7; 64]).expect("written");
+    let mut moved = context.command_buffer();
+    let copy = |src_offset, dst_offset, size| CopyRegion {
+        src_offset,
+        dst_offset,
+        size,
+    };
+    moved
+        .copy_buffer(&staging, &deep, &[copy(0, 0, 64)])
+        .expect("recorded");
+    moved
+        .fill_buffer(&deep, 64, 64, 0x0101_0101)
+        .expect("recorded");
+    moved
+        .copy_buffer(&deep, &staging, &[copy(0, 128, 128)])
+        .expect("recorded");
+    for index in 0..2 {
+        queued(&context, (1, index), &moved, SECOND)
+            .and_then(|fence| fence.wait(SECOND))
+            .expect("run on the copy engine's queue, from its pool");
+    }
+    let mut seen = vec![0u8; 256];
+    visible.read(0, &mut seen).expect("read");
+    assert_eq!(&seen[128..192], &[7; 64]);
+    assert_eq!(&seen[192..], &[1; 64]);
+    let mut cleared = context.command_buffer();
+    cleared.fill_buffer(&staging, 0, 256, 0).expect("recorded");
+    queued(&context, (0, 0), &cleared, SECOND)
+        .and_then(|fence| fence.wait(SECOND))
+        .expect("the first family's queue still runs its own");
+    drop((moved, cleared, visible, staging, local, deep, context));
+    drop(device);
     let_go(&rig.finish());
 }
 
@@ -3551,9 +3705,9 @@ fn a_job_answered_late_keeps_its_slot_while_more_jobs_than_slots_end_on_another_
         .fill_buffer(&quick_target, 0, 64, 0x0606_0606)
         .expect("recorded");
     rig.withhold(super::ring(0).expect("a ring"));
-    let answered_late = queued(&context, 0, &late, SECOND).expect("submitted");
+    let answered_late = queued(&context, (0, 0), &late, SECOND).expect("submitted");
     for _ in 0..FEEDBACK_SLOTS {
-        queued(&context, 1, &quick, SECOND)
+        queued(&context, (0, 1), &quick, SECOND)
             .and_then(|fence| fence.wait(SECOND))
             .expect("another queue's job ran");
     }
@@ -3656,7 +3810,7 @@ fn nothing_joins_the_queue_of_a_context_lost_or_ended() {
     let mut state = ContextState {
         next_id: 1,
         spans: tairix_collections::RangeMap::new(),
-        free_commands: Vec::new(),
+        free_commands: Default::default(),
         pending: VecDeque::new(),
         in_flight: 0,
         next_seq: 0,
@@ -3683,14 +3837,7 @@ fn a_set_whose_making_is_refused_part_way_lets_go_what_was_made() {
         let size = 64 * 4;
         let (memory, surface) = storage(&context, 1, size);
         let (pipeline, layout) = pass(&context, fill::SPIRV).expect("a pipeline");
-        // The module and its set's layout go once the pipeline is made.
-        rig.wait_for(|state| {
-            state
-                .contexts
-                .iter()
-                .flat_map(|(_, host)| host.objects.values())
-                .all(|object| !matches!(object, Object::Module(_)))
-        });
+        rig.wait_for(pipeline_settled);
         let made = compute_objects(&rig.host.state.lock().expect("unpoisoned"));
         rig.host.state.lock().expect("unpoisoned").refuse_submit_in = Some(refused_at);
         assert!(matches!(

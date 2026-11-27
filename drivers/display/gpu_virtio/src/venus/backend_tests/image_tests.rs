@@ -428,6 +428,27 @@ fn an_image_s_memory_is_asked_with_its_making_where_the_host_answers_it_of_its_d
 }
 
 #[test]
+fn only_an_image_made_for_copies_is_shared_with_the_copy_engine() {
+    for engine in [false, true] {
+        let rig = Rig::new();
+        rig.offer(|offered| offered.copy_engine = engine.then_some((2, [1; 3])));
+        let device = rig.device();
+        let context = context(&device);
+        let size = extent(4, 4);
+        let copied = desc(Format::Rgba8Unorm, (size, 1, 1), ImageUsage::TRANSFER_SRC);
+        let sampled = desc(Format::Rgba8Unorm, (size, 1, 1), ImageUsage::SAMPLED);
+        let made = [placed(&context, &copied), placed(&context, &sampled)];
+        let concurrent: Vec<bool> = host_images(&rig)
+            .iter()
+            .map(|image| image.concurrent)
+            .collect();
+        assert_eq!(concurrent, [engine, false], "a copy engine: {engine}");
+        drop((made, context, device));
+        let_go(&rig.finish());
+    }
+}
+
+#[test]
 fn a_host_whose_family_runs_no_graphics_work_makes_no_depth_or_stencil_image() {
     let rig = Rig::new();
     rig.offer(|offered| offered.family_flags = queue::COMPUTE | queue::TRANSFER);

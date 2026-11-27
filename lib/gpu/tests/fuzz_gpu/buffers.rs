@@ -257,7 +257,7 @@ struct Round {
 
 impl Round {
     fn new(rng: &mut Prng, make: Make<'_>) -> Self {
-        let device = make(Arc::new(tairix_parallel::Serial));
+        let device = make(Arc::new(tairix_parallel::Serial), None);
         let context = device
             .create_context(&ContextDesc::default())
             .expect("a context");

@@ -437,10 +437,15 @@ impl<'b> Reader<'b> {
             self.structure(Structure::QueueFamilyProperties2)?;
             let flags = self.u32()?;
             let queues = self.u32()?;
-            // Timestamp bits and the image transfer granularity.
-            self.words(4)?;
+            // Its timestamps' valid bits.
+            self.words(1)?;
+            let granularity = [self.u32()?, self.u32()?, self.u32()?];
             families
-                .try_push(HostQueueFamily { flags, queues })
+                .try_push(HostQueueFamily {
+                    flags,
+                    queues,
+                    granularity,
+                })
                 .map_err(|_| FAULT)?;
         }
         Ok((count, families))
@@ -756,11 +761,13 @@ pub(crate) struct HostLimits {
     pub(crate) standard_sample_locations: bool,
 }
 
-/// A queue family's flags and its queues.
+/// A queue family's flags, its queues, and the least its image copies move
+/// along each axis.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct HostQueueFamily {
     pub(crate) flags: u32,
     pub(crate) queues: u32,
+    pub(crate) granularity: [u32; 3],
 }
 
 /// A memory type's flags and its heap.

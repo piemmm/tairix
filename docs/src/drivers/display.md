@@ -495,8 +495,13 @@ the first marked `ConsoleHost`.
   driving the display. A thread of its own probes
   the host — an instance, its first physical device, its extensions, its
   properties and the granularity it bounds robust accesses at, a queue
-  family taking dispatches, drawing too where one does, its memory types and
-  its features — and states it through `tairix_gpu::Device::hardware`:
+  family taking dispatches, drawing too where one does — its transfers
+  reaching depth and stencil wherever it runs graphics work, whether or not
+  the seam draws there — and beside it the host's first copy engine where it
+  has one, a family running transfers and nothing else, its queues within the
+  rings the first leaves and its image copies at the host's granularity — its
+  memory types and its features — and states it through
+  `tairix_gpu::Device::hardware`:
   transfers, compute and, on a host drawing with the software device's
   meaning, rendering over buffers and images; of each format the uses an
   image, a texel buffer, a sampler, a vertex buffer, an attachment or a
@@ -514,7 +519,8 @@ the first marked `ConsoleHost`.
   bindings or before it wrote it needs both, and the device is made with
   them enabled with the features its capabilities need. Each
   context is a virtio-gpu context of its own holding a Vulkan instance, a
-  device and a queue for each the device states, each on a ring of its own;
+  device and a queue for each the device states, each on a ring of its own,
+  and a command pool for each family, a job's command buffer from its queue's;
   a 256 KiB shared blob holding its reply stream, an exchange area and its
   job stream; and a feedback page. No context reaches another's memory, so
   the device states no `Features::SHARED_MEMORY` and refuses every export.
@@ -523,7 +529,11 @@ the first marked `ConsoleHost`.
   followed by a command naming its object is fatal to the context on the
   host. Memory is one allocation with one buffer over it, zeroed before it
   is answered — host-visible memory, a blob mapped into the region, through
-  the driver's mapping, device-local memory by a fill. A job is one command
+  the driver's mapping, device-local memory by a fill. Where the device states
+  two families every buffer, and every image made for copies, is made for
+  both at once (Vulkan's concurrent sharing), so what one family writes the
+  other reads with no ownership transfer; an image no copy reaches stays the
+  first family's. A job is one command
   buffer, a barrier before each command, its last command writing the job's
   number into a slot of the feedback page; it crosses in parts of at most
   96 KiB, the last on its queue's ring and the rest on ring `0`, and is done

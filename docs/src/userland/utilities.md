@@ -1122,10 +1122,13 @@ dismissed, `1` refused or lost, or a usage error.
 
 `tairix-gpucheck` lists the GPUs drivers serve (the `GPU_DEVICES` query),
 reaches each through `Device::connect`, and runs the same work on it and on a
-software device, each step on the first queue family stating its kind of
-work: a pattern updated into host-visible memory, a fill beside it, both
-copied through memory the device keeps for itself and back, then a fill past
-its buffer that every device must refuse; every pass of the pinned set on its
+software device: a pattern updated into host-visible memory, a fill beside
+it, both copied through memory the device keeps for itself and back, then a
+fill past its buffer that every device must refuse, all on every queue family
+stating transfers, a copy engine among them, each held to the software
+device's; every other step on the first family running each command it
+records — one that draws for transfers reaching depth or stencil, one that
+computes or draws for a colour clear; every pass of the pinned set on its
 sample (`tairix_shaders::SET`); the image work — copies between buffers and
 images and between images, clears of colour, depth and stencil, and a
 dispatch fetching a uniform texel buffer, writing a storage texel buffer and
@@ -1197,7 +1200,9 @@ tairix-gpucheck` holds two software devices to agreement, the image work to
 the values it computes and the render work to a model of Vulkan's rules, a
 device running transfers alone refused at the first pass by name, a device
 whose first family runs transfers alone running its dispatches on the next,
-each kind of difference found where it first is, every corpus family run on
+the transfers run on a copy engine beside a family running everything and
+each held to the software device's, each kind of difference found where it
+first is, a family's named, every corpus family run on
 the software device alike each time with known answers among them held to
 the specification's values, the corpus to every admitted instruction, and
 each of its inputs to answering alike on every device; the Venus verticals hold the virtio-gpu driver's

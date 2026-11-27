@@ -509,7 +509,7 @@ fn images_are_copied_in_and_out_alike() {
 /// never decided against an image the context makes under that key later.
 #[test]
 fn an_upload_copying_out_of_an_image_its_context_lacks_is_refused_as_it_arrives() {
-    let loopback = Loopback::new(MEMORY, Arc::new(tairix_parallel::Serial)).expect("served");
+    let loopback = Loopback::new(MEMORY, Arc::new(tairix_parallel::Serial), None).expect("served");
     // Keys as a fresh context gives its first image and buffer.
     let typed = loopback.connect(2, REGION).expect("connected");
     let theirs = context(&typed);
@@ -749,7 +749,7 @@ fn answer<T: Wire>(answered: &[(u64, Vec<u8>)], ticket: u64, op: GpuOp) -> Resul
 
 #[test]
 fn a_client_that_closes_has_its_held_waits_answered_as_destroyed() {
-    let loopback = Loopback::new(MEMORY, Arc::new(tairix_parallel::Serial)).expect("served");
+    let loopback = Loopback::new(MEMORY, Arc::new(tairix_parallel::Serial), None).expect("served");
     let grant = loopback.grant(1, GPU_REGION_MIN);
     let open = loopback.serve(1, &frame(GpuOp::Open, &ops::Open { grant }));
     assert!(answer::<Empty>(&open.replies, open.ticket, GpuOp::Open).is_ok());

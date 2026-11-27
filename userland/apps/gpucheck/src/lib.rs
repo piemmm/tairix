@@ -4,14 +4,17 @@
 //!
 //! The work is, first, the transfers every device runs: words updated into
 //! host-visible memory, a fill beside them, both copied through memory the
-//! device keeps for itself and back, and a command each device must refuse.
+//! device keeps for itself and back, and a command each device must refuse,
+//! all run on every queue family stating transfers, a copy engine among them.
 //! Then every pass of the pinned set run on its sample; then, on a device
 //! stating the uses it makes of its formats, the image work (`images`) and,
 //! on one that draws, the render work (`render`); and last an indirect
 //! dispatch whose counts are past the device's own, which must lose its
 //! context; and last the differential corpus (`corpus`), every instruction
-//! the validator admits run and held to the software device's answer. Each
-//! step runs on the first queue family stating its kind of work. What each
+//! the validator admits run and held to the software device's answer. Every
+//! other step runs on the first queue family running each command it
+//! records: one that draws for transfers reaching depth or stencil, one that
+//! computes or draws for a colour clear. What each
 //! device leaves in memory, and how it refused, is the answer: two devices
 //! that agree leave the same bytes and words, refuse the same command for
 //! the same reason, and lose the same context.
@@ -54,8 +57,8 @@ use tairix_gpu::{
     Allocation, AllocationDesc, BindSetEntry, BindSetLayout, Buffer, BufferDesc, BufferUsage,
     CommandBuffer, ComputePipeline, ComputePipelineDesc, Context, ContextDesc, CopyRegion,
     DescriptorType, Device, Error, Format, FormatFeatures, LayoutBinding, Limits, Loss,
-    MemoryProperties, NoThreads, PushConstants, QueueCapabilities, Resource, SoftwareDesc,
-    Submission, SubmitError, DEFAULT_SUBGROUP_SIZE,
+    MemoryProperties, NoThreads, PushConstants, QueueCapabilities, QueueFamily, Resource,
+    SoftwareDesc, Submission, SubmitError, DEFAULT_SUBGROUP_SIZE,
 };
 use tairix_shaders::compose::fill;
 use tairix_shaders::{Pinned, Refused, SET};
@@ -199,13 +202,22 @@ const DEADLINE_SECS: i64 = 10;
 /// work's memory and its pipelines with room to spare.
 const REFERENCE_MEMORY: u64 = 16 << 20;
 
-/// What a device answered the work.
+/// What the transfers left on one queue family.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Answer {
-    /// The transfers' host-visible memory, read back once they ran.
+pub struct Transferred {
+    /// The family they ran on.
+    pub family: u32,
+    /// Their host-visible memory, read back once they ran.
     pub bytes: Vec<u8>,
     /// The refusal of a fill past its buffer.
     pub refused: Option<SubmitError>,
+}
+
+/// What a device answered the work.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Answer {
+    /// What the transfers left on each family stating them, in order.
+    pub transfers: Vec<Transferred>,
     /// What each pass of the pinned set left in each of its bindings, in the
     /// set's order.
     pub passes: Vec<Vec<Vec<u32>>>,
@@ -249,13 +261,19 @@ pub struct Refusal {
     /// The transfers, a pass of the pinned set by name, the image work, the
     /// render work, or the dispatch past the device's counts.
     pub step: &'static str,
+    /// The queue family the step ran on, where it runs on each.
+    pub family: Option<u32>,
     /// What the device answered.
     pub why: Error,
 }
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.step, self.why)
+        f.write_str(self.step)?;
+        if let Some(family) = self.family {
+            write!(f, " on queue family {family}")?;
+        }
+        write!(f, ": {}", self.why)
     }
 }
 
@@ -270,9 +288,11 @@ const PAST_COUNTS: &str = "a dispatch past the device's counts";
 pub enum Difference {
     /// The device refused a step of the work, where the reference ran it.
     Refused(Refusal),
-    /// A byte of the transfers' memory differs: its offset, the device's and
-    /// the reference's.
+    /// A byte of the transfers' memory differs: the family they ran on, the
+    /// byte's offset, the device's and the reference's.
     Byte {
+        /// The family the transfers ran on.
+        family: u32,
         /// Its offset into the host-visible memory.
         at: usize,
         /// What the device left there.
@@ -282,6 +302,8 @@ pub enum Difference {
     },
     /// The command both must refuse was refused differently, or not at all.
     Refusal {
+        /// The family it was submitted to.
+        family: u32,
         /// The device's refusal.
         device: Option<SubmitError>,
         /// The reference's.
@@ -372,15 +394,20 @@ impl fmt::Display for Difference {
         match self {
             Self::Refused(refusal) => write!(f, "refused {refusal}"),
             Self::Byte {
+                family,
                 at,
                 device,
                 reference,
             } => write!(
                 f,
-                "byte {at} reads {device:#04x} where the software device left {reference:#04x}"
+                "on queue family {family}, byte {at} reads {device:#04x} where the software device left {reference:#04x}"
             ),
-            Self::Refusal { device, reference } => {
-                f.write_str("a fill past its buffer was ")?;
+            Self::Refusal {
+                family,
+                device,
+                reference,
+            } => {
+                write!(f, "on queue family {family}, a fill past its buffer was ")?;
                 write_answer(f, device.as_ref())?;
                 f.write_str(" where the software device's was ")?;
                 write_answer(f, reference.as_ref())
@@ -579,11 +606,25 @@ fn bytes_of(words: &[u32]) -> Vec<u8> {
 ///
 /// [`Error::Unsupported`] where none states it.
 pub fn family(device: &Device, work: QueueCapabilities) -> Result<u32, Error> {
+    family_where(device, |family| family.capabilities.contains(work))
+}
+
+/// The first queue family of `device` that clears colour: one that computes
+/// or draws.
+///
+/// # Errors
+///
+/// [`Error::Unsupported`] where none does.
+pub fn clearing(device: &Device) -> Result<u32, Error> {
+    family_where(device, QueueFamily::clears_colour)
+}
+
+fn family_where(device: &Device, runs: impl Fn(&QueueFamily) -> bool) -> Result<u32, Error> {
     device
         .info()
         .queue_families
         .iter()
-        .position(|family| family.capabilities.contains(work))
+        .position(runs)
         .and_then(|index| u32::try_from(index).ok())
         .ok_or(Error::Unsupported)
 }
@@ -605,7 +646,11 @@ fn submit(context: &Context, family: u32, commands: &CommandBuffer) -> Result<()
 
 /// A refusal, named for the work's step `step`.
 fn at(step: &'static str) -> impl Fn(Error) -> Refusal {
-    move |why| Refusal { step, why }
+    move |why| Refusal {
+        step,
+        family: None,
+        why,
+    }
 }
 
 /// Run the work on `device`.
@@ -615,7 +660,20 @@ fn at(step: &'static str) -> impl Fn(Error) -> Refusal {
 /// The step the device refused that every device must run, and why.
 pub fn work(device: &Device) -> Result<Answer, Refusal> {
     let near = near(device).map_err(at(TRANSFERS))?;
-    let (bytes, refused) = transfers(device, near).map_err(at(TRANSFERS))?;
+    let mut transferred = Vec::new();
+    for (family, stated) in (0u32..).zip(&device.info().queue_families) {
+        if stated.capabilities.contains(QueueCapabilities::TRANSFER) {
+            let refused = |why| Refusal {
+                step: TRANSFERS,
+                family: Some(family),
+                why,
+            };
+            transferred.push(transfers(device, (near, family)).map_err(refused)?);
+        }
+    }
+    if transferred.is_empty() {
+        return Err(at(TRANSFERS)(Error::Unsupported));
+    }
     let context = device
         .create_context(&ContextDesc::default())
         .map_err(at(TRANSFERS))?;
@@ -631,8 +689,7 @@ pub fn work(device: &Device) -> Result<Answer, Refusal> {
     let past_counts = past_counts(device, near).map_err(at(PAST_COUNTS))?;
     let corpus = corpus::run(device)?;
     Ok(Answer {
-        bytes,
-        refused,
+        transfers: transferred,
         passes,
         images,
         render,
@@ -641,10 +698,10 @@ pub fn work(device: &Device) -> Result<Answer, Refusal> {
     })
 }
 
-/// The transfers, through host-visible memory of type `near`: the bytes they
-/// leave, and how the fill past its buffer was refused.
-fn transfers(device: &Device, near: u32) -> Result<(Vec<u8>, Option<SubmitError>), Error> {
-    let transfer = family(device, QueueCapabilities::TRANSFER)?;
+/// The transfers on a queue of `family`, through host-visible memory of type
+/// `near`: the bytes they leave, and how the fill past its buffer was
+/// refused.
+fn transfers(device: &Device, (near, family): (u32, u32)) -> Result<Transferred, Error> {
     // Memory the device keeps for itself where it has some, else its own.
     let far = device
         .info()
@@ -678,11 +735,11 @@ fn transfers(device: &Device, near: u32) -> Result<(Vec<u8>, Option<SubmitError>
             size: 16 << 10,
         }],
     )?;
-    submit(&context, transfer, &commands)?;
+    submit(&context, family, &commands)?;
     let mut past = context.command_buffer();
     past.fill_buffer(&staging, 0, BYTES + 4, 0)?;
     let refused = context
-        .queue(transfer, 0)?
+        .queue(family, 0)?
         .submit(&Submission {
             command_buffers: &[&past],
             waits: &[],
@@ -692,7 +749,11 @@ fn transfers(device: &Device, near: u32) -> Result<(Vec<u8>, Option<SubmitError>
         .err();
     let mut bytes = vec![0; usize::try_from(BYTES).map_err(|_| Error::TooLarge)?];
     memory.read(0, &mut bytes)?;
-    Ok((bytes, refused))
+    Ok(Transferred {
+        family,
+        bytes,
+        refused,
+    })
 }
 
 /// The compute pipeline of `spirv`'s entry point `entry`, laid out as the
@@ -850,6 +911,32 @@ fn past_counts(device: &Device, near: u32) -> Result<Option<Result<(), Error>>, 
     Ok(Some(submit(&context, compute, &commands)))
 }
 
+/// Where the transfers on any of a device's families, `answered`, differ
+/// from the reference's on its one family, the first of `expected`.
+fn compare_transfers(answered: &[Transferred], expected: &[Transferred]) -> Result<(), Difference> {
+    let Some(held) = expected.first() else {
+        return Ok(());
+    };
+    for left in answered {
+        if let Some((at, device, reference)) = first_difference(&left.bytes, &held.bytes) {
+            return Err(Difference::Byte {
+                family: left.family,
+                at,
+                device,
+                reference,
+            });
+        }
+        if left.refused != held.refused {
+            return Err(Difference::Refusal {
+                family: left.family,
+                device: left.refused,
+                reference: held.refused,
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Where `answered`, a device's answer to the work, differs from
 /// `expected`, the reference's: the first difference, in the order the work
 /// ran.
@@ -858,19 +945,7 @@ fn past_counts(device: &Device, near: u32) -> Result<Option<Result<(), Error>>, 
 ///
 /// [`Difference`] where they differ.
 pub fn compare(answered: &Answer, expected: &Answer) -> Result<(), Difference> {
-    if let Some((at, device, reference)) = first_difference(&answered.bytes, &expected.bytes) {
-        return Err(Difference::Byte {
-            at,
-            device,
-            reference,
-        });
-    }
-    if answered.refused != expected.refused {
-        return Err(Difference::Refusal {
-            device: answered.refused,
-            reference: expected.refused,
-        });
-    }
+    compare_transfers(&answered.transfers, &expected.transfers)?;
     for ((pinned, left), held) in SET.iter().zip(&answered.passes).zip(&expected.passes) {
         let mut words = left
             .iter()

@@ -285,13 +285,14 @@ pub(crate) mod memory {
 /// A memory heap's flags.
 pub(crate) const HEAP_DEVICE_LOCAL: u32 = 1;
 
-/// A queue family's flags: the driver reads the one, and its tests state
-/// the others of the families they describe.
+/// A queue family's flags.
 pub(crate) mod queue {
     pub(crate) const GRAPHICS: u32 = 1;
     pub(crate) const COMPUTE: u32 = 1 << 1;
-    #[cfg(test)]
     pub(crate) const TRANSFER: u32 = 1 << 2;
+    pub(crate) const SPARSE_BINDING: u32 = 1 << 3;
+    #[cfg(test)]
+    pub(crate) const VIDEO_DECODE: u32 = 1 << 5;
 }
 
 /// Buffer usage flags: every use the seam names a buffer for.

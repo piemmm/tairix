@@ -59,7 +59,7 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GP6.3 | The swapchain: `tairix_window::swapchain::Swapchain`, a window a device draws, its frames filled off the loop and paced `Fifo` or `Mailbox` | done |
 | GP6.4 | Promotion in one copy, on every engine: a promoted window laid straight from its client's frame into the buffer the display scans, its content brought up to that frame before anything reads it | done |
 | GP6.5 | Shown end to end: `gpucheck --present` through the swapchain, promoted on virtio-gpu in a desktop vertical | done |
-| GP7 | `plans/WINTERSUN.md` WS19: the game's 3D view (WS32) — its terrain, entity, particle and light passes — as pinned SPIR-V, offloaded | planned |
+| GP7 | `plans/WINTERSUN.md` WS19: the game's 3D view (WS32) — its terrain, entity, particle and light passes — as pinned SPIR-V, offloaded | blocked: `plans/WINTERSUN.md` builds WS19 in its row order, after its M2–M5 items |
 | GP8 | Untrusted-shader admission: `plans/SHADER.md`'s runtime path wired into pipeline creation | done |
 | GP9 | `drivers/display/v3d`: the Raspberry Pi VideoCore VI backend | planned |
 | GP10 | The application-facing GPU library and its generated C surface — what a ported game links | planned |
@@ -72,8 +72,8 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GD5 | The screen fade as a lone layer's opacity | done |
 | GD10 | Black as no layer: a solid black window over the screen is the engine's own background, nothing written, baked or held | done |
 | GD6 | The desktop's frost, dithered blend, copy, fill and encode as pinned compute passes (`lib/shaders`), `lib/raster`'s arithmetic to the bit | done |
-| GD7 | Copy engines as `lib/gpu`'s transfer queue | planned |
-| GD11 | The desktop's compositing engine on a device: GD6's passes drawing its frost and flattened layers where the session is given hardware, `lib/raster` everywhere else | planned |
+| GD7 | Copy engines as `lib/gpu`'s transfer queue: each family's transfers held to Vulkan's rules for it, a copy engine's granularity, Venus stating the host's copy engine, `gpucheck` holding every family that transfers | done |
+| GD11 | The desktop's compositing engine on a device: GD6's passes drawing its frost and flattened layers where the session is given hardware, `lib/raster` everywhere else | blocked: no display TAIRiX drives scans device memory (§4) |
 
 Items are built in ledger order. An item is complete — tests, docs, and a green
 whole-project gate — before the next begins. Several items additionally wait on
@@ -364,7 +364,7 @@ device has not stated.
   how a refusal names it; every list a command carries has its fixed bound.
 - **Queues** state `TRANSFER` and `COMPUTE`, and `GRAPHICS` with GP3.4's
   passes and draws; a command on a queue whose family does not run it is
-  refused.
+  refused, a family's transfers held to Vulkan's rules for it (GD7).
 
 ### 1.2 What GP2's model now means
 
@@ -939,7 +939,8 @@ GP5's pieces, in the order they land:
   - **What it states** is the host's statement narrowed: one queue family
     running transfers and dispatches — one running graphics work too where
     the host has one, since only such a family copies and clears depth and
-    stencil, and without it no depth or stencil format is stated; drawing where
+    stencil, and without it no depth or stencil format is stated — and beside
+    it the host's copy engine where it has one (GD7); drawing where
     the host draws with the software device's meaning (GP5.6); and of each
     format the uses its images, texel buffers, samplers, vertex buffers,
     attachments and resolves make where the host serves them (GP5.5, GP5.6),
@@ -1769,6 +1770,57 @@ is built. Where a GPU's natural arithmetic draws the frost faster and looks the
 same, `lib/raster` adopts that definition rather than the GPU emulating the
 CPU's (§0 decision 11), and the stated tolerance moves with it.
 
+**GD7 — copy engines as `lib/gpu`'s transfer queue.** A device whose copy
+engines move bytes beside its shader cores states them as a queue family of
+their own that runs transfers alone, so the uploads and read-backs a consumer
+queues there run beside its other families' work rather than behind it.
+- **What a family runs is its capabilities' Vulkan meaning, on every
+  device.** A family running transfers copies between buffers, fills and
+  updates, and clears colour unless it is a copy engine. It copies a depth or
+  stencil plane to or from a buffer, copies one between multisampled images,
+  or clears one only where it states `DEPTH_STENCIL`: its engine draws,
+  whether or not the device states its draws, and one that draws and
+  transfers states it (`QueueFamily::clears_colour`,
+  `QueueFamily::transfers_depth_stencil`). A copy engine starts a buffer's
+  side of a copy with an image on a whole word, and every family keeps an
+  image's side to its `Granularity`: blocks of a power of two texels along
+  each axis — each offset whole blocks, each extent too or reaching the
+  level's edge — or whole levels; any family but a copy engine copies single
+  texels. The model refuses anything else before a backend sees it, so a
+  consumer is refused alike by every device.
+- **Venus states the host's copy engine.** The family running dispatches
+  states `DEPTH_STENCIL` wherever it runs graphics work, drawing stated or
+  not. Beside it, the host's first family running transfers and nothing else
+  — no compute, graphics, video or protected work — is stated second, its
+  queues within the rings the first leaves and its granularity the host's;
+  where Vulkan's rules make no granularity of the host's, no copy engine is
+  stated. Every buffer, and every image made for copies, is then made
+  concurrent across the two, so what one family writes the other reads with
+  no ownership transfer, and an image no copy reaches stays the first
+  family's; each family has a command pool of its own, a job's command buffer
+  its queue's; and the feedback slots hold every engine's jobs at once.
+  lavapipe has no copy engine, so a host stating one — an NVIDIA host's
+  family of two — is held only to the renderer's model in the tests: the
+  x86_64 port maps no write-combining memory yet (`plans/FINISH-x86_64.md`
+  F1), and such a host's memory maps no other way.
+- **The software device states none.** Its one worker runs every engine's
+  work, so a copy queued on a second family would wait behind the dispatch it
+  was meant to run beside.
+- **`gpucheck`** runs the transfers on every family stating them, each held to
+  the software device's, and every other step on the first family running
+  each command it records.
+- **The BCM2711's DMA4 engines take none of the desktop's copies.** After GD1
+  and GD2 a frame copies nothing into display memory, and what it still moves
+  it changes: the session's decode clamps each channel to its alpha, a
+  promoted window's lay judges each pixel's, and a composed row is encoded
+  into the display's frame from the cache it was composed in. Where a plain
+  copy remains — a view's picture into its layer, the cursor's image — it is
+  small, and the engines are no faster than a core, which copies at
+  2.2–2.8 GB/s (tinymembench, sbc-bench); not coherent with the cores' caches,
+  they read memory a core just wrote only once it is cleaned to the point of
+  coherency, a pass over the same bytes. They are a transfer family's on a
+  device of the board's (GP9).
+
 **GD11 — the desktop on a device.** The compositor's pixel work goes through a
 compositing engine of which there are two, drawing one definition: `lib/raster`,
 on every target, and GD6's passes on a `lib/gpu` device, its surfaces device
@@ -1779,8 +1831,11 @@ writes one path against the engine and both engines draw every frame whole.
 GD6's conformance cases hold them to the bit. The `lib/gpu` software device is
 never the compositing engine: interpreting a pass the CPU already draws natively
 would only be slower, so a session given no hardware composes through
-`lib/raster` (User-delegated ruling, 2026-11-10). It waits on a device to serve
-it: the device channel (GP11) and a hardware backend (GP5).
+`lib/raster` (User-delegated ruling, 2026-11-10). The device channel (GP11) and a
+hardware backend (GP5) serve it; what it waits on is a display that scans the
+device's memory, which none TAIRiX drives does (§4): composed on a device and
+copied into the display's frame, every pixel it changes would cost a copy
+GD2 removed, besides its window's upload.
 
 ## 8. Refused by name
 

@@ -7,6 +7,7 @@ use tairix_spirv::enumerant::Capability;
 use tairix_spirv::{Admitted, Version};
 
 use crate::format::{Format, FormatFeatures};
+use crate::image::{Extent3d, Origin3d};
 use crate::{Error, MAX_DRAW_VERTEX_BUFFERS, MAX_PASS_ATTACHMENTS, MAX_VERTEX_ATTRIBUTES};
 
 tairix_util::flags! {
@@ -64,18 +65,28 @@ impl BufferUsage {
 tairix_util::flags! {
     /// The work a queue family runs.
     pub struct QueueCapabilities(u32) {
-        /// Copies, fills, updates and clears.
+        /// Copies, fills and updates, and colour clears where the family is
+        /// no copy engine ([`QueueFamily::clears_colour`]).
         const TRANSFER = 1;
         /// Dispatches.
         const COMPUTE = 1 << 1;
         /// Render passes and their draws.
         const GRAPHICS = 1 << 2;
+        /// Depth and stencil planes reached by its transfers — cleared,
+        /// copied to or from a buffer, or copied between multisampled
+        /// images — as only an engine that draws reaches them, whether or
+        /// not the device states its draws
+        /// ([`QueueFamily::transfers_depth_stencil`]).
+        const DEPTH_STENCIL = 1 << 3;
     }
 }
 
 impl QueueCapabilities {
     /// Every kind of work.
-    pub const ALL: Self = Self::TRANSFER.with(Self::COMPUTE).with(Self::GRAPHICS);
+    pub const ALL: Self = Self::TRANSFER
+        .with(Self::COMPUTE)
+        .with(Self::GRAPHICS)
+        .with(Self::DEPTH_STENCIL);
 }
 
 tairix_util::flags! {
@@ -182,13 +193,116 @@ pub struct MemoryType {
 
 /// A set of queues running the same kind of work on one engine of the
 /// device.
+///
+/// What a family runs is Vulkan's meaning of its capabilities, which the
+/// model holds every device to: a family that only transfers — a copy engine
+/// — copies, fills and updates, its image copies kept to its
+/// [`Granularity`] and its buffers' side of them to whole words, and clears
+/// nothing.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct QueueFamily {
     /// The work its queues run.
     pub capabilities: QueueCapabilities,
     /// How many queues of the family each context has.
     pub queues: u32,
+    /// The least its image copies move: [`Granularity::TEXEL`] for any family
+    /// but a copy engine.
+    pub granularity: Granularity,
 }
+
+impl QueueFamily {
+    /// Whether what it states of depth and stencil holds together: they are
+    /// reached only by transfers, and a family that draws and transfers
+    /// reaches them, its engine being one that draws.
+    const fn reaches_depth_stencil_as_it_draws(&self) -> bool {
+        let runs = self.capabilities;
+        let transfers = runs.contains(QueueCapabilities::TRANSFER);
+        let reaches = runs.contains(QueueCapabilities::DEPTH_STENCIL);
+        (!reaches || transfers)
+            && (!(transfers && runs.contains(QueueCapabilities::GRAPHICS)) || reaches)
+    }
+
+    /// Whether it is a copy engine: a family whose engine neither computes
+    /// nor draws.
+    #[must_use]
+    pub const fn copies_alone(&self) -> bool {
+        !self.capabilities.intersects(
+            QueueCapabilities::COMPUTE
+                .with(QueueCapabilities::GRAPHICS)
+                .with(QueueCapabilities::DEPTH_STENCIL),
+        )
+    }
+
+    /// Whether it clears colour images: a family that transfers and is no
+    /// copy engine.
+    #[must_use]
+    pub const fn clears_colour(&self) -> bool {
+        self.capabilities.contains(QueueCapabilities::TRANSFER) && !self.copies_alone()
+    }
+
+    /// Whether its transfers reach a depth or stencil plane past copies
+    /// between single-sampled images: copying one to or from a buffer or
+    /// between multisampled images, or clearing one.
+    #[must_use]
+    pub const fn transfers_depth_stencil(&self) -> bool {
+        self.capabilities
+            .contains(QueueCapabilities::TRANSFER.with(QueueCapabilities::DEPTH_STENCIL))
+    }
+}
+
+/// The least a queue family's image copies move along each axis of a level.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Granularity {
+    /// Blocks of `1 << log2[axis]` texels: each offset whole blocks, and each
+    /// extent whole blocks too or reaching the level's edge.
+    Blocks {
+        /// Each axis's block, as a power of two, at most [`MAX_GRANULARITY_LOG2`].
+        log2: [u8; 3],
+    },
+    /// Whole levels alone: each offset nought, each extent the level's.
+    Levels,
+}
+
+impl Granularity {
+    /// A texel at a time.
+    pub const TEXEL: Self = Self::Blocks { log2: [0; 3] };
+
+    /// Whether a family may state it: only a copy engine copies more than
+    /// single texels.
+    fn fits(self, copy_engine: bool) -> bool {
+        match self {
+            Self::Levels => copy_engine,
+            Self::Blocks { log2 } if copy_engine => {
+                log2.iter().all(|&log2| log2 <= MAX_GRANULARITY_LOG2)
+            }
+            Self::Blocks { .. } => self == Self::TEXEL,
+        }
+    }
+
+    /// Whether a copy on its family moves the region `origin` and `extent`
+    /// describe of a level `level` texels in size.
+    pub(crate) fn admits(self, origin: Origin3d, extent: Extent3d, level: Extent3d) -> bool {
+        match self {
+            Self::Levels => origin == Origin3d::default() && extent == level,
+            Self::Blocks { log2 } => {
+                let whole = |start: u32, length: u32, edge: u32, log2: u8| {
+                    1u32.checked_shl(u32::from(log2)).is_some_and(|block| {
+                        start.is_multiple_of(block)
+                            && (length.is_multiple_of(block)
+                                || start.checked_add(length) == Some(edge))
+                    })
+                };
+                whole(origin.x, extent.width, level.width, log2[0])
+                    && whole(origin.y, extent.height, level.height, log2[1])
+                    && whole(origin.z, extent.depth, level.depth, log2[2])
+            }
+        }
+    }
+}
+
+/// The widest block a [`Granularity`] states, as a power of two: the widest
+/// a texel offset's word holds.
+pub const MAX_GRANULARITY_LOG2: u8 = 31;
 
 /// The bounds a device puts on what is asked of it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -329,6 +443,8 @@ impl DeviceInfo {
                 (1..=MAX_QUEUES_PER_FAMILY).contains(&family.queues)
                     && family.capabilities != QueueCapabilities::NONE
                     && QueueCapabilities::ALL.contains(family.capabilities)
+                    && family.reaches_depth_stencil_as_it_draws()
+                    && family.granularity.fits(family.copies_alone())
             });
         let limits = &self.limits;
         let bounded = limits.max_allocation_size > 0
@@ -366,6 +482,18 @@ impl DeviceInfo {
         } else {
             Err(Error::Malformed)
         }
+    }
+
+    /// Its families' engines, each holding `depth` jobs at once: the depths a
+    /// backend running every family alike states.
+    #[must_use]
+    pub fn engines(&self, depth: usize) -> ArrayVec<usize, MAX_QUEUE_FAMILIES> {
+        let mut engines = ArrayVec::new();
+        for _ in &self.queue_families {
+            // Within the bound the families are held to.
+            let _ = engines.try_push(depth);
+        }
+        engines
     }
 
     /// Whether it runs modules declaring `capability`.

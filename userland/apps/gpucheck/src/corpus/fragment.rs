@@ -10,7 +10,7 @@ use alloc::vec::Vec;
 use tairix_gpu::{
     Aspects, BindSetLayout, ClearValue, ColourAttachment, ColourMask, Context, ContextDesc,
     CullMode, Device, Draw, Error, Features, Format, FormatFeatures, FrontFace, ImageUsage, Load,
-    Pass, PushConstants, QueueCapabilities, Rasterization, Rect, RenderPipeline,
+    Pass, PushConstants, QueueCapabilities, QueueFamily, Rasterization, Rect, RenderPipeline,
     RenderPipelineDesc, Resource, StageDesc, Topology, Viewport,
 };
 use tairix_spirv::enumerant::{BuiltIn, Capability, Decoration, ExecutionModel, StorageClass};
@@ -21,7 +21,7 @@ use super::{
 };
 use crate::images::{placed, square, whole_view, Sampled, SIDE};
 use crate::render::{built_in, target, ONE_SAMPLE};
-use crate::{family, in_binding_order, near, states_uses, submit};
+use crate::{family, family_where, in_binding_order, near, states_uses, submit};
 
 pub(super) const FAMILY: Family = Family::compute(
     "the corpus's fragment stage",
@@ -280,8 +280,11 @@ pub(super) fn draw(
     if !info.features.contains(Features::FRAGMENT_STORES) || !states_uses(device, &USES) {
         return Ok(None);
     }
+    // A depth image is filled from memory.
+    let Ok(transfer) = family_where(device, QueueFamily::transfers_depth_stencil) else {
+        return Ok(None);
+    };
     let near = near(device)?;
-    let transfer = family(device, QueueCapabilities::TRANSFER)?;
     let context = device.create_context(&ContextDesc::default())?;
     let sampled = Sampled::new(&context, (near, transfer))?;
     let (_target_memory, target) = placed(
