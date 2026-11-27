@@ -20,7 +20,6 @@ use std::thread::JoinHandle;
 
 use tairix_abi::driver::RegionCaching;
 use tairix_abi::hwtree::HwResource;
-use tairix_abi::time::MonotonicClock;
 use tairix_abi::{DriverError, Duration64, PAGE_SIZE};
 use tairix_collections::SlotMap;
 use tairix_gpu::{
@@ -2616,18 +2615,6 @@ impl Spawn for Threads {
     }
 }
 
-/// Real time, so a job never answered times out instead of holding the test.
-struct Wall(std::time::Instant);
-
-impl MonotonicClock for Wall {
-    fn now_ns(&self) -> u64 {
-        u64::try_from(self.0.elapsed().as_nanos()).unwrap_or(u64::MAX)
-    }
-}
-
-/// Longer than any answer a correct run waits for.
-const ANSWERED: Duration64 = Duration64::from_secs(10);
-
 /// A host, the desk to it, and the display end serving it on a thread.
 struct Rig {
     host: Arc<Host>,
@@ -2721,22 +2708,17 @@ impl Rig {
     }
 
     fn device(&self) -> Device {
-        self.device_on(Arc::new(Still))
+        self.try_device().expect("a device")
     }
 
-    fn device_on(&self, clock: Arc<dyn MonotonicClock + Send + Sync>) -> Device {
-        self.try_device_on(clock).expect("a device")
-    }
-
-    fn try_device_on(
-        &self,
-        clock: Arc<dyn MonotonicClock + Send + Sync>,
-    ) -> Result<Device, DriverError> {
+    /// A device on a clock that never moves, so every wait on it ends with
+    /// the host's answer, however long the machine makes the host take.
+    fn try_device(&self) -> Result<Device, DriverError> {
         device(
             Arc::clone(&self.desk),
             Arc::clone(&self.host.shared),
             &self.threads,
-            clock,
+            Arc::new(Still),
         )
     }
 
@@ -2779,22 +2761,17 @@ impl Rig {
         change(&mut self.host.state.lock().expect("unpoisoned").offered);
     }
 
-    /// Wait until the host's state is as `until` says, failing past a budget
-    /// no correct run comes near.
+    /// Wait until the host's state is as `until` says, woken as the host
+    /// carries out each order: a host the machine slows takes longer, and the
+    /// verdict is the same.
     fn wait_for(&self, until: impl Fn(&HostState) -> bool) {
         let state = self.host.state.lock().expect("unpoisoned");
-        let (state, _) = self
-            .host
-            .changed
-            .wait_timeout_while(state, std::time::Duration::from_secs(10), |state| {
-                !until(state)
-            })
-            .expect("unpoisoned");
-        // Let go before judging: a failed assertion must not poison the lock
-        // the display end serves the desk under.
-        let met = until(&state);
-        drop(state);
-        assert!(met, "the host never came to the state awaited");
+        drop(
+            self.host
+                .changed
+                .wait_while(state, |state| !until(state))
+                .expect("unpoisoned"),
+        );
     }
 
     /// Answer everything still with the desk, then stop.
@@ -2873,15 +2850,7 @@ fn submit(
     context: &tairix_gpu::Context,
     commands: &tairix_gpu::CommandBuffer,
 ) -> Result<(), Error> {
-    submit_by(context, commands, SECOND)
-}
-
-fn submit_by(
-    context: &tairix_gpu::Context,
-    commands: &tairix_gpu::CommandBuffer,
-    deadline: Duration64,
-) -> Result<(), Error> {
-    queued(context, (0, 0), commands, deadline)?.wait(deadline)
+    queued(context, (0, 0), commands, SECOND)?.wait(SECOND)
 }
 
 /// `commands` submitted to queue `index` of the context's family `family`,
@@ -2903,16 +2872,34 @@ fn queued(
         .map_err(|refused| refused.error)
 }
 
-/// That `kept` still runs work once another context of its device is lost.
-fn goes_on(kept: &tairix_gpu::Context) {
-    let (memory, target) = buffer(kept, 1, 64);
-    let mut fill = kept.command_buffer();
+/// A fill of a buffer of `context`'s recorded: the memory it writes, the
+/// buffer and the commands.
+fn recorded_fill(
+    context: &tairix_gpu::Context,
+) -> (
+    tairix_gpu::Allocation,
+    tairix_gpu::Buffer,
+    tairix_gpu::CommandBuffer,
+) {
+    let (memory, target) = buffer(context, 1, 64);
+    let mut fill = context.command_buffer();
     fill.fill_buffer(&target, 0, 64, 0x0303_0303)
         .expect("recorded");
-    submit_by(kept, &fill, ANSWERED).expect("another context's work goes on");
+    (memory, target, fill)
+}
+
+/// That the fill [`recorded_fill`] records ran, writing `memory`.
+fn fill_ran(memory: &tairix_gpu::Allocation) {
     let mut seen = [0u8; 4];
     memory.read(0, &mut seen).expect("read");
     assert_eq!(seen, [3; 4]);
+}
+
+/// That `kept` still runs work once another context of its device is lost.
+fn goes_on(kept: &tairix_gpu::Context) {
+    let (memory, _target, fill) = recorded_fill(kept);
+    submit(kept, &fill).expect("another context's work goes on");
+    fill_ran(&memory);
 }
 
 /// That everything the host made for the backend was let go.
@@ -3157,10 +3144,7 @@ fn a_host_short_of_the_robustness_the_seam_s_semantics_need_serves_nothing() {
     for short in shorts {
         let rig = Rig::new();
         rig.offer(short);
-        assert_eq!(
-            rig.try_device_on(Arc::new(Still)).err(),
-            Some(DriverError::Unsupported)
-        );
+        assert_eq!(rig.try_device().err(), Some(DriverError::Unsupported));
         let_go(&rig.finish());
     }
 }
@@ -3647,7 +3631,7 @@ fn a_job_the_host_refuses_loses_its_context_alone_and_everything_is_let_go() {
 #[test]
 fn a_lost_context_answers_the_work_it_still_holds_and_ends_while_held() {
     let rig = Rig::new();
-    let device = rig.device_on(Arc::new(Wall(std::time::Instant::now())));
+    let device = rig.device();
     let kept = context(&device);
     let refused = context(&device);
     // More parts than the job area holds, so the last still waits when the
@@ -3662,7 +3646,7 @@ fn a_lost_context_answers_the_work_it_still_holds_and_ends_while_held() {
             .expect("recorded");
     }
     rig.misbehave(Misbehaviour::RefuseSubmits);
-    let answered = submit_by(&refused, &commands, ANSWERED);
+    let answered = submit(&refused, &commands);
     rig.misbehave(Misbehaviour::Nothing);
     assert!(matches!(answered, Err(Error::Lost(_))), "{answered:?}");
     rig.wait_for(|state| state.contexts.iter().count() == 1);
@@ -3674,14 +3658,14 @@ fn a_lost_context_answers_the_work_it_still_holds_and_ends_while_held() {
 #[test]
 fn a_job_whose_number_never_lands_loses_its_context_alone() {
     let rig = Rig::new();
-    let device = rig.device_on(Arc::new(Wall(std::time::Instant::now())));
+    let device = rig.device();
     let kept = context(&device);
     let silent = context(&device);
     let (memory, target) = buffer(&silent, 1, 64);
     let mut commands = silent.command_buffer();
     commands.fill_buffer(&target, 0, 64, 1).expect("recorded");
     rig.misbehave(Misbehaviour::IgnoreWork);
-    let answered = submit_by(&silent, &commands, ANSWERED);
+    let answered = submit(&silent, &commands);
     rig.misbehave(Misbehaviour::Nothing);
     assert!(matches!(answered, Err(Error::Lost(_))), "{answered:?}");
     rig.wait_for(|state| state.contexts.iter().count() == 1);

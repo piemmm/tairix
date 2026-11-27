@@ -17,7 +17,7 @@ use crate::host::Routine;
 use crate::memory::Bits;
 
 /// The work, in instructions, between words with the host.
-const SLICE: u64 = 1 << 20;
+pub(crate) const SLICE: u64 = 1 << 20;
 /// What a step of a SWI's own loop weighs toward the host's word: a slice
 /// is some sixty-five thousand steps.
 const STEP: u64 = 16;

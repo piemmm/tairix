@@ -1042,15 +1042,20 @@ pub const TARGETS: &[Target] = &[
                       exchanges and jobs travel",
         features: &[],
         scope: Scope::LibExcept {
-            skip: &["venus::backend::tests::render_tests::records_outrunning_their_slot_split_their_pass_into_rendering_instances"],
+            skip: &[
+                "venus::backend::tests::render_tests::records_outrunning_their_slot_split_their_pass_into_rendering_instances",
+                "venus::backend::tests::image_tests::a_host_slower_than_any_deadline_is_waited_for",
+            ],
             reason: "the library holds all but the crate's two fuzz harnesses, enrolled beside \
-                     it, and naming it is what lets its tests be dealt across cores. The test \
-                     skipped is its extent: a pass splits only once it checks more records \
+                     it, and naming it is what lets its tests be dealt across cores. Each test \
+                     skipped is its own extent. A pass splits only once it checks more records \
                      than a slot holds, each read by the pinned check the test's renderer runs \
                      on the software device's interpreter, and interpreted it took twenty-seven \
-                     minutes. It carries no `unsafe`, the job streams, blobs and checks it \
-                     reaches are the kept record tests' too, it passed interpreted, and it runs \
-                     in full under the ordinary test matrix",
+                     minutes. A host held eleven seconds is held eleven seconds of the \
+                     interpreter's clock, which counts them out a step at a time while the \
+                     driver's waits spin. Neither carries `unsafe`, the job streams, blobs, \
+                     checks and wait they reach are the kept tests' too, and both run in full \
+                     under the ordinary test matrix",
         },
         spread: Spread::Sharded(
             "interpreted, its tests cost twenty-six minutes in one process, each Venus test \

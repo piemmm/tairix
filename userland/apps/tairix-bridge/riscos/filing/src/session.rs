@@ -297,17 +297,20 @@ pub fn application_slot(kernel: &mut Kernel, bytes: u32) {
         .expect("its limit");
 }
 
-/// `line` run as a command: the transfer to an application it started.
+/// `line` run as a command from a block of the RMA: the transfer to an
+/// application it started, or the first refusal met claiming, writing,
+/// running or freeing that block.
 pub fn command(os: &mut Os<'_>, line: &str) -> Result<(), Fail> {
     let length = u32::try_from(line.len() + 1).expect("short");
-    let at = os.rma_claim(length).expect("room");
-    os.write_terminated(at, line.as_bytes(), 13, line.len() + 1)
-        .expect("written");
-    let mut regs = Regs::default();
-    regs.r[0] = at;
-    let ran = os.perform(X | CLI, &mut regs);
-    os.rma_free(at).expect("the line's block given back");
-    ran
+    let at = os.rma_claim(length)?;
+    let ran = os
+        .write_terminated(at, line.as_bytes(), 13, line.len() + 1)
+        .and_then(|()| {
+            let mut regs = Regs::default();
+            regs.r[0] = at;
+            os.perform(X | CLI, &mut regs)
+        });
+    ran.and(os.rma_free(at))
 }
 
 /// The redirection a command line set up ended and its files closed, as

@@ -23,6 +23,8 @@ use tairix_riscos_arm::psr;
 
 pub use crate::clock::Deadlines;
 pub use access::Reach;
+#[cfg(test)]
+pub(crate) use call::SLICE;
 pub use call::{Ended, Entry, Returned, Target, Transfer, Unwind, Wait};
 pub(crate) use processor::{Parked, Processor};
 

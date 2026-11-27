@@ -63,24 +63,9 @@ impl Space for Os<'_> {
     }
 }
 
-/// The error a heap failure gives.
-pub(crate) const fn heap_error(error: HeapError) -> Error {
-    let (number, token) = match error {
-        HeapError::BadReason => (0x180, "UnknownReasonCode"),
-        HeapError::FailInit => (0x181, "HeapNotInitialised"),
-        HeapError::BadDescriptor => (0x182, "BadHeapDescriptor"),
-        HeapError::BadLink => (0x183, "HeapCorrupt"),
-        HeapError::NoRoom => (0x184, "HeapFull"),
-        HeapError::NotABlock => (0x185, "NotAHeapBlock"),
-        HeapError::BadExtend => (0x186, "HeapCannotGrow"),
-        HeapError::ExcessiveShrink { .. } => (0x187, "HeapShrinkLimited"),
-    };
-    Error { number, token }
-}
-
 /// "No such reason code": the heap's, which other calls give for a reason
 /// they do not know, as genuine RISC OS 5's `OS_NVMemory` does.
-pub(crate) const UNKNOWN_REASON: Error = heap_error(HeapError::BadReason);
+pub(crate) const UNKNOWN_REASON: Error = HeapError::BadReason.error();
 
 impl Os<'_> {
     /// Whether a privileged mode may read and write every byte from `start`
@@ -127,7 +112,7 @@ impl Os<'_> {
         match attempt(self) {
             Ok(done) => return Ok(done),
             Err(HeapError::NoRoom) => {}
-            Err(error) => return Err(self.error(heap_error(error))),
+            Err(error) => return Err(self.error(error.error())),
         }
         self.grow_heap(heap, need)?;
         attempt(self).map_err(|_| self.error(heap.full()))
@@ -138,7 +123,7 @@ impl Os<'_> {
         let base = self.heap_base(heap);
         Heap::open(self, base)
             .and_then(|h| h.describe(self))
-            .map_err(|e| self.error(heap_error(e)))
+            .map_err(|e| self.error(e.error()))
     }
 
     /// The size of `block` of `heap`, header included, if it is one.
@@ -153,7 +138,7 @@ impl Os<'_> {
     /// high-water mark; its error if the area cannot grow so far.
     fn grow_heap(&mut self, heap: KernelHeap, need: u64) -> Result<(), Fail> {
         let base = self.heap_base(heap);
-        let header = Heap::open(self, base).map_err(|e| self.error(heap_error(e)))?;
+        let header = Heap::open(self, base).map_err(|e| self.error(e.error()))?;
         let room = u64::from(header.room());
         let wanted = need.saturating_sub(room) + 8;
         let pages = wanted.div_ceil(u64::from(PAGE_SIZE));
@@ -171,7 +156,7 @@ impl Os<'_> {
         let base = self.heap_base(heap);
         Heap::open(self, base)
             .and_then(|mut h| h.free(self, block))
-            .map_err(|e| self.error(heap_error(e)))
+            .map_err(|e| self.error(e.error()))
     }
 
     /// A node of `size` bytes in the system heap for the kernel's own

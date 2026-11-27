@@ -168,7 +168,7 @@ impl Os<'_> {
             }
             let mut names = Regs::default();
             names.r[..3].copy_from_slice(&[12, at, index]);
-            if self.perform(os::MODULE, &mut names).is_err() {
+            if !self.perform_quietly(os::MODULE, &mut names)? {
                 return Ok(());
             }
             if continuing {
@@ -223,7 +223,7 @@ impl Os<'_> {
             }
             let mut rom = Regs::default();
             rom.r[..3].copy_from_slice(&[20, at, section]);
-            if self.perform(os::MODULE, &mut rom).is_err() {
+            if !self.perform_quietly(os::MODULE, &mut rom)? {
                 return Ok(());
             }
             visit(self, &rom)?;

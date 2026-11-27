@@ -15,7 +15,7 @@ use super::{calendar, CHUNK, CONVERT_TIME_FORMATS, DAYLIGHT_RULES, DAYLIGHT_SAVI
 use crate::memory::layout::RISC_OS_5;
 use crate::memory::Bits;
 use crate::msgtrans::tests::swi;
-use crate::os::{Fail, Regs, MILLENNIUM};
+use crate::os::{Fail, Regs, Unwind, MILLENNIUM};
 use crate::service::{POST_INIT, TERRITORY_STARTED, TIME_ZONE_CHANGED};
 use crate::swi::os::{BYTE, SERVICE_CALL};
 use crate::swi::X;
@@ -712,6 +712,22 @@ fn the_territory_command_names_or_selects_the_current_territory() {
         cli(&mut s, "Territory UK extra").map_err(|(n, _)| n),
         Err(0xDC)
     );
+}
+
+/// `*Territory` asks the Manager for the current territory's name, and a
+/// host stopping work while it asks stops the command.
+#[test]
+fn the_territory_command_passes_the_host_s_word_on() {
+    let mut s = session_in("Europe/London", (2026, 7, 1, 12, 0));
+    let asking = s.charged(|os| {
+        let mut name = Regs::default();
+        name.r[..3].copy_from_slice(&[1, BUFFER, 16]);
+        os.perform(X | super::NUMBER_TO_NAME, &mut name)
+            .expect("named");
+    });
+    assert!(asking > 0, "asking counts toward the host's word");
+    let stopped = s.stopped_after(1, |os| super::territory_command(os, &mut Regs::default()));
+    assert_eq!(stopped, Err(Fail::Unwind(Unwind::Stopped)));
 }
 
 #[test]

@@ -1078,6 +1078,49 @@ fn modules_lists_each_incarnation_of_each_module() {
     assert_eq!(alloc::string::String::from_utf8_lossy(&text), expected);
 }
 
+/// An `OS_Module` reason walking the chain or the ROM, and the command whose
+/// listing walks it.
+type Walk = (
+    u32,
+    fn(&mut crate::os::Os<'_>, &mut Regs) -> Result<(), Fail>,
+);
+
+/// `*Modules` and `*ROMModules` stop at the enumeration that refuses, and a
+/// host stopping work during it stops the command: its word is passed on,
+/// not taken for the list's end, so a guest asking for listings without end
+/// is stopped.
+#[test]
+fn a_module_listing_passes_the_host_s_word_on() {
+    let walks: [Walk; 2] = [
+        (12, super::commands::modules_command),
+        (20, super::commands::rom_modules_command),
+    ];
+    for (reason, command) in walks {
+        let mut s = session();
+        let mut last = [reason, 0, if reason == 20 { u32::MAX } else { 0 }];
+        while let Ok(regs) = module(
+            &mut s,
+            [last[0], last[1], last[2], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ) {
+            last = [reason, regs.r[1], regs.r[2]];
+        }
+        let ending = s.charged(|os| {
+            let mut regs = Regs::new([last[0], last[1], last[2], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            assert!(os.perform(MODULE, &mut regs).is_err(), "the walk's end");
+        });
+        assert!(ending > 0, "refusing counts toward the host's word");
+        let whole = s.charged(|os| {
+            command(os, &mut Regs::default()).expect("listed");
+        });
+        let stopped = s.stopped_after(whole - ending + 1, |os| command(os, &mut Regs::default()));
+        assert_eq!(
+            stopped,
+            Err(Fail::Unwind(Unwind::Stopped)),
+            "OS_Module {reason}"
+        );
+    }
+}
+
 #[test]
 fn rom_modules_lists_the_built_ins_and_unplug_stops_them() {
     let mut s = session();

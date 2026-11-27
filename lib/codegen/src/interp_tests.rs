@@ -112,6 +112,29 @@ fn a_loop_runs_and_memory_and_helpers_are_reached() {
     );
 }
 
+/// The hostile function the fuzz harness found: helper 1 takes three
+/// arguments and is passed two, through the table `1 << 29` reaches.
+#[test]
+fn a_helper_called_with_other_than_its_arity_is_a_trap() {
+    let mut b = Builder::new(&[Type::I64], Some(Type::I64));
+    let n = b.params(Block::ENTRY)[0];
+    let one = b.binary(BinOp::Sdiv, n, n);
+    let table = b.binary(BinOp::Rotl, one, n);
+    b.call(table, 1, &[n, table], None);
+    b.ret(Some(table));
+    let func = b.finish().unwrap();
+    crate::verify::verify(&func).unwrap();
+    let mut memory = TestMemory {
+        buffer: vec![0; crate::testgen::BUFFER_BYTES],
+    };
+    let mut helpers = TestHelpers::default();
+    assert_eq!(
+        run(&func, &[29], &mut memory, &mut helpers, 100),
+        Err(Trap::Helper(1))
+    );
+    assert!(helpers.calls.is_empty());
+}
+
 #[test]
 fn memory_and_helpers_it_lacks_are_traps() {
     let mut b = Builder::new(&[Type::I64, Type::I64], Some(Type::I64));

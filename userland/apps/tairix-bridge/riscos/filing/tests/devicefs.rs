@@ -6,6 +6,8 @@
 mod common;
 
 use common::programs::run;
+use tairix_riscos_kernel::swi::buffer::GET_INFO;
+use tairix_riscos_kernel::vectors::UKSWI;
 
 /// The driver and the routines around it, assembled in two passes: the
 /// entry logs its reason, R2 to R7 and its mode, answers `Initialise` with
@@ -830,5 +832,39 @@ fn shut_closes_from_the_highest_handle_and_a_refused_close_leaves_its_file_open(
             "closed ok",
             "finalised b b",
         ]
+    );
+}
+
+/// A buffer the driver names is asked after where guest code answering in
+/// the buffer manager's place exits: the exit is passed on, and BASIC's exit
+/// handler returns the open with nothing in its registers, no file opened,
+/// where a swallowed exit has the open refused for a buffer it then fails to
+/// make.
+#[test]
+fn an_exit_met_asking_after_a_named_buffer_is_passed_on() {
+    let exits = [
+        format!("SYS \"OS_Module\",6,,,20 TO ,,x%:!x%=&{GET_INFO:X}:P%=x%+4"),
+        "[OPT 0".to_string(),
+        "LDR R10,[PC,#-12]:CMP R11,R10:MOVNE PC,R14:SWI \"OS_Exit\"".to_string(),
+        "]".to_string(),
+        format!(
+            "SYS \"OS_Claim\",&{:X},x%+4,0:OSCLI \"RMKill BufferManager\"",
+            UKSWI.0
+        ),
+    ];
+    let lines: Vec<&str> = DRIVER
+        .iter()
+        .copied()
+        .chain([
+            "SYS \"XDeviceFS_Register\",2,devs,drv,&BBBB,&CCCC,0,1,1 TO dh%",
+            "SYS \"OS_Release\",&1D,upcall,0:SYS \"OS_ChangeEnvironment\",9,oe1%,oe2%,oe3%",
+        ])
+        .chain(exits.iter().map(String::as_str))
+        .chain(["SYS \"XOS_Find\",&4F,\"devices#buffer5:$.PrbB\" TO r0%;f%:PROCw(\"open \"+FNerr(r0%,f%)+\" \"+STR$~r0%)"])
+        .collect();
+    assert_eq!(
+        run(&lines, PROCEDURES, b""),
+        ["open ok 0"],
+        "the open left as the exit did"
     );
 }

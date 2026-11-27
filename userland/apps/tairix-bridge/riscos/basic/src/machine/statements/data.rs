@@ -171,7 +171,8 @@ impl Machine<'_, '_> {
                 {
                     return Err(Error::NoSuchLine.into());
                 }
-                line += u32::from(self.byte_at(line + 3)?);
+                line = line.wrapping_add(u32::from(self.byte_at(line.wrapping_add(3))?));
+                self.os.yield_point()?;
             }
             line
         } else {

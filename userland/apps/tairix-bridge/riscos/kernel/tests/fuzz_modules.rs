@@ -28,7 +28,8 @@ use tairix_riscos_arm::instruction::{
 use tairix_riscos_arm::reg::Reg;
 use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::os::{Fail, Kernel, Regs};
-use tairix_riscos_kernel::swi::os::MODULE;
+use tairix_riscos_kernel::swi::os::environment::CURRENT_ACTIVE_OBJECT;
+use tairix_riscos_kernel::swi::os::{CHANGE_ENVIRONMENT, MODULE};
 use tairix_riscos_kernel::swi::X;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -45,6 +46,8 @@ const BUDGET: u64 = 20_000;
 const CHUNKS: [u32; 3] = [0x5_A5C0, 0x5_A600, 0x8_0040];
 /// The services images list and runs issue, most often one of a few.
 const SERVICES: [u32; 6] = [0x27, 0x4E, 0x5A, 0xB9, 0xDA, 0xDB];
+/// The header word holding the offset of a module's title.
+const TITLE: usize = 4;
 
 fn encode(op: Op) -> u32 {
     match a32::encode(&Instruction {
@@ -166,7 +169,7 @@ impl Image {
 fn image(rng: &mut Prng, code: &Code, title: &[u8]) -> Vec<u8> {
     let mut image = Image { bytes: vec![0; 52] };
     let title_at = image.text(title);
-    image.set(4, title_at);
+    image.set(TITLE, title_at);
     let mut help = title.to_vec();
     help.extend_from_slice(b"\t\t1.00 (01 Jan 2000)");
     let help_at = image.text(&help);
@@ -365,18 +368,28 @@ fn step(run: &mut Run, rng: &mut Prng) {
     }
 }
 
+/// The title the module whose code is at `code` gives in its header.
+fn title(run: &mut Run, code: u32) -> Option<Vec<u8>> {
+    let mut os = run.kernel.os();
+    let offset = 4 * u32::try_from(TITLE).ok()?;
+    let at = os.read_word(code.wrapping_add(offset)).ok()?;
+    os.read_zstring(code.wrapping_add(at), 64).ok()
+}
+
 /// The kernel still answers, and its chain walks to an end with the
-/// `UtilityModule` first.
+/// `UtilityModule` first, found by its place: a name written into
+/// application space is gone once a claim of the RMA's takes that space.
 fn still_sound(run: &mut Run, step: usize) {
     assert!(
         swi(run, 0x42, [0; 13]).is_ok(),
         "OS_ReadMonotonicTime after step {step}"
     );
-    let _ = run.kernel.os().write_bytes(NAMES, b"UtilityModule\r");
-    let kernel = swi(run, MODULE, [18, NAMES, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let first = swi(run, MODULE, [12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        .ok()
+        .and_then(|regs| title(run, regs.r[3]));
     assert_eq!(
-        kernel.map(|regs| regs.r[1]).ok(),
-        Some(0),
+        first.as_deref(),
+        Some(&b"UtilityModule"[..]),
         "the kernel first after step {step}"
     );
     let (mut module, mut incarnation) = (0, 0);
@@ -414,4 +427,94 @@ fn any_module_image_and_any_reason_answer_as_values() {
         }
         runs += 1;
     }
+}
+
+/// The soak's find: the RMA's claims, grown past the free pool, take all of
+/// application space, where a name written for `OS_Module` would lie; the
+/// kernel still answers and its chain stays sound.
+#[test]
+fn a_claim_taking_application_space_leaves_the_chain_sound() {
+    let mut run = boot(&mut Prng::new(0));
+    let kernel = swi(&mut run, MODULE, [12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        .expect("the kernel")
+        .r[3];
+    swi(
+        &mut run,
+        CHANGE_ENVIRONMENT,
+        [
+            CURRENT_ACTIVE_OBJECT,
+            kernel,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ],
+    )
+    .expect("the kernel the current active object");
+    while swi(
+        &mut run,
+        MODULE,
+        [6, 0, 0, 0x1000, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    )
+    .is_ok()
+    {}
+    assert!(
+        run.kernel.os().read_byte(NAMES).is_err(),
+        "application space taken"
+    );
+    still_sound(&mut run, 0);
+}
+
+/// The soak's find: a module whose finalisation is noise that calls on into
+/// `*Modules` without end, reinitialised under a host that stops work at its
+/// first word. The listing passes the host's word on rather than taking it
+/// for the chain's end, so the call ends.
+#[test]
+fn a_finalisation_listing_modules_without_end_is_stopped() {
+    let code = Code::new();
+    let mut image = Image { bytes: vec![0; 52] };
+    let title = image.text(b"Fz3");
+    image.set(TITLE, title);
+    let help = image.text(b"Fz3\t\t1.00 (01 Jan 2000)");
+    image.set(5, help);
+    let start = image.words(&[code.claim, code.ret]);
+    let init = image.words(&[code.ret]);
+    let finalise = image.words(&[0x7CFE_61CD, 0x68D5_6053, code.ret]);
+    for (field, entry) in [(0, start), (1, init), (2, finalise)] {
+        image.set(field, entry);
+    }
+    let flags = image.words(&[1]);
+    image.set(12, flags);
+    // The find was made on RISC OS 5's layout, which a boot takes two times
+    // in three.
+    let seed = (0..64)
+        .find(|&seed| Prng::new(seed).below(3) != 0)
+        .expect("a seed among the first sixty-four");
+    let mut run = boot(&mut Prng::new(seed));
+    // Both enumerations are the find's: without either, the finalisation's
+    // noise never reaches `*Modules`.
+    let _ = swi(&mut run, MODULE, [12, 13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let _ = run.kernel.os().write_bytes(IMAGE, &image.bytes);
+    let length = u32::try_from(image.bytes.len()).expect("small");
+    swi(
+        &mut run,
+        MODULE,
+        [11, IMAGE, length, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    )
+    .expect("linked");
+    let _ = swi(&mut run, MODULE, [12, 14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let _ = run.kernel.os().write_bytes(NAMES, b"Fz.\0");
+    let _ = swi(
+        &mut run,
+        MODULE,
+        [3, NAMES, NAMES, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+    still_sound(&mut run, 0);
 }

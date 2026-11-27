@@ -1,17 +1,18 @@
 //! What hostile programs were found doing to the drivers, each now answered
 //! as a value: selectors naming no screen, a module answering a service with
 //! a wild list, a copy cursor left behind by a smaller window, a cursor
-//! wrapped round the coordinates, characters as large as VDU 5 allows, and
-//! sprites whose control blocks claim sizes no memory or sum holds.
+//! wrapped round the coordinates, characters as large as VDU 5 allows,
+//! sprites whose control blocks claim sizes no memory or sum holds, and a
+//! bell whose sound SWI never returns.
 
 mod common;
 
 use common::{
-    answers, call, drivers, error_number, insert_module, vdu, with_files, BY_POINTER, SELECTOR_AT,
-    USER,
+    answers, call, drivers, error_number, insert_module, unknown_swis_held, vdu, with_files,
+    BY_POINTER, SELECTOR_AT, USER,
 };
 use tairix_riscos_filing::session::{Session, SLOT_BYTES};
-use tairix_riscos_kernel::os::{Fail, Regs};
+use tairix_riscos_kernel::os::{Fail, Regs, Unwind};
 use tairix_riscos_kernel::swi::os::{BYTE, PLOT, READ_C, SCREEN_MODE, SPRITE_OP};
 use tairix_riscos_kernel::swi::X;
 use tairix_riscos_vdu::display;
@@ -613,4 +614,19 @@ fn a_conversion_memory_cannot_hold_changes_nothing_of_the_sprite() {
         "an alpha mask past memory's end"
     );
     assert_eq!(held(&mut session), before, "its alpha and mode word kept");
+}
+
+/// A bell whose sound SWI a guest answers and never returns from stops at
+/// the host's word: the stop is passed on, not taken for a bell refused.
+#[test]
+fn a_bell_the_host_stops_passes_the_stop_on() {
+    let mut session = drivers(b"");
+    let count = unknown_swis_held(&mut session);
+    session.allow_words(Some(0));
+    assert_eq!(vdu(&mut session, &[7]), Err(Fail::Unwind(Unwind::Stopped)));
+    assert_eq!(
+        session.kernel.os().read_word(count).expect("the count"),
+        1,
+        "the bell's SWI asked once"
+    );
 }

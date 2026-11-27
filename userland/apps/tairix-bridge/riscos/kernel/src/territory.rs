@@ -381,7 +381,7 @@ impl Os<'_> {
         let buffer = self.world.territory.workspace.map_or(0, |w| w + SCRATCH_AT);
         let mut name = Regs::default();
         name.r[..3].copy_from_slice(&[number, buffer, 16]);
-        if self.perform(X | NUMBER_TO_NAME, &mut name).is_ok() {
+        if self.perform_quietly(X | NUMBER_TO_NAME, &mut name)? {
             self.read_zstring(buffer, 16)
         } else {
             let length = self.own_lookup(own, b"UnnamedTerritory", buffer, 16)?;

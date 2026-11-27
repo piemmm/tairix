@@ -17,7 +17,7 @@ use crate::input::InputEvent;
 use crate::memory::layout::{Layout, APPLICATION};
 use crate::memory::policy::Ceiling;
 use crate::memory::Bits;
-use crate::os::{len32, Config, Ending, Host, Kernel, Outcome, Pulse, Regs, MILLENNIUM};
+use crate::os::{len32, Config, Ending, Host, Kernel, Os, Outcome, Pulse, Regs, MILLENNIUM, SLICE};
 use crate::vectors;
 
 /// Input events and the times they arrive.
@@ -223,6 +223,27 @@ pub(crate) fn with_application(layout: &'static Layout, bits: Bits) -> Session {
 }
 
 impl Session {
+    /// What `work` counts toward the host's word.
+    pub(crate) fn charged(&mut self, work: impl FnOnce(&mut Os<'_>)) -> u64 {
+        let mut os = self.kernel.os();
+        os.world.since_word = 0;
+        work(&mut os);
+        os.world.since_word
+    }
+
+    /// `work` run with the host's word asked, and answered by stopping the
+    /// run, once `units` of its work are counted.
+    pub(crate) fn stopped_after<T>(
+        &mut self,
+        units: u64,
+        work: impl FnOnce(&mut Os<'_>) -> T,
+    ) -> T {
+        self.stop_after.set(Some(0));
+        let mut os = self.kernel.os();
+        os.world.since_word = SLICE - units;
+        work(&mut os)
+    }
+
     /// Makes a slot of `bits` with `bytes` of memory current, the memory
     /// limit its top, and the processor of `bits` in User mode at its base.
     pub(crate) fn application(&mut self, bits: Bits, bytes: u32) {

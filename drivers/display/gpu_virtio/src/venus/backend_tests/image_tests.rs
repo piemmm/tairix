@@ -19,7 +19,7 @@ use tairix_spirv::assemble::admit;
 use tairix_spirv::{Admitted, BindingKind, Stage, Stages};
 
 use super::host_images::{image_objects, HostImage};
-use super::{context, let_go, Misbehaviour, Object, Rig, SECOND};
+use super::{context, fill_ran, let_go, recorded_fill, submit, Misbehaviour, Object, Rig, SECOND};
 use crate::venus::info::host_format;
 use crate::venus::testing::{drawn, Still, DRAW_FEATURES};
 use crate::venus::{api_version, image, queue, Structure};
@@ -811,6 +811,54 @@ fn an_image_past_what_the_host_makes_is_refused_and_leaves_nothing_behind() {
     drop((image, memory));
     rig.wait_for(|state| image_objects(state) == 0);
     drop((context, device));
+    let_go(&rig.finish());
+}
+
+/// A host the machine slows past any deadline is waited for: a wait on its
+/// state and a submission's on its answer each end when the host carries the
+/// order out, however long that takes.
+#[test]
+fn a_host_slower_than_any_deadline_is_waited_for() {
+    let rig = Rig::new();
+    let device = rig.device();
+    let context = context(&device);
+    let memory = context
+        .allocate(&AllocationDesc {
+            size: 1 << 20,
+            memory_type: 0,
+        })
+        .expect("memory");
+    let usage = ImageUsage::TRANSFER_SRC.with(ImageUsage::SAMPLED);
+    let image = context
+        .create_image(
+            &memory,
+            0,
+            &desc(Format::Rgba8Unorm, (extent(64, 8), 1, 1), usage),
+        )
+        .expect("an image");
+    let (written, target, fill) = recorded_fill(&context);
+    rig.pause();
+    drop(image);
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| rig.wait_for(|state| image_objects(state) == 0));
+        let submitter = scope.spawn(|| submit(&context, &fill));
+        rig.wait_for(|state| state.held == 2);
+        std::thread::sleep(std::time::Duration::from_secs(11));
+        let ended = (waiter.is_finished(), submitter.is_finished());
+        // Resumed before judging, so a failure ends both threads instead of
+        // holding the scope.
+        rig.resume();
+        assert_eq!(ended, (false, false), "the host held both orders");
+        waiter
+            .join()
+            .expect("the wait ended as the host carried the order out");
+        submitter
+            .join()
+            .expect("the submission was answered")
+            .expect("the work ran");
+    });
+    fill_ran(&written);
+    drop((fill, target, written, memory, context, device));
     let_go(&rig.finish());
 }
 

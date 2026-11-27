@@ -159,7 +159,7 @@ fn a_variable_chain_overwritten_aborts_its_read() {
 /// never a panic.
 #[test]
 fn a_waiting_record_a_function_rewrites_is_refused() {
-    const FORMS: [&str; 9] = [
+    const FORMS: [&str; 10] = [
         "PRINT LEFT$(\"ab\",@)",
         "MOVE 0,@",
         "SYS \"OS_WriteC\",@",
@@ -169,6 +169,7 @@ fn a_waiting_record_a_function_rewrites_is_refused() {
         "MOUSE X%,Y%,B%(@)",
         "CALL C%,B%(@)",
         "PRINT MID$(\"abc\",2,@)",
+        "RESTORE +@",
     ];
     let mut corrupt = 0;
     for form in FORMS {

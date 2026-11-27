@@ -7,7 +7,6 @@ use tairix_riscos_arm::psr::{self, Mode};
 use tairix_riscos_arm::reg::Reg;
 
 use crate::heap::{self, Heap, HeapError};
-use crate::kheap::heap_error;
 use crate::memory::layout::HIGH_ZERO_PAGE;
 use crate::os::{Entry, Fail, Os, Regs};
 use crate::vectors::{self, Carry};
@@ -224,7 +223,7 @@ impl Os<'_> {
             }
             _ => Err(HeapError::BadReason),
         };
-        result.map_err(|error| self.error(heap_error(error)))
+        result.map_err(|error| self.error(error.error()))
     }
 }
 

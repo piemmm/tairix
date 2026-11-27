@@ -11,13 +11,16 @@
 //! * nothing panics, and every refusal is a value, a guest run stopped at
 //!   its budget among them;
 //! * the kernel still answers a SWI afterwards;
-//! * the library, re-initialised after a run, holds none of the RMA it took.
+//! * the library, re-initialised after a run, holds none of the RMA it took,
+//!   unless the guest wrote over the RMA's own structure, as a program may on
+//!   RISC OS.
 
 use std::ops::Range;
 use std::sync::LazyLock;
 
 use tairix_fuzzseed::Prng;
 use tairix_riscos_filing::session::{command, modules_with, session, Session, Setup};
+use tairix_riscos_kernel::heap::HeapError;
 use tairix_riscos_kernel::memory::layout::APPLICATION;
 use tairix_riscos_kernel::memory::Bits;
 use tairix_riscos_kernel::module::Builtin;
@@ -230,45 +233,83 @@ fn sound_lib_init(session: &mut Session) {
     call(session, SHARED_C_LIBRARY + 3, &r).expect("a sound client");
 }
 
-/// Guest code calling a random entry of a random chunk through its vector
-/// with hostile registers, run to its end or its budget.
-fn entry_call(session: &mut Session, rng: &mut Prng, heaps: &[Range<u32>]) {
-    let place = rng.below(CHUNKS.len());
-    let entry = under(rng, CHUNKS[place].1);
-    let target = vector_of(place) + 4 * entry;
-    let call = 0xEB00_0000 | ((target.wrapping_sub(CODE + 8) >> 2) & 0x00FF_FFFF);
-    let exit = 0xEF00_0000 | EXIT;
-    let mut os = session.kernel.os();
-    os.write_word(CODE, call).expect("written");
-    os.write_word(CODE + 4, exit).expect("written");
-    let mut registers = [0; 15];
-    for slot in &mut registers[..10] {
-        *slot = if rng.below(3) == 0 {
-            wild(rng, heaps)
-        } else {
+/// Guest code calling chunk `place`'s entry `entry` through its vector with
+/// `registers`.
+struct EntryCall {
+    place: usize,
+    entry: u32,
+    registers: [u32; 15],
+}
+
+impl EntryCall {
+    /// A random entry of a random chunk with hostile registers.
+    fn drawn(rng: &mut Prng, heaps: &[Range<u32>]) -> Self {
+        let place = rng.below(CHUNKS.len());
+        let entry = under(rng, CHUNKS[place].1);
+        let mut registers = [0; 15];
+        for slot in &mut registers[..10] {
+            *slot = if rng.below(3) == 0 {
+                wild(rng, heaps)
+            } else {
+                pointer(rng)
+            };
+        }
+        registers[10] = if rng.below(4) == 0 {
             pointer(rng)
+        } else {
+            WORKSPACE + 560
         };
+        let frame = pointer(rng);
+        registers[11] = *rng.pick(&[0, frame]);
+        registers[13] = if rng.below(4) == 0 {
+            pointer(rng)
+        } else {
+            WORKSPACE + 0x800 + 4 * under(rng, 0x100)
+        };
+        Self {
+            place,
+            entry,
+            registers,
+        }
     }
-    registers[10] = if rng.below(4) == 0 {
-        pointer(rng)
-    } else {
-        WORKSPACE + 560
-    };
-    let frame = pointer(rng);
-    registers[11] = *rng.pick(&[0, frame]);
-    registers[13] = if rng.below(4) == 0 {
-        pointer(rng)
-    } else {
-        WORKSPACE + 0x800 + 4 * under(rng, 0x100)
-    };
-    let fail = os.enter_application(Bits::Bit32, CODE, |user| *user = registers);
-    assert!(
-        matches!(fail, Fail::Unwind(_)),
-        "the call entered: {fail:?}"
-    );
-    session.allow_words(Some(WORDS));
-    let _ = session.kernel.run(BUDGET);
-    session.allow_words(None);
+
+    /// The call made, run to its end or its budget.
+    fn make(&self, session: &mut Session) {
+        let target = vector_of(self.place) + 4 * self.entry;
+        let call = 0xEB00_0000 | ((target.wrapping_sub(CODE + 8) >> 2) & 0x00FF_FFFF);
+        let exit = 0xEF00_0000 | EXIT;
+        let mut os = session.kernel.os();
+        os.write_word(CODE, call).expect("written");
+        os.write_word(CODE + 4, exit).expect("written");
+        let fail = os.enter_application(Bits::Bit32, CODE, |user| *user = self.registers);
+        assert!(
+            matches!(fail, Fail::Unwind(_)),
+            "the call entered: {fail:?}"
+        );
+        session.allow_words(Some(WORDS));
+        let _ = session.kernel.run(BUDGET);
+        session.allow_words(None);
+    }
+}
+
+/// The library re-initialised after a run holds none of the RMA it took,
+/// unless the guest wrote over the RMA's own structure, as a program may on
+/// RISC OS: the heap then answers that it is corrupt, and what the library
+/// gave back cannot be counted. Any other refusal is the library's.
+fn the_rma_given_back(session: &mut Session, held: u32) {
+    let mut os = session.kernel.os();
+    match command(&mut os, "RMReInit SharedCLibrary") {
+        Ok(()) => assert_eq!(rma_used(session), held, "the RMA given back"),
+        Err(Fail::Error(block)) => {
+            let number = os.read_word(block).expect("the error's number");
+            assert_eq!(
+                number,
+                HeapError::BadLink.error().number,
+                "reinitialised: error {number:#X}"
+            );
+        }
+        Err(unwind) => panic!("reinitialised: {unwind:?}"),
+    }
 }
 
 #[test]
@@ -293,16 +334,75 @@ fn hostile_library_calls_leave_the_kernel_answering_and_the_rma_given_back() {
             if rng.below(3) == 0 {
                 lib_init(&mut session, &mut rng, &heaps);
             } else {
-                entry_call(&mut session, &mut rng, &heaps);
+                EntryCall::drawn(&mut rng, &heaps).make(&mut session);
             }
             assert!(
                 answers(&mut session),
                 "the kernel answering after step {step}"
             );
         }
-        let mut os = session.kernel.os();
-        command(&mut os, "RMReInit SharedCLibrary").expect("reinitialised");
-        assert_eq!(rma_used(&mut session), held, "the RMA given back");
+        the_rma_given_back(&mut session, held);
         runs += 1;
     }
+}
+
+/// The soak's find: `_kernel_system`, its SL eight bytes off its stack chunk,
+/// puts the handlers back through what it takes for the statics, making a
+/// FileCore routine the abort handler; `islower`'s abort runs it and the
+/// entries after it in Abort mode, the last filling the RMA. Every answer
+/// stays a value.
+#[test]
+fn a_client_whose_handlers_fill_the_rma_is_answered_as_values() {
+    let mut session = fresh();
+    let held = rma_used(&mut session);
+    sound_lib_init(&mut session);
+    let calls = [
+        EntryCall {
+            place: 0,
+            entry: 22,
+            registers: [
+                0x8AEB_9FA9,
+                END,
+                0x6EA2_162F,
+                0,
+                WORKSPACE + 0x1B0,
+                END - 8,
+                WORKSPACE + 0xB2C,
+                0x3344_EEF8,
+                END - 0x1C,
+                WORKSPACE + 0xEA8,
+                WORKSPACE + 552,
+                0,
+                0,
+                0x895A_1D97,
+                0,
+            ],
+        },
+        EntryCall {
+            place: 1,
+            entry: 160,
+            registers: [
+                0x7FFC,
+                0x7FFC,
+                0xB2B9_0BA8,
+                END - 0x28,
+                0xCBC0_F741,
+                0x7FFC,
+                WORKSPACE + 0xE4C,
+                WORKSPACE + 0x434,
+                0x7B6B_FCD3,
+                0x7EE2_26CC,
+                END + 0x2_FAE2,
+                0,
+                0,
+                WORKSPACE + 0x968,
+                0,
+            ],
+        },
+    ];
+    for call in &calls {
+        call.make(&mut session);
+        assert!(answers(&mut session), "the kernel answering");
+    }
+    the_rma_given_back(&mut session, held);
 }

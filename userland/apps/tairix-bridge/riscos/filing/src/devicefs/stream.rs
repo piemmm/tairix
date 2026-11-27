@@ -1022,7 +1022,7 @@ fn buffered(
     let [_, _, _, flags, size, named, threshold, ..] = create.r;
     let mut probe = Regs::default();
     probe.r[0] = named;
-    let exists = named != NONE && os.perform(X | buffer::GET_INFO, &mut probe).is_ok();
+    let exists = named != NONE && os.perform_quietly(X | buffer::GET_INFO, &mut probe)?;
     let handle = if exists {
         named
     } else {

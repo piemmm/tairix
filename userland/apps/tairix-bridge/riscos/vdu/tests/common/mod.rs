@@ -243,6 +243,28 @@ pub fn insert_module(session: &mut Session, image: &[u8]) -> Result<u32, Fail> {
     os.perform(X | MODULE, &mut insert).map(|()| base)
 }
 
+/// UKSWIV claimed by guest code that counts the calls it is given and
+/// returns from none, so a SWI no module provides runs until the host's
+/// word: the address of the count.
+pub fn unknown_swis_held(session: &mut Session) -> u32 {
+    const HELD: [u32; 5] = [
+        0,           // the count
+        0xE51F_C00C, // LDR R12, [PC, #-12]
+        0xE28C_C001, // ADD R12, R12, #1
+        0xE50F_C014, // STR R12, [PC, #-20]
+        0xEAFF_FFFE, // B .
+    ];
+    let os = &mut session.kernel.os();
+    let bytes = u32::try_from(size_of_val(&HELD)).expect("a few words");
+    let count = os.rma_claim(bytes).expect("room");
+    os.write_words(count, &HELD).expect("written");
+    let mut claim = Regs::default();
+    claim.r[..3].copy_from_slice(&[tairix_riscos_kernel::vectors::UKSWI.0, count + 4, 0]);
+    os.perform(X | tairix_riscos_kernel::swi::os::CLAIM, &mut claim)
+        .expect("claimed");
+    count
+}
+
 /// The drivers' modules with the filing system's.
 pub static MODULES: LazyLock<Vec<&'static Builtin>> =
     LazyLock::new(|| modules_with(&[DRIVERS.as_slice()]));

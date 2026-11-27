@@ -16,6 +16,8 @@
 
 use core::num::NonZeroU32;
 
+use crate::error::Error;
+
 /// The descriptor's magic word: the bytes `Heap`.
 pub const MAGIC: u32 = 0x7061_6548;
 /// The descriptor's size: where the first block may start.
@@ -47,6 +49,24 @@ pub enum HeapError {
         /// The bytes it did shrink by.
         removed: u32,
     },
+}
+
+impl HeapError {
+    /// The error RISC OS gives for it.
+    #[must_use]
+    pub const fn error(self) -> Error {
+        let (number, token) = match self {
+            Self::BadReason => (0x180, "UnknownReasonCode"),
+            Self::FailInit => (0x181, "HeapNotInitialised"),
+            Self::BadDescriptor => (0x182, "BadHeapDescriptor"),
+            Self::BadLink => (0x183, "HeapCorrupt"),
+            Self::NoRoom => (0x184, "HeapFull"),
+            Self::NotABlock => (0x185, "NotAHeapBlock"),
+            Self::BadExtend => (0x186, "HeapCannotGrow"),
+            Self::ExcessiveShrink { .. } => (0x187, "HeapShrinkLimited"),
+        };
+        Error { number, token }
+    }
 }
 
 /// Guest memory as a heap reaches it.

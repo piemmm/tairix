@@ -99,7 +99,10 @@ pub fn helper(index: u32, args: &[u64]) -> u64 {
     )
 }
 
-/// The interpreter's helpers: [`helper`], at the table a case gives.
+/// The interpreter's helpers: [`helper`], at the table a case gives, each
+/// taking the [`arity`] a model reads. A call passing another count is
+/// refused: what a machine's helper reads past its arguments is the caller's
+/// garbage, which no backend can agree with.
 #[derive(Debug, Default)]
 pub struct TestHelpers {
     /// The calls made, each its index and arguments, in order.
@@ -114,7 +117,7 @@ impl Helpers for TestHelpers {
         args: &[u64],
         ret: Option<Type>,
     ) -> Result<Option<u64>, Trap> {
-        if table != TABLE || index >= HELPERS {
+        if table != TABLE || index >= HELPERS || args.len() != arity(index) {
             return Err(Trap::Helper(index));
         }
         self.calls.push((index, args.to_vec()));

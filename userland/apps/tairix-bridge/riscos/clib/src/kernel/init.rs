@@ -181,7 +181,7 @@ fn started(os: &mut Os<'_>, start: Start) -> Result<(), Fail> {
     let command = command_copy(os, top)?;
     statics.write(os, at::COMMAND, command)?;
     let mut version = Regs::default();
-    let available = os.perform(X | fp_emulator::VERSION, &mut version).is_ok();
+    let available = os.perform_quietly(X | fp_emulator::VERSION, &mut version)?;
     statics.write(os, at::FP_AVAILABLE, u32::from(available))?;
     set_handlers(os, statics)?;
     let first = statics.read(os, at::LANGUAGES)?;

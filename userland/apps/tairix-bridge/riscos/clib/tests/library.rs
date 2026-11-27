@@ -3,7 +3,10 @@
 
 mod common;
 
-use common::{run, Build, Calls};
+use common::{numbered, program, run, run_built, Build, Builder, Calls};
+use tairix_riscos_filing::session::disc_file;
+use tairix_riscos_kernel::swi::fp_emulator::VERSION;
+use tairix_riscos_kernel::vectors::UKSWI;
 
 /// RISC OS 5.30's answer for an OS error.
 const OS_ERROR: u32 = (-2_i32).cast_unsigned();
@@ -599,5 +602,36 @@ fn a_privileged_caller_sets_the_irq_state_and_a_read_an_escape_ends_answers_minu
         probe.out(16),
         0,
         "the escape acknowledged on the way back to User mode"
+    );
+}
+
+/// A start whose `FPEmulator_Version` reaches guest code that exits passes
+/// the exit on: the client is never entered, where a swallowed exit would
+/// take it for an emulator missing and run it.
+#[test]
+fn init_passes_on_an_exit_its_emulator_query_meets() {
+    let exits = numbered(&Builder {
+        name: "Exits",
+        origin: 0,
+        assembly: &format!(
+            "LDR R10,version\nCMP R11,R10\nMOVNE PC,R14\nSWI \"OS_Exit\"\n.version DCD &{VERSION:X}\n"
+        ),
+        layout: "",
+        save: &format!(
+            "SYS \"OS_Module\",6,,,O%-code% TO ,,b%:FOR i%=0 TO O%-code%-4 STEP 4:b%!i%=code%!i%:NEXT:SYS \"OS_Claim\",&{:X},b%,0:OSCLI \"RMKill FPEmulator\"",
+            UKSWI.0
+        ),
+    });
+    let probe = run_built(
+        &[
+            ("Mk", &program(&Build::plain("B tail\n"))),
+            ("Exits", &exits),
+        ],
+        "Run HostFS:$.CTest probe args",
+        &[],
+    );
+    assert!(
+        disc_file(&probe.disc, "CRes").is_none(),
+        "the client never ran"
     );
 }

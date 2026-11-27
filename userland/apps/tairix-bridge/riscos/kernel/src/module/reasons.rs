@@ -476,7 +476,7 @@ impl Os<'_> {
         let (block, change) = (regs.r[2], regs.r[3].cast_signed());
         let rounded = change.wrapping_add(31) & !31;
         let Some(held) = self.heap_block_size(KernelHeap::Rma, block) else {
-            return Err(self.error(crate::kheap::heap_error(crate::heap::HeapError::NotABlock)));
+            return Err(self.error(crate::heap::HeapError::NotABlock.error()));
         };
         if rounded < 0 || !block.is_multiple_of(32) {
             let need = u64::from(held) + u64::from(rounded.max(0).unsigned_abs()) + 8;

@@ -9,7 +9,7 @@
 //! state, never inside one.
 
 use tairix_riscos_kernel::byte::var;
-use tairix_riscos_kernel::os::{Entry, Fail, Os, Regs};
+use tairix_riscos_kernel::os::{quietly, Entry, Fail, Os, Regs};
 use tairix_riscos_kernel::vectors::Vector;
 use tairix_vdu::code::{Control, Operation, FIRST_DEFINED};
 
@@ -472,10 +472,10 @@ fn perform(os: &mut Os<'_>, effect: Effect) -> Result<(), Fail> {
                 0,
             ]);
             // A machine with no sound modules rings no bell.
-            let _ = os.perform(
+            quietly(os.perform(
                 tairix_riscos_kernel::swi::X | tairix_riscos_kernel::swi::sound::CONTROL,
                 &mut sound,
-            );
+            ))?;
             Ok(())
         }
         Effect::Mode(mode) => crate::select::vdu_22(os, mode),
