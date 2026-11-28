@@ -13,8 +13,14 @@ use tairix_riscos_kernel::os::{len32, Fail, Os};
 
 use crate::colour::Direct;
 use crate::palette::EIGHT_BIT_COLOURS;
+use crate::pointer::{MOST_HEIGHT, MOST_WIDTH, PIXELS_PER_BYTE};
 use crate::screen::AREA;
 use crate::state::read;
+
+/// The most pixels across a pointer is.
+pub const POINTER_WIDTH_MOST: u32 = MOST_WIDTH as u32 * PIXELS_PER_BYTE;
+/// The most lines down it is.
+pub const POINTER_HEIGHT_MOST: u32 = MOST_HEIGHT as u32;
 
 /// The screen on display.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,8 +51,32 @@ pub struct Cursor {
     pub width: u32,
     /// The lines of the cell it covers.
     pub lines: core::ops::RangeInclusive<u32>,
-    /// It flashes rather than standing steady.
-    pub flashing: bool,
+    /// How it flashes.
+    pub flash: Flash,
+}
+
+/// How the text cursor flashes, as `VDU 23,0,10` sets it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flash {
+    /// It stands steady.
+    Steady,
+    /// Fast.
+    Fast,
+    /// Slowly.
+    Slow,
+}
+
+impl Flash {
+    /// How long it stands lit, then unlit, in centiseconds: a sixteenth and a
+    /// thirty-second of a 50 Hz field rate, as the 6845 flashed it.
+    #[must_use]
+    pub const fn half_period_cs(self) -> Option<u32> {
+        match self {
+            Self::Steady => None,
+            Self::Fast => Some(16),
+            Self::Slow => Some(32),
+        }
+    }
 }
 
 /// The pointer to draw.
@@ -225,14 +255,19 @@ pub fn cursor(os: &mut Os<'_>) -> Option<Cursor> {
             y: row * cell.space_y,
             width: cell.size_x,
             lines: start..=end,
-            flashing: t.cursor.appearance >= 2,
+            flash: match t.cursor.appearance {
+                2 => Flash::Fast,
+                3 => Flash::Slow,
+                _ => Flash::Steady,
+            },
         })
     })
     .flatten()
 }
 
 /// The pointer, where a shape is selected, its pixels in `pixels` a row at
-/// a time, each a colour 0 to 3, nought clear.
+/// a time, each a colour 0 to 3, nought clear: a showing hourglass's frame
+/// where it is the hourglass's shape that is selected.
 ///
 /// # Errors
 ///
@@ -241,22 +276,36 @@ pub fn pointer(os: &mut Os<'_>, pixels: &mut Vec<u8>) -> Result<Option<PointerVi
     pixels.clear();
     read(os, |vdu, os| {
         let p = &vdu.pointer;
-        let Some(shape) = p
-            .selected
-            .checked_sub(1)
-            .and_then(|n| p.shapes.get(usize::from(n)))
-        else {
-            return Ok(None);
+        let (width, height, active) = if let Some(frame) = crate::hourglass::showing(vdu, os) {
+            crate::hourglass::paint(os, frame, pixels)?;
+            (
+                crate::hourglass::WIDTH,
+                crate::hourglass::HEIGHT,
+                crate::hourglass::ACTIVE,
+            )
+        } else {
+            let Some(shape) = p
+                .selected
+                .checked_sub(1)
+                .and_then(|n| p.shapes.get(usize::from(n)))
+            else {
+                return Ok(None);
+            };
+            if pixels.try_reserve_exact(4 * shape.data.len()).is_err() {
+                return Err(os.no_memory());
+            }
+            pixels.extend(
+                shape
+                    .data
+                    .iter()
+                    .flat_map(|byte| (0..4).map(move |p| (byte >> (2 * p)) & 3)),
+            );
+            (
+                u32::from(shape.width) * 4,
+                u32::from(shape.height),
+                (u32::from(shape.active.0), u32::from(shape.active.1)),
+            )
         };
-        if pixels.try_reserve_exact(4 * shape.data.len()).is_err() {
-            return Err(os.no_memory());
-        }
-        pixels.extend(
-            shape
-                .data
-                .iter()
-                .flat_map(|byte| (0..4).map(move |p| (byte >> (2 * p)) & 3)),
-        );
         let (x, y) = p.at(os);
         let f = &vdu.screen.format;
         let at = (
@@ -264,15 +313,22 @@ pub fn pointer(os: &mut Os<'_>, pixels: &mut Vec<u8>) -> Result<Option<PointerVi
             f.height().cast_signed() - 1 - (y >> f.y_eig()),
         );
         Ok(Some(PointerView {
-            width: u32::from(shape.width) * 4,
-            height: u32::from(shape.height),
+            width,
+            height,
             colours: vdu
                 .palette
                 .pointer
                 .map(|[first, _]| rgb(Rgb::from_riscos_word(first))),
             at,
-            active: (u32::from(shape.active.0), u32::from(shape.active.1)),
+            active,
         }))
     })
     .unwrap_or(Ok(None))
+}
+
+/// Whether the current context's hourglass shows: its program says it is
+/// busy.
+#[must_use]
+pub fn hourglass(os: &mut Os<'_>) -> bool {
+    read(os, |vdu, os| crate::hourglass::shows(vdu, os)).unwrap_or(false)
 }

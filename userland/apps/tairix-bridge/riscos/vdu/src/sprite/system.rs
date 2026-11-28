@@ -7,14 +7,12 @@ use tairix_image::{sprite_area as block, SpriteName};
 use tairix_riscos_arm::mmu::PAGE_SIZE;
 use tairix_riscos_kernel::cmos;
 use tairix_riscos_kernel::memory::handler_reason as reason;
+pub(crate) use tairix_riscos_kernel::memory::SPRITES as AREA;
 use tairix_riscos_kernel::memory::{Bits, Create};
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
 
 use super::area::Area;
 use crate::state;
-
-/// The area's number.
-pub(crate) const AREA: u32 = 3;
 /// The most it may reach, as RISC OS 5 has it, and in a layout that admits
 /// 26-bit code the share of the 26-bit window's areas it may take.
 const MOST: u32 = 0x100_0000;

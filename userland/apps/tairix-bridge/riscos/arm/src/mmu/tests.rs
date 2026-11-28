@@ -680,3 +680,13 @@ fn a_reservation_the_host_cannot_make_tables_for_changes_nothing() {
         "whose count the refusal left alone"
     );
 }
+
+/// A watch is held in an ordered map whose nodes are at least half full, so
+/// one costs at most four times its key and value.
+#[test]
+fn a_frame_s_bookkeeping_is_within_its_share() {
+    let watch = 4 * (core::mem::size_of::<u32>() + core::mem::size_of::<Watch>());
+    let bits = (1 + WATCHERS).div_ceil(8);
+    let kept = core::mem::size_of::<Slot>() + core::mem::size_of::<u32>() + watch + bits;
+    assert!(kept <= (PAGE_SIZE / BOOKKEEPING_SHARE) as usize, "{kept}");
+}

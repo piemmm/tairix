@@ -2,15 +2,20 @@
 //! every context of a session, with nothing but its port to the front end
 //! and the damage ring in its share.
 //!
+//! - **The start.** The front end's first command is the session's
+//!   [`Begin`](crate::protocol::Begin); the kernel is made from it through
+//!   the [`Session`] the worker's process gives, and the keyboard it names
+//!   selected.
 //! - **Scheduling.** Each context that can run has a turn of [`TURN`]
 //!   instructions in turn, the guest's measure of its time. One waiting on
 //!   input or the clock runs again once that comes or its own timed work falls
 //!   due, one parked on a relay once its reply comes; the session's timed work
 //!   wakes one waiting context to take the clock's interrupt, not every one.
-//!   While the current context cannot be set aside it alone may run. With
-//!   none to run the worker waits on its port until the soonest deadline of a
-//!   context that may, so an idle session costs nothing. While the front end
-//!   holds the session nothing runs, not even a context waiting in place.
+//!   One the front end pauses has no turn until it is let go on. While the
+//!   current context cannot be set aside it alone may run. With none to run
+//!   the worker waits on its port until the soonest deadline of a context
+//!   that may, so an idle session costs nothing. While the front end holds
+//!   the session nothing runs, not even a context waiting in place.
 //! - **Time.** The guest's clock is the port's since the session began; the
 //!   kernel makes up a second of a late clock's work at most and gives up the
 //!   rest, never racing it.
@@ -18,15 +23,19 @@
 //! - **Screens.** After each turn, and before the kernel waits in place for
 //!   input or the clock, the current context's screen is set beside what the
 //!   front end was told, and the lines drawn since go into the ring as its
-//!   room allows. Lines it had no room for go once the front end gives room
-//!   back, each context with lines waiting visited in turn while others run.
+//!   room allows, then the text cursor and the pointer drawn over it. Lines it
+//!   had no room for go once the front end gives room back, each context with
+//!   lines waiting visited in turn while others run.
+//! - **Memory.** After each turn what the context holds of its own, and what
+//!   the shared areas hold, are told where they changed.
 //! - **Relays** go out as events: one the kernel lets park waits for its
 //!   reply with its context parked, unless the context is parked on another,
 //!   and any other in place.
 //! - **Launches** make a context, its slot and its mailbox, tell the front
-//!   end, and run the command line there. A context ends when its program
-//!   does, when its command needs no program, or on a quit, and the front end
-//!   is told once its end has run, so nothing of it is shown after.
+//!   end, and run the command line, or the boot sequence, there. A context
+//!   ends when its program does, when its command needs no program, or on a
+//!   quit, and the front end is told once its end has run, so nothing of it
+//!   is shown after; a boot's failures are told before its end.
 //! - **Containment.** A command the protocol does not allow, or a session
 //!   that fails, ends the worker with why.
 
@@ -34,14 +43,19 @@ mod port;
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use tairix_collections::{BitVec, OrderedMap};
+use tairix_reclaim::PressureBand;
 use tairix_riscos_arm::cpu::Unmodelled;
+use tairix_riscos_filing::boot::{self, Report};
 use tairix_riscos_kernel::context::{ContextError, ContextId};
+use tairix_riscos_kernel::desktop::DesktopFont;
 use tairix_riscos_kernel::error;
-use tairix_riscos_kernel::memory::{layout, Bits};
+use tairix_riscos_kernel::memory::policy::Ceiling;
+use tairix_riscos_kernel::memory::{layout, Bits, Own, Shared};
 use tairix_riscos_kernel::os::{
     len32, BootError, Config, Ended, Fail, Host, Kernel, Os, Outcome, Regs, Unwind, Wait,
 };
@@ -49,9 +63,11 @@ use tairix_riscos_kernel::swi::os::{environment, CHANGE_ENVIRONMENT, CLI};
 use tairix_riscos_kernel::swi::X;
 use tairix_riscos_vdu::display;
 use tairix_sandbox::session::ShareWrite;
-use tairix_sandbox::WorkerPort;
+use tairix_sandbox::{Waited, WorkerPort};
 
-use crate::protocol::{Context, Ending, Error, Event, Screen, BOOT, SCREEN_MOST};
+use crate::protocol::{
+    Command, Context, Cursor, Ending, Error, Event, Screen, Shape, BOOT, SCREEN_MOST,
+};
 use crate::ring::{Ring, RECORD_MOST, RING_BYTES};
 pub use port::End;
 use port::{Kept, Port, Reply};
@@ -59,13 +75,46 @@ use port::{Kept, Port, Reply};
 /// The instructions a context runs in a turn before another may.
 pub const TURN: u64 = 1 << 20;
 
-/// What a worker is made with beside its port and share.
-#[derive(Clone, Copy, Debug)]
-pub struct Setup {
-    /// The bytes of the slot each launched program is given.
-    pub slot_bytes: u32,
-    /// The real time when the worker starts, in centiseconds since 1900.
-    pub real_time: u64,
+/// What the front end started a session with, as the worker keeps it for the
+/// kernel's making.
+#[derive(Debug)]
+pub struct Started {
+    /// The guest's RAM.
+    pub ceiling: Ceiling,
+    /// The decoded pages each processor keeps.
+    pub memo_pages: usize,
+    /// The session's zone: the store, read for the session's life, and the
+    /// zone's name in it; none for UTC.
+    pub zone: Option<(Vec<u8>, String)>,
+    /// The TAIRiX desktop's interface text.
+    pub font: DesktopFont,
+    /// The machine's memory pressure.
+    pub pressure: PressureBand,
+}
+
+/// Why a session's kernel could not be configured.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Unconfigured {
+    /// What the front end started it with is no session's: why.
+    Refused(&'static str),
+    /// There was no memory for it.
+    NoMemory,
+}
+
+/// What a worker's process gives its session beside its port and share.
+pub trait Session {
+    /// The kernel's configuration for a session started as `started`, its
+    /// host `host`.
+    ///
+    /// # Errors
+    ///
+    /// [`Unconfigured`]: a zone store the zone reader refuses, or one
+    /// without the zone it names; or no memory.
+    fn config(&mut self, host: Box<dyn Host>, started: Started) -> Result<Config, Unconfigured>;
+
+    /// The machine's memory pressure moved to `band`, which the session's
+    /// caches are then held to.
+    fn pressure(&mut self, band: PressureBand);
 }
 
 /// How a context stands between its turns.
@@ -90,6 +139,10 @@ struct Live {
     standing: Standing,
     /// When its own timed work falls due, as it stood after its last turn.
     due: Option<u64>,
+    /// What the front end was last told it holds of its own.
+    own: Option<Own>,
+    /// It runs the boot sequence, whose failures are owed at its end.
+    boot: bool,
 }
 
 impl Live {
@@ -132,12 +185,30 @@ impl Eligible {
     }
 }
 
-/// What the front end has been shown of one context's screen.
+/// What the front end has been shown of one context's screen and what is
+/// drawn over it.
 struct Seen {
     screen: Screen,
     shown: Option<display::Shown>,
     /// The lines drawn and not yet sent.
     pending: BitVec,
+    cursor: Option<Cursor>,
+    pointer: Option<Pointer>,
+    at: Option<(i32, i32)>,
+    /// The guest's settings of its pointer, as last counted.
+    sets: u32,
+    /// Whether its hourglass shows, as last told.
+    hourglass: bool,
+}
+
+/// A pointer shape as last told.
+#[derive(Clone, PartialEq, Eq)]
+struct Pointer {
+    width: u32,
+    height: u32,
+    active: (u8, u8),
+    colours: [u32; 3],
+    pixels: Vec<u8>,
 }
 
 /// What the front end has been shown of each context's screen, and the ring
@@ -151,6 +222,8 @@ struct Display<P, S> {
     share: S,
     /// A line's colours as the drivers read them.
     line: Vec<u32>,
+    /// A pointer shape's pixels as the drivers read them.
+    shape: Vec<u8>,
 }
 
 /// The current context's screen shown, as after a turn and before the
@@ -176,6 +249,27 @@ fn described(view: &display::View) -> Option<Screen> {
         y_eig: view.y_eig,
         border: view.border,
         blanked: view.blanked,
+    })
+}
+
+/// The text cursor as the front end is told it: none where the protocol
+/// cannot place it on `screen`.
+fn cursor_on(screen: &Screen, cursor: &display::Cursor) -> Option<Cursor> {
+    let (top, bottom) = (*cursor.lines.start(), *cursor.lines.end());
+    let fits = cursor.x < screen.width
+        && cursor
+            .y
+            .checked_add(bottom)
+            .is_some_and(|y| y < screen.height)
+        && cursor.width >= 1
+        && cursor.width <= screen.width - cursor.x;
+    fits.then_some(Cursor {
+        x: cursor.x,
+        y: cursor.y,
+        width: cursor.width,
+        top,
+        bottom,
+        flash: cursor.flash,
     })
 }
 
@@ -207,10 +301,21 @@ impl<P: WorkerPort, S: ShareWrite> Display<P, S> {
                 let Ok(pending) = BitVec::try_with_len(screen.height as usize, true) else {
                     return;
                 };
+                // A context's count starts at nought with its mouse, and
+                // neither it nor its hourglass is the screen's.
+                let (sets, hourglass) = self
+                    .seen
+                    .get(&context)
+                    .map_or((0, false), |seen| (seen.sets, seen.hourglass));
                 let fresh = Seen {
                     screen,
                     shown: shown.clone(),
                     pending,
+                    cursor: None,
+                    pointer: None,
+                    at: None,
+                    sets,
+                    hourglass,
                 };
                 if self.seen.try_insert(context, fresh).is_err() {
                     return;
@@ -261,6 +366,7 @@ impl<P: WorkerPort, S: ShareWrite> Display<P, S> {
             });
             from = (first + lines) as usize;
         }
+        show_over(seen, &mut self.shape, &self.port, os, context);
         self.port.borrow_mut().flush();
     }
 
@@ -281,6 +387,69 @@ impl<P: WorkerPort, S: ShareWrite> Display<P, S> {
             .map(|(&context, _)| context)?;
         self.visited = next;
         Some(next)
+    }
+}
+
+/// What is drawn over `context`'s screen told where it changed: the text
+/// cursor, the pointer's shape and place, the guest setting its pointer
+/// itself, and its hourglass.
+fn show_over<P: WorkerPort>(
+    seen: &mut Seen,
+    shape: &mut Vec<u8>,
+    port: &Rc<RefCell<Port<P>>>,
+    os: &mut Os<'_>,
+    context: Context,
+) {
+    let cursor = display::cursor(os).and_then(|cursor| cursor_on(&seen.screen, &cursor));
+    if seen.cursor != cursor {
+        seen.cursor = cursor;
+        port.borrow_mut().send(&Event::Cursor { context, cursor });
+    }
+    if let Ok(view) = display::pointer(os, shape) {
+        let pointer = view.map(|view| Pointer {
+            width: view.width,
+            height: view.height,
+            active: (
+                u8::try_from(view.active.0).unwrap_or(u8::MAX),
+                u8::try_from(view.active.1).unwrap_or(u8::MAX),
+            ),
+            colours: view.colours,
+            pixels: core::mem::take(shape),
+        });
+        if seen.pointer != pointer {
+            let told = pointer.as_ref().map(|p| Shape {
+                width: p.width,
+                height: p.height,
+                active: p.active,
+                colours: p.colours,
+                pixels: &p.pixels,
+            });
+            port.borrow_mut().send(&Event::Pointer {
+                context,
+                shape: told,
+            });
+            seen.pointer = pointer;
+        } else if let Some(kept) = pointer {
+            *shape = kept.pixels;
+        }
+        let at = view.map(|view| view.at);
+        if let Some((x, y)) = at.filter(|&at| seen.at != Some(at)) {
+            port.borrow_mut().send(&Event::PointerAt { context, x, y });
+        }
+        seen.at = at;
+    }
+    let sets = os.pointer_sets();
+    if seen.sets != sets {
+        seen.sets = sets;
+        port.borrow_mut().send(&Event::PointerSet { context });
+    }
+    let hourglass = display::hourglass(os);
+    if seen.hourglass != hourglass {
+        seen.hourglass = hourglass;
+        port.borrow_mut().send(&Event::Hourglass {
+            context,
+            shown: hourglass,
+        });
     }
 }
 
@@ -320,10 +489,17 @@ fn write_lines<S: ShareWrite>(
     })
 }
 
+/// What a launch runs once its context is made.
+enum Launching<'a> {
+    Line(&'a [u8]),
+    Boot,
+}
+
 /// The worker.
 struct Worker<P: WorkerPort, S> {
     kernel: Kernel,
     port: Rc<RefCell<Port<P>>>,
+    session: Box<dyn Session>,
     /// The contexts launched and not yet ended.
     contexts: OrderedMap<Context, Live>,
     /// The boot's context, which every ended one gives way to.
@@ -336,33 +512,100 @@ struct Worker<P: WorkerPort, S> {
     /// turn or launch.
     session_due: Option<u64>,
     slot_bytes: u32,
+    /// The pages in use when the shared areas were last looked at, and what
+    /// the front end was last told they hold.
+    in_use: u32,
+    shared: Option<Shared>,
     share: core::marker::PhantomData<S>,
 }
 
+/// What the first command started the session with: the start itself, and
+/// what of it the worker uses beside the kernel's making.
+struct Begun {
+    started: Started,
+    slot_bytes: u32,
+    real_time: u64,
+    keyboard: u32,
+}
+
+/// The session's start, which the front end's first command must be.
+fn begun<P: WorkerPort>(port: &mut P) -> Result<Begun, End> {
+    let taken = port.recv(None, |payload| match Command::decode(payload) {
+        Ok(Command::Begin(begin)) => {
+            let zone = match begin.zone {
+                Some(zone) => match (copied(zone.store), copied(zone.name.as_bytes())) {
+                    (Some(store), Some(name)) => match String::from_utf8(name) {
+                        Ok(name) => Some((store, name)),
+                        Err(_) => return Err(End::Violation("a zone named in no text")),
+                    },
+                    _ => return Err(End::NoMemory),
+                },
+                None => None,
+            };
+            let ceiling = Ceiling::of_pages(begin.ram_pages)
+                .ok_or(End::Violation("more RAM than a guest can be shown"))?;
+            Ok(Begun {
+                started: Started {
+                    ceiling,
+                    memo_pages: begin.memo_pages as usize,
+                    zone,
+                    font: begin.font,
+                    pressure: begin.pressure,
+                },
+                slot_bytes: begin.slot_bytes,
+                real_time: begin.real_time,
+                keyboard: begin.keyboard,
+            })
+        }
+        Ok(_) => Err(End::Violation("a session not started first")),
+        Err(_) => Err(End::Violation("a command that does not decode")),
+    });
+    match taken {
+        Ok(Waited::Frame(begun)) => begun,
+        Ok(Waited::Nothing | Waited::Closed) => Err(End::Closed),
+        Err(error) => Err(End::Failed(error)),
+    }
+}
+
+/// `bytes` copied into memory of the worker's own: none where there is no
+/// room for them.
+fn copied(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut owned = Vec::new();
+    owned.try_reserve_exact(bytes.len()).ok()?;
+    owned.extend_from_slice(bytes);
+    Some(owned)
+}
+
 /// The session served over `port`, its screens' lines in `share`: the
-/// kernel made with `config` given the worker's host, then every command
-/// answered until the session ends.
-pub fn serve<P, S>(
-    port: P,
-    share: S,
-    setup: Setup,
-    config: impl FnOnce(Box<dyn Host>) -> Config,
-) -> End
+/// kernel made through `session` once the front end has started it, then
+/// every command answered until the session ends.
+pub fn serve<P, S>(mut port: P, share: S, mut session: impl Session + 'static) -> End
 where
     P: WorkerPort + 'static,
     S: ShareWrite + 'static,
 {
     let origin = port.now();
-    let Some(port) = Port::new(port, origin, setup.real_time) else {
+    let begun = match begun(&mut port) {
+        Ok(begun) => begun,
+        Err(end) => return end,
+    };
+    let Some(port) = Port::new(port, origin, begun.real_time) else {
         return End::Refused(BootError::NoMemory);
     };
     let port = Rc::new(RefCell::new(port));
-    let mut made = config(port::host(&port));
+    let mut made = match session.config(port::host(&port), begun.started) {
+        Ok(made) => made,
+        Err(Unconfigured::Refused(why)) => return End::Violation(why),
+        Err(Unconfigured::NoMemory) => return End::NoMemory,
+    };
     made.show = Some(show::<P, S>);
     let mut kernel = match Kernel::new(made) {
         Ok(kernel) => kernel,
         Err(error) => return End::Refused(error),
     };
+    if kernel.os().select_keyboard(begun.keyboard).is_err() {
+        return End::Fault;
+    }
     let display = Display {
         port: Rc::clone(&port),
         ring: Ring::new(),
@@ -370,6 +613,7 @@ where
         visited: BOOT,
         share,
         line: Vec::new(),
+        shape: Vec::new(),
     };
     if kernel.os().hold_extension(display).is_err() {
         return End::Refused(BootError::NoMemory);
@@ -379,12 +623,15 @@ where
     let worker = Worker {
         kernel,
         port,
+        session: Box::new(session),
         contexts: OrderedMap::new(),
         boot,
         next: BOOT + 1,
         last: BOOT,
         session_due,
-        slot_bytes: setup.slot_bytes,
+        slot_bytes: begun.slot_bytes,
+        in_use: u32::MAX,
+        shared: None,
         share: core::marker::PhantomData::<S>,
     };
     worker.serve()
@@ -397,6 +644,7 @@ impl<P: WorkerPort + 'static, S: ShareWrite + 'static> Worker<P, S> {
                 return end;
             }
             self.port.borrow_mut().take_commands(Some(0));
+            self.take_moved();
             self.apply_kept();
             let shown = self.show_waiting();
             match self.next_turn() {
@@ -416,6 +664,23 @@ impl<P: WorkerPort + 'static, S: ShareWrite + 'static> Worker<P, S> {
         self.port.borrow().running
     }
 
+    /// The machine's memory pressure and the desktop's text taken where they
+    /// moved: the session's caches held to the band, a `Desktop` font found
+    /// from now on set in the text.
+    fn take_moved(&mut self) {
+        let (pressure, font) = {
+            let mut port = self.port.borrow_mut();
+            (port.pressure.take(), port.font.take())
+        };
+        if let Some(band) = pressure {
+            self.session.pressure(band);
+            self.kernel.os().pressure_moved();
+        }
+        if let Some(font) = font {
+            self.kernel.os().set_desktop_font(font);
+        }
+    }
+
     /// The commands kept applied, as far as the session allows: a launch
     /// waits while the session is held, and a launch or a quit while the
     /// current context cannot be set aside. Those that wait keep their
@@ -431,7 +696,10 @@ impl<P: WorkerPort + 'static, S: ShareWrite + 'static> Worker<P, S> {
             };
             let running = self.running();
             let applied = match command {
-                Kept::Launch { serial, ref line } => running && self.launch(serial, line),
+                Kept::Launch { serial, ref line } => {
+                    running && self.launch(serial, &Launching::Line(line))
+                }
+                Kept::Boot { serial } => running && self.launch(serial, &Launching::Boot),
                 Kept::Quit { context } => self.quit(context),
             };
             if !applied {
@@ -466,13 +734,14 @@ impl<P: WorkerPort + 'static, S: ShareWrite + 'static> Worker<P, S> {
     }
 
     /// The contexts that may have a turn, in turn after the one that had the
-    /// last.
+    /// last: none the front end pauses.
     fn in_turn(&self, eligible: Eligible) -> impl Iterator<Item = (&Context, &Live)> {
         let after = self.last.wrapping_add(1);
+        let port = Rc::clone(&self.port);
         self.contexts
             .range(after..)
             .chain(self.contexts.range(..after))
-            .filter(move |(_, live)| eligible.admits(live))
+            .filter(move |(&context, live)| eligible.admits(live) && !port.borrow().paused(context))
     }
 
     /// The next context to have a turn: one that can run, after the last in
@@ -570,6 +839,31 @@ impl<P: WorkerPort + 'static, S: ShareWrite + 'static> Worker<P, S> {
             live.due = deadlines.own;
         }
         show::<P, S>(&mut self.kernel.os());
+        self.tell_memory(context);
+    }
+
+    /// What the current context, `context`, holds of its own and what the
+    /// shared areas hold, each told where it changed since last told.
+    fn tell_memory(&mut self, context: Context) {
+        let memory = self.kernel.memory();
+        let own = memory.own();
+        let in_use = memory.pages_in_use();
+        let shared = (in_use != self.in_use).then(|| memory.shared());
+        if let Some(live) = self.contexts.get_mut(&context) {
+            if live.own != Some(own) {
+                live.own = Some(own);
+                self.port.borrow_mut().send(&Event::Own {
+                    context,
+                    slot: own.slot,
+                    screen: own.screen,
+                });
+            }
+        }
+        self.in_use = in_use;
+        if let Some(shared) = shared.filter(|&shared| self.shared != Some(shared)) {
+            self.shared = Some(shared);
+            self.port.borrow_mut().send(&Event::Shared(shared));
+        }
     }
 
     /// The current context, `context`, whose program `ended`: its screen
@@ -591,9 +885,36 @@ impl<P: WorkerPort + 'static, S: ShareWrite + 'static> Worker<P, S> {
         self.ended(context, Ending::Unmodelled(unmodelled));
     }
 
-    /// The current context, `context`, ended: its end run first, then the
-    /// front end told, so that nothing the end does is shown after it.
+    /// The failures `report` kept, and the count it did not keep, told as
+    /// the boot `context`'s.
+    fn tell_report(&self, context: Context, report: &Report) {
+        let mut port = self.port.borrow_mut();
+        for failure in &report.failures {
+            port.send(&Event::BootFailed {
+                context,
+                line: &failure.line,
+                error: Error {
+                    number: failure.number,
+                    text: &failure.text,
+                },
+            });
+        }
+        if report.omitted > 0 {
+            port.send(&Event::BootOmitted {
+                context,
+                count: report.omitted,
+            });
+        }
+    }
+
+    /// The current context, `context`, ended: a boot's failures told first,
+    /// then its end run, then the front end told, so that nothing the end
+    /// does is shown after it.
     fn ended(&mut self, context: Context, ending: Ending<'_>) {
+        if self.contexts.get(&context).is_some_and(|live| live.boot) {
+            let report = boot::reported(&mut self.kernel.os());
+            self.tell_report(context, &report);
+        }
         if let Err(error) = self.kernel.os().end_context(self.boot) {
             self.refused_switch(error);
             return;
@@ -619,9 +940,9 @@ impl<P: WorkerPort + 'static, S: ShareWrite + 'static> Worker<P, S> {
         self.contexts.remove(&context);
     }
 
-    /// Launch `serial` made, running `line`: false while the current
-    /// context cannot be set aside for it.
-    fn launch(&mut self, serial: u32, line: &[u8]) -> bool {
+    /// Launch `serial` made, running what `launching` names: false while the
+    /// current context cannot be set aside for it.
+    fn launch(&mut self, serial: u32, launching: &Launching<'_>) -> bool {
         let refused = |worker: &Self, error: Option<Error<'_>>| {
             worker
                 .port
@@ -657,6 +978,8 @@ impl<P: WorkerPort + 'static, S: ShareWrite + 'static> Worker<P, S> {
             kernel,
             standing: Standing::Ready,
             due: None,
+            own: None,
+            boot: matches!(launching, Launching::Boot),
         };
         // Its mailbox last: a context the front end has not been told of has
         // none, so nothing of it is shown.
@@ -675,7 +998,10 @@ impl<P: WorkerPort + 'static, S: ShareWrite + 'static> Worker<P, S> {
         self.port
             .borrow_mut()
             .send(&Event::Launched { serial, context });
-        let ran = self.command(line);
+        let ran = match *launching {
+            Launching::Line(line) => self.command(line),
+            Launching::Boot => self.boot(context),
+        };
         self.session_due = self.kernel.os().deadlines().session;
         match ran {
             Ok(()) => self.program_ended(context, Ended::Exit { code: 0 }),
@@ -692,6 +1018,17 @@ impl<P: WorkerPort + 'static, S: ShareWrite + 'static> Worker<P, S> {
             Err(Fail::Unwind(Unwind::Transfer | Unwind::Stopped)) => {}
         }
         true
+    }
+
+    /// The boot sequence run in the current context, `context`: where it
+    /// finishes at once, its failures told then, none owed at its end.
+    fn boot(&mut self, context: Context) -> Result<(), Fail> {
+        let report = boot::start(&mut self.kernel.os())?;
+        self.tell_report(context, &report);
+        if let Some(live) = self.contexts.get_mut(&context) {
+            live.boot = false;
+        }
+        Ok(())
     }
 
     /// The current context given a slot of the worker's size, its memory
@@ -775,7 +1112,7 @@ impl<P: WorkerPort + 'static, S: ShareWrite + 'static> Worker<P, S> {
             let eligible = self.eligible();
             let mut takers = false;
             let mut soonest = None;
-            for live in self.contexts.values().filter(|live| eligible.admits(live)) {
+            for (_, live) in self.in_turn(eligible) {
                 takers |= live.waits_on_the_clock();
                 soonest = [soonest, live.falls_due()].into_iter().flatten().min();
             }

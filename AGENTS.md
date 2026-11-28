@@ -829,7 +829,8 @@ tairix/
 │   │           ├── draw/   #   Draw and DrawFile: paths filled and stroked, Draw files.
 │   │           ├── font/   #   The Font Manager and the ROM fonts: faces, guest fonts, text.
 │   │           ├── clib/   #   SharedCLibrary: the library kernel and the C library.
-│   │           └── session/ #  The session's protocol between the front end and its worker.
+│   │           ├── session/ #  The session's protocol between the front end and its worker.
+│   │           └── app/    #   TAIRiXBridge.app: the front end, and a session's worker role.
 │   └── games/           # Games. A leaf subtree: its crates compose each other
 │       │                #   and `lib/*`, and NOTHING outside it may depend on
 │       │                #   them, so game code never enters the OS libraries.

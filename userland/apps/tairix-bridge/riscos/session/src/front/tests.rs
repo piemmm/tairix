@@ -6,11 +6,14 @@
 
 use alloc::vec::Vec;
 
+use alloc::format;
+
 use tairix_fuzzseed::meter::refusing_after;
+use tairix_riscos_kernel::memory::Shared;
 use tairix_riscos_kernel::relay::Side;
 
 use super::*;
-use crate::protocol::{Ending, Error, WAITING_MOST};
+use crate::protocol::{Ending, Error, Flash, WAITING_MOST};
 use crate::ring::RING_BYTES;
 
 const SCREEN: Screen = Screen {
@@ -436,4 +439,128 @@ fn the_room_a_launch_s_events_need_is_held_as_it_is_asked() {
             .count()
     });
     assert_eq!(believed, events.len(), "{:?}", events.get(believed));
+}
+
+/// A model whose boot was asked and made context 1.
+fn booted() -> Front {
+    let mut front = Front::new().expect("room");
+    let serial = front.boot().expect("asked");
+    assert_eq!(front.boot(), None, "a session boots once");
+    let made = Event::Launched { serial, context: 1 };
+    assert_eq!(front.believe(&made), Ok(None));
+    front
+}
+
+fn failed(context: Context) -> Event<'static> {
+    Event::BootFailed {
+        context,
+        line: b"Run Boot:Choices.Boot.PreDesk.Thing",
+        error: Error {
+            number: 0xD6,
+            text: b"Not found",
+        },
+    }
+}
+
+#[test]
+fn a_boot_tells_no_more_failures_than_a_report_keeps_and_counts_the_rest_once() {
+    let mut front = booted();
+    for _ in 0..BOOT_FAILURES_MOST {
+        assert_eq!(front.believe(&failed(1)), Ok(None));
+    }
+    let before = format!("{front:?}");
+    assert!(front.believe(&failed(1)).is_err());
+    let omitted = Event::BootOmitted {
+        context: 1,
+        count: 9,
+    };
+    assert_eq!(front.believe(&omitted), Ok(None));
+    assert!(front.believe(&omitted).is_err(), "counted once");
+    assert!(front.believe(&failed(1)).is_err(), "none after the count");
+    assert_ne!(format!("{front:?}"), before, "the count was noted");
+}
+
+#[test]
+fn only_the_boot_s_context_tells_boot_failures() {
+    let mut front = launched(&[b"BASIC"]);
+    assert!(front.believe(&failed(1)).is_err());
+    let omitted = Event::BootOmitted {
+        context: 1,
+        count: 1,
+    };
+    assert!(front.believe(&omitted).is_err());
+    assert!(front.believe(&failed(2)).is_err(), "nor one not running");
+}
+
+#[test]
+fn a_cursor_is_believed_only_within_a_screen_told() {
+    let mut front = launched(&[b"BASIC"]);
+    let within = Cursor {
+        x: 632,
+        y: 464,
+        width: 8,
+        top: 0,
+        bottom: 15,
+        flash: Flash::Steady,
+    };
+    let told = |cursor| Event::Cursor { context: 1, cursor };
+    assert_eq!(front.believe(&told(Some(within))), Ok(None));
+    assert_eq!(front.believe(&told(None)), Ok(None));
+    for beyond in [
+        Cursor { width: 9, ..within },
+        Cursor {
+            bottom: 16,
+            ..within
+        },
+    ] {
+        assert!(front.believe(&told(Some(beyond))).is_err(), "{beyond:?}");
+    }
+    let mut unscreened = Front::new().expect("room");
+    let serial = unscreened.launch(b"BASIC").expect("carried");
+    let made = Event::Launched { serial, context: 1 };
+    assert_eq!(unscreened.believe(&made), Ok(None));
+    assert!(unscreened.believe(&told(Some(within))).is_err());
+    let pointer = Event::PointerAt {
+        context: 1,
+        x: 0,
+        y: 0,
+    };
+    assert!(
+        unscreened.believe(&pointer).is_err(),
+        "a pointer needs one too"
+    );
+    assert_eq!(front.believe(&pointer), Ok(None));
+    let hourglass = Event::Hourglass {
+        context: 1,
+        shown: true,
+    };
+    assert!(
+        unscreened.believe(&hourglass).is_err(),
+        "an hourglass is drawn over one"
+    );
+    assert_eq!(front.believe(&hourglass), Ok(None));
+    let elsewhere = Event::Hourglass {
+        context: 2,
+        shown: false,
+    };
+    assert!(front.believe(&elsewhere).is_err(), "a context not running");
+}
+
+#[test]
+fn a_running_context_alone_may_be_paused_or_have_its_memory_told() {
+    let mut front = launched(&[b"BASIC"]);
+    assert!(front.runs(1));
+    assert!(!front.runs(2));
+    let own = |context| Event::Own {
+        context,
+        slot: 0x8_0000,
+        screen: 0x4_B000,
+    };
+    assert_eq!(front.believe(&own(1)), Ok(None));
+    assert!(front.believe(&own(2)).is_err());
+    assert_eq!(
+        front.believe(&Event::Shared(Shared::default())),
+        Ok(None),
+        "the shared areas whatever runs"
+    );
 }

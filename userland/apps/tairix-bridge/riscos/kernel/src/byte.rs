@@ -448,7 +448,7 @@ impl Os<'_> {
     }
 
     /// The keyboard selected, and the modules told.
-    fn select_keyboard(&mut self, keyboard: u32, alphabet: u32) -> Result<(), Unwind> {
+    fn adopt_keyboard(&mut self, keyboard: u32, alphabet: u32) -> Result<(), Unwind> {
         self.world.country.keyboard = keyboard;
         self.world.country.key_alphabet = alphabet;
         self.ask_international(
@@ -478,7 +478,7 @@ impl Os<'_> {
         let old = u32::from(self.byte_var(var::COUNTRY));
         self.set_byte_var(var::COUNTRY, u8::try_from(country).unwrap_or(0));
         self.world.country.alphabet = alphabet;
-        self.select_keyboard(country, alphabet)?;
+        self.adopt_keyboard(country, alphabet)?;
         self.define_alphabet_fully(alphabet)?;
         regs.r[1] = old;
         regs.r[2] = crate::service::international::DEFINE;
@@ -515,7 +515,7 @@ impl Os<'_> {
                     return Ok(());
                 };
                 regs.r[1] = self.world.country.keyboard;
-                self.select_keyboard(keyboard, alphabet)?;
+                self.adopt_keyboard(keyboard, alphabet)?;
             }
         }
         Ok(())

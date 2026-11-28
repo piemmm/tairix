@@ -14,7 +14,7 @@ use crate::proto::MAX_FRAME;
 
 /// What a worker needs whatever it parses: its heap's bookkeeping and the
 /// stack and tables its service builds before the first request.
-pub(crate) const WORKER_BASELINE_BYTES: u64 = 16 << 20;
+pub const WORKER_BASELINE_BYTES: u64 = 16 << 20;
 
 /// The ceiling of a worker whose request and reply frames bound its work.
 pub const MESSAGE_WORKER_BYTES: u64 = 2 * MAX_FRAME as u64 + WORKER_BASELINE_BYTES;
@@ -45,6 +45,13 @@ pub enum WorkerMemory {
     /// Icons and thumbnails: pictures drawn at a tile's size, whose decode is
     /// refused past a fixed peak on any machine.
     Artwork,
+    /// An emulated machine its owner sizes: `bytes`, its guest's memory and
+    /// the worker's own beside it, as the owner's policy for the machine
+    /// chose them.
+    Machine {
+        /// The bytes it may map.
+        bytes: u64,
+    },
 }
 
 impl WorkerMemory {
@@ -53,7 +60,8 @@ impl WorkerMemory {
     /// baseline; a document decoder a quarter of the machine, so one parse
     /// leaves the rest to everything else, and never less than
     /// [`DOCUMENT_WORKER_FLOOR_BYTES`]; an artwork decoder
-    /// [`ARTWORK_WORKER_BYTES`].
+    /// [`ARTWORK_WORKER_BYTES`]; an emulated machine what its owner sized it
+    /// to, and never less than [`MESSAGE_WORKER_BYTES`].
     #[must_use]
     pub const fn ceiling(self, ram_bytes: u64) -> u64 {
         match self {
@@ -67,13 +75,21 @@ impl WorkerMemory {
                 }
             }
             Self::Artwork => ARTWORK_WORKER_BYTES,
+            Self::Machine { bytes } => {
+                if bytes > MESSAGE_WORKER_BYTES {
+                    bytes
+                } else {
+                    MESSAGE_WORKER_BYTES
+                }
+            }
         }
     }
 
     /// The longest document a worker of this kind may be handed on a machine
     /// of `ram_bytes` (zero where unknown): what its ceiling holds beside a
     /// message worker's frames — and, for an artwork decoder, beside its
-    /// thumbnail's decode. A message parser is handed none.
+    /// thumbnail's decode. A message parser and an emulated machine are
+    /// handed none.
     ///
     /// The bytes must be resident to be read at all, since every decoder
     /// reads a whole file, so this is what a document costs before anything
@@ -82,7 +98,7 @@ impl WorkerMemory {
     #[must_use]
     pub const fn document_bytes(self, ram_bytes: u64) -> u64 {
         match self {
-            Self::Messages => 0,
+            Self::Messages | Self::Machine { .. } => 0,
             Self::Documents => self.ceiling(ram_bytes).saturating_sub(MESSAGE_WORKER_BYTES),
             Self::Artwork => ARTWORK_WORKER_BYTES
                 .saturating_sub(MESSAGE_WORKER_BYTES)
@@ -114,6 +130,21 @@ mod tests {
         for ram in [0, 64 << 20, 64 << 30] {
             assert_eq!(WorkerMemory::Messages.ceiling(ram), MESSAGE_WORKER_BYTES);
             assert_eq!(WorkerMemory::Messages.document_bytes(ram), 0);
+        }
+    }
+
+    #[test]
+    fn an_emulated_machine_is_held_to_what_its_owner_sized_it_to_and_its_frames() {
+        for ram in [0, 64 << 20, 64 << 30] {
+            let sized = WorkerMemory::Machine { bytes: 512 << 20 };
+            assert_eq!(sized.ceiling(ram), 512 << 20, "whatever the machine");
+            assert_eq!(sized.document_bytes(ram), 0, "handed no document");
+            let small = WorkerMemory::Machine { bytes: 1 };
+            assert_eq!(
+                small.ceiling(ram),
+                MESSAGE_WORKER_BYTES,
+                "its frames at least"
+            );
         }
     }
 

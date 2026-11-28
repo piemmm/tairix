@@ -1720,6 +1720,11 @@ mod tests {
         ("Starfield", ProgramKind::Screensaver, &[]),
         ("SystemMonitor", ProgramKind::Screensaver, &[]),
         (
+            "TAIRiXBridge",
+            ProgramKind::Application,
+            SANDBOXED_DOCUMENT_APP_REQUEST,
+        ),
+        (
             "TextEdit",
             ProgramKind::Application,
             SANDBOXED_DOCUMENT_APP_REQUEST,

@@ -4,8 +4,8 @@ TAIRiX Bridge's VDU drivers and sprites (`plans/RISCOS-EMULATOR.md` §8, RO21
 and RO22): RISC OS 5's screen modes and screen memory, the VDU stream,
 `OS_Plot`, colours and palettes, Teletext, the pointer, and the ScreenModes
 module; ColourTrans, InverseTable and BlendTable; `OS_SpriteOp`, SpriteExtend
-with its JPEG SWIs, and SpriteUtils; over the guest memory the kernel gives
-them.
+with its JPEG SWIs, and SpriteUtils; and the Hourglass (RO61); over the guest
+memory the kernel gives them.
 
 - **Modes**: the numbered modes from `lib/vdu`, selectors and mode strings,
   what the current monitor type shows and what it trades a mode it lacks for,
@@ -18,7 +18,11 @@ them.
   patterns, `HLineAddr`, `OS_ChangedBox`.
 - **Palettes**: every depth's, behind `PaletteV`.
 - **The display**: what a front end shows, the lines written since it last
-  asked, the cursor and the pointer to draw over them.
+  asked, the cursor and the pointer to draw over them, and whether the
+  hourglass shows.
+- **The hourglass**: each context's own, held with its screen, so it goes
+  with the program that turned it on; its SWIs and frames as RISC OS 5's,
+  drawn for TAIRiX.
 - **Sprites**: system and user areas through `lib/image`'s structures, every
   `OS_SpriteOp` reason, output to a sprite or its mask, the kernel's and
   SpriteExtend's plots with translation tables, alpha and colour mapping,

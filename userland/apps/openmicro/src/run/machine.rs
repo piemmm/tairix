@@ -1556,7 +1556,12 @@ impl MachineWindow {
 
     /// Present what the pane held back for a frame to come back.
     pub fn present_deferred(&mut self, client: &mut Client) {
-        let _ = self.pane.present_deferred(client, &self.surface);
+        if let Err(err) = self.pane.present_deferred(client, &self.surface) {
+            app::report(
+                APP_NAME,
+                format_args!("the window could not be presented ({err})"),
+            );
+        }
     }
 
     /// Offer `saving` to be saved, once no picker is open.

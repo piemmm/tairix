@@ -4692,6 +4692,45 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-riscos-app"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appconf",
+ "tairix-appdata",
+ "tairix-buildcfg",
+ "tairix-collections",
+ "tairix-controls",
+ "tairix-crt",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-hash",
+ "tairix-help",
+ "tairix-input",
+ "tairix-log",
+ "tairix-machines",
+ "tairix-procinfo",
+ "tairix-raster",
+ "tairix-reclaim",
+ "tairix-riscos-arm",
+ "tairix-riscos-basic",
+ "tairix-riscos-clib",
+ "tairix-riscos-draw",
+ "tairix-riscos-filing",
+ "tairix-riscos-font",
+ "tairix-riscos-kernel",
+ "tairix-riscos-session",
+ "tairix-riscos-vdu",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-theme",
+ "tairix-tz",
+ "tairix-util",
+ "tairix-visible",
+ "tairix-window",
+]
+
+[[package]]
 name = "tairix-riscos-arm"
 version = "0.0.0"
 dependencies = [
@@ -4827,6 +4866,7 @@ dependencies = [
 name = "tairix-riscos-session"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-collections",
  "tairix-fscopy",
  "tairix-fuzzseed",

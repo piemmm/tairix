@@ -7,12 +7,15 @@ use tairix_riscos_arm::profile::{Profile, BIT26, BIT32};
 
 use crate::memory::Bits;
 
+/// The processors a session keeps: one per profile.
+pub(crate) const PROFILES: usize = 2;
+
 /// A context's processors while another context's run: the profile it was
 /// running under, and each processor's context. A processor it never had
 /// is at reset when it next runs.
 pub(crate) struct Parked {
     current: Bits,
-    cpus: [Option<Context>; 2],
+    cpus: [Option<Context>; PROFILES],
 }
 
 impl Parked {
@@ -20,7 +23,7 @@ impl Parked {
     pub(crate) const fn fresh(bits: Bits) -> Self {
         Self {
             current: bits,
-            cpus: [None, None],
+            cpus: [const { None }; PROFILES],
         }
     }
 }
@@ -41,7 +44,7 @@ const fn index(bits: Bits) -> usize {
 
 /// The processor code runs on, by the profile it was loaded under.
 pub(crate) struct Processor {
-    cpus: [Option<Cpu>; 2],
+    cpus: [Option<Cpu>; PROFILES],
     current: Bits,
     /// Decoded pages each processor keeps.
     memo_pages: usize,
@@ -51,7 +54,7 @@ pub(crate) struct Processor {
 impl Processor {
     /// A processor of `bits` at reset, keeping `memo_pages` decoded pages.
     pub(crate) fn new(bits: Bits, memo_pages: usize) -> Self {
-        let mut cpus = [None, None];
+        let mut cpus = [const { None }; PROFILES];
         cpus[index(bits)] = Some(Cpu::new(profile(bits), memo_pages));
         Self {
             cpus,

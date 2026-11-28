@@ -15,7 +15,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-#[cfg(any(test, feature = "write", feature = "rt", feature = "listing"))]
+#[cfg(any(test, feature = "write", feature = "keep", feature = "listing"))]
 extern crate alloc;
 
 mod clock;
@@ -41,6 +41,8 @@ pub use clock::{resolve_region, resolve_zone, CivilClock, Decided, HourCycle};
 #[cfg(feature = "rt")]
 pub use load::{load, LoadError};
 pub use pattern::{Pattern, WIDEST};
+#[cfg(any(test, feature = "keep"))]
+pub use store::keep;
 pub use store::{is_region_code, is_zone_name, Place, Region, StoreError, ZoneInfo};
 pub use week::Weekday;
 pub use zone::{Disambiguation, LocalError, LocalTime, OffsetChange, Zone, ZoneOffset};

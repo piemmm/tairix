@@ -23,6 +23,8 @@ use crate::os::{len32, Ending, Entry, Fail, Os, Regs, Unwind, Wait};
 use crate::vectors::{self, Carry};
 use crate::zeropage;
 
+pub use crate::intkey::host::low_level;
+
 /// The keyboard buffer.
 pub(crate) const KEYBOARD: u32 = 0;
 /// The serial input buffer.
@@ -130,6 +132,18 @@ impl Typing {
             mouse: crate::mouse::Mouse::new(),
         })
     }
+}
+
+/// The mouse's buttons, as `OS_Mouse` and the input events give them.
+pub mod buttons {
+    /// Adjust.
+    pub const ADJUST: u32 = 1;
+    /// Menu.
+    pub const MENU: u32 = 2;
+    /// Select.
+    pub const SELECT: u32 = 4;
+    /// Every button.
+    pub const ALL: u32 = ADJUST | MENU | SELECT;
 }
 
 /// An input event the host delivers.

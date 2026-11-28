@@ -599,9 +599,10 @@ fn apply(
     os.set_byte_var(tairix_riscos_kernel::byte::var::VDU_BANK, 0);
     os.set_byte_var(tairix_riscos_kernel::byte::var::DISPLAY_BANK, 0);
     (vdu.text, vdu.graphics, vdu.colours) = fresh_state(&format, vdu.text.flags);
-    vdu.palette = Palette::for_mode(&format);
+    vdu.palette = vdu.palette.changed_to(&format);
     vdu.teletext = Teletext::new();
     vdu.cursors_removed = 0;
+    vdu.pointer.reset();
     os.set_byte_var(tairix_riscos_kernel::byte::var::PAGE_LINES, 0);
     crate::changed::reset(os)?;
     vdu.colours.publish(os, &format)?;
@@ -925,6 +926,7 @@ pub(crate) fn start_screen(os: &mut Os<'_>) -> Result<(), Fail> {
         monitor,
         shadow: false,
         cursors_removed: 0,
+        hourglass: crate::hourglass::Hourglass::new(),
     };
     if let Err(fail) = os.hold_context_extension(vdu, end_screen) {
         os.free_rma_quietly(selector_copy);

@@ -35,6 +35,10 @@ use memo::{Decoded, Memo, Thumb};
 /// R15, the register a transfer to which branches or writes the flags.
 const PC: Reg = Reg::PC;
 
+/// The most bytes one of a processor's `memo_pages` holds: a page decoded in
+/// each instruction set.
+pub const MEMO_PAGE_BYTES: usize = Memo::<u32, 2>::PAGE_BYTES + Memo::<Thumb, 1>::PAGE_BYTES;
+
 /// An exception.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Exception {

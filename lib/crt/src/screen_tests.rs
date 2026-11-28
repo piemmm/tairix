@@ -623,3 +623,33 @@ fn a_screenshot_is_the_monitors_shape_at_least_as_wide_as_asked_in_whole_dots() 
         "pixels not the frame's"
     );
 }
+
+#[test]
+fn a_screen_s_own_shape_is_fitted_centred_and_a_monitor_s_is_four_by_three() {
+    let target = |x, y, width, height| Target {
+        x,
+        y,
+        width,
+        height,
+    };
+    assert_eq!(fit_aspect(640, 512, (5, 4)), Some(target(0, 0, 640, 512)));
+    assert_eq!(
+        fit_aspect(1000, 500, (5, 4)),
+        Some(target(187, 0, 625, 500))
+    );
+    assert_eq!(
+        fit_aspect(400, 1000, (5, 4)),
+        Some(target(0, 340, 400, 320))
+    );
+    assert_eq!(fit(800, 800), fit_aspect(800, 800, ASPECT));
+    assert_eq!(fit_aspect(10, 10, (0, 1)), None, "no extent");
+    assert_eq!(fit_aspect(10, 10, (1, 0)), None);
+    assert_eq!(fit_aspect(1, 1, (1000, 1)), None, "too small to hold any");
+}
+
+#[test]
+fn the_widest_area_fits_without_overflowing() {
+    let fitted = fit(u32::MAX, u32::MAX).expect("a picture");
+    assert_eq!(fitted.width, u32::MAX);
+    assert_eq!(fitted.height, u32::MAX / 4 * 3 + 2);
+}

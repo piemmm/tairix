@@ -342,7 +342,7 @@ pub use settings::{
 pub use shell::{
     DesktopShell, InputSource, ScreensaverPreview, ShellOutcome, Stopped, Timed,
     COMPONENT_REQUEST_REFUSED, COMPONENT_REQUEST_REFUSED_MESSAGE, DESKTOP_RESTYLED,
-    DESKTOP_RESTYLED_MESSAGE,
+    DESKTOP_RESTYLED_MESSAGE, UNATTESTED_REQUEST_REFUSED, UNATTESTED_REQUEST_REFUSED_MESSAGE,
 };
 pub use switchboard::{
     deliver_pending_open, drop_is_noteworthy, encode_switchboard_reply, maybe_send_seat_report,

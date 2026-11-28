@@ -173,6 +173,12 @@ pub(crate) struct State {
     pub(crate) output: Option<Output>,
 }
 
+impl tairix_riscos_kernel::Reclaims for State {
+    fn reclaim(&mut self) {
+        self.store.reclaim();
+    }
+}
+
 pub(crate) fn own(world: &mut World) -> Option<&mut Own> {
     world.extension::<State>().map(|state| &mut state.own)
 }
@@ -193,7 +199,7 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let settings = Settings::configured(os)?;
     let (pressure, log) = os.cache_context();
     let store = Store::new(os.ceiling_bytes(), os.cache_key(), pressure, log);
-    os.hold_extension(State {
+    os.hold_cache_extension(State {
         own,
         handles: Handles::new(),
         settings,

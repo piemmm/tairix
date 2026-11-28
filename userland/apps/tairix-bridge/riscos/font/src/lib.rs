@@ -61,6 +61,13 @@ use tairix_util::endian::le_u16;
 /// `Config::modules`.
 pub static MODULES: [&Builtin; 2] = [&module::FONT_MANAGER, &rom::ROM_FONTS];
 
+/// The most the Font Manager holds of the host's memory beside a session of
+/// `ceiling` bytes: its caches.
+#[must_use]
+pub fn host_bytes(ceiling: u64) -> u64 {
+    store::Store::most(ceiling)
+}
+
 /// The encoding files `ROMFonts` holds, made afresh from their tables, each
 /// by its leaf in `Resources:$.Fonts.Encodings`: what
 /// `cargo xtask riscos --write-encodings` commits.

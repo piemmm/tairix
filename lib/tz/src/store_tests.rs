@@ -12,6 +12,17 @@ use crate::write::{build, BuildError};
 use crate::{is_region_code, is_zone_name, StoreError, ZoneInfo};
 
 #[test]
+fn a_kept_store_reads_as_parsed_and_a_refused_one_keeps_nothing() {
+    let bytes = store();
+    let parsed = ZoneInfo::parse(&bytes).expect("the fixture parses");
+    let kept = crate::keep(bytes.clone()).expect("kept");
+    assert_eq!(*kept, parsed);
+    let mut broken = bytes;
+    broken[HEADER_LEN] ^= 1;
+    assert_eq!(crate::keep(broken), Err(StoreError::Checksum));
+}
+
+#[test]
 fn stores_are_equal_by_the_bytes_they_hold() {
     let bytes = store();
     let copy = bytes.clone();

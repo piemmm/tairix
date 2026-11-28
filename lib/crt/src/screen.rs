@@ -28,12 +28,26 @@ pub const DOT: usize = 4;
 /// whole pixels; `None` for one too small to hold any.
 #[must_use]
 pub fn fit(width: u32, height: u32) -> Option<Target> {
-    let (across, down) = ASPECT;
-    let (w, h) = if u64::from(width) * u64::from(down) <= u64::from(height) * u64::from(across) {
-        (width, width * down / across)
+    fit_aspect(width, height, ASPECT)
+}
+
+/// The largest rectangle `across` wide for every `down` high a `width`×
+/// `height` area holds, centred on whole pixels: a screen's own shape, where
+/// it is not a monitor's. `None` for an area too small to hold any, or a
+/// shape with no extent.
+#[must_use]
+pub fn fit_aspect(width: u32, height: u32, (across, down): (u32, u32)) -> Option<Target> {
+    if across == 0 || down == 0 {
+        return None;
+    }
+    let (across, down) = (u64::from(across), u64::from(down));
+    let (wide, high) = (u64::from(width), u64::from(height));
+    let (w, h) = if wide * down <= high * across {
+        (wide, wide * down / across)
     } else {
-        (height * across / down, height)
+        (high * across / down, high)
     };
+    let (w, h) = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
     (w > 0 && h > 0).then(|| Target {
         x: (width - w) / 2,
         y: (height - h) / 2,

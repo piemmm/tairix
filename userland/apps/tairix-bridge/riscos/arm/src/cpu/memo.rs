@@ -97,6 +97,9 @@ impl<K: Copy + PartialEq, const SHIFT: u32> Memo<K, SHIFT> {
     /// Instruction slots in a page.
     const SLOTS: usize = 1 << (PAGE_BITS - SHIFT);
 
+    /// The bytes one decoded page holds.
+    pub(super) const PAGE_BYTES: usize = Self::SLOTS * core::mem::size_of::<Slot<K>>();
+
     /// A memo holding at most `pages` decoded pages, rounded down to a power
     /// of two, whose zero key `zero` decodes as `decoded`; zero pages holds
     /// none and decodes every instruction it is asked for.
@@ -186,5 +189,16 @@ mod tests {
             }
         }
         assert_eq!(decodes, 2, "each task's decoded once");
+    }
+
+    #[test]
+    fn a_decoded_page_holds_its_page_bytes() {
+        let mut memo: Memo<u32, 2> = Memo::new(4, 0, Decoded::arm(0, &BIT32));
+        for address in [0x8000, 0x8004, 0x8FFC] {
+            memo.decoded(8, address, 0xE3A0_0001, |word| Decoded::arm(word, &BIT32));
+        }
+        assert_eq!(memo.bytes(), Memo::<u32, 2>::PAGE_BYTES);
+        memo.decoded(9, 0x9000, 0xE3A0_0001, |word| Decoded::arm(word, &BIT32));
+        assert_eq!(memo.bytes(), 2 * Memo::<u32, 2>::PAGE_BYTES);
     }
 }

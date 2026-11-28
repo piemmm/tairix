@@ -23,7 +23,7 @@ use crate::bootcommands::objects::{object_kind, objects, Object, DIRECTORY, FILE
 use crate::hostfs;
 use crate::script::{self, OnError, Source};
 
-pub use crate::script::{Failure, Report};
+pub use crate::script::{Failure, Report, FAILURES_MOST};
 
 /// `!Boot`'s skeleton, below the disc's root, each made in turn where the
 /// disc has no `!Boot`.

@@ -1584,6 +1584,7 @@ mod tests {
         "Slideshow",
         "Starfield",
         "SystemMonitor",
+        "TAIRiXBridge",
         "TextEdit",
         "applib",
         "audioctl",

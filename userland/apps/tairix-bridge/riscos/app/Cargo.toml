@@ -1,0 +1,97 @@
+[package]
+name = "tairix-riscos-app"
+description = "TAIRiX Bridge's TAIRiXBridge.app: the front end — the session windows, each context's single-tasking screen, the keyboard and pointer, the settings, and the relays a session's worker asks for — and, re-entered as a capability-empty worker, a session itself (plans/RISCOS-EMULATOR.md §15.3)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[build-dependencies]
+tairix-buildcfg = { path = "../../../../../lib/buildcfg", version = "=0.0.0", features = ["std"] }
+
+[dependencies]
+# The processor's decoded-page and frame costs, which a session's memory is
+# divided by.
+tairix-riscos-arm = { path = "../arm", version = "=0.0.0" }
+# The memory policy, the layout a slot is held to, and the keyboard's
+# low-level key numbers.
+tairix-riscos-kernel = { path = "../kernel", version = "=0.0.0" }
+# HostFS's caches, which the worker keeps beside its guest.
+tairix-riscos-filing = { path = "../filing", version = "=0.0.0" }
+# The Font Manager's caches, likewise.
+tairix-riscos-font = { path = "../font", version = "=0.0.0" }
+# The protocol, the damage ring and the front end's side of a session.
+tairix-riscos-session = { path = "../session", version = "=0.0.0" }
+# What any sandbox worker needs before its first request.
+tairix-sandbox = { path = "../../../../../lib/sandbox", version = "=0.0.0" }
+# The host's key edges and buttons, and the damage a window presents.
+tairix-abi = { path = "../../../../../lib/abi", version = "=0.0.0" }
+# A screen's picture and the pixels it is drawn in.
+tairix-raster = { path = "../../../../../lib/raster", version = "=0.0.0" }
+# The rectangles a screen changed in since it was painted.
+tairix-geometry = { path = "../../../../../lib/geometry", version = "=0.0.0" }
+# The largest rectangle of a mode's pixel aspect a window holds.
+tairix-crt = { path = "../../../../../lib/crt", version = "=0.0.0" }
+# The rest of the session's modules, the zone reader the session's zone is
+# kept by, the pressure its caches give way to, and the key they hash under.
+tairix-riscos-vdu = { path = "../vdu", version = "=0.0.0" }
+tairix-riscos-draw = { path = "../draw", version = "=0.0.0" }
+tairix-riscos-basic = { path = "../basic", version = "=0.0.0" }
+tairix-riscos-clib = { path = "../clib", version = "=0.0.0" }
+tairix-tz = { path = "../../../../../lib/tz", version = "=0.0.0", features = ["keep"] }
+tairix-reclaim = { path = "../../../../../lib/reclaim", version = "=0.0.0" }
+tairix-hash = { path = "../../../../../lib/hash", version = "=0.0.0" }
+tairix-log = { path = "../../../../../lib/log", version = "=0.0.0" }
+# The settings' keys in the application's own store, and the form, theme and
+# input vocabulary they are edited in.
+tairix-appconf = { path = "../../../../../lib/appconf", version = "=0.0.0" }
+tairix-controls = { path = "../../../../../lib/controls", version = "=0.0.0" }
+tairix-theme = { path = "../../../../../lib/theme", version = "=0.0.0" }
+tairix-input = { path = "../../../../../lib/input", version = "=0.0.0" }
+# The rows a screen's menu is built from, as the emulators' menus are.
+tairix-machines = { path = "../../../../../lib/machines", version = "=0.0.0" }
+# How a session window shows a size, and what of a guest's text it may draw.
+tairix-procinfo = { path = "../../../../../lib/procinfo", version = "=0.0.0" }
+tairix-visible = { path = "../../../../../lib/visible", version = "=0.0.0" }
+
+[dev-dependencies]
+# A store of real zones a test's session is started in.
+tairix-tz = { path = "../../../../../lib/tz", version = "=0.0.0", features = ["keep", "test-support"] }
+
+# The package is both the host-tested front end and the `Run` entry-point
+# binary of the on-disk `TAIRiXBridge.app` bundle: a freestanding pure-Rust
+# program on the native Tier-1 targets and an inert host stub elsewhere
+# (`src/run.rs`, `build.rs`).
+[[bin]]
+name = "tairix-riscos-app-run"
+path = "src/run.rs"
+
+# Everything only the freestanding `Run` binary links.
+[target.'cfg(target_os = "none")'.dependencies]
+# The pure-Rust userland runtime: `_start`, the allocator, the syscalls, the
+# threads and the worker desk the files and fonts are served on.
+tairix-rt = { path = "../../../../../lib/rt", version = "=0.0.0" }
+# The app half of the window channel and the shared windowed-app shell.
+tairix-window = { path = "../../../../../lib/window", version = "=0.0.0" }
+# The bundle's own `Help/` tree, for the short `-h` surface.
+tairix-help = { path = "../../../../../lib/help", version = "=0.0.0", features = ["rt"] }
+# The sandbox's session channel and the worker role a session runs in.
+tairix-sandbox = { path = "../../../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
+# The application's own store, which holds the settings.
+tairix-appdata = { path = "../../../../../lib/appdata", version = "=0.0.0", features = ["rt"] }
+# The settings' sheet window.
+tairix-machines = { path = "../../../../../lib/machines", version = "=0.0.0", features = ["rt"] }
+# The machine's memory, which a session's is a share of.
+tairix-procinfo = { path = "../../../../../lib/procinfo", version = "=0.0.0", features = ["program"] }
+# The font service a session's glyph requests are carried to, and the
+# families the desktop font's line box is read from.
+tairix-font = { path = "../../../../../lib/font", version = "=0.0.0" }
+# The queue each worker's jobs wait in.
+tairix-util = { path = "../../../../../lib/util", version = "=0.0.0" }
+# The sessions' HostFS servers, kept by session.
+tairix-collections = { path = "../../../../../lib/collections", version = "=0.0.0" }

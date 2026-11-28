@@ -4,8 +4,8 @@
 
 mod common;
 
-use common::{call, drivers, rma_used, vdu};
-use tairix_riscos_filing::session::{application_slot, Session, SLOT_BYTES};
+use common::{call, drivers, launched, rma_used, vdu};
+use tairix_riscos_filing::session::Session;
 use tairix_riscos_kernel::memory::{FREE_POOL, SCREEN};
 use tairix_riscos_kernel::swi::colour_trans as ct;
 use tairix_riscos_kernel::swi::os::{BYTE, READ_DYNAMIC_AREA};
@@ -26,13 +26,6 @@ fn colour_number(session: &mut Session, colour: u32) -> u32 {
     call(session, ct::RETURN_COLOUR_NUMBER, &[colour])
         .expect("matched")
         .r[0]
-}
-
-/// A new context, current, with an application slot.
-fn launched(session: &mut Session) -> tairix_riscos_kernel::context::ContextId {
-    let id = session.kernel.os().launch_context().expect("launched");
-    application_slot(&mut session.kernel, SLOT_BYTES);
-    id
 }
 
 #[test]

@@ -14,7 +14,7 @@ use super::header::Sprite;
 use super::{
     system, NOT_FOUND, NO_DEEP_NEW_PALETTE, NO_MEMORY, NO_ROOM, NO_ROOM_TO_COPY, UNRECOGNISED,
 };
-use crate::palette::read_through;
+use crate::palette::{kind, read_through};
 
 /// An operation's sprite: the area it is in, how R0 named it, and its
 /// control block.
@@ -137,7 +137,7 @@ pub(crate) fn screen_palette(os: &mut Os<'_>, entries: u32) -> Result<Vec<u8>, F
         return Err(os.error(NO_MEMORY));
     }
     for entry in 0..entries {
-        let [first, second] = read_through(os, entry)?;
+        let [first, second] = read_through(os, entry, kind::NORMAL)?;
         bytes.extend_from_slice(&first.to_le_bytes());
         bytes.extend_from_slice(&second.to_le_bytes());
     }

@@ -72,7 +72,7 @@ pub struct Failure {
 
 /// The most failures a report keeps: a containment bound on what a boot of
 /// a hostile disc may hold, the rest counted.
-const FAILURES_MOST: usize = 64;
+pub const FAILURES_MOST: usize = 64;
 
 /// What reporting scripts met: each line that failed, in the order met, as
 /// many as a report keeps, and how many more there were.

@@ -439,6 +439,7 @@ pub struct DesktopInfo {
     double_click: Duration64,
     text: Option<DesktopText>,
     machine_zone: Option<ZoneName>,
+    zone: Option<ZoneName>,
     refresh: RefreshRate,
     settings_generation: u32,
 }
@@ -458,8 +459,12 @@ const OUTPUT_OFFSET: usize = TEXT_OFFSET + TEXT_WIRE_LEN;
 /// [`DesktopInfo`]; the name follows it.
 const ZONE_OFFSET: usize = OUTPUT_OFFSET + 8;
 
+/// Byte offset of the clocks' zone name's length in an encoded
+/// [`DesktopInfo`]; the name follows it.
+const CLOCK_ZONE_OFFSET: usize = ZONE_OFFSET + 1 + ZONE_NAME_MAX;
+
 /// Byte offset of the frame rate in an encoded [`DesktopInfo`].
-const REFRESH_OFFSET: usize = ZONE_OFFSET + 1 + ZONE_NAME_MAX;
+const REFRESH_OFFSET: usize = CLOCK_ZONE_OFFSET + 1 + ZONE_NAME_MAX;
 
 /// Byte offset of the settings generation in an encoded [`DesktopInfo`].
 const SETTINGS_OFFSET: usize = REFRESH_OFFSET + 4;
@@ -472,8 +477,9 @@ impl DesktopInfo {
     /// and the text family (16) — a zero size and an all-zero family where
     /// the user chose none — then the output's width (4) and height (4),
     /// the machine zone's name: its length (1) and [`ZONE_NAME_MAX`] bytes,
-    /// zero past it, and all zero where the machine keeps none, the frame
-    /// rate in millihertz (4), and the settings generation (4).
+    /// zero past it, and all zero where the machine keeps none, the clocks'
+    /// zone's name likewise, all zero where the desktop holds no zone store,
+    /// the frame rate in millihertz (4), and the settings generation (4).
     pub const WIRE_LEN: usize = SETTINGS_OFFSET + 4;
 
     /// The desktop with a `screen_width_px` × `screen_height_px` screen at
@@ -513,6 +519,7 @@ impl DesktopInfo {
             double_click: DOUBLE_CLICK_DEFAULT,
             text: None,
             machine_zone: None,
+            zone: None,
             refresh: RefreshRate::ASSUMED,
             settings_generation: 0,
         })
@@ -554,6 +561,12 @@ impl DesktopInfo {
             machine_zone: zone,
             ..self
         }
+    }
+
+    /// The same desktop with its clocks reading `zone`, or none.
+    #[must_use]
+    pub const fn with_zone(self, zone: Option<ZoneName>) -> Self {
+        Self { zone, ..self }
     }
 
     /// The same desktop composing a frame each period of `refresh`.
@@ -673,6 +686,15 @@ impl DesktopInfo {
         self.machine_zone
     }
 
+    /// The time zone the desktop's clocks read — the user's choice, else
+    /// the machine's, else the zone store's default — so an application
+    /// shows the local time the desktop shows; `None` where the desktop holds
+    /// no zone store.
+    #[must_use]
+    pub const fn zone(&self) -> Option<ZoneName> {
+        self.zone
+    }
+
     /// The rate the desktop composes frames at: its output's own, or
     /// [`RefreshRate::ASSUMED`] where the output states none. A frame
     /// presented faster than this is one the user never sees.
@@ -728,10 +750,15 @@ impl DesktopInfo {
         encode_text(self.text, &mut out[TEXT_OFFSET..OUTPUT_OFFSET]);
         put_u32(out, OUTPUT_OFFSET, self.output_width_px);
         put_u32(out, OUTPUT_OFFSET + 4, self.output_height_px);
-        if let Some(zone) = self.machine_zone {
-            let (len, name) = zone.wire();
-            out[ZONE_OFFSET] = len;
-            out[ZONE_OFFSET + 1..REFRESH_OFFSET].copy_from_slice(name);
+        for (zone, at) in [
+            (self.machine_zone, ZONE_OFFSET),
+            (self.zone, CLOCK_ZONE_OFFSET),
+        ] {
+            if let Some(zone) = zone {
+                let (len, name) = zone.wire();
+                out[at] = len;
+                out[at + 1..at + 1 + ZONE_NAME_MAX].copy_from_slice(name);
+            }
         }
         put_u32(out, REFRESH_OFFSET, self.refresh.mhz());
         put_u32(out, SETTINGS_OFFSET, self.settings_generation);
@@ -784,12 +811,12 @@ impl DesktopInfo {
         )?;
         let refresh =
             RefreshRate::from_mhz(read_u32(record, REFRESH_OFFSET)).ok_or(Errno::OutOfRange)?;
+        let zone_at =
+            |at: usize| ZoneName::from_wire(record[at], &record[at + 1..at + 1 + ZONE_NAME_MAX]);
         Ok(desktop
             .with_text(decode_text(&record[TEXT_OFFSET..OUTPUT_OFFSET])?)
-            .with_machine_zone(ZoneName::from_wire(
-                record[ZONE_OFFSET],
-                &record[ZONE_OFFSET + 1..REFRESH_OFFSET],
-            )?)
+            .with_machine_zone(zone_at(ZONE_OFFSET)?)
+            .with_zone(zone_at(CLOCK_ZONE_OFFSET)?)
             .with_refresh(refresh)
             .with_settings_generation(read_u32(record, SETTINGS_OFFSET)))
     }
@@ -835,9 +862,9 @@ pub(crate) fn decode_text(field: &[u8]) -> Result<Option<DesktopText>, Errno> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Appearance, Contrast, Density, DesktopInfo, DesktopText, Motion, DOUBLE_CLICK_DEFAULT,
-        DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN, DOUBLE_CLICK_OFFSET, OUTPUT_OFFSET, REFRESH_OFFSET,
-        SETTINGS_OFFSET, TEXT_OFFSET, ZONE_OFFSET,
+        Appearance, Contrast, Density, DesktopInfo, DesktopText, Motion, CLOCK_ZONE_OFFSET,
+        DOUBLE_CLICK_DEFAULT, DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN, DOUBLE_CLICK_OFFSET,
+        OUTPUT_OFFSET, REFRESH_OFFSET, SETTINGS_OFFSET, TEXT_OFFSET, ZONE_OFFSET,
     };
     use crate::driver::display::RefreshRate;
     use crate::font_ipc::FamilyKey;
@@ -951,14 +978,38 @@ mod tests {
     #[test]
     fn the_machine_zone_round_trips_and_its_absence_is_all_zero() {
         assert_eq!(desktop().machine_zone(), None);
-        assert!(desktop().to_le_bytes()[ZONE_OFFSET..REFRESH_OFFSET]
+        assert!(desktop().to_le_bytes()[ZONE_OFFSET..CLOCK_ZONE_OFFSET]
             .iter()
             .all(|&byte| byte == 0));
         let paris = ZoneName::new("Europe/Paris").expect("a zone name");
         let info = desktop().with_machine_zone(Some(paris));
         assert_eq!(DesktopInfo::from_bytes(&info.to_le_bytes()), Ok(info));
         assert_eq!(info.machine_zone(), Some(paris));
+        assert_eq!(info.zone(), None, "the clocks' own is apart");
         assert_eq!(paris.as_str(), "Europe/Paris");
+    }
+
+    #[test]
+    fn the_clocks_zone_round_trips_beside_the_machine_s() {
+        assert!(desktop().to_le_bytes()[CLOCK_ZONE_OFFSET..REFRESH_OFFSET]
+            .iter()
+            .all(|&byte| byte == 0));
+        let paris = ZoneName::new("Europe/Paris").expect("a zone name");
+        let tokyo = ZoneName::new("Asia/Tokyo").expect("a zone name");
+        let info = desktop()
+            .with_machine_zone(Some(paris))
+            .with_zone(Some(tokyo));
+        assert_eq!(DesktopInfo::from_bytes(&info.to_le_bytes()), Ok(info));
+        assert_eq!(
+            (info.machine_zone(), info.zone()),
+            (Some(paris), Some(tokyo))
+        );
+        let mut misshapen = info.to_le_bytes();
+        misshapen[CLOCK_ZONE_OFFSET + 1] = b' ';
+        assert_eq!(DesktopInfo::from_bytes(&misshapen), Err(Errno::OutOfRange));
+        let mut trailing = desktop().with_zone(Some(tokyo)).to_le_bytes();
+        trailing[REFRESH_OFFSET - 1] = b'x';
+        assert_eq!(DesktopInfo::from_bytes(&trailing), Err(Errno::BadMagic));
     }
 
     #[test]
@@ -966,7 +1017,7 @@ mod tests {
         let paris = ZoneName::new("Europe/Paris").expect("a zone name");
         let bytes = desktop().with_machine_zone(Some(paris)).to_le_bytes();
         let mut trailing = bytes;
-        trailing[REFRESH_OFFSET - 1] = b'x';
+        trailing[CLOCK_ZONE_OFFSET - 1] = b'x';
         assert_eq!(DesktopInfo::from_bytes(&trailing), Err(Errno::BadMagic));
         let mut misshapen = bytes;
         misshapen[ZONE_OFFSET + 1] = b' ';

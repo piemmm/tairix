@@ -13,8 +13,8 @@ use tairix_riscos_filing::ramfs;
 use tairix_riscos_kernel::corpus::StillHost;
 use tairix_riscos_kernel::memory::layout::RISC_OS_5;
 use tairix_riscos_kernel::memory::policy::Ceiling;
+use tairix_riscos_kernel::memory::RAM_DISC as AREA;
 use tairix_riscos_kernel::os::{Config, Fail, Host, Kernel, Os, Outcome, Regs};
-use tairix_riscos_kernel::ramdisc::AREA;
 use tairix_riscos_kernel::swi::os::{CHANGE_DYNAMIC_AREA, CLI, FILE, GET_ENV};
 use tairix_riscos_kernel::swi::X;
 

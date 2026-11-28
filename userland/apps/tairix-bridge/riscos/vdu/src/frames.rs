@@ -78,7 +78,7 @@ pub(crate) fn frames(os: &mut Os<'_>) -> Result<(), Unwind> {
             0,
         ]))?;
     }
-    Ok(())
+    crate::hourglass::frames(os, now)
 }
 
 /// One frame of the flash: the counter down, the flashing colours' state
@@ -110,24 +110,29 @@ fn flash_frame(os: &mut Os<'_>) {
 }
 
 /// When the drivers' next timed work falls due: the frame the flash changes
-/// at, or the next frame while the vertical sync event is enabled.
+/// at, or the next frame while the vertical sync event is enabled, and the
+/// hourglass appearing or turning over.
 pub(crate) fn deadline(os: &mut Os<'_>) -> Option<u64> {
     let event = os.event_enabled(VSYNC_EVENT);
     let counter = u64::from(os.byte_var(var::FLASH_COUNTER).max(1));
     read(os, |vdu, os| {
         let rate = vdu.screen.frame_rate;
-        let next = vdu.frames.counted + 1;
-        if event {
-            return Some(vdu.frames.time_of(next, rate));
-        }
-        let format = vdu.screen.format;
-        let lasting = os.byte_var(if vdu.palette.second {
-            var::SECOND_DURATION
+        let frame = if event {
+            Some(vdu.frames.time_of(vdu.frames.counted + 1, rate))
         } else {
-            var::FIRST_DURATION
-        });
-        (vdu.palette.flashing(&format) && lasting != 0)
-            .then(|| vdu.frames.time_of(vdu.frames.counted + counter, rate))
+            let format = vdu.screen.format;
+            let lasting = os.byte_var(if vdu.palette.second {
+                var::SECOND_DURATION
+            } else {
+                var::FIRST_DURATION
+            });
+            (vdu.palette.flashing(&format) && lasting != 0)
+                .then(|| vdu.frames.time_of(vdu.frames.counted + counter, rate))
+        };
+        [frame, crate::hourglass::due(vdu, os)]
+            .into_iter()
+            .flatten()
+            .min()
     })
     .flatten()
 }

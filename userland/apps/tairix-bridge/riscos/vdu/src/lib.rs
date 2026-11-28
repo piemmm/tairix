@@ -1,8 +1,8 @@
 //! TAIRiX Bridge's VDU drivers (`plans/RISCOS-EMULATOR.md` §8): RISC OS
 //! 5's screen modes and screen memory, the VDU stream, `OS_Plot`, colours
 //! and palettes, the pointer, sprites, and the `ScreenModes`, `ColourTrans`,
-//! `InverseTable`, `BlendTable`, `SpriteExtend` and `SpriteUtils` modules,
-//! held to what genuine RISC OS 5.30 was recorded doing.
+//! `InverseTable`, `BlendTable`, `SpriteExtend`, `SpriteUtils` and
+//! `Hourglass` modules, held to what genuine RISC OS 5.30 was recorded doing.
 //!
 //! - [`DRIVERS`]: the drivers, as the kernel reaches them.
 //! - [`MODULES`]: the built-in modules this crate provides.
@@ -32,6 +32,7 @@ pub mod display;
 mod font;
 mod frames;
 mod hline;
+mod hourglass;
 mod inverse;
 mod inversetable;
 mod mode;
@@ -102,13 +103,14 @@ mod routine {
 
 /// The built-in modules this crate provides, for the session's
 /// `Config::modules`.
-pub static MODULES: [&Builtin; 6] = [
+pub static MODULES: [&Builtin; 7] = [
     &screenmodes::SCREEN_MODES,
     &colourtrans::COLOUR_TRANS,
     &inversetable::INVERSE_TABLE,
     &blendtable::BLEND_TABLE,
     &sprite::extend::SPRITE_EXTEND,
     &sprite::utils::SPRITE_UTILS,
+    &hourglass::HOURGLASS,
 ];
 
 /// A copy-cursor editing key.

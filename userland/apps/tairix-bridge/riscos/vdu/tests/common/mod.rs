@@ -383,3 +383,26 @@ pub fn service_hook(number: u32) -> (Vec<u8>, u32) {
     .collect();
     module_image([0, 0, 0, 0x34], &code, b"SvcHook")
 }
+
+/// A new context, current, with an application slot.
+pub fn launched(session: &mut Session) -> tairix_riscos_kernel::context::ContextId {
+    let id = session.kernel.os().launch_context().expect("launched");
+    tairix_riscos_filing::session::application_slot(&mut session.kernel, SLOT_BYTES);
+    id
+}
+
+/// The clock moved on `centiseconds`, its interrupts taken as it goes.
+pub fn wait(session: &mut Session, centiseconds: u64) {
+    let mut os = session.kernel.os();
+    let until = os.now() + centiseconds;
+    os.wait_until(until).expect("waited");
+}
+
+/// The pointer's selection, as `OS_Byte` 106 gives it back.
+pub fn pointer_selected(session: &mut Session) -> u32 {
+    let old = call(session, tairix_riscos_kernel::swi::os::BYTE, &[106, 0])
+        .expect("selected")
+        .r[1];
+    call(session, tairix_riscos_kernel::swi::os::BYTE, &[106, old]).expect("selected again");
+    old
+}

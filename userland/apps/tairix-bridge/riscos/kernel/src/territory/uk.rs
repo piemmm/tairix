@@ -602,11 +602,7 @@ fn alphabet_identifier(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
 }
 
 fn select_keyboard_handler(os: &mut Os<'_>, _regs: &mut Regs) -> Result<(), Fail> {
-    os.os_byte(
-        crate::international::ALPHABET_BYTE,
-        crate::international::SET_KEYBOARD | NUMBER,
-    )?;
-    Ok(())
+    os.select_keyboard(NUMBER)
 }
 
 #[expect(clippy::unnecessary_wraps, reason = "a territory entry's signature")]

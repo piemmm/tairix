@@ -459,10 +459,18 @@ low 32 KiB aborts. Each stack has an unmapped page below it.
 
 ### The memory policy
 
-A session's ceiling is a quarter of the machine's usable RAM, lowered by the
-user's limit on the worker and by the setting; nothing raises it. It is the
-RAM the guest is told it has, and its free pool is the ceiling less what is in
-use, the fixed pages included. Memory is taken only as the guest asks for it.
+A session may take a quarter of the machine's usable RAM, lowered by the
+user's address-space limit and by the setting; nothing raises it. That bounds
+its worker, which is spawned held to it. The guest is given the most it holds
+beside what the worker keeps for it: the sandbox's baseline, the damage ring
+and its link's frames, a thirty-second of the guest's RAM for the frames'
+bookkeeping (`mmu::BOOKKEEPING_SHARE`), the decoded pages each processor keeps
+— as many as one cache's share of the guest's RAM holds — and the caches HostFS
+and the Font Manager hold. That is the RAM the guest is told it has, and its
+free pool is it less what is in use, the fixed pages included. Memory is taken
+only as the guest asks for it. Each launch is given a slot of an eighth of the
+guest's RAM, no less than 640 KiB and no more than a 26-bit slot holds, since a
+slot's pages are committed when it is given.
 
 ### Task slots
 
@@ -2077,6 +2085,9 @@ there.
 - **The cursor** is drawn by the front end over the screen, never into its
   memory, so a program reading its screen never finds it there, where genuine
   RISC OS EORs it in.
+- **The pointer** is drawn by the front end too, from the shape `OS_Byte` 106
+  selects in the pointer's colours. A mode change turns it off and links it
+  to the mouse again, its colours kept.
 - **Teletext.** Mode 7, or a Teletext selector, is a page of characters drawn
   into a sixteen-colour screen from `lib/teletext`, each cell 16 by 20 pixels
   whatever the mode's flags, twice over, the second frame without its
@@ -3027,6 +3038,47 @@ Known differences from RISC OS 5.30, each deliberate:
 - a type number past &FFF maps nothing, where a file's `*` line maps every
   number.
 
+### Hourglass
+
+Hourglass 2.19 (`vdu/src/hourglass.rs`), its seven SWIs as RISC OS 5.30
+answers them, held to it by the screen corpus.
+
+- **Calls.** `Hourglass_On` and `Hourglass_Start` each count a call that
+  `Hourglass_Off` matches, and `Hourglass_Smash` matches them all. The first
+  call alone sets the delay — 33 centiseconds for `On`, R0 for `Start` — and
+  a `Start` of no delay holds the hourglass back, or stops one showing from
+  turning over, until its calls are matched. An `Off` with none to match does
+  nothing.
+- **Frames.** Once it appears, every 15 centiseconds it selects whichever of
+  pointer shapes 3 and 4 its last frame did not — 4 first in a context —
+  linked to the mouse, and wears its two colours as pointer colours 1 and 3.
+  A frame due while its context did not run is counted from when it fell
+  due.
+- **What it gives back.** Going, it selects again the shape a program last
+  selected — before it appeared or since — linked, and gives each pointer
+  colour it still wears back as the program last set it.
+- **Settings.** `Hourglass_Colours` keeps each of its two colours, −1
+  leaving one as it is, worn from its next frame: the low three bytes red,
+  green and blue, cyan and blue to begin with. `Hourglass_LEDs` keeps the
+  lights as a byte, masked with R1 then flipped by R0, and
+  `Hourglass_Percentage` shows nought to 99 beneath the glass and anything
+  else nothing. A SWI past `Hourglass_Colours` is refused &110.
+- **The frame** is drawn for TAIRiX: a glass 16 pixels across whose sand
+  runs from its upper bulb to its lower over eight frames, the percentage in
+  the system font beneath, and the lights in its bars, its place the waist.
+  It is the pointer the front end draws while one of its shapes is
+  selected; a program's own shapes 3 and 4 are never written.
+
+Known differences from RISC OS 5.30, each deliberate:
+
+- each context's hourglass is its own, kept with its screen, so a program
+  that exits or fails with it on takes it with it, where RISC OS 5 leaves
+  it on for the next;
+- a new application lets go of what the one before it left on, never
+  claiming `Service_NewApplication`;
+- what a killed incarnation of the module left showing is given back once
+  its context next runs.
+
 ## The session
 
 `tairix-riscos-session` is what crosses between the front end and a
@@ -3035,22 +3087,32 @@ the screens' damage ring, and the two sides that speak it. Every message is
 decoded whole against fixed bounds, and the side that reads one that is not
 ends the session.
 
-- **Commands**, from the front end: run and hold, each applied as it comes;
-  an input event for a context; the damage ring's oldest bytes given back; a
-  relay's reply, or its failure; a launch, a new context running a command
-  line of at most 1,023 characters, none a control character, which waits
-  while the session is held; and a quit, which ends a context. No more than
-  `WAITING_MOST` (64) launches and quits are ever unanswered.
+- **Commands**, from the front end: first and once, the session's start —
+  the guest's RAM, the decoded pages each processor keeps, the slot every
+  launch is given, the real time, the zone's store and name, the keyboard,
+  the desktop font and the pressure band; run and hold, each applied as it
+  comes; an input event for a context; the damage ring's oldest bytes given
+  back; a relay's reply, or its failure; the boot, once; a launch, a new
+  context running a command line of at most 1,023 characters, none a control
+  character, which waits while the session is held; a quit, which ends a
+  context; a context paused or let go on; and the pressure band and the
+  desktop font as they change. No more than `WAITING_MOST` (64) launches and
+  quits are ever unanswered.
 - **Events**, from the worker: the input a context has taken in; a launch's
   context, told before its command line runs, or the error that refused a
   launch that made none; a context's screen — its size, eigen factors,
   border and whether it is blanked; a run of its lines damaged, each pixel an
-  `&RRGGBB` word, in the ring; a relay to carry to the files or the font
-  service, of at most a mebibyte, naming the context it is for and whether
-  that context is parked on it; and a context's end — its exit code, its
-  error and text, a fault, a reset, an unmodelled instruction, or the front
-  end's quit — told once its end has run, so that nothing of the context
-  follows it.
+  `&RRGGBB` word, in the ring; its text cursor — the cell, the lines it
+  covers and whether it flashes fast or slowly — its pointer's shape and
+  place, the guest setting the pointer or the mouse itself, and whether its
+  hourglass shows; what a
+  context holds of its own and what the shared areas hold, as they change; a
+  relay to carry to the files or the font service, of at most a mebibyte,
+  naming the context it is for and whether that context is parked on it; the
+  boot's failures, at most `BOOT_FAILURES_MOST`, and how many more there were;
+  and a context's end — its exit code, its error and text, a fault, a reset,
+  an unmodelled instruction, or the front end's quit — told once its end has
+  run, so that nothing of the context follows it.
 - **Relays unanswered.** A relay the worker waits for in place is the only
   one of its kind unanswered: the worker does nothing else until its answer
   comes. A context is parked on one at most; while it is, any other it makes
@@ -3068,6 +3130,16 @@ ends the session.
 `worker::serve` runs the kernel and every context of the session, with
 nothing but its port to the front end and the ring in its share.
 
+- **The start.** The kernel is made from the session's start through the
+  `Session` the worker's process gives — in `Run`, every crate's modules, the
+  VDU drivers, the shared session's layout and the zone, its store kept for
+  the worker's life — and the keyboard it names selected. A start whose store
+  the zone reader refuses, or that names a zone the store lacks, ends the
+  worker as a violation.
+- **The boot** is the session's first launch: `filing::boot::start` as a
+  context of its own, on the user's own disc where the session has one and
+  setting `Choices:` alone elsewhere. Every failure it kept is told before its
+  end.
 - **Turns.** Each context that can run has a turn of `TURN` (2²⁰)
   instructions in turn. One waiting on input or the clock runs again once
   that comes or its own timed work — its key repeating, its screen's next
@@ -3080,7 +3152,12 @@ nothing but its port to the front end and the ring in its share.
   nothing and a deadline passing always gives a turn.
 - **Held.** While the front end holds the session nothing runs: a context
   waiting in place, or part way through its turn, holds where it stands, and
-  no launch is made.
+  no launch is made. A context the front end pauses has no turn until it is
+  let go on.
+- **Pressure and the desktop font.** A later band goes to the session's
+  caches, which give back what it no longer allows; a later desktop font is
+  the one the Font Manager names from then on. Each is taken once a turn, the
+  latest of several.
 - **Time.** The guest's monotonic clock is the port's since the session
   began, and its real time the host's when the worker started, moved on by
   it. The kernel makes up a second of a late clock's ticks at most and gives
@@ -3088,16 +3165,19 @@ nothing but its port to the front end and the ring in its share.
 - **Screens.** After each turn, and before the kernel waits in place for
   input or the clock, the current context's screen is set beside what the
   front end was told: a new or changed one described first, then the lines
-  drawn since put in the ring as its room allows. Lines it had no room for go
-  once room comes back, each context with lines waiting visited in turn while
-  others run, so a busy context never keeps another's screen stale.
+  drawn since put in the ring as its room allows, then the cursor and the
+  pointer where they changed. Lines it had no room for go once room comes
+  back, each context with lines waiting visited in turn while others run, so a
+  busy context never keeps another's screen stale. What the context holds of
+  its own, and what the shared areas hold, are told after each turn where
+  they changed.
 - **Relays.** One the kernel lets park leaves its context parked while
   others run, and its reply is given to the kernel when the context is next
   entered, which readies it. Any other waits in place: every command that
   comes meanwhile is taken, launches and quits kept for after. An answer to a
   relay whose context has ended, or that the kernel went on from, is dropped.
-- **Launches and quits.** A launch makes a context, a slot of
-  `Setup::slot_bytes` with the memory limit at its top, and its mailbox,
+- **Launches and quits.** A launch makes a context, a slot of the size the
+  session was started with, its memory limit at its top, and its mailbox,
   tells the front end, then runs the command line there: the context ends at
   once where the command needs no program, and with its error where it fails.
   What the making does before the front end is told is the session's own. A
@@ -3108,13 +3188,15 @@ nothing but its port to the front end and the ring in its share.
   commands kept their bound, from the start, so a failed allocation never
   loses a command: a reply there is no room to copy fails its relay, and a
   launch whose line there is no room to keep is refused.
-- **Containment.** A command that does not decode, input beyond a context's
-  credit, an answer to no relay or to one waited on elsewhere, more of the
-  ring given back than it held, a quit of a context never launched, or more
-  than 64 launches and quits waiting ends the worker with `End::Violation`
-  and why. A port that fails or closes ends it, and so do a fault switching
-  contexts (`End::Fault`) and a switch there is no memory for
-  (`End::NoMemory`).
+- **Containment.** A command that does not decode, a session not started
+  first or started twice, input beyond a context's credit, an answer to no
+  relay or to one waited on elsewhere, more of the ring given back than it
+  held, a quit or a pause of a context never launched, or more than 64
+  launches and quits waiting ends the worker with `End::Violation` and why. A
+  port that fails or closes ends it, and so do a fault switching contexts or
+  selecting the keyboard (`End::Fault`) and a switch there is no memory for
+  (`End::NoMemory`). The worker's exit status says which, so the front end
+  reads why a worker stopped by itself.
 
 ### The front end's model
 
@@ -3123,9 +3205,12 @@ the worker and been told. The worker runs guest code, so the model believes
 an event only where the worker could have sent it — a credit for input that
 was sent; a launch that was asked, its context numbered above every one
 before; a screen, damage or a relay only for a context running, damage within
-its screen and where the ring takes the next record; a relay parked on only
-by a context parked on no other, and one waited for in place only while no
-other is; and an end only of a context running. An event it refuses is
+its screen and where the ring takes the next record; a cursor within its
+screen, and a pointer or an hourglass only over a screen described; a relay parked on only by
+a context parked on no other, and one waited for in place only while no other
+is; the boot's failures only from the boot's context, no more than a report
+keeps, and how many more were omitted once; and an end only of a context
+running. An event it refuses is
 `Unbelievable`, with the reason the front end condemns the session with, and
 changes nothing. The room each event needs is held when the launch it follows
 is asked, so a refusal is only ever the worker's doing. The model asks a
@@ -3137,6 +3222,78 @@ sandbox reads its exit, crashed, out of memory or killed, or what it sent
 that could not be believed — and the command lines of the contexts that were
 running. Nothing is restarted: a fresh worker would not be the world the user
 had.
+
+### The front end's side
+
+`host::Host` drives one worker over its `SandboxSession` and never blocks:
+its owner registers the session's pipes on a wait-set while it wants them,
+and drains `Host::told`. It sends a command only where the model lets it go,
+those the session's queue has no room for waiting in order; believes every
+event through `Front`; copies each damage record out of the ring into its own
+memory and gives the ring back at once; and holds input past a context's
+credit in order, motion run together and a pointer's place moved on, a key
+dropped past `HELD_MOST` (256) with its release, as a keyboard's own buffer
+overruns.
+
+## The front end
+
+`TAIRiXBridge.app` (`userland/apps/tairix-bridge/riscos/app`) is the front
+end, and re-entered as a capability-empty worker a session itself. Nothing
+that waits runs on its window loop: a file worker serves every session's
+HostFS, reads the zone store, takes the documents folder and the files handed
+over, and starts each session's worker; a font worker carries glyph requests
+to the font service, held to the one request the Font Manager makes, and
+works out the desktop font; the settings writer commits the settings.
+
+- **Sessions.** The shared session's window opens as the application starts
+  and asks for the documents folder; its worker starts with the folder as
+  its own disc, or without one where it was refused, which the window says. A
+  file on the documents folder's volume runs in the shared session; one from
+  anywhere else, or of no identity, in an isolated session of its own, which
+  ends with its last task, unless the user runs it in the shared session from
+  the window's own command — which isolating every program withdraws. Every
+  launch is delivered on `Transfer` and run with `*Run`, after the session's
+  boot has ended.
+- **A session's window** is the Task Manager's: each task with its slot and
+  screen memory and whether it is paused or busy, the guest's RAM and what
+  the shared areas hold, the newest eight of its notes — what a launch failed
+  with, the boot's first four failures and how many more there were — and
+  the commands — Run, Run in Shared Session, Pause or Resume and Quit for the
+  task chosen, and Settings. A session that ends says why there and on
+  standard error, with the tasks that were running, and is recorded.
+- **The hourglass.** A task is busy while its program shows the hourglass,
+  which its screen draws as the program's pointer, unless it is paused; the
+  desktop's busy pointer shows over the session's window while any task is.
+  A task's ending, and its session's, end its busy state with it.
+- **Screens.** Each context's screen is a window whose picture is the screen
+  at its own pixels, which the desktop scales into the largest rectangle of
+  the mode's pixel aspect the window holds, sharp or smooth, the border's
+  colour round it. The text cursor, inverting the lines it covers and flashing
+  at a sixteenth or a thirty-second of a 50 Hz field rate, and the pointer are
+  drawn over the guest's lines, never into them, and the desktop's own pointer
+  is hidden over a screen whose guest shows one. The window's bar holds its
+  menu — Full Screen, Sharp or Smooth, Pause, and Reset, which ends the
+  program and runs it again in the same window — since the secondary button
+  is the guest's Menu.
+- **Input.** A screen takes the raw keyboard: each key's edge goes as its PC
+  keyboard's low-level key number, a key with none going nowhere, and every
+  key and button held is let go when the window loses the keyboard. Select,
+  Menu and Adjust are the primary, secondary and middle buttons, or in a RISC
+  OS mouse's order the primary, middle and secondary, as the setting chooses.
+  The pointer goes as a place in OS units until the guest sets the pointer or
+  the mouse itself; a primary click then takes pointer lock, and the pointer's
+  motion goes instead, until a lone Meta tap releases it and the window lets
+  go of the buttons the lock held.
+- **Settings** are kept in the application's own store and edited in a form
+  of their own, each committed where its control settles: the button order,
+  the memory each session may take, isolating every program, and how screens
+  are scaled. A new memory setting applies to the sessions started after it.
+- **The start.** A session starts with the time zone the desktop's clocks
+  read, its store delegated by the desktop and read once; with the RISC OS
+  keyboard laid out as the desktop's keys are, the USA's; and with the
+  desktop's text as its desktop font, its size in sixteenths of a point
+  through its family's line box. A later desktop font and pressure band follow
+  to every session.
 
 ## The reference harness
 

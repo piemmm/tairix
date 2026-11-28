@@ -45,6 +45,7 @@ pub(crate) struct Vdu {
     pub(crate) shadow: bool,
     /// The depth of `OS_RemoveCursors` calls not yet restored.
     pub(crate) cursors_removed: u32,
+    pub(crate) hourglass: crate::hourglass::Hourglass,
 }
 
 /// `work` on the drivers' state and the session together.

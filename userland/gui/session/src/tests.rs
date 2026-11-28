@@ -10464,16 +10464,21 @@ fn a_civil_change_is_told_at_once_and_presented_once() {
     assert_eq!(work_since(&shell, before).0, 1, "one present");
 }
 
-/// Only the desktop's own Settings application is delegated the zone store,
-/// and only where the session holds one.
+/// Any application the kernel attests is delegated the zone store, public and
+/// read-only as it is, but only where the session holds one; a caller no
+/// application is attested as is refused.
 #[test]
-fn the_zone_store_is_delegated_to_settings_alone() {
+fn the_zone_store_is_delegated_to_any_attested_application() {
     let (mut shell, _comp) = headless_desktop();
     let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
     let own = tairix_abi::AppIdentity::new("os.tairix.desktop", publisher).expect("identity");
     let settings = tairix_abi::AppIdentity::new(tairix_taskbar::system::SETTINGS_BUNDLE, publisher)
         .expect("identity");
-    let files = tairix_abi::AppIdentity::new("os.tairix.files", publisher).expect("identity");
+    let other = tairix_abi::AppIdentity::new(
+        "org.example.clock",
+        tairix_abi::PublisherId::from_raw([2; 32]),
+    )
+    .expect("identity");
     shell.set_own_app(Some(own));
 
     assert_eq!(
@@ -10483,13 +10488,37 @@ fn the_zone_store_is_delegated_to_settings_alone() {
     );
     shell.set_zones(Some(held_zones()));
     assert_eq!(shell.zone_store_descriptor(Some(&settings)), Ok(9));
-    assert_eq!(
-        shell.zone_store_descriptor(Some(&files)),
-        Err(Errno::PermissionDenied)
-    );
+    assert_eq!(shell.zone_store_descriptor(Some(&other)), Ok(9));
     assert_eq!(
         shell.zone_store_descriptor(None),
         Err(Errno::PermissionDenied)
+    );
+}
+
+/// The zone the clock reads, resolved against the store, is what every
+/// windowed application is told; with no store there is none to tell.
+#[test]
+fn the_clock_s_zone_is_published_as_it_was_resolved() {
+    let (mut shell, _comp) = headless_desktop();
+    let settings = DesktopSettings::default();
+    shell.adopt_civil(&settings);
+    assert_eq!(shell.clock_zone(), None, "no store");
+    shell.set_zones(Some(held_zones()));
+    shell.adopt_civil(&settings);
+    assert_eq!(
+        shell.clock_zone().map(|zone| String::from(zone.as_str())),
+        Some(String::from("Europe/London")),
+        "the store's default"
+    );
+    let chosen = DesktopSettings {
+        time_zone: tairix_abi::zone::ZoneName::new("Asia/Kolkata"),
+        ..DesktopSettings::default()
+    };
+    shell.adopt_civil(&chosen);
+    assert_eq!(
+        shell.clock_zone().map(|zone| String::from(zone.as_str())),
+        Some(String::from("Asia/Kolkata")),
+        "the user's choice"
     );
 }
 
@@ -10594,22 +10623,26 @@ fn the_window_host_hands_on_only_a_documents_folder_its_manifest_names() {
     );
 }
 
-/// Counts the refusals of Settings-only requests it is handed.
-struct RefusalCount(core::sync::atomic::AtomicUsize);
+/// Counts the events of one id it is handed.
+struct RefusalCount(tairix_log::EventId, core::sync::atomic::AtomicUsize);
 
 impl tairix_log::Sink for RefusalCount {
     fn write_event(&self, event: &tairix_log::Event<'_>) {
-        if event.id == crate::COMPONENT_REQUEST_REFUSED {
-            self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if event.id == self.0 {
+            self.1.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         }
     }
 }
 
 /// Every request only Settings may make, refused to another caller, is on
-/// the audit trail; one Settings makes is not.
+/// the audit trail; one Settings makes is not, nor is one any application
+/// may make.
 #[test]
 fn a_settings_only_request_refused_to_another_caller_is_recorded() {
-    static REFUSALS: RefusalCount = RefusalCount(core::sync::atomic::AtomicUsize::new(0));
+    static REFUSALS: RefusalCount = RefusalCount(
+        crate::COMPONENT_REQUEST_REFUSED,
+        core::sync::atomic::AtomicUsize::new(0),
+    );
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let mut shell = DesktopShell::new(
         TaskbarConfig::bottom_bar(640, 480),
@@ -10624,7 +10657,7 @@ fn a_settings_only_request_refused_to_another_caller_is_recorded() {
         .expect("identity");
     let files = tairix_abi::AppIdentity::new("os.tairix.files", publisher).expect("identity");
     shell.set_own_app(Some(own));
-    let refused = || REFUSALS.0.load(core::sync::atomic::Ordering::Relaxed);
+    let refused = || REFUSALS.1.load(core::sync::atomic::Ordering::Relaxed);
     let desktop = tairix_wallpaper::DesktopSettings::default();
     let document = "screensaver.saver = os.tairix.saver.life\n";
 
@@ -10640,11 +10673,44 @@ fn a_settings_only_request_refused_to_another_caller_is_recorded() {
         shell.request_screensaver_preview(Some(&files), document, (&desktop, true)),
         Err(Errno::PermissionDenied)
     );
+    assert_eq!(refused(), 3);
     assert_eq!(
         shell.zone_store_descriptor(Some(&files)),
+        Err(Errno::NotFound),
+        "any application may take the zone store: this session holds none"
+    );
+    assert_eq!(refused(), 3, "the zone store is no component's alone");
+}
+
+/// The zone store refused to a caller no application is attested as is on
+/// the audit trail.
+#[test]
+fn the_zone_store_refused_to_an_unattested_caller_is_recorded() {
+    static REFUSALS: RefusalCount = RefusalCount(
+        crate::UNATTESTED_REQUEST_REFUSED,
+        core::sync::atomic::AtomicUsize::new(0),
+    );
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let shell = DesktopShell::new(
+        TaskbarConfig::bottom_bar(640, 480),
+        TEST_SEAT,
+        (TEST_FRAME_BYTES, 0),
+        &NORMAL_PRESSURE,
+        &REFUSALS,
+    );
+    let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
+    let files = tairix_abi::AppIdentity::new("os.tairix.files", publisher).expect("identity");
+    let refused = || REFUSALS.1.load(core::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        shell.zone_store_descriptor(Some(&files)),
+        Err(Errno::NotFound)
+    );
+    assert_eq!(refused(), 0, "an attested caller is answered");
+    assert_eq!(
+        shell.zone_store_descriptor(None),
         Err(Errno::PermissionDenied)
     );
-    assert_eq!(refused(), 4);
+    assert_eq!(refused(), 1);
 }
 
 /// Only the desktop's own Settings application may preview a screensaver,

@@ -18,10 +18,31 @@ use crate::os::{Fail, Os, World};
 /// current, its other values already taken from it.
 pub type End = for<'a, 'b> fn(&'a mut Os<'b>, Box<dyn Any>);
 
+/// A value holding caches the machine's memory pressure takes back.
+pub trait Reclaims: Any {
+    /// What the pressure's band no longer allows the caches to keep, given
+    /// back.
+    fn reclaim(&mut self);
+}
+
+/// What a value is given at a context's end and when the pressure moves.
+#[derive(Clone, Copy)]
+struct Ways {
+    end: Option<End>,
+    reclaim: Option<fn(&mut dyn Any)>,
+}
+
+impl Ways {
+    const PLAIN: Self = Self {
+        end: None,
+        reclaim: None,
+    };
+}
+
 struct Held {
     id: TypeId,
     value: Box<dyn Any>,
-    end: Option<End>,
+    ways: Ways,
 }
 
 /// Values, each with its type.
@@ -44,36 +65,42 @@ impl Values {
 
     /// `value` held as the `T`, in place of any before: false where there
     /// is no room to hold it.
-    fn hold<T: Any>(&mut self, value: Box<dyn Any>, end: Option<End>) -> bool {
+    fn hold<T: Any>(&mut self, value: Box<dyn Any>, ways: Ways) -> bool {
+        let held = Held {
+            id: TypeId::of::<T>(),
+            value,
+            ways,
+        };
         if let Some(place) = self.place::<T>() {
-            self.0[place] = Held {
-                id: TypeId::of::<T>(),
-                value,
-                end,
-            };
+            self.0[place] = held;
             return true;
         }
         if self.0.try_reserve(1).is_err() {
             return false;
         }
-        self.0.push(Held {
-            id: TypeId::of::<T>(),
-            value,
-            end,
-        });
+        self.0.push(held);
         true
     }
 
-    /// The `T` taken out with its end, a placeholder left that no lookup of
+    /// The `T` taken out with its ways, a placeholder left that no lookup of
     /// a `T` finds.
-    fn set_aside<T: Any>(&mut self) -> Option<(Box<T>, Option<End>)> {
+    fn set_aside<T: Any>(&mut self) -> Option<(Box<T>, Ways)> {
         let place = self.place::<T>()?;
         let held = self.0.get_mut(place)?;
         match core::mem::replace(&mut held.value, Box::new(())).downcast::<T>() {
-            Ok(value) => Some((value, held.end)),
+            Ok(value) => Some((value, held.ways)),
             Err(other) => {
                 held.value = other;
                 None
+            }
+        }
+    }
+
+    /// Each value holding caches told the pressure moved.
+    fn reclaim(&mut self) {
+        for held in &mut self.0 {
+            if let Some(reclaim) = held.ways.reclaim {
+                reclaim(&mut *held.value);
             }
         }
     }
@@ -87,7 +114,7 @@ impl Values {
     /// Each value given to its end, the values with none dropped.
     pub(crate) fn end(self, os: &mut Os<'_>) {
         for held in self.0 {
-            if let Some(end) = held.end {
+            if let Some(end) = held.ways.end {
                 end(os, held.value);
             }
         }
@@ -161,7 +188,26 @@ impl Os<'_> {
     ///
     /// "Not enough memory" where the host has no room for it.
     pub fn hold_extension<T: Any>(&mut self, value: T) -> Result<(), Fail> {
-        self.hold_in(Holder::Session, value, None)
+        self.hold_in(Holder::Session, value, Ways::PLAIN)
+    }
+
+    /// Holds `value` as the session's `T`, as [`Self::hold_extension`] does,
+    /// its caches given back as [`Self::pressure_moved`] tells it.
+    ///
+    /// # Errors
+    ///
+    /// "Not enough memory" where the host has no room for it.
+    pub fn hold_cache_extension<T: Reclaims>(&mut self, value: T) -> Result<(), Fail> {
+        let reclaim: fn(&mut dyn Any) = |value| {
+            if let Some(value) = value.downcast_mut::<T>() {
+                value.reclaim();
+            }
+        };
+        let ways = Ways {
+            end: None,
+            reclaim: Some(reclaim),
+        };
+        self.hold_in(Holder::Session, value, ways)
     }
 
     /// Holds `value` as the current context's `T`, in place of any it held
@@ -172,18 +218,28 @@ impl Os<'_> {
     ///
     /// "Not enough memory" where the host has no room for it.
     pub fn hold_context_extension<T: Any>(&mut self, value: T, end: End) -> Result<(), Fail> {
-        self.hold_in(Holder::Context, value, Some(end))
+        let ways = Ways {
+            end: Some(end),
+            reclaim: None,
+        };
+        self.hold_in(Holder::Context, value, ways)
     }
 
-    fn hold_in<T: Any>(&mut self, holder: Holder, value: T, end: Option<End>) -> Result<(), Fail> {
+    fn hold_in<T: Any>(&mut self, holder: Holder, value: T, ways: Ways) -> Result<(), Fail> {
         let Ok(boxed) = tairix_collections::try_box(value) else {
             return Err(self.no_memory());
         };
-        if self.world.extensions.values(holder).hold::<T>(boxed, end) {
+        if self.world.extensions.values(holder).hold::<T>(boxed, ways) {
             Ok(())
         } else {
             Err(self.no_memory())
         }
+    }
+
+    /// The machine's memory pressure moved: every value the session holds
+    /// caches in gives back what the band no longer allows.
+    pub fn pressure_moved(&mut self) {
+        self.world.extensions.session.reclaim();
     }
 
     /// `work` on the `T` held and the rest of the session together, while a
@@ -194,11 +250,11 @@ impl Os<'_> {
         work: impl FnOnce(&mut T, &mut Self) -> R,
     ) -> Option<R> {
         let holder = self.world.extensions.holder::<T>()?;
-        let (mut value, end) = self.world.extensions.values(holder).set_aside::<T>()?;
+        let (mut value, ways) = self.world.extensions.values(holder).set_aside::<T>()?;
         let answer = work(&mut value, self);
         // Only `work` letting go of its own `T` empties the place; the value
         // set aside is its holder's again.
-        let _ = self.world.extensions.values(holder).hold::<T>(value, end);
+        let _ = self.world.extensions.values(holder).hold::<T>(value, ways);
         Some(answer)
     }
 

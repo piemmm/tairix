@@ -1,7 +1,10 @@
-//! The memory policy (`plans/RISCOS-EMULATOR.md` §3): how much RAM a
-//! session is given, which is all the RAM its guest is told it has.
+//! The memory policy (`plans/RISCOS-EMULATOR.md` §3): how much of the
+//! machine a session may take, and how much RAM its guest is told it has.
 
+use tairix_riscos_arm::cpu::MEMO_PAGE_BYTES;
 use tairix_riscos_arm::mmu::PAGE_SIZE;
+
+use crate::os::PROFILES;
 
 /// The share of the machine's usable RAM a session may take: a quarter, so
 /// the shared session and the isolated ones beside it leave the rest of the
@@ -10,7 +13,21 @@ use tairix_riscos_arm::mmu::PAGE_SIZE;
 const SHARE: u64 = 4;
 
 /// The most pages a guest can be shown: its physical addresses are 32 bits.
-const MOST_PAGES: u64 = 1 << 20;
+pub const MOST_PAGES: u64 = 1 << 20;
+
+/// The most a session may take on a machine with `usable` bytes of RAM: its
+/// guest and everything its worker keeps beside it.
+#[must_use]
+pub const fn session_bytes(usable: u64) -> u64 {
+    usable / SHARE
+}
+
+/// The most a session's decoded instructions hold when each of its
+/// processors keeps `memo_pages` pages.
+#[must_use]
+pub const fn memo_bytes(memo_pages: u32) -> u64 {
+    PROFILES as u64 * memo_pages as u64 * MEMO_PAGE_BYTES as u64
+}
 
 /// A session's ceiling: the RAM its guest has, in pages.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -19,10 +36,11 @@ pub struct Ceiling {
 }
 
 impl Ceiling {
-    /// The ceiling of a session on a machine with `usable` bytes of RAM.
+    /// The ceiling of a guest given all its session may take on a machine
+    /// with `usable` bytes of RAM.
     #[must_use]
     pub fn derive(usable: u64) -> Self {
-        Self::of_bytes(usable / SHARE)
+        Self::of_bytes(session_bytes(usable))
     }
 
     /// This ceiling, lowered to `bytes` if that is less: the user's limit on
@@ -30,6 +48,12 @@ impl Ceiling {
     #[must_use]
     pub fn lowered(self, bytes: u64) -> Self {
         self.min(Self::of_bytes(bytes))
+    }
+
+    /// A ceiling of `pages` pages: none past what a guest can be shown.
+    #[must_use]
+    pub fn of_pages(pages: u32) -> Option<Self> {
+        (u64::from(pages) <= MOST_PAGES).then_some(Self { pages })
     }
 
     fn of_bytes(bytes: u64) -> Self {
@@ -50,6 +74,14 @@ impl Ceiling {
     pub const fn bytes(self) -> u64 {
         self.pages as u64 * PAGE_SIZE as u64
     }
+}
+
+/// The budget each of a session's caches is held to in a session of
+/// `ceiling` bytes: a share of its RAM, as every reclaimable cache's is of
+/// what backs it.
+#[must_use]
+pub fn cache_budget(ceiling: u64) -> tairix_reclaim::CacheBudget {
+    tairix_reclaim::CacheBudget::from_backing(usize::try_from(ceiling).unwrap_or(usize::MAX))
 }
 
 #[cfg(test)]
@@ -75,5 +107,16 @@ mod tests {
     fn a_guest_is_never_shown_more_than_32_bits_of_physical_address() {
         assert_eq!(Ceiling::derive(1 << 40).bytes(), 4 * 1024 * MIB);
         assert_eq!(Ceiling::derive(0).pages(), 0);
+        assert_eq!(session_bytes(1 << 40), 1 << 38, "the session is not");
+    }
+
+    #[test]
+    fn decoded_pages_cost_a_page_of_each_instruction_set_on_each_processor() {
+        assert_eq!(memo_bytes(0), 0);
+        assert_eq!(memo_bytes(3), 3 * PROFILES as u64 * MEMO_PAGE_BYTES as u64);
+        assert!(
+            MEMO_PAGE_BYTES > PAGE_SIZE as usize,
+            "a decoding outweighs its word"
+        );
     }
 }

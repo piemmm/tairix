@@ -102,6 +102,9 @@ pub(crate) struct Mouse {
     bounds: Bounds,
     /// What a movement the host reports is multiplied by, across and up.
     multipliers: (i32, i32),
+    /// How often the guest has set the mouse or the pointer itself, counted
+    /// from the context's making, modulo 2³².
+    sets: u32,
 }
 
 impl Mouse {
@@ -112,6 +115,7 @@ impl Mouse {
             buttons: 0,
             bounds: UNBOUNDED,
             multipliers: (1, 1),
+            sets: 0,
         }
     }
 }
@@ -208,6 +212,21 @@ impl Os<'_> {
         (mouse.x, mouse.y)
     }
 
+    /// The guest set the mouse or the pointer itself, so a host's pointer no
+    /// longer stands where the guest's does.
+    pub fn pointer_set(&mut self) {
+        let mouse = &mut self.world.input.typing.mouse;
+        mouse.sets = mouse.sets.wrapping_add(1);
+    }
+
+    /// How often the current context's guest has set the mouse or the
+    /// pointer itself, modulo 2³²: a front end that sees it move stops
+    /// placing the guest's pointer where its own stands.
+    #[must_use]
+    pub fn pointer_sets(&self) -> u32 {
+        self.world.input.typing.mouse.sets
+    }
+
     /// Bounds the mouse to `bounds`, homing it to the nearest point within:
     /// what a mode change does with the whole screen.
     pub fn set_mouse_bounds(&mut self, bounds: Bounds) {
@@ -247,6 +266,7 @@ impl Os<'_> {
                 if mouse.bounds.holds(x, y) {
                     (mouse.x, mouse.y) = (x, y);
                 }
+                self.pointer_set();
             }
             4 => {
                 let (ox, oy) = self.mouse_origin();

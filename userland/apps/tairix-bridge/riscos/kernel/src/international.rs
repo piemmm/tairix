@@ -31,6 +31,8 @@ pub(crate) const SET_KEYBOARD: u32 = 0x80;
 pub(crate) const LATIN1: u32 = 101;
 /// UTF-8, whose codes from &80 are shown by their number.
 pub const UTF8: u32 = 111;
+/// The USA, whose keyboard is the US layout.
+pub const USA: u32 = 48;
 /// The configured country.
 const COUNTRY_CMOS: u8 = crate::cmos::COUNTRY;
 
@@ -513,8 +515,19 @@ fn keyboard_command(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let Some(number) = named(os, reason::COUNTRY_NUMBER, regs.r[0])? else {
         return Err(os.own_error(own, UNKNOWN_KEYBOARD, &[]));
     };
-    os.os_byte(ALPHABET_BYTE, number | SET_KEYBOARD)?;
-    Ok(())
+    os.select_keyboard(number)
+}
+
+impl Os<'_> {
+    /// Country `number`'s keyboard selected, as `*Keyboard` selects it: the
+    /// key handler lays the keys out as that keyboard has them.
+    ///
+    /// # Errors
+    ///
+    /// `OS_Byte`'s, and a claimant's of `ByteV`.
+    pub fn select_keyboard(&mut self, number: u32) -> Result<(), Fail> {
+        self.os_byte(ALPHABET_BYTE, number | SET_KEYBOARD).map(drop)
+    }
 }
 
 fn country_command(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {

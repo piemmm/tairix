@@ -3609,6 +3609,7 @@ pub fn desktop_info(compositor: &Compositor, shell: &DesktopShell) -> Result<Des
             .with_double_click(compositor.double_click())?
             .with_text(DesktopText::new(fonts.ui_family(), fonts.base_size_px()).ok())
             .with_machine_zone(shell.machine_zone())
+            .with_zone(shell.clock_zone())
             .with_refresh(compositor.refresh_rate())
             .with_settings_generation(shell.settings_generation()),
     )

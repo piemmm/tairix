@@ -14,10 +14,11 @@ use tairix_filecore::record::DISC_RECORD_SIZE;
 use tairix_filecore::Disc;
 use tairix_riscos_arm::mmu::PAGE_SIZE;
 use tairix_riscos_kernel::error::Error;
+use tairix_riscos_kernel::memory::RAM_DISC as AREA;
 use tairix_riscos_kernel::module::{Builtin, Command, Resource};
 use tairix_riscos_kernel::msgtrans::{Own, OwnFile};
 use tairix_riscos_kernel::os::{len32, quietly, Fail, Os, Regs, World};
-use tairix_riscos_kernel::ramdisc::{Occupant, AREA};
+use tairix_riscos_kernel::ramdisc::Occupant;
 use tairix_riscos_kernel::swi::os::{
     fs_control, DYNAMIC_AREA, FS_CONTROL, MODULE, READ_DYNAMIC_AREA,
 };

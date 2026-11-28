@@ -23149,3 +23149,143 @@ row 476 DFDEDDDCDBDAD9D8 632x00
 row 477 D7D6D5D4D3D2D1D0 632x00
 row 478 CFCECDCCCBCAC9C8 632x00
 row 479 C7C6C5C4C3C2C1C0 632x00
+case hourglass_calls_answer_and_keep_their_settings
+r colour1 FFFF00
+r colour3 FF0000
+r colour1_was FFFF00
+r colour3_was FF0000
+r colour1_kept 11223300
+r colour3_set 44556600
+r colour1_now 11223300
+r colour3_now 778899AA
+r leds 0
+r leds_was 0
+r leds_eor 1
+r leds_all FF
+r leds_and FC
+r leds_back 0
+r percent 32
+r  v 0
+r percent 63
+r  v 0
+r percent 64
+r  v 0
+r percent FFFFFFFF
+r  v 0
+r off_unmatched 0
+r smash_unmatched 0
+r beyond 110
+screen 640 480 0 80
+case hourglass_shows_after_its_delay_until_its_calls_are_matched
+r selected 1
+r  pointer1 11111119
+r  pointer2 22222219
+r  pointer3 33333319
+r on 1
+r at31 1
+r at35 4
+r  pointer1 FFFF0019
+r  pointer2 22222219
+r  pointer3 FF000019
+r nested 4
+r off 1
+r  pointer1 11111119
+r  pointer2 22222219
+r  pointer3 33333319
+r first_delay 3
+r smashed 1
+r off_after_smash 1
+r start8 1
+r start12 4
+r start_nested 4
+r start_off 1
+r start0 1
+r start0_off 1
+r never_shown 1
+screen 640 480 0 80
+case hourglass_keeps_what_a_program_sets_of_the_pointer_meanwhile
+r shown 3
+r  pointer1 FFFF0019
+r  pointer2 22222219
+r  pointer3 FF000019
+r selection_was 3
+r selected 2
+r later 4
+r  pointer1 30201019
+r  pointer2 22222219
+r  pointer3 FF000019
+r  pointer1 30201019
+r  pointer2 22222219
+r  pointer3 FF000019
+r  pointer1 30201019
+r  pointer2 22222219
+r  pointer3 FF000019
+r  pointer1 80800019
+r  pointer2 22222219
+r  pointer3 FF000019
+r off 2
+r  pointer1 30201019
+r  pointer2 22222219
+r  pointer3 33333319
+r unlinked 4
+r unlinked_off 1
+screen 640 480 0 80
+case hourglass_frames_turn_over_on_its_own_clock
+r at1 3
+r at16 4
+r at31 3
+r at46 4
+screen 640 480 0 80
+case hourglass_gives_back_the_pointer_colours_a_program_sets_meanwhile
+r  pointer1 FFFF0019
+r  pointer2 22222219
+r  pointer3 FF000019
+r  pointer1 30201019
+r  pointer2 22222219
+r  pointer3 60504019
+r  pointer1 90807019
+r  pointer2 22222219
+r  pointer3 60504019
+r  pointer1 90807019
+r  pointer2 22222219
+r  pointer3 60504019
+screen 640 480 0 80
+case hourglass_start_with_no_delay_holds_it_back
+r held_back 1
+r after_one_off 1
+r after_two 1
+r on_again 3
+r start0_while_shown 3
+r off_once 3
+r off_twice 1
+r from_off 4
+r back_off 0
+r after_mode 0
+r mode_later 4
+r mode_off 0
+screen 640 480 0 80
+case hourglass_start_sets_its_clock_again
+r pending_restarted 3
+r restarted_due 4
+r shown 3
+r frozen 3
+r resumed5 3
+r resumed15 3
+r resumed30 3
+r one_left 3
+r none_left 1
+r held_one 1
+r held_none 1
+screen 640 480 0 80
+case mode_change_and_the_pointer_selected
+r before 1
+r after 0
+r unlinked_after 0
+r screenmode_after 0
+screen 640 480 0 80
+case mode_change_and_the_pointer_and_border_colours
+r pointer1 56341219
+r border 18
+r pointer1_vdu20 56341219
+r border_vdu20 18
+screen 640 480 0 80

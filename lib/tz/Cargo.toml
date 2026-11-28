@@ -15,8 +15,10 @@ workspace = true
 # The store writer, for the compiler that writes the store. Off for every
 # reader, so none links the allocation the writer needs.
 write = []
+# A store held for the rest of the process, from bytes a process was handed.
+keep = []
 # The loader of the planted store, for a program on TAIRiX.
-rt = ["dep:tairix-rt"]
+rt = ["keep", "dep:tairix-rt"]
 # The store's places as a reader looks one up, for a surface that lists them;
 # it allocates, so a reader that only reads a clock leaves it off.
 listing = []

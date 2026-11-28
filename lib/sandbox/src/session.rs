@@ -303,6 +303,9 @@ pub struct SandboxSession<T: SessionTransport, S: Sink> {
     peer_finished: bool,
     /// Set by containment. Implies `transport` is `None`.
     failed: bool,
+    /// The exit status the worker containment disposed of ended with, where
+    /// one was read.
+    exit: Option<i32>,
     after_failure: AfterFailure,
 }
 
@@ -355,6 +358,7 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
             inbound,
             peer_finished: false,
             failed: false,
+            exit: None,
             after_failure,
         })
     }
@@ -547,6 +551,24 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
         self.peer_finished
     }
 
+    /// How a contained session's worker ended, as its exit status read when
+    /// it was disposed of: none while it runs.
+    #[must_use]
+    pub const fn worker_end(&self) -> Option<WorkerEnd> {
+        if self.failed {
+            Some(WorkerEnd::of_status(self.exit))
+        } else {
+            None
+        }
+    }
+
+    /// The exit status a contained session's worker ended with, where it was
+    /// read: what a worker that stopped by itself says through it.
+    #[must_use]
+    pub const fn exit_status(&self) -> Option<i32> {
+        self.exit
+    }
+
     /// Close the transport and reap the worker, reporting its exit code
     /// when one is known. A contained session has already been reaped and
     /// reports `None`.
@@ -585,6 +607,7 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
         }
         self.failed = true;
         let exit_code = self.transport.take().and_then(SessionTransport::dispose);
+        self.exit = exit_code;
         match self.after_failure {
             AfterFailure::Replace => {
                 log_worker_crashed(&self.sink, reason, exit_code);

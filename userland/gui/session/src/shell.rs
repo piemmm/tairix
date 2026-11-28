@@ -118,6 +118,14 @@ pub const COMPONENT_REQUEST_REFUSED: EventId = EventId(20_019);
 pub const COMPONENT_REQUEST_REFUSED_MESSAGE: &str =
     "request only a desktop component may make refused";
 
+/// Event id of a request any application may make — the zone store —
+/// refused to a caller the kernel attests as none.
+pub const UNATTESTED_REQUEST_REFUSED: EventId = EventId(20_046);
+
+/// The exact message [`UNATTESTED_REQUEST_REFUSED`] is emitted with.
+pub const UNATTESTED_REQUEST_REFUSED_MESSAGE: &str =
+    "request only an attested application may make refused";
+
 /// Something the input path carries, with when the input it came from
 /// happened on the monotonic clock — as its device reported it, where it did:
 /// what clicks, double-clicks and strokes are timed by, whenever the desktop
@@ -330,6 +338,9 @@ pub struct DesktopShell {
     zones: Option<HeldZones>,
     /// The machine's own zone, which a user who chose none reads.
     machine_zone: Option<ZoneName>,
+    /// The zone the clock reads, as it was last resolved: none where there
+    /// is no store.
+    clock_zone: Option<ZoneName>,
     /// The file manager's settings in effect, published in the desktop's
     /// document.
     files: FilerPreferences,
@@ -520,6 +531,7 @@ impl DesktopShell {
             clock: SessionClock::new(CivilClock::UTC),
             zones: None,
             machine_zone: None,
+            clock_zone: None,
             files: FilerPreferences::default(),
             settings_generation: 0,
             #[cfg(test)]
@@ -2834,15 +2846,28 @@ impl DesktopShell {
     }
 
     /// The descriptor the zone store is delegated from, for `caller`, the
-    /// application the kernel attests is asking.
+    /// application the kernel attests is asking: the store is public and
+    /// read-only, so any application may read local time from it.
     ///
     /// # Errors
     ///
-    /// [`Errno::PermissionDenied`] for any caller but the desktop's own
-    /// Settings application, which lists the store's regions and places;
-    /// [`Errno::NotFound`] when the session holds no store.
+    /// [`Errno::PermissionDenied`] for a caller no application is attested
+    /// as, which the audit trail keeps; [`Errno::NotFound`] when the session
+    /// holds no store.
     pub fn zone_store_descriptor(&self, caller: Option<&AppIdentity>) -> Result<u32, Errno> {
-        if !self.settings_only(caller, "zone-store") {
+        if caller.is_none() {
+            tairix_log::log(
+                self.audit,
+                &tairix_log::Event {
+                    level: Level::Warn,
+                    id: UNATTESTED_REQUEST_REFUSED,
+                    message: UNATTESTED_REQUEST_REFUSED_MESSAGE,
+                    fields: &[Field {
+                        key: "request",
+                        value: FieldValue::Str("zone-store"),
+                    }],
+                },
+            );
             return Err(Errno::PermissionDenied);
         }
         self.zones.map(|held| held.fd).ok_or(Errno::NotFound)
@@ -2859,6 +2884,12 @@ impl DesktopShell {
     #[must_use]
     pub const fn machine_zone(&self) -> Option<ZoneName> {
         self.machine_zone
+    }
+
+    /// The zone the clock reads, as every windowed application is told it.
+    #[must_use]
+    pub const fn clock_zone(&self) -> Option<ZoneName> {
+        self.clock_zone
     }
 
     /// The file manager's settings in effect.
@@ -2904,6 +2935,10 @@ impl DesktopShell {
         let machine = self.machine_zone.as_ref().map(ZoneName::as_str);
         let (civil, (zone, region)) =
             tairix_wallpaper::civil_clock(self.zones(), settings, machine);
+        self.clock_zone = self
+            .zones
+            .as_ref()
+            .and_then(|_| ZoneName::new(civil.zone().name()));
         self.clock.set_civil(civil);
         let widest = self.clock.widest();
         let reshaped = self.session.taskbar().clock().widest() != widest.as_slice();

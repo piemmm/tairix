@@ -433,6 +433,23 @@ impl Channel {
         ask_outlines(scalars, family, instance, &mut self.reply, call)
     }
 
+    /// The service's reply to the outline request `request`, its frame left
+    /// at the head of `reply`: its length, none when no transport is
+    /// installed, the call fails or the reply is longer than an outline
+    /// reply may be.
+    fn relay_outlines(&mut self, request: &[u8], reply: &mut Vec<u8>) -> Option<usize> {
+        self.ready();
+        let transport = self.transport.as_mut()?;
+        if reply.len() < FONT_MAX_OUTLINE_REPLY {
+            reply
+                .try_reserve_exact(FONT_MAX_OUTLINE_REPLY - reply.len())
+                .ok()?;
+            reply.resize(FONT_MAX_OUTLINE_REPLY, 0);
+        }
+        let len = transport.call(request, reply).ok()?;
+        (len <= FONT_MAX_OUTLINE_REPLY).then_some(len)
+    }
+
     /// Fetch the coverage of a prefix of `scalars`, or an empty batch when no
     /// transport is installed or the call or its reply could not be read
     /// (fail closed: the caller composites nothing).
@@ -1557,6 +1574,23 @@ pub fn outline_run(
     with_client(|client| client.serve_outlines(scalars, family, (weight, style, stretch)))
 }
 
+/// The font service's reply to `request`, an outline request a process that
+/// cannot reach the service made — a sandboxed worker's — carried as it
+/// stands, the reply's frame left at the head of `reply`: its length.
+///
+/// None for any request but [`FontRequest::Outlines`], which is all such a
+/// process may ask, and where no transport is installed, the call fails or
+/// the reply is longer than an outline reply may be. Whoever made the request
+/// decodes the frame; the caller hands it on whole.
+#[must_use]
+pub fn relay_outlines(request: &FontRequest, reply: &mut Vec<u8>) -> Option<usize> {
+    if !matches!(request, FontRequest::Outlines { .. }) {
+        return None;
+    }
+    let frame = request.to_le_bytes();
+    with_client(|client| client.with_channel(|channel| channel.relay_outlines(&frame, reply)))
+}
+
 /// The outline of `scalar` in `family`, instanced at `weight`/`style`/
 /// `stretch`, if a fetch has already brought it into the client's outline
 /// cache.
@@ -1954,6 +1988,7 @@ pub(crate) mod tests {
 
     use alloc::string::String;
     use alloc::sync::Arc;
+    use alloc::vec;
     use alloc::vec::Vec;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use tairix_log::DiscardSink;
@@ -2256,6 +2291,70 @@ pub(crate) mod tests {
         }
 
         fn set_transport(&mut self, _: Box<dyn FontTransport>) {}
+    }
+
+    /// A service answering `expected`, and nothing else, with `frame`, as
+    /// long as it says.
+    struct Answering {
+        expected: Vec<u8>,
+        frame: Vec<u8>,
+        said: usize,
+    }
+
+    impl FontTransport for Answering {
+        fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+            if request != self.expected.as_slice() {
+                return Err(Errno::PermissionDenied);
+            }
+            reply[..self.frame.len()].copy_from_slice(&self.frame);
+            Ok(self.said)
+        }
+    }
+
+    #[test]
+    fn an_outline_request_is_relayed_whole_and_its_reply_frame_handed_back() {
+        let request = FontRequest::Outlines {
+            family: FamilyKey::MONO,
+            scalars: GlyphRun::new(&['a', 'b']).expect("a run"),
+            weight: FontWeight::REGULAR,
+            style: FontStyle::Normal,
+            stretch: FontStretch::default(),
+        };
+        let mut channel = Channel::new();
+        let mut reply = Vec::new();
+        assert_eq!(
+            channel.relay_outlines(&request.to_le_bytes(), &mut reply),
+            None,
+            "no transport, no answer"
+        );
+        let expected = request.to_le_bytes().to_vec();
+        channel.install_transport(Box::new(Answering {
+            expected: expected.clone(),
+            frame: vec![1, 2, 3],
+            said: 3,
+        }));
+        assert_eq!(
+            channel.relay_outlines(&request.to_le_bytes(), &mut reply),
+            Some(3),
+            "carried as it stood"
+        );
+        assert_eq!(&reply[..3], [1, 2, 3]);
+        channel.install_transport(Box::new(Answering {
+            expected,
+            frame: Vec::new(),
+            said: FONT_MAX_OUTLINE_REPLY + 1,
+        }));
+        assert_eq!(
+            channel.relay_outlines(&request.to_le_bytes(), &mut reply),
+            None,
+            "a reply longer than an outline reply may be"
+        );
+    }
+
+    #[test]
+    fn only_an_outline_request_is_relayed() {
+        let mut reply = Vec::new();
+        assert_eq!(relay_outlines(&FontRequest::Families, &mut reply), None);
     }
 
     #[test]

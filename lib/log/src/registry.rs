@@ -156,6 +156,8 @@ pub const RECORDER: EventRange = EventRange::new(36_000, 37_000);
 pub const OPENMICRO: EventRange = EventRange::new(37_000, 38_000);
 /// The directory-browser engine: what the desktop opened a document with.
 pub const BROWSE: EventRange = EventRange::new(38_000, 38_100);
+/// TAIRiX Bridge's RISC OS front end.
+pub const RISCOS: EventRange = EventRange::new(39_000, 40_000);
 
 /// Every range and the crates that take identifiers from it.
 pub const OWNERS: &[Owner] = &[
@@ -382,6 +384,10 @@ pub const OWNERS: &[Owner] = &[
     Owner {
         range: BROWSE,
         crates: &["lib/browse"],
+    },
+    Owner {
+        range: RISCOS,
+        crates: &["userland/apps/tairix-bridge/riscos/app"],
     },
 ];
 

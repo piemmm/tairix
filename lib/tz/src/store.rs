@@ -61,12 +61,28 @@ pub struct ZoneInfo<'a> {
 }
 
 /// A store's validated layout without its bytes ([`ZoneInfo::validated`]).
-#[cfg(feature = "rt")]
+#[cfg(any(test, feature = "keep"))]
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Validated {
     header: Header,
     sections: Sections,
     len: usize,
+}
+
+/// The store `bytes` hold, validated and kept for the rest of the process:
+/// every zone and clock built from it borrows it, so a process keeps it once.
+///
+/// # Errors
+///
+/// [`StoreError`]: nothing is kept.
+#[cfg(any(test, feature = "keep"))]
+pub fn keep(bytes: alloc::vec::Vec<u8>) -> Result<&'static ZoneInfo<'static>, StoreError> {
+    // Validated before it is kept, so a refused store costs nothing for the
+    // life of the process; the bytes kept are the ones validated, moved.
+    let validated = ZoneInfo::parse(&bytes)?.validated();
+    let kept: &'static [u8] = alloc::vec::Vec::leak(bytes);
+    let info = ZoneInfo::from_validated(validated, kept).ok_or(StoreError::Length)?;
+    Ok(alloc::boxed::Box::leak(alloc::boxed::Box::new(info)))
 }
 
 /// The release and the table sizes, rather than every byte of the store.
@@ -192,7 +208,7 @@ impl<'a> ZoneInfo<'a> {
 
     /// What validation found of this store, held apart from its bytes so a
     /// reader can move them without validating them again.
-    #[cfg(feature = "rt")]
+    #[cfg(any(test, feature = "keep"))]
     pub(crate) const fn validated(&self) -> Validated {
         Validated {
             header: self.header,
@@ -203,7 +219,7 @@ impl<'a> ZoneInfo<'a> {
 
     /// The store `validated` describes, over `bytes`: the very bytes it was
     /// parsed from, moved. `None` for bytes of another length.
-    #[cfg(feature = "rt")]
+    #[cfg(any(test, feature = "keep"))]
     pub(crate) fn from_validated(validated: Validated, bytes: &'a [u8]) -> Option<Self> {
         (bytes.len() == validated.len).then_some(Self {
             bytes,

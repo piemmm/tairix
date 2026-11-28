@@ -27,11 +27,58 @@ const SCREEN: Screen = Screen {
     blanked: false,
 };
 
+/// A start with no zone of its own.
+fn begin() -> Begin<'static> {
+    Begin {
+        ram_pages: 0x4000,
+        memo_pages: 16,
+        slot_bytes: 0x8_0000,
+        real_time: 0x58_0000_0000,
+        zone: None,
+        keyboard: 48,
+        font: DesktopFont::SHIPPED,
+        pressure: PressureBand::Mild,
+    }
+}
+
+fn begin_bytes(begin: Begin<'_>) -> Vec<u8> {
+    command_bytes(&Command::Begin(begin))
+}
+
 #[test]
 fn every_command_decodes_to_itself() {
     let reply = vec![7; RELAY_MOST];
     let line = vec![b'a'; LINE_MOST];
+    let store = vec![3; 300];
+    let sized = DesktopFont {
+        family: FamilyKey::MONO,
+        size: Some(16 * 12),
+    };
     for command in [
+        Command::Begin(begin()),
+        Command::Begin(Begin {
+            zone: Some(Zoned {
+                store: &store,
+                name: "Europe/London",
+            }),
+            font: sized,
+            pressure: PressureBand::Critical,
+            ram_pages: u32::try_from(MOST_PAGES).unwrap_or(u32::MAX),
+            memo_pages: MEMO_MOST,
+            ..begin()
+        }),
+        Command::Boot { serial: 7 },
+        Command::Pause {
+            context: 2,
+            paused: true,
+        },
+        Command::Pause {
+            context: 2,
+            paused: false,
+        },
+        Command::Pressure(PressureBand::Severe),
+        Command::Font(sized),
+        Command::Font(DesktopFont::SHIPPED),
         Command::Run,
         Command::Hold,
         Command::Input {
@@ -86,6 +133,7 @@ fn every_command_decodes_to_itself() {
 fn every_event_decodes_to_itself() {
     let request = vec![1; RELAY_MOST];
     let text = vec![b'e'; tairix_riscos_kernel::error::TEXT];
+    let line = vec![0x7F; LINE_MOST];
     for event in [
         Event::Credit {
             context: 2,
@@ -105,16 +153,6 @@ fn every_event_decodes_to_itself() {
         Event::Refused {
             serial: 1,
             error: None,
-        },
-        Event::Screen {
-            context: 0,
-            screen: SCREEN,
-        },
-        Event::Damage {
-            context: 0,
-            first: 10,
-            lines: 470,
-            offset: 0x40,
         },
         Event::Relay {
             serial: 3,
@@ -160,9 +198,216 @@ fn every_event_decodes_to_itself() {
             context: 1,
             ending: Ending::Quit,
         },
+        Event::Own {
+            context: 1,
+            slot: 0x8_0000,
+            screen: 0x5_0000,
+        },
+        Event::Shared(Shared {
+            system_heap: 1,
+            rma: 2,
+            sprites: 3,
+            font_cache: 4,
+            ram_disc: 5,
+            made: 6,
+            free: u32::MAX,
+        }),
+        Event::BootFailed {
+            context: 1,
+            line: &line,
+            error: Error {
+                number: 0xD6,
+                text: b"Not found",
+            },
+        },
+        Event::BootOmitted {
+            context: 1,
+            count: 3,
+        },
     ] {
         let bytes = event_bytes(&event);
         assert_eq!(Event::decode(&bytes), Ok(event), "{event:?}");
+    }
+}
+
+#[test]
+fn every_screen_s_event_decodes_to_itself() {
+    let pixels = [0, 1, 2, 3, 0, 1];
+    for event in [
+        Event::Screen {
+            context: 0,
+            screen: SCREEN,
+        },
+        Event::Damage {
+            context: 0,
+            first: 10,
+            lines: 470,
+            offset: 0x40,
+        },
+        Event::Cursor {
+            context: 1,
+            cursor: Some(CURSOR),
+        },
+        Event::Cursor {
+            context: 1,
+            cursor: None,
+        },
+        Event::Pointer {
+            context: 1,
+            shape: Some(shape(&pixels)),
+        },
+        Event::Pointer {
+            context: 1,
+            shape: None,
+        },
+        Event::PointerAt {
+            context: 1,
+            x: -5,
+            y: i32::MAX,
+        },
+        Event::PointerSet { context: 1 },
+        Event::Hourglass {
+            context: 1,
+            shown: true,
+        },
+        Event::Hourglass {
+            context: u32::MAX,
+            shown: false,
+        },
+    ] {
+        let bytes = event_bytes(&event);
+        assert_eq!(Event::decode(&bytes), Ok(event), "{event:?}");
+    }
+}
+
+const CURSOR: Cursor = Cursor {
+    x: 8,
+    y: 16,
+    width: 8,
+    top: 6,
+    bottom: 7,
+    flash: Flash::Slow,
+};
+
+/// A pointer shape three pixels across and two down over `pixels`.
+fn shape(pixels: &[u8]) -> Shape<'_> {
+    Shape {
+        width: 3,
+        height: 2,
+        active: (1, 0),
+        colours: [0xFF_FFFF, 0, 0x12_3456],
+        pixels,
+    }
+}
+
+#[test]
+fn a_start_outside_its_bounds_is_refused() {
+    let empty = begin_bytes(Begin {
+        slot_bytes: 0,
+        ..begin()
+    });
+    let part_page = begin_bytes(Begin {
+        slot_bytes: 0x8_0000 + 1,
+        ..begin()
+    });
+    let too_much = begin_bytes(Begin {
+        ram_pages: u32::try_from(MOST_PAGES + 1).unwrap_or(u32::MAX),
+        ..begin()
+    });
+    let no_memo = begin_bytes(Begin {
+        memo_pages: 0,
+        ..begin()
+    });
+    let many_memo = begin_bytes(Begin {
+        memo_pages: MEMO_MOST + 1,
+        ..begin()
+    });
+    let keyboard = begin_bytes(Begin {
+        keyboard: 0x80,
+        ..begin()
+    });
+    let store = [0; 4];
+    let unnamed = begin_bytes(Begin {
+        zone: Some(Zoned {
+            store: &store,
+            name: "Europe//London",
+        }),
+        ..begin()
+    });
+    for bytes in [
+        empty, part_page, too_much, no_memo, many_memo, keyboard, unnamed,
+    ] {
+        assert_eq!(Command::decode(&bytes), Err(WireError::Malformed));
+    }
+    let mut band = begin_bytes(begin());
+    *band.last_mut().expect("its band") = 5;
+    assert_eq!(Command::decode(&band), Err(WireError::Malformed));
+    let mut family = begin_bytes(begin());
+    let at = family.len() - 1 - 2 - FONT_FAMILY_KEY_LEN;
+    family[at] = b'!';
+    assert_eq!(Command::decode(&family), Err(WireError::Malformed));
+}
+
+#[test]
+fn what_is_drawn_over_a_screen_outside_its_bounds_is_refused() {
+    let pixels = [0, 1, 2, 3, 0, 1];
+    let bright = [0, 1, 4, 3, 0, 1];
+    let short = [0, 1, 2];
+    let wide = vec![0; (POINTER_WIDTH_MOST + 1) as usize];
+    for event in [
+        Event::Cursor {
+            context: 1,
+            cursor: Some(Cursor { width: 0, ..CURSOR }),
+        },
+        Event::Cursor {
+            context: 1,
+            cursor: Some(Cursor {
+                top: 8,
+                bottom: 7,
+                ..CURSOR
+            }),
+        },
+        Event::Cursor {
+            context: 1,
+            cursor: Some(Cursor {
+                x: SCREEN_MOST,
+                ..CURSOR
+            }),
+        },
+        Event::Pointer {
+            context: 1,
+            shape: Some(shape(&bright)),
+        },
+        Event::Pointer {
+            context: 1,
+            shape: Some(shape(&short)),
+        },
+        Event::Pointer {
+            context: 1,
+            shape: Some(Shape {
+                width: POINTER_WIDTH_MOST + 1,
+                height: 1,
+                pixels: &wide,
+                ..shape(&pixels)
+            }),
+        },
+        Event::Pointer {
+            context: 1,
+            shape: Some(Shape {
+                height: 0,
+                pixels: &[],
+                ..shape(&pixels)
+            }),
+        },
+        Event::Pointer {
+            context: 1,
+            shape: Some(Shape {
+                colours: [0x100_0000, 0, 0],
+                ..shape(&pixels)
+            }),
+        },
+    ] {
+        assert!(Event::decode(&event_bytes(&event)).is_err(), "{event:?}");
     }
 }
 
@@ -277,7 +522,17 @@ fn fields_outside_their_bounds_are_refused() {
 }
 
 #[test]
-fn the_largest_relay_is_the_largest_payload() {
+fn the_largest_start_is_the_largest_payload_and_a_relay_fits_it() {
+    let store = vec![b'z'; ZONE_STORE_MOST];
+    let name = "A".repeat(ZONE_NAME_MAX);
+    let start = Command::Begin(Begin {
+        zone: Some(Zoned {
+            store: &store,
+            name: &name,
+        }),
+        ..begin()
+    });
+    assert_eq!(command_bytes(&start).len(), PAYLOAD_MOST);
     let most = vec![b'x'; RELAY_MOST];
     let relay = Event::Relay {
         serial: u32::MAX,
@@ -286,7 +541,7 @@ fn the_largest_relay_is_the_largest_payload() {
         side: Side::Fonts,
         request: &most,
     };
-    assert_eq!(event_bytes(&relay).len(), PAYLOAD_MOST);
+    assert!(event_bytes(&relay).len() <= PAYLOAD_MOST);
     let answer = Command::Answer {
         serial: u32::MAX,
         reply: &most,

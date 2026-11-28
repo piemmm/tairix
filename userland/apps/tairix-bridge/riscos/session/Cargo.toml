@@ -28,18 +28,27 @@ tairix-riscos-vdu = { path = "../vdu", version = "=0.0.0" }
 # The worker's and the front end's maps of contexts, mailboxes, launches and
 # relays, and a screen's damaged lines.
 tairix-collections = { path = "../../../../../lib/collections", version = "=0.0.0" }
+# The boot sequence a session's first launch runs, and how many of its
+# failures it keeps.
+tairix-riscos-filing = { path = "../filing", version = "=0.0.0" }
+# The desktop font's family key and a zone name's shape, which a session's
+# start carries.
+tairix-abi = { path = "../../../../../lib/abi", version = "=0.0.0" }
+# The machine's memory pressure band, which the front end hands on.
+tairix-reclaim = { path = "../../../../../lib/reclaim", version = "=0.0.0" }
+# The largest zone store the zone reader takes, which a session's start may
+# carry.
+tairix-tz = { path = "../../../../../lib/tz", version = "=0.0.0" }
+# Where the front end's side of a session records a worker it contains.
+tairix-log = { path = "../../../../../lib/log", version = "=0.0.0" }
 
 [dev-dependencies]
 # The seeded generator the fuzz harness draws from.
 tairix-fuzzseed = { path = "../../../../../tests/fuzzseed", version = "=0.0.0" }
-# The modules a test's session has — the filing system and its HostFS
-# server, BASIC — and the tree its disc is served over.
-tairix-riscos-filing = { path = "../filing", version = "=0.0.0" }
+# The modules a test's session has — BASIC beside the filing system — and the
+# tree its disc is served over.
 tairix-riscos-basic = { path = "../basic", version = "=0.0.0" }
 tairix-fscopy = { path = "../../../../../lib/fscopy", version = "=0.0.0", features = ["test-support"] }
-# What a test's kernel is made with: the machine's pressure, a log, a cache
-# key and a zone.
-tairix-reclaim = { path = "../../../../../lib/reclaim", version = "=0.0.0" }
-tairix-log = { path = "../../../../../lib/log", version = "=0.0.0" }
+# What a test's kernel is made with: a cache key and a zone store.
 tairix-hash = { path = "../../../../../lib/hash", version = "=0.0.0" }
-tairix-tz = { path = "../../../../../lib/tz", version = "=0.0.0" }
+tairix-tz = { path = "../../../../../lib/tz", version = "=0.0.0", features = ["test-support"] }

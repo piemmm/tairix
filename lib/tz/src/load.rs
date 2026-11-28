@@ -1,14 +1,12 @@
 //! The zone store a process reads once and keeps for its life.
 
-use alloc::boxed::Box;
-use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_abi::Errno;
 use tairix_rt::File;
 
 use crate::layout::MAX_STORE_LEN;
-use crate::store::{StoreError, ZoneInfo};
+use crate::store::{keep, StoreError, ZoneInfo};
 
 /// Why the store could not be had.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -41,13 +39,5 @@ impl fmt::Display for LoadError {
 pub fn load(file: &File) -> Result<&'static ZoneInfo<'static>, LoadError> {
     let bytes = tairix_rt::read_fd_to_end(file.fd(), MAX_STORE_LEN)
         .map_err(|raw| LoadError::Unreadable(Errno::from_syscall(raw)))?;
-    // Validated before it is kept, so a refused store costs nothing for the
-    // life of the process; the bytes kept are the ones validated, moved.
-    let validated = ZoneInfo::parse(&bytes)
-        .map_err(LoadError::Refused)?
-        .validated();
-    let kept: &'static [u8] = Vec::leak(bytes);
-    let info =
-        ZoneInfo::from_validated(validated, kept).ok_or(LoadError::Refused(StoreError::Length))?;
-    Ok(Box::leak(Box::new(info)))
+    keep(bytes).map_err(LoadError::Refused)
 }

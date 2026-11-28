@@ -67,15 +67,19 @@ pub fn string_entry<'a>(manifest: &'a str, key: &str) -> Option<&'a str> {
         .and_then(|(_, value)| quoted_string(value))
 }
 
+/// The most grouping directories a crate may sit beneath inside its class: a
+/// bound on the walk, so a directory link back up the tree ends it.
+pub const GROUPING_MOST: usize = 4;
+
 /// Every crate under `root` holding the manifest file `manifest`, in a
 /// deterministic order: the program crates under `userland` hold
 /// [`MANIFEST_SOURCE`].
 ///
-/// Such a crate sits at `<class>/<crate>`, or at `<class>/<group>/<crate>`
-/// beneath a grouping directory that is not itself a crate — a game's own
-/// subtree, a bus's drivers. `read` is told every directory whose listing the
-/// answer depends on, so a build script can rerun when a crate is added
-/// anywhere the walk looks.
+/// Such a crate sits at `<class>/<crate>`, or beneath grouping directories
+/// that are not themselves crates — a game's own subtree, a bus's drivers, a
+/// bridged system's subtree — at most [`GROUPING_MOST`] deep. `read` is told
+/// every directory whose listing the answer depends on, so a build script can
+/// rerun when a crate is added anywhere the walk looks.
 ///
 /// # Errors
 ///
@@ -87,21 +91,31 @@ pub fn manifest_crates(
 ) -> io::Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     for class in sorted_dirs(root, &mut read)? {
-        for member in sorted_dirs(&class, &mut read)? {
-            if member.join("Cargo.toml").is_file() {
-                if member.join(manifest).is_file() {
-                    found.push(member);
-                }
-                continue;
-            }
-            for member_crate in sorted_dirs(&member, &mut read)? {
-                if member_crate.join(manifest).is_file() {
-                    found.push(member_crate);
-                }
-            }
-        }
+        crates_beneath(&class, manifest, GROUPING_MOST, &mut read, &mut found)?;
     }
     Ok(found)
+}
+
+/// The crates holding `manifest` among `group`'s members, pushed onto
+/// `found`: a member that is a crate is never looked inside, and one that is
+/// not is a grouping directory, walked while `groupings` lasts.
+fn crates_beneath(
+    group: &Path,
+    manifest: &str,
+    groupings: usize,
+    read: &mut impl FnMut(&Path),
+    found: &mut Vec<PathBuf>,
+) -> io::Result<()> {
+    for member in sorted_dirs(group, read)? {
+        if member.join("Cargo.toml").is_file() {
+            if member.join(manifest).is_file() {
+                found.push(member);
+            }
+        } else if let Some(deeper) = groupings.checked_sub(1) {
+            crates_beneath(&member, manifest, deeper, read, found)?;
+        }
+    }
+    Ok(())
 }
 
 /// The `[package] name` a crate's `Cargo.toml` text gives, or `None` where
@@ -230,8 +244,9 @@ mod tests {
         assert_eq!(package_name("[dependencies]\nname = \"no\"\n"), None);
     }
 
-    /// The walk finds a crate holding the manifest at either depth, never one
-    /// without it, and never looks inside a crate for another.
+    /// The walk finds a crate holding the manifest beneath any grouping
+    /// directories within its bound, never one without it, and never looks
+    /// inside a crate for another.
     #[test]
     fn the_walk_finds_each_crate_holding_the_manifest() {
         let root =
@@ -242,6 +257,9 @@ mod tests {
             ("class/bare", false),
             ("class/group/nested", true),
             ("class/held/inner", true),
+            ("class/system/subtree/app", true),
+            ("class/a/b/c/d/deepest", true),
+            ("class/a/b/c/d/e/beyond", true),
         ] {
             let dir = root.join(dir);
             std::fs::create_dir_all(&dir).expect("a scratch tree");
@@ -254,7 +272,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(
             found,
-            vec![root.join("class/group/nested"), root.join("class/held")]
+            vec![
+                root.join("class/a/b/c/d/deepest"),
+                root.join("class/group/nested"),
+                root.join("class/held"),
+                root.join("class/system/subtree/app"),
+            ]
         );
     }
 

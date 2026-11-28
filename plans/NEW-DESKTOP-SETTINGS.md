@@ -443,7 +443,7 @@ owner the change goes to; the last column is what a refusal looks like.
 | Touchscreen | — | — | pane states absence (§3) |
 | Printers & Scanners | — | — | pane states absence (§3) |
 | Accessibility | the session's published settings document (contrast, density, motion, scale, the pointer's set, size and aids) | session apply (merged) | apply refused, stated on `stderr`, row reverts |
-| Language & Region | the session's published settings document (`region`, `time.zone`); the regions and places from the zone store, read through the read-only delegation the session mints Settings alone (`TakeZoneStore`) | session apply, which refuses a region or zone the store does not hold | apply refused, stated; with no store delegated the rows offer the default and the held value alone |
+| Language & Region | the session's published settings document (`region`, `time.zone`); the regions and places from the zone store, read through the read-only delegation the session mints any attested application (`TakeZoneStore`) | session apply, which refuses a region or zone the store does not hold | apply refused, stated; with no store delegated the rows offer the default and the held value alone |
 | Sharing | — | — | pane states absence (§3) |
 | Users & Groups | ungated `USER_DIRECTORY` / `GROUP_DIRECTORY` roster + own record; other accounts' fields, lock state and grants only after admin authentication (DS9) | elevated user-admin tool (DS9) | Authority Mark, account unchanged |
 | Storage | ungated `MOUNT_LIST` alone — its `VolumeStats` and its availability overlay; `VOLUME_IO_HEALTH` needs `CAP_SYSINFO_KERNEL` and stays the Switchboard's | — (read-only; mounting is the file manager's) | reading renders unmeasured |
@@ -1073,9 +1073,10 @@ its offset from UTC; both are read through the zone store the session delegates
 
 **Language & Region** is a user-scope form over the session's `region` and
 `time.zone` keys. Settings may open no file, so the zone store reaches it as a
-read-only delegation: `WindowRequest::TakeZoneStore`, answered to Settings
-alone, mints it the descriptor the session opened at bring-up, and Settings
-reads and keeps the store for its life. The Region row offers *Default* (the
+read-only delegation: `WindowRequest::TakeZoneStore`, answered to any attested
+application since the store is public and read-only, mints it the descriptor
+the session opened at bring-up, and Settings reads and keeps the store for its
+life. The Region row offers *Default* (the
 store's own region, by name) and then every region by name, its description
 showing how the region it holds writes a date and a time at an instant that
 shows both field order and clock style; the list scrolls a window of whole rows

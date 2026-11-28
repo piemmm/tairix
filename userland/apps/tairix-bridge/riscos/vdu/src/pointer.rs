@@ -49,6 +49,12 @@ impl Pointer {
         }
     }
 
+    /// Turned off and following the mouse, as every mode change leaves it.
+    pub(crate) const fn reset(&mut self) {
+        self.selected = 0;
+        self.unlinked = false;
+    }
+
     /// Where it is, in OS units from the screen's bottom left.
     pub(crate) fn at(&self, os: &Os<'_>) -> (i32, i32) {
         if self.unlinked {
@@ -107,7 +113,9 @@ pub(crate) fn word_21(os: &mut Os<'_>, reason: u8, block: u32) -> Result<(), Fai
                 let origin = vdu.graphics.origin;
                 vdu.pointer.position = (x.wrapping_add(origin.0), y.wrapping_add(origin.1));
                 Ok(())
-            })
+            })?;
+            os.pointer_set();
+            Ok(())
         }
         6 => {
             let (x, y) = with(os, |vdu, os| {

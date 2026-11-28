@@ -8,11 +8,14 @@ Its notices are [the bridge's](../../README.md).
 
 Stability: `experimental`.
 
-- `protocol` — the commands the front end sends (run and hold, credited
-  input, the damage ring's space released, relays answered, launches and
-  quits) and the events the worker sends (input taken in, launches made or
-  refused, screens and their damage, relays to carry, contexts ended), each
-  decoded whole against fixed bounds.
+- `protocol` — the commands the front end sends (the session's start, run
+  and hold, credited input, the damage ring's space released, relays
+  answered, the boot, launches, quits and pauses, the pressure band and the
+  desktop font) and the events the worker sends (input taken in, launches
+  made or refused, screens, their damage, cursors, pointers and hourglasses,
+  memory held,
+  relays to carry, the boot's failures, contexts ended), each decoded whole
+  against fixed bounds.
 - `ring` — the screens' damage ring in the spawn share, placed and released
   alike on both sides, so the front end believes a record only where the
   worker could have put it.
@@ -25,6 +28,9 @@ Stability: `experimental`.
 - `front` — the front end's model of the session: an event believed only
   where the worker could have sent it, and a session that ended reported with
   the contexts that were running.
+- `host` — the front end's side of one worker, driven without blocking:
+  commands queued in order, events believed, damage copied out of the ring,
+  input held past a context's credit.
 
 It holds no `unsafe` code. `tests/fuzz_protocol.rs` is its fuzz harness and
 `tests/worker.rs` runs the worker over the real kernel, filing system and

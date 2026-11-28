@@ -4,7 +4,7 @@
 
 use tairix_drawing::riscos::units::MILLIPOINTS_PER_OS_UNIT;
 use tairix_riscos_kernel::cmos;
-use tairix_riscos_kernel::memory::Create;
+use tairix_riscos_kernel::memory::{Create, FONT_CACHE as CACHE_AREA};
 use tairix_riscos_kernel::os::{Fail, Os, Regs};
 use tairix_riscos_kernel::swi::{os as kos, X};
 use tairix_vdu::mode::var::{X_EIG, Y_EIG};
@@ -25,9 +25,8 @@ pub(crate) const FONT_MAX_CMOS: u8 = 200;
 pub(crate) const FONT_MAX_UNIT: u32 = 64 * 1024;
 pub(crate) const FONT_MAX_STORED: [u8; 6] = [0, 16, 12, 24, 0, 0];
 
-/// The font cache's dynamic area, its title, and the most it may grow to:
-/// the largest `FontMax` CMOS can configure.
-const CACHE_AREA: u32 = 4;
+/// The font cache's dynamic area's title, and the most it may grow to: the
+/// largest `FontMax` CMOS can configure.
 const CACHE_TITLE: &[u8] = b"Font cache";
 const CACHE_MOST: u32 = 255 * FONT_MAX_UNIT;
 

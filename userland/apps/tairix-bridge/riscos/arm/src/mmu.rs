@@ -282,6 +282,10 @@ pub enum MmuError {
     Space,
 }
 
+/// What the MMU keeps beside each frame in use is at most this share of the
+/// frame: its slot, its watch, and the entry of the table that maps it.
+pub const BOOKKEEPING_SHARE: u32 = 32;
+
 /// A frame's state.
 struct Slot {
     words: Option<Box<[u32; FRAME_WORDS]>>,

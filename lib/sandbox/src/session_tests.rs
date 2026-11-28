@@ -10,6 +10,7 @@ use super::{
     serve_session, FrameOut, SandboxSession, SessionBounds, SessionDescriptors, SessionError,
     SessionService, SessionStep, SessionTransport, EVENT_SESSION_FAILED, MIN_QUEUE_BYTES,
 };
+use crate::host::WorkerEnd;
 use crate::loopback::LoopbackSession;
 use crate::proto::{head_declared, Channel, ProtoError, FRAME_HEADER_LEN, MAX_FRAME};
 use crate::testing::NullSink;
@@ -452,10 +453,18 @@ fn a_transport_failure_is_contained_reaped_logged_and_latched() {
     let disposed = Rc::clone(&transport.disposed);
     let mut session = SandboxSession::new(transport, bounds(), sink.clone()).expect("committed");
     assert!(session.descriptors().is_some());
+    assert_eq!(session.worker_end(), None, "a running worker has not ended");
+    assert_eq!(session.exit_status(), None);
 
     assert_eq!(session.on_readable(), Err(SessionError::WorkerFailed));
     // Reaped once, logged once, and never replaced.
     assert_eq!(*disposed.borrow(), 1);
+    assert_eq!(
+        session.worker_end(),
+        Some(WorkerEnd::of_status(Some(139))),
+        "its end kept as its status read"
+    );
+    assert_eq!(session.exit_status(), Some(139));
     assert_eq!(
         sink.events.borrow().as_slice(),
         &[(EVENT_SESSION_FAILED, Level::Warn)]

@@ -23,8 +23,8 @@ use tairix_riscos_arm::mmu::{
 
 pub use areas::{
     access_privilege, handler_reason, AreaError, AreaFlags, Clamps, Create, Created, Failure,
-    Handler, Info, Located, LogicalOp, PageQuery, ParkedArea, PhysicalOp, Read, FREE_POOL, RMA,
-    SCREEN, SYSTEM, SYSTEM_HEAP, TITLE,
+    Handler, Info, Located, LogicalOp, Own, PageQuery, ParkedArea, PhysicalOp, Read, Shared,
+    FONT_CACHE, FREE_POOL, RAM_DISC, RMA, SCREEN, SPRITES, SYSTEM, SYSTEM_HEAP, TITLE,
 };
 pub(crate) use areas::{CANT_GET_PHYSICAL, PAGE_RESERVED};
 pub use guest::{Allowed, Guest, GuestError, PageEntry, Service};

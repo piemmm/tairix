@@ -151,6 +151,19 @@ impl State {
     }
 }
 
+impl tairix_riscos_kernel::Reclaims for State {
+    fn reclaim(&mut self) {
+        self.cache.reclaim();
+    }
+}
+
+/// The most HostFS holds of the host's memory beside a session of `ceiling`
+/// bytes: its read cache and `Scrap`.
+#[must_use]
+pub fn host_bytes(ceiling: u64) -> u64 {
+    cache::ReadCache::most(ceiling).saturating_add(scrap::bound(ceiling))
+}
+
 /// The names the memory discs have.
 const SCRAP: &str = "Scrap";
 const CHOICES: &str = "Choices";
@@ -249,7 +262,7 @@ fn init(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
     let scrap_dir = scrap_dir.ok_or_else(|| os.no_memory())?;
     let (pressure, log) = os.cache_context();
     let cache = cache::ReadCache::new(os.ceiling_bytes(), seed, pressure, log);
-    os.hold_extension(State {
+    os.hold_cache_extension(State {
         own: messages,
         workspace,
         discs,

@@ -14,11 +14,9 @@ use crate::dynamic::UNKNOWN_AREA_HANDLER;
 use crate::error::Error;
 use crate::host::Routine;
 use crate::memory::handler_reason as reason;
+use crate::memory::RAM_DISC as AREA;
 use crate::memory::{AreaFlags, Bits, Create, LogicalOp, PageQuery, PhysicalOp};
 use crate::os::{Fail, Os, Unwind};
-
-/// The area's number.
-pub const AREA: u32 = 5;
 
 /// Its title.
 const TITLE: &[u8] = b"RAM disc";

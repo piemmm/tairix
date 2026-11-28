@@ -239,7 +239,7 @@ pub fn document_room(memory: WorkerMemory) -> u64 {
 /// kind whose share follows the machine.
 fn machine_ram(memory: WorkerMemory) -> u64 {
     match memory {
-        WorkerMemory::Messages | WorkerMemory::Artwork => 0,
+        WorkerMemory::Messages | WorkerMemory::Artwork | WorkerMemory::Machine { .. } => 0,
         WorkerMemory::Documents => {
             tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0)
         }

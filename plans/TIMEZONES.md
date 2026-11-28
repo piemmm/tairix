@@ -125,10 +125,14 @@ A process that holds no `CAP_FS_ACCESS` reads the store through a read-only
 and nothing else crosses: no second format, no paged catalog on the wire, and no
 authority beyond reading one public, read-only file.
 
-- **The desktop's Settings application** asks the session
-  (`WindowRequest::TakeZoneStore`, answered to Settings alone). The session
-  read the store at bring-up through a descriptor it holds for its life, so a
-  delegation costs no filesystem operation on its serve loop.
+- **A desktop application** asks the session (`WindowRequest::TakeZoneStore`,
+  answered to any application the kernel attests, since the store is public
+  and read-only): Settings to list the store's regions and places, TAIRiX
+  Bridge to give a RISC OS session its local time. The session read the store
+  at bring-up through a descriptor it holds for its life, so a delegation
+  costs no filesystem operation on its serve loop. Which zone to read is the
+  one the desktop's clocks read, which the `Desktop` notice carries
+  (`DesktopInfo::zone`) beside the machine's.
 - **The login screen** asks the session authority (`SessionRequest::ZoneStore`,
   answered to the greeter account on its console). The authority opens the
   store, delegates it and closes its descriptor at once, and never parses it:

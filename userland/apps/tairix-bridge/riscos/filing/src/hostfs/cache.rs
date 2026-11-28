@@ -14,9 +14,10 @@ use tairix_hash::{BuildSipHash13, HashSeed};
 use super::protocol::Version;
 use tairix_log::Sink;
 use tairix_reclaim::{
-    CacheBudget, CacheCandidate, CachedBytes, InvalidationSource, PressureGauge, RebuildCost,
-    ReclaimCache, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, MAP_ENTRY_OVERHEAD,
+    CacheCandidate, CachedBytes, InvalidationSource, PressureGauge, RebuildCost, ReclaimCache,
+    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, MAP_ENTRY_OVERHEAD,
 };
+use tairix_riscos_kernel::memory::policy::cache_budget as budget;
 
 /// Bytes a block holds: what one read across the relay fetches.
 pub(super) const BLOCK: u32 = 4096;
@@ -73,16 +74,25 @@ impl ReadCache {
         pressure: &'static (dyn PressureGauge + 'static),
         log: &'static (dyn Sink + Sync),
     ) -> Self {
-        let budget = CacheBudget::from_backing(usize::try_from(ceiling).unwrap_or(usize::MAX));
         let blocks = ReclaimCache::new(
             "riscos.hostfs",
             CANDIDATE,
-            budget,
+            budget(ceiling),
             pressure,
             log,
             BuildSipHash13::with_seed(HashSeed::from_bytes(seed)),
         );
         Self { blocks }
+    }
+
+    /// The most a session of `ceiling` bytes lets the cache hold.
+    pub(super) fn most(ceiling: u64) -> u64 {
+        budget(ceiling).hard() as u64
+    }
+
+    /// What the pressure's band no longer allows, given back.
+    pub(super) fn reclaim(&mut self) {
+        self.blocks.enforce_pressure();
     }
 
     /// At most `length` bytes of block `block` of the file named `name` from

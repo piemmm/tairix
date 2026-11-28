@@ -44,6 +44,7 @@ pub use env::{hex, hex8, ExceptionKind, Hex, Registers};
 pub mod error;
 mod events;
 mod extension;
+pub use extension::Reclaims;
 pub mod filing;
 mod fpemulator;
 pub use fpemulator::FRESH_FPSR;
@@ -52,7 +53,9 @@ mod host;
 mod info;
 pub mod input;
 mod international;
-pub use international::{character as alphabet_character, ALPHABETS, UTF8 as UTF8_ALPHABET};
+pub use international::{
+    character as alphabet_character, ALPHABETS, USA as USA_COUNTRY, UTF8 as UTF8_ALPHABET,
+};
 mod intkey;
 mod keyboard;
 mod kheap;

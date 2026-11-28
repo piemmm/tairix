@@ -637,11 +637,14 @@ one placed flows again.
 The session reads the zone store (`/System/Zoneinfo/zones.tzx`, `lib/tz`) once
 at bring-up, before its serve loop, and holds it — and the descriptor it read it
 through — for the life of the session; a store that cannot be read is stated
-once and the clocks read UTC with ISO 8601 dates. The desktop's own Settings
-application, which may open no file, lists the store's regions and places from
-a read-only delegation of that descriptor (`WindowRequest::TakeZoneStore`,
-answered to Settings alone), so handing it over costs no filesystem operation
-on the serve loop. `DesktopShell` holds the icon bar clock (`SessionClock`) and resolves it
+once and the clocks read UTC with ISO 8601 dates. An application that may open
+no file — Settings, listing the store's regions and places, or TAIRiX Bridge,
+starting a session in the clocks' zone — reads it from a read-only delegation
+of that descriptor (`WindowRequest::TakeZoneStore`), answered to any
+application the kernel attests, since the store is public and read-only, and
+refused and recorded (`UNATTESTED_REQUEST_REFUSED`) to a caller none is
+attested as; handing it over costs no filesystem operation on the serve loop.
+`DesktopShell` holds the icon bar clock (`SessionClock`) and resolves it
 with `civil_clock`: the `time.zone` and `region` keys where the store holds
 them; for the zone, else the machine's own; else the store's own zone and
 region (Europe/London and the United Kingdom as shipped). A stored choice the
@@ -660,7 +663,9 @@ session adopts what it read — the clock moves at once, and the desktop's
 description (`DesktopInfo::machine_zone`) is published again, so Settings,
 which may open no file, labels *Default* with the machine's zone and reads its
 clock in it. A configuration that cannot be read or understood is stated and
-the zone held before it is kept. The login screen reads no file either: login
+the zone held before it is kept. The zone the clocks read, as the shell
+resolved it, is published beside it (`DesktopInfo::zone`), none while the
+session holds no store. The login screen reads no file either: login
 hands it the machine's zone as `TZ`, which it reads before the store's
 default.
 

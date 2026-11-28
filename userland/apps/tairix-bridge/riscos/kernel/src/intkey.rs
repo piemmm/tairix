@@ -11,12 +11,14 @@
 //! Alt, Ctrl and F1 select the UK keyboard, F2 the configured one, and F12
 //! the keyboard whose country's dialling code Alt and the digits then give.
 
+pub(crate) mod host;
 mod layouts;
 
 use tairix_inline::ArrayVec;
 use tairix_unicode::{normalize, Form};
 
 use crate::byte::var;
+use crate::input::buttons;
 use crate::international::{ALPHABET_BYTE, READ_KEYBOARD, SET_KEYBOARD, UTF8};
 use crate::keyboard::{status, FIRST, KEY_HANDLER, NO_KEYBOARD, SHIFT_DOWN, SHIFT_UP};
 use crate::memory::Bits;
@@ -305,8 +307,8 @@ pub(crate) struct Held {
     ctrl: u8,
     alt: u8,
     left_alt: bool,
-    /// The mouse buttons held: Adjust, Menu, Select from bit 0.
-    buttons: u8,
+    /// The mouse buttons held.
+    buttons: u32,
     /// The dead key's accent awaiting a character.
     accent: Option<char>,
     entry: AltNumber,
@@ -475,7 +477,7 @@ enum Class {
     LayerAlt,
     Fn,
     /// A mouse button, by its bit.
-    Button(u8),
+    Button(u32),
     Break,
     CapsLock,
     NumLock,
@@ -495,9 +497,9 @@ impl Class {
             key::LEFT_ALT if layout.left_alt_switches => Self::LayerAlt,
             key::LEFT_ALT | key::RIGHT_ALT => Self::Alt,
             key::FN => Self::Fn,
-            key::SELECT => Self::Button(4),
-            key::MENU => Self::Button(2),
-            key::ADJUST => Self::Button(1),
+            key::SELECT => Self::Button(buttons::SELECT),
+            key::MENU => Self::Button(buttons::MENU),
+            key::ADJUST => Self::Button(buttons::ADJUST),
             key::BREAK => Self::Break,
             key::CAPS_LOCK => Self::CapsLock,
             key::NUM_LOCK => Self::NumLock,
@@ -975,9 +977,13 @@ fn special_key(os: &mut Os<'_>, regs: &mut Regs) -> Result<(), Fail> {
         Class::Alt => alt_key(os, action, &mut state, &mut out)?,
         Class::Button(bit) => {
             let keys = &mut os.world.intkey.held;
-            keys.buttons = flag(keys.buttons, bit, action == SHIFT_DOWN);
+            if action == SHIFT_DOWN {
+                keys.buttons |= bit;
+            } else {
+                keys.buttons &= !bit;
+            }
             let mut exit = *regs;
-            exit.r[0] = u32::from(keys.buttons);
+            exit.r[0] = keys.buttons;
             return take_exit(os, regs, exit, 0);
         }
         Class::Break => return take_exit(os, regs, *regs, 4),

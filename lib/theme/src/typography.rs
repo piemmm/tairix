@@ -362,9 +362,23 @@ pub fn line_box_px(points: u16, line_box: u16) -> u16 {
 /// thousandths of its em tall: [`line_box_px`] read back.
 #[must_use]
 pub fn points_of(size_px: u16, line_box: u16) -> u16 {
+    em_size(size_px, line_box, 1)
+}
+
+/// [`points_of`] to the nearest sixteenth of a point, the unit RISC OS
+/// states a font's size in.
+#[must_use]
+pub fn sixteenths_of(size_px: u16, line_box: u16) -> u16 {
+    em_size(size_px, line_box, 16)
+}
+
+/// The em of a body `size_px` logical pixels of line box in a family whose
+/// line is `line_box` thousandths of its em tall, to the nearest
+/// `1 / per_point` of a point.
+fn em_size(size_px: u16, line_box: u16, per_point: u32) -> u16 {
     let (num, den) = PX_PER_POINT;
-    let divisor = u32::from(line_box.max(1)) * num;
-    let scaled = u32::from(size_px) * den * 1000;
+    let divisor = u64::from(line_box.max(1)) * u64::from(num);
+    let scaled = u64::from(size_px) * u64::from(den) * 1000 * u64::from(per_point);
     u16::try_from((scaled + divisor / 2) / divisor).unwrap_or(u16::MAX)
 }
 

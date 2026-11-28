@@ -14,10 +14,11 @@ use tairix_colour::Rgba;
 use crate::motion::{ease_out, smoothstep, MotionInteraction};
 use crate::palette::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA, SELECTION_TINT_ALPHA};
 use crate::{
-    edge_weight, lifted, line_box_px, points_of, Accessibility, Appearance, Contrast, CursorKind,
-    CursorSet, CursorSetId, Density, DesktopText, Fade, FamilyKey, FontWeight, Fonts, Glide,
-    Metrics, Motion, MotionTheme, Palette, SignalRole, SurfaceGround, SyntaxPalette, SyntaxRole,
-    TextRole, Theme, ThemeError, ThemeId, ThemeRegistry, Timeline, CURSOR_KINDS, TEXT_WEIGHT_LIFT,
+    edge_weight, lifted, line_box_px, points_of, sixteenths_of, Accessibility, Appearance,
+    Contrast, CursorKind, CursorSet, CursorSetId, Density, DesktopText, Fade, FamilyKey,
+    FontWeight, Fonts, Glide, Metrics, Motion, MotionTheme, Palette, SignalRole, SurfaceGround,
+    SyntaxPalette, SyntaxRole, TextRole, Theme, ThemeError, ThemeId, ThemeRegistry, Timeline,
+    CURSOR_KINDS, TEXT_WEIGHT_LIFT,
 };
 
 #[test]
@@ -1381,6 +1382,28 @@ fn the_shipped_base_is_ten_points_of_inter() {
     assert_eq!(fonts.spec(TextRole::ItemLabel).size_px, 16);
     assert_eq!(fonts.spec(TextRole::WindowTitle).size_px, 16);
     assert_eq!(line_box_px(11, inter), 18);
+}
+
+#[test]
+fn a_size_in_sixteenths_of_a_point_reads_its_points_finely() {
+    let inter = 1210;
+    // 16 px of Inter's 1.21-em line is 9.917 points.
+    assert_eq!(sixteenths_of(16, inter), 159);
+    assert_eq!(sixteenths_of(12, 1000), 144, "nine points exactly");
+    // Within half a sixteenth of the em: 3/4 of a point a pixel, the line
+    // `line_box` thousandths of the em.
+    for line_box in [1000u16, 1110, 1210, 1362] {
+        for px in 6u16..=64 {
+            let fine = i64::from(sixteenths_of(px, line_box)) * i64::from(line_box) * 4;
+            let exact = i64::from(px) * 3 * 1000 * 16;
+            assert!(
+                (fine - exact).abs() <= i64::from(line_box) * 2,
+                "{px} px at {line_box}"
+            );
+        }
+    }
+    assert_eq!(sixteenths_of(u16::MAX, 1), u16::MAX, "held to the field");
+    assert_eq!(sixteenths_of(16, 0), sixteenths_of(16, 1), "no line is one");
 }
 
 #[test]

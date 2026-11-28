@@ -104,8 +104,14 @@ an application's own documents folder, the reference harness);
 | RO27.3 | The protocol: one total codec both ways over `lib/sandbox`, credited input, the screens' damage ring, the relays, launches and quits | done |
 | RO27.4 | The worker: contexts scheduled in turns of emulated instructions, the deadline wait, pacing to the host's clock | done |
 | RO27.5 | Containment: a frame that fails validation, a crash or a memory overrun ends the session, reported with the contexts that were running | done |
-| RO28 | The front end: launches, single-tasking screens, fullscreen, input, settings, the session window, the bundle | planned |
-| RO61 | Hourglass, whole: its SWIs and the pointer it shows, bridged as the desktop's busy cursor | planned |
+| RO28.1 | The bundle: the `app` crate, which the bundle walk finds below up to four grouping folders; `Run` as the front end and as the session worker; `AppInfo` with the capabilities this item uses; the icon, Help in every required locale, the `RISCOS` event range | done |
+| RO28.2 | A session's start carried to its worker whole — the guest's RAM, the next slot, the real time, the zone, the keyboard, the desktop font, the pressure band — with the memory policy dividing one ceiling between the guest and the worker; the zone store delegated to any application and the desktop's own zone published | done |
+| RO28.3 | The relays: HostFS's roots served on the front end's file worker, the documents folder asked for on the session window, `Transfer`'s deliveries and the read cache's seed; glyph requests carried to the font service on a worker of their own; the boot sequence run as the session's first context | done |
+| RO28.4 | Single-tasking screens: a window for each context's screen, its picture scaled by the desktop at the mode's pixel aspect, sharp or smooth; the text cursor and the pointer drawn over it; Full Screen; pause and Reset | done |
+| RO28.5 | Input: the raw keyboard by RISC OS low-level key number, the buttons in either order, the pointer seamless until the guest sets it and locked after, input held within its credit | done |
+| RO28.6 | Settings in the application's own store, edited in a form of their own: the button order, the memory ceiling, always-isolate, the screens' scaling | done |
+| RO28.7 | The session window and the sessions: the Task Manager's view of each context's slot and the shared areas, quitting and pausing; launches from the picker, drops and opened documents, each in the shared or an isolated session as its provenance says; a session's end told with why and its contexts; the desktop font kept current | done |
+| RO61 | Hourglass, whole: its SWIs and the pointer it shows, bridged as the desktop's busy cursor | done |
 | RO29 | Sound: SoundDMA, SoundChannels, SoundScheduler, SharedSound, the voices, `audio-v1` | planned |
 | RO30 | The debugger: SWI and service trace, breakpoints and watches, stepping, the listing, the Debugger module | planned |
 | RO31 | Machine mode, tier 1: the Archimedes running RISC OS 3.1 (its layout and version answers), VIDC1's colour registers and MEMC's video and cursor addresses on the frame clock, the boundary table, the refusal, and the offer to run again in machine mode | planned |
@@ -1577,8 +1583,16 @@ is fuzzed.
   `UpCall` 7s RISC OS 5's as recorded. `fuzz_devices` drives all three.
 - **Modules whose desktop side waits for a later item** each land whole,
   never in part, right after it:
-  - Hourglass (RO61, after RO28): bridged as the desktop's busy cursor over
-    the session window.
+  - Hourglass (RO61, after RO28), in the VDU crate: its SWIs, delays,
+    frames on pointer shapes 3 and 4 and what it gives back of the pointer as
+    the screen corpus recorded them, drawn for TAIRiX. Each context's is its
+    own, kept with its screen, so a program that exits or fails with it on
+    takes it with it; a new application lets go of what the last left on,
+    and a killed incarnation's is given back once its context runs. The
+    worker tells whether a context's shows (`Event::Hourglass`); the task is
+    busy in the session window, with the desktop's busy cursor over it while
+    any task is. From RO39 a Wimp task's hourglass is to be the task's own
+    in the same way.
   - DDEUtils (RO62, after RO39): the prefix and long command lines, and
     throwback, which is Wimp messages to the editor that registered.
   - Free (RO63, after RO40): `*ShowFree` opens its display in a desktop
@@ -2129,31 +2143,110 @@ it (`front::Front`, §15.1).
   or the font service. File, socket and glyph relays run on workers of their
   own, and a burst of guest damage is copied and presented once per pass of
   the loop (`AGENTS.md` §28).
-- **Launches** arrive from RO32's hand-offs, from the picker, from drops, and
-  from the terminal (RO48).
-- **Each guest window** is a TAIRiX window in the chosen look. Each
-  single-tasking screen is a window scaled through `lib/crt`, with Full Screen
-  (`SetSizeState(Fullscreen)`), sharp or smooth scaling, pause, and Reset of
-  that context.
-- **Settings.** Kept in `lib/appdata` and edited in a `lib/controls`
-  `FormDialog`, as both emulators' settings are: the look, the button order,
-  the memory ceiling, the network for the shared session, always-isolate, and
-  the territory if it should differ from the locale.
-- **The desktop font.** A session's `desktop_font` is the desktop notice's
-  text: its family, and its size in sixteenths of a point through the
-  family's line box. A change of the desktop's text reaches the session for
-  the Wimp's `Message_FontChanged` (RO39).
+- **The session's side** (`session/src/host.rs`) drives one worker over
+  its `SandboxSession`: it sends what the front end asks only where `Front`
+  lets it, believes every event through `Front`, copies each damage record
+  out of the ring into its own memory and gives the ring back at once, and
+  holds input past a context's credit in order, motion run together.
+- **Starting a session (RO28.2).** The first command is `Begin`, once: the
+  guest's RAM, the decoded pages each processor keeps, the next slot every
+  launch is given, the real time, the zone, the keyboard, the desktop font
+  and the pressure band. A later band and a later desktop font follow as
+  commands of their own.
+  - **Memory.** One ceiling bounds the worker: a quarter of usable RAM,
+    lowered by the user's address-space limit and the setting. The guest is
+    given what the ceiling leaves once the worker's own needs are taken from
+    it — its frames' bookkeeping, the decoded pages, its relay buffers and
+    the ring — and the worker is spawned held to the ceiling
+    (`WorkerMemory::Machine`). The next slot is an eighth of the guest's RAM,
+    no less than 640 KiB and no more than a 26-bit slot holds, since a slot's
+    pages are committed when it is given; RO39's Task Manager makes it the
+    user's to set.
+  - **The zone** is the one the desktop's clocks read, which the `Desktop`
+    notice carries beside the machine's. The front end takes the store
+    through `TakeZoneStore`, which the desktop answers any application (the
+    store is public and read-only), reads it on its file worker, and hands
+    the worker the store and the zone's name; the worker holds them for its
+    life. Where the desktop has no store the session reads UTC.
+  - **The keyboard** is the RISC OS keyboard laid out as the host's keys are:
+    TAIRiX's seat types the US layout, so the session's configured keyboard
+    is the USA's.
+- **The relays (RO28.3).**
+  - **Files.** Each session's HostFS server runs on the front end's file
+    worker over its grants: the shared session's own disc, the documents
+    folder, asked for on the session window before the worker is started;
+    `Transfer`, holding each file a launch delivers; the read cache's seed
+    from the front end's CSPRNG.
+  - **Glyphs.** A glyph request is held to the one request the Font Manager
+    makes, `FontRequest::Outlines`, and carried unchanged to the font service
+    on a worker of its own; the font service's reply goes back as it came.
+  - **The boot.** A session's first launch is its boot (`Command::Boot`):
+    `filing::boot::start` run as a context of its own, on the user's own disc
+    in the shared session and setting `Choices:` alone elsewhere. Every
+    failure it kept is told before its end, and no other launch is made until
+    it has ended.
+- **Single-tasking screens (RO28.4).** Each context's screen is a window whose
+  picture is the screen at its own pixels, which the desktop scales into the
+  largest rectangle of the mode's pixel aspect the window holds, sharp or
+  smooth, the border's colour round it. The text cursor and the pointer, which
+  the worker describes as they change, are drawn over the picture and never
+  into the screen, and the desktop's own pointer is hidden over a screen whose
+  guest shows one. The cursor inverts the lines it covers and flashes at a
+  sixteenth or a thirty-second of a 50 Hz field rate, as `VDU 23,0,10` chose.
+  Each window's bar, above the picture since the secondary button is the
+  guest's Menu, opens its menu: Full Screen, sharp or smooth scaling, pause
+  (`Command::Pause`) and Reset, which ends the context and launches its
+  command line again in the same window.
+- **Input (RO28.5).** A screen takes the raw keyboard: each edge goes to the
+  guest as its PC keyboard's low-level key number (`intkey::low_level`), and
+  every key and button held is released when the window loses the keyboard.
+  Select, Menu and Adjust are the primary, secondary and middle buttons, or
+  in a RISC OS mouse's order across the primary, middle and secondary, as the
+  setting chooses. The pointer goes as a place in OS units until the guest
+  sets the pointer or the mouse itself (`OS_Word` 21,3 and 21,5), which the
+  worker tells; the window then takes pointer lock at the next primary click
+  and sends its motion, until a lone Meta tap releases it.
+- **Settings (RO28.6).** Kept in the application's own store through
+  `lib/appconf`'s registry and edited in a `lib/controls` `FormDialog` in a
+  window of its own, each committed where its control settles: the button
+  order, the memory ceiling, always-isolate, and how the screens are scaled.
+  The look arrives with RO44, the shared session's network with RO46.1, and a
+  territory to choose with a second territory.
+- **The session window and the sessions (RO28.7).**
+  - **The window** is the Task Manager's: each context with its command line,
+    its slot and screen memory and whether it is paused; the shared areas' use
+    and the free pool, as the worker tells them when they change; quitting,
+    pausing and resuming a context; launching; the settings; and why the
+    documents folder was refused or the boot failed.
+  - **Launches** arrive from the picker, from drops on the session window and
+    from the documents the desktop opens with the application, each delivered
+    on `Transfer` and run with `*Run`; RO32 adds its hand-offs and RO48 the
+    terminal. A file on the documents folder's own volume runs in the shared
+    session; one anywhere else, or of no known provenance, runs in an
+    isolated session of its own, unless the user runs it in the shared session
+    from the window's own command, which always-isolate withdraws.
+  - **An ending.** A session that ends is told on its session window and
+    stderr and recorded, with why and the command lines of its contexts. The
+    shared session lives while its window is open; an isolated one ends with
+    its last task, its window closing with it unless it ended for a reason to
+    tell. The application ends with its last session's window.
+  - **The desktop font.** A session's desktop font is the desktop notice's
+    text: its family, and its size in sixteenths of a point through the
+    family's line box. A change of the desktop's text is carried to every
+    session (`Command::Font`) for the Wimp's `Message_FontChanged` (RO39).
 - **The bundle.**
-  - **Manifest.** `AppInfo` requests `CAP_SANDBOX_SPAWN`, `CAP_SHM`,
-    `CAP_JIT_MAP_EXEC`, `CAP_NET`, `CAP_LOG_EMIT` and `CAP_CONSOLE_WRITE`.
-    It declares the hosted-desktop property (RO33), the claims (RO32), and
-    `documents-folder = "RISC OS"`, with `document-access = "read-write"`.
+  - **Manifest.** `AppInfo` requests what the front end uses: `CAP_SANDBOX_SPAWN`,
+    `CAP_SHM`, `CAP_LOG_EMIT` and `CAP_CONSOLE_WRITE`. `CAP_NET` arrives with
+    RO46.1's sockets and `CAP_JIT_MAP_EXEC` with RO53's installs. It declares
+    `documents-folder = "RISC OS"`, with `document-access = "read-write"`;
+    the hosted-desktop property arrives with RO33 and the claims with RO32.
   - **Contents.** The icon, Help in every required locale, and the docs page
-    (`docs/src/desktop/riscos.md`).
-- **Diagnostics.** Events go into the `RISCOS` range of `lib/log`: a session
-  started or ended and why, a worker ended for what it sent, a stop at machine
-  mode's boundary with its chip and register, a refused module replacement, and
-  the isolation chosen at launch.
+    (`docs/src/desktop/tairix-bridge.md`).
+- **Diagnostics.** Events go into the `RISCOS` range of `lib/log` as each is
+  first emitted: a session started or ended and why, a worker ended for what
+  it sent, and the isolation chosen at launch; a stop at machine mode's
+  boundary joins with RO31 and a refused module replacement with the kernel's
+  report of one.
 
 ## 16. The translator (RO52–RO54)
 

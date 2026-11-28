@@ -11,14 +11,17 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use tairix_collections::OrderedMap;
+use tairix_reclaim::PressureBand;
+use tairix_riscos_kernel::desktop::DesktopFont;
 use tairix_riscos_kernel::input::InputEvent;
 use tairix_riscos_kernel::os::{BootError, Ending, Host, Pulse};
 use tairix_riscos_kernel::relay::{Relayed, Side};
 use tairix_sandbox::wire::Writer;
+use tairix_sandbox::worker::WorkerExit;
 use tairix_sandbox::{ProtoError, Waited, WorkerPort};
 
 use crate::credit::Inbox;
-use crate::protocol::{Command, Context, Event, BOOT, RELAY_MOST, WAITING_MOST};
+use crate::protocol::{Command, Context, Event, Stopped, BOOT, RELAY_MOST, WAITING_MOST};
 
 /// Why the worker stops.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,16 +34,39 @@ pub enum End {
     Violation(&'static str),
     /// The kernel would not boot.
     Refused(BootError),
-    /// The kernel faulted switching contexts.
+    /// The kernel faulted switching contexts, or selecting the keyboard the
+    /// session was started with.
     Fault,
-    /// There was no memory to switch contexts with.
+    /// There was no memory to switch contexts with, or to keep what the
+    /// session was started with.
     NoMemory,
+}
+
+impl End {
+    /// The exit status a worker that ends for this carries: the sandbox's own
+    /// where one names it, the session's [`Stopped`] otherwise.
+    #[must_use]
+    pub const fn code(self) -> i32 {
+        match self {
+            Self::Closed => WorkerExit::Finished.code(),
+            Self::Failed(ProtoError::PeerClosed) => WorkerExit::PeerClosed.code(),
+            Self::Failed(ProtoError::Oversize) => WorkerExit::Oversize.code(),
+            Self::Failed(ProtoError::OutOfMemory) | Self::NoMemory => {
+                WorkerExit::OutOfMemory.code()
+            }
+            Self::Failed(ProtoError::Channel(_)) => WorkerExit::Transport.code(),
+            Self::Violation(_) => Stopped::Violation.code(),
+            Self::Refused(_) => Stopped::Refused.code(),
+            Self::Fault => Stopped::Fault.code(),
+        }
+    }
 }
 
 /// A command the run loop applies, kept from where it arrived.
 #[derive(Debug)]
 pub(super) enum Kept {
     Launch { serial: u32, line: Vec<u8> },
+    Boot { serial: u32 },
     Quit { context: Context },
 }
 
@@ -71,12 +97,14 @@ enum InPlace {
 }
 
 /// A context's input, whether what it has taken in is still to be told,
-/// and the reply its parked relay waits for: room for each held from its
-/// start, so that nothing that arrives needs more.
+/// the reply its parked relay waits for, and whether the front end holds it:
+/// room for each held from its start, so that nothing that arrives needs
+/// more.
 struct Mailbox {
     inbox: Inbox,
     owes_credit: bool,
     reply: Option<Reply>,
+    paused: bool,
 }
 
 /// The worker's end of the session.
@@ -108,6 +136,11 @@ pub(super) struct Port<P> {
     pub(super) kept: VecDeque<Kept>,
     /// The damage ring's bytes given back since the run loop last took them.
     pub(super) released: u64,
+    /// The machine's memory pressure, where it moved since the run loop last
+    /// took it.
+    pub(super) pressure: Option<PressureBand>,
+    /// The desktop's text, where it changed since the run loop last took it.
+    pub(super) font: Option<DesktopFont>,
     pub(super) end: Option<End>,
 }
 
@@ -145,6 +178,8 @@ impl<P: WorkerPort> Port<P> {
             made: BOOT,
             kept,
             released: 0,
+            pressure: None,
+            font: None,
             end: None,
         })
     }
@@ -175,6 +210,7 @@ impl<P: WorkerPort> Port<P> {
             inbox,
             owes_credit: false,
             reply: None,
+            paused: false,
         };
         let made = !self.mailboxes.contains_key(&context)
             && self.mailboxes.try_insert(context, mailbox).is_ok();
@@ -214,6 +250,13 @@ impl<P: WorkerPort> Port<P> {
     /// Whether the front end has been told of `context` and not of its end.
     pub(super) fn knows(&self, context: Context) -> bool {
         self.mailboxes.contains_key(&context)
+    }
+
+    /// Whether the front end holds `context` where it stands.
+    pub(super) fn paused(&self, context: Context) -> bool {
+        self.mailboxes
+            .get(&context)
+            .is_some_and(|mailbox| mailbox.paused)
     }
 
     /// Whether input waits for `context`.
@@ -288,14 +331,26 @@ impl<P: WorkerPort> Port<P> {
     fn apply(&mut self, taken: Taken) {
         match taken {
             Taken::Malformed => self.finish(End::Violation("a command that does not decode")),
+            Taken::Begin => self.finish(End::Violation("a session started twice")),
             Taken::Input { context, event } => self.input(context, event),
             Taken::Released { bytes } => self.released += u64::from(bytes),
             Taken::Answer { serial, reply } => self.answer(serial, reply),
             Taken::Running(running) => self.running = running,
+            Taken::Pressure(band) => self.pressure = Some(band),
+            Taken::Font(font) => self.font = Some(font),
             Taken::Unheld { serial } => self.send(&Event::Refused {
                 serial,
                 error: None,
             }),
+            Taken::Pause { context, .. } if context == BOOT || context > self.made => {
+                self.finish(End::Violation("a pause of a context never made"));
+            }
+            // One that has ended crossed its end.
+            Taken::Pause { context, paused } => {
+                if let Some(mailbox) = self.mailboxes.get_mut(&context) {
+                    mailbox.paused = paused;
+                }
+            }
             Taken::Kept(Kept::Quit { context }) if context == BOOT || context > self.made => {
                 self.finish(End::Violation("a quit of a context never made"));
             }
@@ -429,6 +484,8 @@ impl<P: WorkerPort> Port<P> {
 /// A command as the port takes it: its bytes copied out of the frame.
 enum Taken {
     Malformed,
+    /// A start, which only the first command may be.
+    Begin,
     Input {
         context: Context,
         event: InputEvent,
@@ -442,6 +499,12 @@ enum Taken {
     },
     /// Run, or hold.
     Running(bool),
+    Pause {
+        context: Context,
+        paused: bool,
+    },
+    Pressure(PressureBand),
+    Font(DesktopFont),
     /// A launch whose line there was no room to keep.
     Unheld {
         serial: u32,
@@ -458,8 +521,13 @@ impl Taken {
             Some(owned)
         };
         match command {
+            Command::Begin(_) => Self::Begin,
             Command::Run => Self::Running(true),
             Command::Hold => Self::Running(false),
+            Command::Pause { context, paused } => Self::Pause { context, paused },
+            Command::Pressure(band) => Self::Pressure(band),
+            Command::Font(font) => Self::Font(font),
+            Command::Boot { serial } => Self::Kept(Kept::Boot { serial }),
             Command::Input { context, event } => Self::Input { context, event },
             Command::Released { bytes } => Self::Released { bytes },
             // An answer there is no room to keep fails the relay.

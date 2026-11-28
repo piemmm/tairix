@@ -15,7 +15,9 @@ use tairix_collections::{OrderedMap, OrderedSet};
 use tairix_sandbox::WorkerEnd;
 
 use crate::credit::Credit;
-use crate::protocol::{carries, Context, Event, Screen, BOOT, WAITING_MOST};
+use crate::protocol::{
+    carries, Context, Cursor, Event, Screen, Stopped, BOOT, BOOT_FAILURES_MOST, WAITING_MOST,
+};
 use crate::ring::{Placed, Ring};
 
 /// An event the worker could not have sent: why.
@@ -28,8 +30,12 @@ pub enum Why {
     /// The worker ended — it crashed, overran its memory, was killed — as the
     /// sandbox reads its exit.
     Worker(WorkerEnd),
+    /// The worker stopped by itself, its exit status saying why.
+    Stopped(Stopped),
     /// It sent what it could not have.
     Unbelievable(Unbelievable),
+    /// The front end had no memory to keep what the session needed.
+    NoRoom,
 }
 
 impl Why {
@@ -38,7 +44,9 @@ impl Why {
     pub const fn reason(self) -> &'static str {
         match self {
             Self::Worker(end) => end.reason(),
+            Self::Stopped(stopped) => stopped.reason(),
             Self::Unbelievable(Unbelievable(why)) => why,
+            Self::NoRoom => "there was no memory to keep the session",
         }
     }
 }
@@ -46,10 +54,13 @@ impl Why {
 /// A context launched and not ended.
 #[derive(PartialEq, Eq, Debug)]
 struct Running {
-    /// The command line it was launched with.
+    /// The command line it was launched with: none for the boot's.
     line: Vec<u8>,
     credit: Credit,
     screen: Option<Screen>,
+    /// For the boot's, the failures it has told, and whether it has told
+    /// how many more there were.
+    boot: Option<(usize, bool)>,
 }
 
 /// A relay unanswered: the context it was made for, and whether that
@@ -66,6 +77,8 @@ pub struct Front {
     next_launch: u32,
     /// The launches asked and not answered, with their lines.
     launches: OrderedMap<u32, Vec<u8>>,
+    /// The boot's launch, once asked: the session has one at most.
+    boot: Option<u32>,
     /// The contexts a quit was asked of that have not ended.
     quitting: OrderedSet<Context>,
     running: OrderedMap<Context, Running>,
@@ -85,6 +98,7 @@ impl Front {
         Some(Self {
             next_launch: 0,
             launches: OrderedMap::new(),
+            boot: None,
             quitting: OrderedSet::new(),
             running: OrderedMap::new(),
             made: BOOT,
@@ -103,9 +117,28 @@ impl Front {
     /// no launch carries the line, as many launches and quits wait as the
     /// worker keeps, or there is no room to keep it and what it makes.
     pub fn launch(&mut self, line: &[u8]) -> Option<u32> {
+        if !carries(line) {
+            return None;
+        }
+        self.ask_launch(line)
+    }
+
+    /// The session's boot asked: the serial its command goes as, none where
+    /// it has been asked before or a launch could not be.
+    pub fn boot(&mut self) -> Option<u32> {
+        if self.boot.is_some() {
+            return None;
+        }
+        let serial = self.ask_launch(b"")?;
+        self.boot = Some(serial);
+        Some(serial)
+    }
+
+    /// A launch of `line` noted, its room held: its serial.
+    fn ask_launch(&mut self, line: &[u8]) -> Option<u32> {
         let serial = self.next_launch;
         self.next_launch = serial.wrapping_add(1);
-        if !carries(line) || !self.room_to_ask() || self.launches.contains_key(&serial) {
+        if !self.room_to_ask() || self.launches.contains_key(&serial) {
             return None;
         }
         // Room for the context each launch asked may make, and for the relay
@@ -130,6 +163,13 @@ impl Front {
             && !self.quitting.contains(&context)
             && self.room_to_ask()
             && self.quitting.try_insert(context).is_ok()
+    }
+
+    /// Whether `context` runs: launched and not ended, so it may be paused,
+    /// let go on or given input.
+    #[must_use]
+    pub fn runs(&self, context: Context) -> bool {
+        self.running.contains_key(&context)
     }
 
     /// An input event for `context` sent, where its credit lets one go now.
@@ -182,25 +222,7 @@ impl Front {
                     .taken(applied)
                     .map_err(|_| Unbelievable("a credit for input never sent"))?;
             }
-            Event::Launched { serial, context } => {
-                if context <= self.made {
-                    return Err(Unbelievable("a context numbered as one made before"));
-                }
-                // Held when the launch was asked, so neither takes any.
-                let unnoted = |_| Unbelievable("a launch made with no room to note it");
-                self.running.try_reserve(1).map_err(unnoted)?;
-                let line = self
-                    .launches
-                    .remove(&serial)
-                    .ok_or(Unbelievable("a launch made that was never asked"))?;
-                let running = Running {
-                    line,
-                    credit: Credit::new(),
-                    screen: None,
-                };
-                self.running.try_insert(context, running).map_err(unnoted)?;
-                self.made = context;
-            }
+            Event::Launched { serial, context } => self.launched(serial, context)?,
             Event::Refused { serial, .. } => {
                 self.launches
                     .remove(&serial)
@@ -216,53 +238,48 @@ impl Front {
                 lines,
                 offset,
             } => {
-                let screen = self
-                    .running_mut(context, "damage to a context not running")?
-                    .screen
-                    .ok_or(Unbelievable("damage to a screen never described"))?;
-                if first + lines > screen.height {
-                    return Err(Unbelievable("damage below its screen"));
+                return self
+                    .damaged(context, first..first + lines, offset)
+                    .map(Some)
+            }
+            Event::Cursor { context, cursor } => {
+                let screen = self.screen_of(context, "a cursor over no screen")?;
+                if cursor.is_some_and(|cursor| !over(&screen, &cursor)) {
+                    return Err(Unbelievable("a cursor beyond its screen"));
                 }
-                let bytes = lines
-                    .checked_mul(screen.width)
-                    .and_then(|pixels| pixels.checked_mul(4))
-                    .ok_or(Unbelievable("damage the ring could not hold"))?;
-                let placed = self
-                    .ring
-                    .accept(offset, bytes)
-                    .map_err(|_| Unbelievable("damage where the worker could not have put it"))?;
-                return Ok(Some(placed));
+            }
+            Event::Pointer { context, .. } | Event::PointerAt { context, .. } => {
+                self.screen_of(context, "a pointer over no screen")?;
+            }
+            Event::Hourglass { context, .. } => {
+                self.screen_of(context, "an hourglass over no screen")?;
+            }
+            Event::PointerSet { context } => {
+                self.running_mut(context, "a pointer set in a context not running")?;
+            }
+            Event::Own { context, .. } => {
+                self.running_mut(context, "the memory of a context not running")?;
+            }
+            Event::Shared(_) => {}
+            Event::BootFailed { context, .. } => {
+                let (told, omitted) = self.boot_of(context)?;
+                if *omitted || *told >= BOOT_FAILURES_MOST {
+                    return Err(Unbelievable("more boot failures than a report keeps"));
+                }
+                *told += 1;
+            }
+            Event::BootOmitted { context, .. } => {
+                let (_, omitted) = self.boot_of(context)?;
+                if core::mem::replace(omitted, true) {
+                    return Err(Unbelievable("a boot's omitted failures told twice"));
+                }
             }
             Event::Relay {
                 serial,
                 context,
                 parked,
                 ..
-            } => {
-                if context != BOOT && !self.running.contains_key(&context) {
-                    return Err(Unbelievable("a relay for a context not running"));
-                }
-                if parked && context == BOOT {
-                    return Err(Unbelievable("the session's own relay parked"));
-                }
-                if self.relays.contains_key(&serial) {
-                    return Err(Unbelievable("a relay as one unanswered"));
-                }
-                let alike = |other: &Unanswered| {
-                    other.parked == parked && (!parked || other.context == context)
-                };
-                if self.relays.values().any(alike) {
-                    return Err(Unbelievable(if parked {
-                        "a context parked on a second relay"
-                    } else {
-                        "a second relay waited for in place"
-                    }));
-                }
-                // Room held when the launch was asked, or the session made.
-                self.relays
-                    .try_insert(serial, Unanswered { context, parked })
-                    .map_err(|_| Unbelievable("a relay with no room to note it"))?;
-            }
+            } => self.relayed(serial, context, parked)?,
             Event::Ended { context, .. } => {
                 self.running
                     .remove(&context)
@@ -273,6 +290,76 @@ impl Front {
         Ok(None)
     }
 
+    fn launched(&mut self, serial: u32, context: Context) -> Result<(), Unbelievable> {
+        if context <= self.made {
+            return Err(Unbelievable("a context numbered as one made before"));
+        }
+        // Held when the launch was asked, so neither takes any.
+        let unnoted = |_| Unbelievable("a launch made with no room to note it");
+        self.running.try_reserve(1).map_err(unnoted)?;
+        let line = self
+            .launches
+            .remove(&serial)
+            .ok_or(Unbelievable("a launch made that was never asked"))?;
+        let running = Running {
+            line,
+            credit: Credit::new(),
+            screen: None,
+            boot: (self.boot == Some(serial)).then_some((0, false)),
+        };
+        self.running.try_insert(context, running).map_err(unnoted)?;
+        self.made = context;
+        Ok(())
+    }
+
+    fn damaged(
+        &mut self,
+        context: Context,
+        lines: core::ops::Range<u32>,
+        offset: u32,
+    ) -> Result<Placed, Unbelievable> {
+        let screen = self
+            .running_mut(context, "damage to a context not running")?
+            .screen
+            .ok_or(Unbelievable("damage to a screen never described"))?;
+        if lines.end > screen.height {
+            return Err(Unbelievable("damage below its screen"));
+        }
+        let bytes = (lines.end - lines.start)
+            .checked_mul(screen.width)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or(Unbelievable("damage the ring could not hold"))?;
+        self.ring
+            .accept(offset, bytes)
+            .map_err(|_| Unbelievable("damage where the worker could not have put it"))
+    }
+
+    fn relayed(&mut self, serial: u32, context: Context, parked: bool) -> Result<(), Unbelievable> {
+        if context != BOOT && !self.running.contains_key(&context) {
+            return Err(Unbelievable("a relay for a context not running"));
+        }
+        if parked && context == BOOT {
+            return Err(Unbelievable("the session's own relay parked"));
+        }
+        if self.relays.contains_key(&serial) {
+            return Err(Unbelievable("a relay as one unanswered"));
+        }
+        let alike =
+            |other: &Unanswered| other.parked == parked && (!parked || other.context == context);
+        if self.relays.values().any(alike) {
+            return Err(Unbelievable(if parked {
+                "a context parked on a second relay"
+            } else {
+                "a second relay waited for in place"
+            }));
+        }
+        // Room held when the launch was asked, or the session made.
+        self.relays
+            .try_insert(serial, Unanswered { context, parked })
+            .map_err(|_| Unbelievable("a relay with no room to note it"))
+            .map(drop)
+    }
+
     fn running_mut(
         &mut self,
         context: Context,
@@ -280,6 +367,33 @@ impl Front {
     ) -> Result<&mut Running, Unbelievable> {
         self.running.get_mut(&context).ok_or(Unbelievable(why))
     }
+
+    /// The screen of `context`, which must be running and have told one.
+    fn screen_of(&mut self, context: Context, why: &'static str) -> Result<Screen, Unbelievable> {
+        self.running_mut(context, why)?
+            .screen
+            .ok_or(Unbelievable(why))
+    }
+
+    /// What the boot `context` has told of its failures: it must be running
+    /// the boot.
+    fn boot_of(&mut self, context: Context) -> Result<(&mut usize, &mut bool), Unbelievable> {
+        let why = "a boot failure of a context not booting";
+        let (told, omitted) = self
+            .running_mut(context, why)?
+            .boot
+            .as_mut()
+            .ok_or(Unbelievable(why))?;
+        Ok((told, omitted))
+    }
+}
+
+/// Whether `cursor` lies within `screen`.
+fn over(screen: &Screen, cursor: &Cursor) -> bool {
+    let across = cursor.x.checked_add(cursor.width);
+    let down = cursor.y.checked_add(cursor.bottom);
+    across.is_some_and(|right| right <= screen.width)
+        && down.is_some_and(|bottom| bottom < screen.height)
 }
 
 #[cfg(test)]

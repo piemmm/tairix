@@ -11,9 +11,10 @@ use core::mem::size_of;
 use tairix_hash::{BuildFastHash, BuildSipHash13, HashSeed};
 use tairix_log::Sink;
 use tairix_reclaim::{
-    CacheBudget, CacheCandidate, CachedBytes, InvalidationSource, PressureGauge, RebuildCost,
-    ReclaimCache, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, MAP_ENTRY_OVERHEAD,
+    CacheCandidate, CachedBytes, InvalidationSource, PressureGauge, RebuildCost, ReclaimCache,
+    ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity, MAP_ENTRY_OVERHEAD,
 };
+use tairix_riscos_kernel::memory::policy::cache_budget as budget;
 
 use crate::bitmaps::{Held as HeldFile, Raster, Wanted};
 use crate::fontdata::FontData;
@@ -109,6 +110,10 @@ const FILES: CacheCandidate = CacheCandidate {
     entry_metadata_bytes: MAP_ENTRY_OVERHEAD + size_of::<Wanted>() + size_of::<File>(),
 };
 
+/// The caches a store keeps: the masters' data, the bitmap files and the
+/// glyphs.
+const CACHES: u64 = 3;
+
 /// The masters' data, by master serial, the bitmap files read for them, and
 /// the glyphs drawn from either. The serials are the Font Manager's own, so
 /// the data's keys need no keyed hash; the sizes and glyphs the guest
@@ -133,12 +138,11 @@ impl Store {
         pressure: &'static (dyn PressureGauge + 'static),
         log: &'static (dyn Sink + Sync),
     ) -> Self {
-        let budget = || CacheBudget::from_backing(usize::try_from(ceiling).unwrap_or(usize::MAX));
         Self {
             data: ReclaimCache::new(
                 "riscos.font",
                 CANDIDATE,
-                budget(),
+                budget(ceiling),
                 pressure,
                 log,
                 BuildFastHash::new(),
@@ -146,7 +150,7 @@ impl Store {
             files: ReclaimCache::new(
                 "riscos.font.files",
                 FILES,
-                budget(),
+                budget(ceiling),
                 pressure,
                 log,
                 BuildSipHash13::with_seed(key),
@@ -154,7 +158,7 @@ impl Store {
             glyphs: ReclaimCache::new(
                 "riscos.font.glyphs",
                 GLYPHS,
-                budget(),
+                budget(ceiling),
                 pressure,
                 log,
                 BuildSipHash13::with_seed(key),
@@ -162,6 +166,19 @@ impl Store {
             generation: 0,
             drawn: 0,
         }
+    }
+
+    /// The most the store's caches together hold in a session of `ceiling`
+    /// bytes.
+    pub(crate) fn most(ceiling: u64) -> u64 {
+        CACHES * budget(ceiling).hard() as u64
+    }
+
+    /// What the pressure's band no longer allows, given back.
+    pub(crate) fn reclaim(&mut self) {
+        self.data.enforce_pressure();
+        self.files.enforce_pressure();
+        self.glyphs.enforce_pressure();
     }
 
     /// The bitmap file `wanted`, where the cache holds it.

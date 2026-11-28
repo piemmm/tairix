@@ -2821,18 +2821,29 @@ mod program {
         fn answer(&mut self, answer: Answer) {
             match answer {
                 Answer::FrameReturned { window_id } => {
-                    if let Some(win) = self.shelf.as_mut().filter(|win| win.id() == window_id) {
-                        let _ = win.present_deferred(&mut self.client);
+                    let presented = if let Some(win) =
+                        self.shelf.as_mut().filter(|win| win.id() == window_id)
+                    {
+                        win.present_deferred(&mut self.client)
                     } else if let Some(win) =
                         self.sheet.as_mut().filter(|win| win.id() == window_id)
                     {
-                        let _ = win.present_deferred(&mut self.client);
-                    } else if let Some(window) = self
-                        .machines
-                        .iter_mut()
-                        .find(|w| w.window_id() == window_id)
-                    {
-                        window.present_deferred(&mut self.client);
+                        win.present_deferred(&mut self.client)
+                    } else {
+                        if let Some(window) = self
+                            .machines
+                            .iter_mut()
+                            .find(|w| w.window_id() == window_id)
+                        {
+                            window.present_deferred(&mut self.client);
+                        }
+                        Ok(())
+                    };
+                    if let Err(err) = presented {
+                        app::report(
+                            APP_NAME,
+                            format_args!("a window could not be presented ({err})"),
+                        );
                     }
                 }
                 Answer::PickedName { window_id, name } => {

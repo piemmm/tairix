@@ -17,12 +17,19 @@
 //! plain `cargo test` and `cargo xtask fuzz` extends it to a wall-clock
 //! budget.
 
+use tairix_abi::font_ipc::FamilyKey;
 use tairix_fuzzseed::Prng;
+use tairix_reclaim::PressureBand;
+use tairix_riscos_kernel::desktop::DesktopFont;
 use tairix_riscos_kernel::input::InputEvent;
+use tairix_riscos_kernel::memory::Shared;
 use tairix_riscos_kernel::relay::Side;
 use tairix_riscos_session::credit::{Credit, Inbox, INPUT_WINDOW};
 use tairix_riscos_session::front::Front;
-use tairix_riscos_session::protocol::{Command, Ending, Error, Event, Screen, BOOT, LINE_MOST};
+use tairix_riscos_session::protocol::{
+    Begin, Command, Cursor, Ending, Error, Event, Flash, Screen, Shape, Zoned, BOOT,
+    BOOT_FAILURES_MOST, LINE_MOST, MEMO_MOST,
+};
 use tairix_riscos_session::ring::{Ring, RECORD_MOST, RING_BYTES};
 use tairix_sandbox::wire::Writer;
 
@@ -54,13 +61,71 @@ fn noise(rng: &mut Prng, most: usize) -> Vec<u8> {
     rng.noise(length)
 }
 
+/// A sound pressure band.
+fn band(rng: &mut Prng) -> PressureBand {
+    PressureBand::from_depth(rng.next_u8() % 5)
+}
+
+/// A sound cursor flash.
+fn flash(rng: &mut Prng) -> Flash {
+    [Flash::Steady, Flash::Fast, Flash::Slow][rng.below(3)]
+}
+
+/// A sound desktop font: the shipped family or the fixed-pitch one, sized or
+/// not.
+fn font(rng: &mut Prng) -> DesktopFont {
+    DesktopFont {
+        family: if rng.below(2) == 0 {
+            DesktopFont::SHIPPED.family
+        } else {
+            FamilyKey::MONO
+        },
+        size: (rng.below(2) == 0).then(|| 1 + rng.next_u16() % 0xFFFF),
+    }
+}
+
+/// A sound zone name: one to three components of the letters a zone name
+/// takes.
+fn zone_name(rng: &mut Prng) -> String {
+    let parts = 1 + rng.below(3);
+    let part = |rng: &mut Prng| -> String {
+        (0..=rng.below(8))
+            .map(|_| char::from(b'A' + rng.next_u8() % 26))
+            .collect()
+    };
+    (0..parts).map(|_| part(rng)).collect::<Vec<_>>().join("/")
+}
+
 /// A sound command's bytes.
 fn command(rng: &mut Prng) -> Vec<u8> {
     let bytes = noise(rng, 64);
     let line: Vec<u8> = (0..rng.at_most(LINE_MOST))
         .map(|_| b' ' + rng.next_u8() % 95)
         .collect();
-    let command = match rng.below(8) {
+    let name = zone_name(rng);
+    let command = match rng.below(13) {
+        8 => Command::Begin(Begin {
+            ram_pages: rng.next_u32() % (1 << 20),
+            memo_pages: 1 + rng.next_u32() % MEMO_MOST,
+            slot_bytes: (1 + rng.next_u32() % 0x2000) * 0x1000,
+            real_time: rng.next_u64(),
+            zone: (rng.below(2) == 0).then(|| Zoned {
+                store: &bytes,
+                name: &name,
+            }),
+            keyboard: rng.next_u32() % 0x80,
+            font: font(rng),
+            pressure: band(rng),
+        }),
+        9 => Command::Boot {
+            serial: rng.next_u32(),
+        },
+        10 => Command::Pause {
+            context: rng.next_u32(),
+            paused: rng.below(2) == 0,
+        },
+        11 => Command::Pressure(band(rng)),
+        12 => Command::Font(font(rng)),
         0 => Command::Run,
         1 => Command::Hold,
         2 => Command::Input {
@@ -91,28 +156,85 @@ fn command(rng: &mut Prng) -> Vec<u8> {
 }
 
 /// A sound event's bytes.
+/// What a sound event may borrow: a relay's bytes, an error's text, a boot
+/// failure's line and a pointer's pixels.
+struct Bodies {
+    bytes: Vec<u8>,
+    text: Vec<u8>,
+    line: Vec<u8>,
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+impl Bodies {
+    fn drawn(rng: &mut Prng) -> Self {
+        let bytes = noise(rng, 64);
+        let text = (0..rng.at_most(64))
+            .map(|_| 1 + rng.next_u8() % 255)
+            .collect();
+        let (width, height) = (1 + rng.next_u32() % 32, 1 + rng.next_u32() % 32);
+        let pixels = (0..width * height).map(|_| rng.next_u8() % 4).collect();
+        let line = noise(rng, LINE_MOST);
+        Self {
+            bytes,
+            text,
+            line,
+            pixels,
+            width,
+            height,
+        }
+    }
+}
+
 fn event(rng: &mut Prng) -> Vec<u8> {
-    let bytes = noise(rng, 64);
-    let text: Vec<u8> = (0..rng.at_most(64))
-        .map(|_| 1 + rng.next_u8() % 255)
-        .collect();
-    let event = match rng.below(7) {
-        0 => Event::Credit {
+    let bodies = Bodies::drawn(rng);
+    let event = if rng.below(2) == 0 {
+        shown_event(rng, &bodies)
+    } else {
+        told_event(rng, &bodies)
+    };
+    let mut w = Writer::new();
+    event.encode(&mut w);
+    w.finish()
+}
+
+/// A sound event of a screen's.
+fn shown_event<'a>(rng: &mut Prng, bodies: &'a Bodies) -> Event<'a> {
+    match rng.below(7) {
+        0 => Event::Cursor {
             context: rng.next_u32(),
-            applied: rng.next_u32(),
-        },
-        1 => Event::Launched {
-            serial: rng.next_u32(),
-            context: rng.next_u32(),
-        },
-        2 => Event::Refused {
-            serial: rng.next_u32(),
-            error: (rng.below(2) == 0).then(|| Error {
-                number: rng.next_u32(),
-                text: &text,
+            cursor: (rng.below(2) == 0).then(|| {
+                let top = rng.next_u32() % 16;
+                Cursor {
+                    x: rng.next_u32() % 4096,
+                    y: rng.next_u32() % 4096,
+                    width: 1 + rng.next_u32() % 64,
+                    top,
+                    bottom: top + rng.next_u32() % 16,
+                    flash: flash(rng),
+                }
             }),
         },
-        3 => Event::Screen {
+        1 => Event::Pointer {
+            context: rng.next_u32(),
+            shape: (rng.below(2) == 0).then(|| Shape {
+                width: bodies.width,
+                height: bodies.height,
+                active: (rng.next_u8(), rng.next_u8()),
+                colours: [0; 3].map(|_| rng.next_u32() & 0xFF_FFFF),
+                pixels: &bodies.pixels,
+            }),
+        },
+        2 => Event::PointerAt {
+            context: rng.next_u32(),
+            x: rng.next_u32().cast_signed(),
+            y: rng.next_u32().cast_signed(),
+        },
+        3 => Event::PointerSet {
+            context: rng.next_u32(),
+        },
+        4 => Event::Screen {
             context: rng.next_u32(),
             screen: Screen {
                 width: 1 + rng.next_u32() % 4096,
@@ -123,13 +245,65 @@ fn event(rng: &mut Prng) -> Vec<u8> {
                 blanked: rng.below(2) == 0,
             },
         },
-        4 => Event::Damage {
+        5 => Event::Hourglass {
+            context: rng.next_u32(),
+            shown: rng.below(2) == 0,
+        },
+        _ => Event::Damage {
             context: rng.next_u32(),
             first: rng.next_u32() % 4096,
             lines: 1 + rng.next_u32() % 4096,
             offset: rng.next_u32(),
         },
-        5 => Event::Relay {
+    }
+}
+
+/// A sound event of anything but a screen's.
+fn told_event<'a>(rng: &mut Prng, bodies: &'a Bodies) -> Event<'a> {
+    let (bytes, text, line) = (&bodies.bytes, &bodies.text, &bodies.line);
+    match rng.below(9) {
+        0 => Event::Own {
+            context: rng.next_u32(),
+            slot: rng.next_u32(),
+            screen: rng.next_u32(),
+        },
+        1 => Event::Shared(Shared {
+            system_heap: rng.next_u32(),
+            rma: rng.next_u32(),
+            sprites: rng.next_u32(),
+            font_cache: rng.next_u32(),
+            ram_disc: rng.next_u32(),
+            made: rng.next_u32(),
+            free: rng.next_u32(),
+        }),
+        2 => Event::BootFailed {
+            context: rng.next_u32(),
+            line,
+            error: Error {
+                number: rng.next_u32(),
+                text,
+            },
+        },
+        3 => Event::BootOmitted {
+            context: rng.next_u32(),
+            count: rng.next_u32(),
+        },
+        4 => Event::Credit {
+            context: rng.next_u32(),
+            applied: rng.next_u32(),
+        },
+        5 => Event::Launched {
+            serial: rng.next_u32(),
+            context: rng.next_u32(),
+        },
+        6 => Event::Refused {
+            serial: rng.next_u32(),
+            error: (rng.below(2) == 0).then(|| Error {
+                number: rng.next_u32(),
+                text,
+            }),
+        },
+        7 => Event::Relay {
             serial: rng.next_u32(),
             context: rng.next_u32(),
             parked: rng.below(2) == 0,
@@ -138,7 +312,7 @@ fn event(rng: &mut Prng) -> Vec<u8> {
             } else {
                 Side::Fonts
             },
-            request: &bytes,
+            request: bytes,
         },
         _ => Event::Ended {
             context: rng.next_u32(),
@@ -148,7 +322,7 @@ fn event(rng: &mut Prng) -> Vec<u8> {
                 },
                 1 => Ending::Error(Error {
                     number: rng.next_u32(),
-                    text: &text,
+                    text,
                 }),
                 2 => Ending::Reset {
                     hard: rng.below(2) == 0,
@@ -156,10 +330,7 @@ fn event(rng: &mut Prng) -> Vec<u8> {
                 _ => Ending::Quit,
             },
         },
-    };
-    let mut w = Writer::new();
-    event.encode(&mut w);
-    w.finish()
+    }
 }
 
 /// `pristine` changed, cut or replaced by noise.
@@ -264,13 +435,20 @@ struct Made {
     screen: Option<Screen>,
     sent: u32,
     applied: u32,
+    /// For the boot's, the failures told and whether the rest were counted.
+    boot: Option<(usize, bool)>,
 }
+
+/// A pointer two pixels square, each of its colours once.
+const POINTER: [u8; 4] = [0, 1, 2, 3];
 
 /// The harness's own record of an honest session, from which it makes the
 /// events a worker could have sent.
 #[derive(Default)]
 struct Honest {
     asked: Vec<u32>,
+    /// The boot's launch, once asked.
+    boot: Option<u32>,
     made: u32,
     running: Vec<Made>,
     /// The relays unanswered: each one's serial, its context, and whether
@@ -294,33 +472,125 @@ const SMALL: Screen = Screen {
 impl Honest {
     /// An event a worker could send now, its record moved on by it: none
     /// where there is nothing to make one of.
+    /// A launch asked answered: refused, or made.
+    fn answer_launch(&mut self, rng: &mut Prng) -> Event<'static> {
+        let serial = self.asked.swap_remove(rng.below(self.asked.len()));
+        if rng.below(4) == 0 {
+            return Event::Refused {
+                serial,
+                error: None,
+            };
+        }
+        self.made += 1;
+        self.running.push(Made {
+            context: self.made,
+            screen: None,
+            sent: 0,
+            applied: 0,
+            boot: (self.boot == Some(serial)).then_some((0, false)),
+        });
+        Event::Launched {
+            serial,
+            context: self.made,
+        }
+    }
+
+    /// A cursor within running context `at`'s screen, where it has one.
+    fn cursor(&self, at: usize, rng: &mut Prng) -> Option<Event<'static>> {
+        let screen = self.running[at].screen?;
+        let width = 1 + rng.next_u32() % screen.width;
+        let x = rng.next_u32() % (screen.width - width + 1);
+        let bottom = rng.next_u32() % screen.height;
+        let y = rng.next_u32() % (screen.height - bottom);
+        Some(Event::Cursor {
+            context: self.running[at].context,
+            cursor: Some(Cursor {
+                x,
+                y,
+                width,
+                top: rng.next_u32() % (bottom + 1),
+                bottom,
+                flash: flash(rng),
+            }),
+        })
+    }
+
+    /// A pointer's shape or place over running context `at`'s screen, or
+    /// its hourglass, where it has one.
+    fn pointer(&self, at: usize, rng: &mut Prng) -> Option<Event<'static>> {
+        self.running[at].screen?;
+        let context = self.running[at].context;
+        Some(match rng.below(3) {
+            0 => Event::Pointer {
+                context,
+                shape: Some(Shape {
+                    width: 2,
+                    height: 2,
+                    active: (rng.next_u8(), rng.next_u8()),
+                    colours: [0xFF_FFFF, 0, 0x80_8080],
+                    pixels: &POINTER,
+                }),
+            },
+            1 => Event::PointerAt {
+                context,
+                x: rng.next_u32().cast_signed(),
+                y: rng.next_u32().cast_signed(),
+            },
+            _ => Event::Hourglass {
+                context,
+                shown: rng.below(2) == 0,
+            },
+        })
+    }
+
+    /// A boot failure of running context `at`'s, where it runs the boot and
+    /// its report may hold one more.
+    fn boot_report(&mut self, at: usize, rng: &mut Prng) -> Option<Event<'static>> {
+        let context = self.running[at].context;
+        let (told, omitted) = self.running[at].boot.as_mut()?;
+        if *omitted {
+            return None;
+        }
+        if *told < BOOT_FAILURES_MOST && rng.below(4) != 0 {
+            *told += 1;
+            return Some(Event::BootFailed {
+                context,
+                line: b"Run Boot:Choices.Boot.PreDesk.Thing",
+                error: Error {
+                    number: 0xD6,
+                    text: b"Not found",
+                },
+            });
+        }
+        *omitted = true;
+        Some(Event::BootOmitted {
+            context,
+            count: rng.next_u32(),
+        })
+    }
+
     fn event(&mut self, rng: &mut Prng) -> Option<Event<'static>> {
         if !self.asked.is_empty() && rng.below(3) == 0 {
-            let serial = self.asked.swap_remove(rng.below(self.asked.len()));
-            if rng.below(4) == 0 {
-                return Some(Event::Refused {
-                    serial,
-                    error: None,
-                });
-            }
-            self.made += 1;
-            self.running.push(Made {
-                context: self.made,
-                screen: None,
-                sent: 0,
-                applied: 0,
-            });
-            return Some(Event::Launched {
-                serial,
-                context: self.made,
-            });
+            return Some(self.answer_launch(rng));
         }
         if self.running.is_empty() {
             return self.relay(BOOT, false);
         }
         let at = rng.below(self.running.len());
         let context = self.running[at].context;
-        match rng.below(6) {
+        match rng.below(10) {
+            6 => self.cursor(at, rng),
+            7 => self.pointer(at, rng),
+            8 => Some(match rng.below(3) {
+                0 => Event::PointerSet { context },
+                1 => Event::Own {
+                    context,
+                    slot: rng.next_u32(),
+                    screen: rng.next_u32(),
+                },
+                _ => Event::Shared(Shared::default()),
+            }),
+            9 => self.boot_report(at, rng),
             0 => {
                 self.running[at].screen = Some(SMALL);
                 Some(Event::Screen {
@@ -413,6 +683,14 @@ fn front_end_acts(rng: &mut Prng, honest: &mut Honest, fronts: [&mut Front; 2]) 
         2 if !honest.relays.is_empty() => {
             let (serial, ..) = honest.relays.swap_remove(rng.below(honest.relays.len()));
             assert!(main.answer(serial) && twin.answer(serial), "asked");
+        }
+        4 if honest.boot.is_none() => {
+            let serial = main.boot();
+            assert_eq!(twin.boot(), serial);
+            assert_eq!(main.boot(), None, "one boot a session");
+            assert_eq!(twin.boot(), None);
+            honest.asked.extend(serial);
+            honest.boot = serial;
         }
         _ => {
             if let Some(oldest) = honest.unreleased.pop_front() {

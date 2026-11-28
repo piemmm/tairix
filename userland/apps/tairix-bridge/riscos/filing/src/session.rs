@@ -200,13 +200,18 @@ impl Session {
     }
 
     /// Runs the session for at most `budget` instructions a turn, a turn
-    /// that leaves it waiting for the clock taken again once the clock is
-    /// moved on to then, and one that leaves it waiting on a relay taken
-    /// again once the disc has answered it: its outcome otherwise.
+    /// that leaves it waiting for the clock — or, while
+    /// [`Self::wake_for_timed_work`] lets it, for input until a time — taken
+    /// again once the clock is moved on to then, and one that leaves it
+    /// waiting on a relay taken again once the disc has answered it: its
+    /// outcome otherwise.
     pub fn run(&mut self, budget: u64) -> Outcome {
         loop {
             match self.kernel.run(budget) {
                 Outcome::Waiting(Wait::Clock { until }) => {
+                    self.clock.set(self.clock.get().max(until));
+                }
+                Outcome::Waiting(Wait::Input { until: Some(until) }) if self.timed.get() => {
                     self.clock.set(self.clock.get().max(until));
                 }
                 Outcome::Waiting(Wait::Relay) => {

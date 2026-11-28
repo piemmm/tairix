@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 use tairix_riscos_arm::psr;
 
 use crate::dictionary::ESCAPE;
+use crate::input::buttons::SELECT;
 use crate::input::Continuation;
 use crate::memory::Bits;
 use crate::os::{len32, Entry, Fail, Os, Regs, Target, Unwind};
@@ -54,8 +55,6 @@ const BASE_OF_SPRITES: u32 = 0x400EA;
 const CONFIRM_POINTER: &[u8] = b"ptr_confirm\0";
 /// `OS_Byte` 106's pointer shape number, none if zero.
 const POINTER_SHAPE: u32 = 15;
-/// `OS_Mouse`'s Select button.
-const SELECT: u32 = 4;
 
 /// `OS_Confirm` under way: the pointer state to restore, nonzero only
 /// while the mouse answers too, and until when buttons held from before it

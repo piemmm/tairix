@@ -15,7 +15,9 @@ use std::sync::LazyLock;
 
 use tairix_fscopy::fixture::{Handle, Tree};
 use tairix_fscopy::tree::Roots;
+use tairix_reclaim::PressureBand;
 use tairix_riscos_filing::hostfs::server::{Given, Server};
+use tairix_riscos_kernel::desktop::DesktopFont;
 use tairix_riscos_kernel::input::InputEvent;
 use tairix_riscos_kernel::memory::layout::RISC_OS_5;
 use tairix_riscos_kernel::memory::policy::Ceiling;
@@ -23,9 +25,11 @@ use tairix_riscos_kernel::module::Builtin;
 use tairix_riscos_kernel::os::{Config, Host};
 use tairix_riscos_kernel::relay::Side;
 use tairix_riscos_session::front::Front;
-use tairix_riscos_session::protocol::{Command, Context, Ending, Event, Screen, WAITING_MOST};
+use tairix_riscos_session::protocol::{
+    Begin, Command, Context, Ending, Event, Screen, WAITING_MOST,
+};
 use tairix_riscos_session::ring::{Placed, RING_BYTES};
-use tairix_riscos_session::worker::{serve, End, Setup};
+use tairix_riscos_session::worker::{serve, End, Session, Started, Unconfigured};
 use tairix_sandbox::loopback::HeapShare;
 use tairix_sandbox::session::Share;
 use tairix_sandbox::wire::Writer;
@@ -58,9 +62,40 @@ enum Seen {
     Damage(Context, u32, u32, Vec<u32>),
     /// A relay to a side, and whether its context is parked on it.
     Relay(Side, bool),
+    /// What is drawn over a screen: a cursor or a pointer shape, and whether
+    /// there is one, or the pointer's place.
+    Cursor(Context, bool),
+    Pointer(Context, bool),
+    PointerAt(Context, i32, i32),
+    PointerSet(Context),
+    /// Whether a context's hourglass shows.
+    Hourglass(Context, bool),
+    /// What a context holds of its own, and what the shared areas hold.
+    Own(Context, u32, u32),
+    Shared,
+    /// A boot's failure: its line and the error's number; and how many more.
+    BootFailed(Context, Vec<u8>, u32),
+    BootOmitted(Context, u32),
     Ended(Context, String),
     /// The front end's own: the ring's bytes it gave back at last.
     Withheld(u32),
+}
+
+impl Seen {
+    /// Whether it tells only what the front end draws or shows beside a
+    /// screen, which most tests pass over.
+    const fn incidental(&self) -> bool {
+        matches!(
+            self,
+            Self::Relay(..)
+                | Self::Cursor(..)
+                | Self::Pointer(..)
+                | Self::PointerAt(..)
+                | Self::Hourglass(..)
+                | Self::Own(..)
+                | Self::Shared
+        )
+    }
 }
 
 /// A damage record's pixels counted rather than listed, so that a failure
@@ -80,6 +115,19 @@ impl std::fmt::Debug for Seen {
                 )
             }
             Self::Relay(side, parked) => write!(f, "Relay({side:?}, {parked})"),
+            Self::Cursor(context, shown) => write!(f, "Cursor({context}, {shown})"),
+            Self::Pointer(context, shown) => write!(f, "Pointer({context}, {shown})"),
+            Self::PointerAt(context, x, y) => write!(f, "PointerAt({context}, {x}, {y})"),
+            Self::PointerSet(context) => write!(f, "PointerSet({context})"),
+            Self::Hourglass(context, shown) => write!(f, "Hourglass({context}, {shown})"),
+            Self::Own(context, slot, screen) => write!(f, "Own({context}, {slot}, {screen})"),
+            Self::Shared => write!(f, "Shared"),
+            Self::BootFailed(context, line, number) => write!(
+                f,
+                "BootFailed({context}, {:?}, {number:X})",
+                String::from_utf8_lossy(line)
+            ),
+            Self::BootOmitted(context, count) => write!(f, "BootOmitted({context}, {count})"),
             Self::Ended(context, ending) => write!(f, "Ended({context}, {ending})"),
             Self::Withheld(bytes) => write!(f, "Withheld({bytes})"),
         }
@@ -173,6 +221,15 @@ impl Driver {
                     self.queue(&Command::Launch { serial, line });
                 }
             }
+            Act::Send(Command::Boot { .. }) => {
+                if let Some(serial) = self.model.boot() {
+                    self.queue(&Command::Boot { serial });
+                }
+            }
+            Act::Send(command @ Command::Pause { context, .. }) => {
+                assert!(self.model.runs(context), "running");
+                self.queue(&command);
+            }
             Act::Send(Command::Quit { context }) => {
                 if self.model.quit(context) {
                     self.queue(&Command::Quit { context });
@@ -254,6 +311,23 @@ impl Driver {
                 self.answer(serial, side, parked, request);
                 Seen::Relay(side, parked)
             }
+            Event::Cursor { context, cursor } => Seen::Cursor(context, cursor.is_some()),
+            Event::Pointer { context, shape } => Seen::Pointer(context, shape.is_some()),
+            Event::PointerAt { context, x, y } => Seen::PointerAt(context, x, y),
+            Event::PointerSet { context } => Seen::PointerSet(context),
+            Event::Hourglass { context, shown } => Seen::Hourglass(context, shown),
+            Event::Own {
+                context,
+                slot,
+                screen,
+            } => Seen::Own(context, slot, screen),
+            Event::Shared(_) => Seen::Shared,
+            Event::BootFailed {
+                context,
+                line,
+                error,
+            } => Seen::BootFailed(context, line.to_vec(), error.number),
+            Event::BootOmitted { context, count } => Seen::BootOmitted(context, count),
             Event::Ended { context, ending: e } => Seen::Ended(context, ending(&e)),
         };
         for act in (self.react)(&seen) {
@@ -393,21 +467,49 @@ impl WorkerPort for TestPort {
     }
 }
 
-fn config(host: Box<dyn Host>) -> Config {
-    Config {
-        layout: &RISC_OS_5,
-        ceiling: Ceiling::derive(64 << 20),
-        memo_pages: 16,
-        host,
-        vdu: Some(tairix_riscos_vdu::DRIVERS),
-        modules: &MODULES,
-        zone: tairix_tz::Zone::UTC,
-        desktop_font: tairix_riscos_kernel::desktop::DesktopFont::SHIPPED,
-        pressure: &tairix_reclaim::pressure::Unpressured,
-        log: &tairix_log::DiscardSink,
-        cache_key: tairix_hash::HashSeed::UNKEYED,
-        show: None,
+/// A test's session: the real kernel's modules over a pressure the test
+/// never moves.
+struct TestSession {
+    /// The bands the worker was told, in order.
+    bands: Rc<RefCell<Vec<PressureBand>>>,
+}
+
+impl Session for TestSession {
+    fn config(&mut self, host: Box<dyn Host>, started: Started) -> Result<Config, Unconfigured> {
+        Ok(Config {
+            layout: &RISC_OS_5,
+            ceiling: started.ceiling,
+            memo_pages: started.memo_pages,
+            host,
+            vdu: Some(tairix_riscos_vdu::DRIVERS),
+            modules: &MODULES,
+            zone: tairix_tz::Zone::UTC,
+            desktop_font: started.font,
+            pressure: &tairix_reclaim::pressure::Unpressured,
+            log: &tairix_log::DiscardSink,
+            cache_key: tairix_hash::HashSeed::UNKEYED,
+            show: None,
+        })
     }
+
+    fn pressure(&mut self, band: PressureBand) {
+        self.bands.borrow_mut().push(band);
+    }
+}
+
+/// The start a test's front end sends first: a guest of 64 MiB, each
+/// launch given `slot_bytes`.
+fn begin(slot_bytes: u32) -> Command<'static> {
+    Command::Begin(Begin {
+        ram_pages: Ceiling::derive(64 << 20).pages(),
+        memo_pages: 16,
+        slot_bytes,
+        real_time: 0x58_0000_0000,
+        zone: None,
+        keyboard: 1,
+        font: DesktopFont::SHIPPED,
+        pressure: PressureBand::Normal,
+    })
 }
 
 const fn nothing(_: &Seen) -> Vec<Act> {
@@ -420,6 +522,8 @@ struct Served {
     end: End,
     seen: Vec<Seen>,
     damaged_at: u64,
+    /// The pressure bands the worker handed its session.
+    bands: Vec<PressureBand>,
 }
 
 /// How a test's front end is set up beside its script.
@@ -427,6 +531,8 @@ struct Served {
 struct Fronting<'t> {
     keys: &'t [u8],
     disc: Option<&'t Tree>,
+    /// The session's own disc, its folder `/home`.
+    home: Option<&'t Tree>,
     react: fn(&Seen) -> Vec<Act>,
     giving: Giving,
     close_at: Option<u64>,
@@ -435,6 +541,8 @@ struct Fronting<'t> {
     breaches: &'t [Command<'static>],
     /// The slot each launch is given.
     slot_bytes: u32,
+    /// Whether the session's start goes first, as every front end sends it.
+    started: bool,
 }
 
 impl Default for Fronting<'_> {
@@ -442,12 +550,14 @@ impl Default for Fronting<'_> {
         Self {
             keys: b"",
             disc: None,
+            home: None,
             react: nothing,
             giving: Giving::AtOnce,
             close_at: None,
             parked_answer_after: None,
             breaches: &[],
             slot_bytes: 0x8_0000,
+            started: true,
         }
     }
 }
@@ -455,13 +565,19 @@ impl Default for Fronting<'_> {
 /// A session served from `script`, its front end set up as `fronting`.
 fn served(script: &[Command<'static>], fronting: Fronting<'_>) -> Served {
     let share = HeapShare::new(RING_BYTES as usize).expect("the ring");
-    let server = fronting.disc.map(|tree| {
-        let given = Given {
-            dir: tree.open_dir("/disc", false).expect("the disc"),
-            name: "Disc".to_string(),
-            writable: true,
-        };
-        Server::new(None, vec![given], [3; 16], 1)
+    let given = |tree: &Tree, folder: &str, name: &str| Given {
+        dir: tree.open_dir(folder, false).expect("the disc"),
+        name: name.to_string(),
+        writable: true,
+    };
+    let server = (fronting.disc.is_some() || fronting.home.is_some()).then(|| {
+        let own = fronting.home.map(|tree| given(tree, "/home", "Home"));
+        let discs = fronting
+            .disc
+            .map(|tree| given(tree, "/disc", "Disc"))
+            .into_iter()
+            .collect();
+        Server::new(own, discs, [3; 16], 1)
     });
     let front = Rc::new(RefCell::new(Driver {
         commands: VecDeque::new(),
@@ -481,23 +597,27 @@ fn served(script: &[Command<'static>], fronting: Fronting<'_>) -> Served {
         typing: None,
         react: fronting.react,
     }));
+    if fronting.started {
+        front.borrow_mut().queue(&begin(fronting.slot_bytes));
+    }
     for &command in fronting.breaches {
         front.borrow_mut().act(Act::Breach(command));
     }
     for &command in script {
         front.borrow_mut().act(Act::Send(command));
     }
-    let setup = Setup {
-        slot_bytes: fronting.slot_bytes,
-        real_time: 0x58_0000_0000,
+    let bands = Rc::new(RefCell::new(Vec::new()));
+    let session = TestSession {
+        bands: Rc::clone(&bands),
     };
-    let end = serve(TestPort(Rc::clone(&front)), share, setup, config);
+    let end = serve(TestPort(Rc::clone(&front)), share, session);
     let mut front = front.borrow_mut();
     assert!(
         !front.spun,
         "the worker read its port {RECV_MOST} times: it spun"
     );
     Served {
+        bands: bands.take(),
         end,
         seen: std::mem::take(&mut front.seen),
         damaged_at: front.damaged_at,
@@ -533,9 +653,10 @@ fn of<T>(seen: &[Seen], pick: impl Fn(&Seen) -> Option<T>) -> Vec<T> {
     seen.iter().filter_map(pick).collect()
 }
 
-/// The events but the relays, which HostFS's start makes whatever runs.
+/// The events but the incidental ones: the relays HostFS's start makes
+/// whatever runs, and what is drawn over or shown beside a screen.
 fn unrelayed(seen: &[Seen]) -> Vec<Seen> {
-    of(seen, |s| (!matches!(s, Seen::Relay(..))).then(|| s.clone()))
+    of(seen, |s| (!s.incidental()).then(|| s.clone()))
 }
 
 /// Whether `seen` holds a relay to the files.
@@ -1216,3 +1337,265 @@ fn a_launch_the_machine_has_no_room_for_is_refused_and_the_session_goes_on() {
 const CLAIMING: &[u8] = b"SYS &1E,6,,,64 TO ,,C%:C%!0=&E92D403F:C%!4=&E3A00005:C%!8=&E28F1008:\
 C%!12=&EF020008:C%!16=&E8BD403F:C%!20=&E1A0F00E:$(C%+24)=\"HostFS::Disc.$.note\":\
 SYS &1F,&1E,C%,0\r";
+
+#[test]
+fn a_session_not_started_first_ends_without_a_kernel() {
+    let unstarted = Fronting {
+        started: false,
+        ..Fronting::default()
+    };
+    let Served { end, seen, .. } = served(&launch(b"Echo x"), unstarted);
+    assert_eq!(end, End::Violation("a session not started first"));
+    assert!(seen.is_empty(), "nothing made: {seen:?}");
+}
+
+#[test]
+fn a_session_started_twice_ends() {
+    let again = [begin(0x8_0000)];
+    let twice = Fronting {
+        breaches: &again,
+        ..Fronting::default()
+    };
+    let Served { end, .. } = served(&launch(b"Echo x"), twice);
+    assert_eq!(end, End::Violation("a session started twice"));
+}
+
+/// The boot asked, and then nothing else.
+const BOOT_ONLY: [Command<'static>; 2] = [Command::Run, Command::Boot { serial: 0 }];
+
+#[test]
+fn a_boot_on_the_session_s_own_disc_lays_its_skeleton_out_and_ends() {
+    let home = Tree::new().dir("/home");
+    let booting = Fronting {
+        home: Some(&home),
+        ..Fronting::default()
+    };
+    let Served { end, seen, .. } = served(&BOOT_ONLY, booting);
+    assert_eq!(end, End::Closed);
+    assert_eq!(
+        unrelayed(&seen).first(),
+        Some(&Seen::Launched(0, 1)),
+        "{seen:?}"
+    );
+    assert_eq!(seen.last(), Some(&Seen::Ended(1, "exit 0".into())));
+    assert!(!seen.iter().any(|s| matches!(s, Seen::BootFailed(..))));
+    assert_eq!(
+        home.names("/home/!Boot"),
+        ["Choices", "Library", "Resources"]
+    );
+}
+
+#[test]
+fn a_boot_s_failures_are_told_before_its_end() {
+    let home = Tree::new()
+        .dir("/home/!Boot/Choices/Boot/PreDesk")
+        .file("/home/!Boot/Choices/Boot/PreDesk/Notes,ffd", b"data");
+    let booting = Fronting {
+        home: Some(&home),
+        ..Fronting::default()
+    };
+    let Served { end, seen, .. } = served(&BOOT_ONLY, booting);
+    assert_eq!(end, End::Closed);
+    let failed = seen
+        .iter()
+        .position(|s| matches!(s, Seen::BootFailed(1, line, _) if line.ends_with(b"Notes")));
+    let ended = seen.iter().position(|s| matches!(s, Seen::Ended(1, _)));
+    let (Some(failed), Some(ended)) = (failed, ended) else {
+        panic!("the data file's failure, then the end: {seen:?}");
+    };
+    assert!(failed < ended, "{seen:?}");
+    assert!(!seen.iter().any(|s| matches!(s, Seen::BootOmitted(..))));
+}
+
+#[test]
+fn a_boot_with_no_disc_of_its_own_runs_nothing_and_ends() {
+    let Served { end, seen, .. } = served(&BOOT_ONLY, Fronting::default());
+    assert_eq!(end, End::Closed);
+    let told = of(&seen, |s| {
+        matches!(
+            s,
+            Seen::Launched(..) | Seen::BootFailed(..) | Seen::BootOmitted(..) | Seen::Ended(..)
+        )
+        .then(|| s.clone())
+    });
+    assert_eq!(
+        told,
+        [Seen::Launched(0, 1), Seen::Ended(1, "exit 0".into())],
+        "{seen:?}"
+    );
+}
+
+/// A program that runs for ever in User mode.
+fn spinning() -> Vec<u8> {
+    program(&[0xEAFF_FFFE], b"") // B the B
+}
+
+/// Pause the first context once it is made.
+fn pause_the_first(seen: &Seen) -> Vec<Act> {
+    match *seen {
+        Seen::Launched(_, 1) => vec![Act::Send(Command::Pause {
+            context: 1,
+            paused: true,
+        })],
+        _ => Vec::new(),
+    }
+}
+
+#[test]
+fn a_paused_context_has_no_turn_and_the_worker_waits() {
+    let tree = Tree::new().dir("/disc").file("/disc/spin,ff8", &spinning());
+    let pausing = Fronting {
+        disc: Some(&tree),
+        react: pause_the_first,
+        ..Fronting::default()
+    };
+    let Served { end, seen, .. } = served(&launch(b"Run HostFS::Disc.$.spin"), pausing);
+    assert_eq!(end, End::Closed, "the worker waited for ever: {seen:?}");
+    assert!(!seen.iter().any(|s| matches!(s, Seen::Ended(..))));
+}
+
+#[test]
+fn a_context_let_go_on_runs_to_its_end() {
+    let tree = Tree::new()
+        .dir("/disc")
+        .file("/disc/mouse,ff8", &mouse_setting_program());
+    let pause_and_resume = |seen: &Seen| match *seen {
+        Seen::Launched(_, 1) => [true, false]
+            .map(|paused| Act::Send(Command::Pause { context: 1, paused }))
+            .to_vec(),
+        _ => Vec::new(),
+    };
+    let (end, seen) = session(
+        &launch(b"Run HostFS::Disc.$.mouse"),
+        b"",
+        Some(&tree),
+        pause_and_resume,
+    );
+    assert_eq!(end, End::Closed);
+    assert_eq!(seen.last(), Some(&Seen::Ended(1, "exit 0".into())));
+}
+
+#[test]
+fn the_machine_s_latest_pressure_reaches_the_session() {
+    let script = [Command::Run, Command::Pressure(PressureBand::Severe)];
+    let Served { end, bands, .. } = served(&script, Fronting::default());
+    assert_eq!(end, End::Closed);
+    assert_eq!(bands, [PressureBand::Severe]);
+    // A band is where the pressure stands, so one that moved again before
+    // the worker took it is taken as it stands.
+    let script = [
+        Command::Run,
+        Command::Pressure(PressureBand::Severe),
+        Command::Pressure(PressureBand::Mild),
+    ];
+    let Served { bands, .. } = served(&script, Fronting::default());
+    assert_eq!(bands, [PressureBand::Mild]);
+}
+
+/// An absolute program that sets the mouse's position with `OS_Word` 21,3,
+/// then exits.
+fn mouse_setting_program() -> Vec<u8> {
+    assembled(
+        &[
+            0xE3A0_0015, // MOV R0, #21
+            0xE28F_10F4, // ADR R1, the block at &8100
+            0xEF02_0007, // SWI XOS_Word
+            0xEF00_0011, // SWI OS_Exit
+        ],
+        &[(0x100, &[3, 100, 0, 100, 0])],
+    )
+}
+
+#[test]
+fn a_guest_setting_its_mouse_is_told_before_its_end() {
+    let tree = Tree::new()
+        .dir("/disc")
+        .file("/disc/mouse,ff8", &mouse_setting_program());
+    let (end, seen) = session(
+        &launch(b"Run HostFS::Disc.$.mouse"),
+        b"",
+        Some(&tree),
+        nothing,
+    );
+    assert_eq!(end, End::Closed);
+    let set = seen.iter().position(|s| *s == Seen::PointerSet(1));
+    let ended = seen.iter().position(|s| matches!(s, Seen::Ended(1, _)));
+    assert!(set.is_some() && set < ended, "{seen:?}");
+}
+
+/// An absolute program that turns the hourglass on, waits half a second for
+/// a key, turns it off and exits.
+fn hourglass_program() -> Vec<u8> {
+    assembled(
+        &[
+            0xEF06_06C0, // SWI XHourglass_On
+            0xE3A0_0081, // MOV R0, #129
+            0xE3A0_1032, // MOV R1, #50
+            0xE3A0_2000, // MOV R2, #0
+            0xEF02_0006, // SWI XOS_Byte
+            0xEF06_06C1, // SWI XHourglass_Off
+            0xEF00_0011, // SWI OS_Exit
+        ],
+        &[],
+    )
+}
+
+#[test]
+fn a_busy_program_s_hourglass_is_told_shown_then_gone_before_its_end() {
+    let tree = Tree::new()
+        .dir("/disc")
+        .file("/disc/busy,ff8", &hourglass_program());
+    let (end, seen) = session(
+        &launch(b"Run HostFS::Disc.$.busy"),
+        b"",
+        Some(&tree),
+        nothing,
+    );
+    assert_eq!(end, End::Closed);
+    let shown = seen.iter().position(|s| *s == Seen::Hourglass(1, true));
+    let gone = seen.iter().position(|s| *s == Seen::Hourglass(1, false));
+    let ended = seen.iter().position(|s| matches!(s, Seen::Ended(1, _)));
+    assert!(shown.is_some() && shown < gone && gone < ended, "{seen:?}");
+}
+
+#[test]
+fn a_program_that_sets_no_pointer_is_told_of_none() {
+    let (_, seen) = session(&launch(b"Echo Hello"), b"", None, nothing);
+    assert!(
+        !seen.iter().any(|s| matches!(s, Seen::PointerSet(_))),
+        "{seen:?}"
+    );
+}
+
+#[test]
+fn a_context_s_memory_and_the_shared_areas_are_told() {
+    let reading = program(
+        &[
+            0xEF00_0004, // SWI OS_ReadC
+            0xEAFF_FFFD, // B the SWI
+        ],
+        b"",
+    );
+    let tree = Tree::new().dir("/disc").file("/disc/read,ff8", &reading);
+    let fronting = Fronting {
+        disc: Some(&tree),
+        ..Fronting::default()
+    };
+    let Served { seen, .. } = served(&launch(b"Run HostFS::Disc.$.read"), fronting);
+    let own = of(&seen, |s| match *s {
+        Seen::Own(1, slot, screen) => Some((slot, screen)),
+        _ => None,
+    });
+    assert_eq!(own.len(), 1, "told once, as it did not change: {seen:?}");
+    assert_eq!(own[0].0, 0x8_0000, "its slot");
+    assert!(own[0].1 > 0, "its screen");
+    assert!(seen.contains(&Seen::Shared), "{seen:?}");
+}
+
+#[test]
+fn a_text_cursor_is_drawn_over_the_screen_it_marks() {
+    let (_, seen) = session(&launch(b"Echo Hello"), b"", None, nothing);
+    let screen = seen.iter().position(|s| matches!(s, Seen::Screen(1, _)));
+    let cursor = seen.iter().position(|s| *s == Seen::Cursor(1, true));
+    assert!(screen.is_some() && screen < cursor, "{seen:?}");
+}

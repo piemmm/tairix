@@ -142,6 +142,8 @@ pub mod chunk {
     pub const FONT: u32 = 0x4_0080;
     /// `InverseTable`.
     pub const INVERSE_TABLE: u32 = 0x4_BF40;
+    /// `Hourglass`.
+    pub const HOURGLASS: u32 = 0x4_06C0;
     /// `BlendTable`.
     pub const BLEND_TABLE: u32 = 0x5_6280;
     /// `ScreenModes`.

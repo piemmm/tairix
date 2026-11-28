@@ -3446,12 +3446,13 @@ pub enum WindowRequest {
     /// Take a read-only delegation of the shipped civil-time store, which the
     /// caller reads with no filesystem capability of its own.
     ///
-    /// Answered only for the desktop's own Settings application, which lists
-    /// the store's regions and places for the user to choose from. The reply
-    /// is a handle frame ([`decode_handle_reply`]) carrying the
-    /// `fd_grant` handle the session minted to the caller from the descriptor
-    /// it opened at bring-up, so answering costs no filesystem operation;
-    /// `NotFound` when this desktop holds no store.
+    /// Answered for any application the kernel attests: the store is public
+    /// and read-only, and an application reads local time in the zone the
+    /// desktop's clocks read ([`DesktopInfo::zone`]) from it. The reply is a
+    /// handle frame ([`decode_handle_reply`]) carrying the `fd_grant` handle
+    /// the session minted to the caller from the descriptor it opened at
+    /// bring-up, so answering costs no filesystem operation; `NotFound` when
+    /// this desktop holds no store.
     TakeZoneStore,
     /// Ask for the application's own documents folder, the one its signed
     /// manifest names (`documents_folder`): `Home/Documents/<name>/`, made if

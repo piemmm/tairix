@@ -58,7 +58,8 @@ fn definition(os: &mut Os<'_>, block: u32) -> Result<(), Fail> {
 /// state shown now: how it was set at +1, red, green and blue at +2 to +4.
 fn read_palette(os: &mut Os<'_>, block: u32) -> Result<(), Fail> {
     let logical = os.read_byte(block)?;
-    let [first, second] = crate::palette::read_through(os, u32::from(logical))?;
+    let [first, second] =
+        crate::palette::read_through(os, u32::from(logical), crate::palette::kind::NORMAL)?;
     let in_second = with(os, |vdu, _| Ok(vdu.palette.second))?;
     let shown = if in_second { second } else { first };
     os.write_bytes(block.wrapping_add(1), &shown.to_le_bytes())

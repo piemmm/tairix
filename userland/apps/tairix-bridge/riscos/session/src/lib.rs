@@ -11,6 +11,7 @@
 //! - [`front`]: the front end's model of the session, which believes an
 //!   event only where the worker could have sent it and reports a session
 //!   that ended with the contexts that were running.
+//! - [`host`]: the front end's side of one worker, driven without blocking.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -25,6 +26,7 @@ static ALLOC: tairix_fuzzseed::meter::Metered = tairix_fuzzseed::meter::Metered;
 
 pub mod credit;
 pub mod front;
+pub mod host;
 pub mod protocol;
 pub mod ring;
 pub mod worker;

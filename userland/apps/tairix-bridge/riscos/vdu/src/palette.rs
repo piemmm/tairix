@@ -131,6 +131,15 @@ impl Palette {
         palette
     }
 
+    /// The palette a change to a mode of `format` leaves: the mode's, the
+    /// pointer's colours kept.
+    pub(crate) fn changed_to(&self, format: &Format) -> Self {
+        Self {
+            pointer: self.pointer,
+            ..Self::for_mode(format)
+        }
+    }
+
     /// The mode's default entries; the border and the pointer's colours as
     /// they were.
     pub(crate) fn set_default(&mut self, format: &Format) {
@@ -382,10 +391,11 @@ pub(crate) fn set_through(
     Ok(())
 }
 
-/// Logical colour `logical`'s two flash states, as `PaletteV` reads them.
-pub(crate) fn read_through(os: &mut Os<'_>, logical: u32) -> Result<[u32; 2], Fail> {
+/// Logical colour `logical`'s entry `how`, its two flash states as
+/// `PaletteV` reads them.
+pub(crate) fn read_through(os: &mut Os<'_>, logical: u32, how: u32) -> Result<[u32; 2], Fail> {
     let mut regs = Regs::default();
-    regs.r[..5].copy_from_slice(&[logical, kind::NORMAL, 0, 0, reason::READ]);
+    regs.r[..5].copy_from_slice(&[logical, how, 0, 0, reason::READ]);
     os.call_vector(PALETTE_V, &mut regs, Entry::Supervisor)?;
     Ok([regs.r[2], regs.r[3]])
 }

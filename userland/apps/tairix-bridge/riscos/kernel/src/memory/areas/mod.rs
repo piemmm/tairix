@@ -38,6 +38,12 @@ pub const SYSTEM_HEAP: u32 = 0;
 pub const RMA: u32 = 1;
 /// The screen's number, which each context has an area of its own as.
 pub const SCREEN: u32 = 2;
+/// The system sprite area's number.
+pub const SPRITES: u32 = 3;
+/// The font cache's number.
+pub const FONT_CACHE: u32 = 4;
+/// The RAM disc's number.
+pub const RAM_DISC: u32 = 5;
 /// The free pool's flags, which its pages carry: a physical memory pool,
 /// neither cacheable nor bufferable, and read-write to privileged code only.
 pub const FREE_POOL_FLAGS: u32 =
@@ -377,6 +383,35 @@ pub struct Info<'a> {
     pub title: &'a [u8],
     /// For a pool, its pages and the most its page list holds.
     pub pool: Option<(u32, u32)>,
+}
+
+/// What the areas a session's contexts share hold, in bytes, as the Task
+/// Manager shows them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Shared {
+    /// The system heap.
+    pub system_heap: u32,
+    /// The relocatable module area.
+    pub rma: u32,
+    /// The system sprite area.
+    pub sprites: u32,
+    /// The font cache.
+    pub font_cache: u32,
+    /// The RAM disc.
+    pub ram_disc: u32,
+    /// Every area a program made.
+    pub made: u32,
+    /// The free pool.
+    pub free: u32,
+}
+
+/// What the current context holds of its own, in bytes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Own {
+    /// Its application slot.
+    pub slot: u32,
+    /// Its screen.
+    pub screen: u32,
 }
 
 /// What `OS_ReadDynamicArea` answers.
@@ -723,6 +758,40 @@ impl Memory {
                 _ => None,
             },
         })
+    }
+
+    /// What the current context holds of its own.
+    #[must_use]
+    pub fn own(&self) -> Own {
+        Own {
+            slot: self
+                .current_slot()
+                .and_then(|slot| self.slot_size(slot))
+                .unwrap_or(0),
+            screen: self.area_info(SCREEN).map_or(0, |info| info.size),
+        }
+    }
+
+    /// What the areas every context shares hold, and the free pool.
+    #[must_use]
+    pub fn shared(&self) -> Shared {
+        let size = |number| self.area_info(number).map_or(0, |info| info.size);
+        let made = self
+            .areas
+            .names
+            .values()
+            .filter_map(|&id| self.areas.area(id))
+            .filter(|area| area.number > SYSTEM)
+            .fold(0u32, |sum, area| sum.saturating_add(area.size()));
+        Shared {
+            system_heap: size(SYSTEM_HEAP),
+            rma: size(RMA),
+            sprites: size(SPRITES),
+            font_cache: size(FONT_CACHE),
+            ram_disc: size(RAM_DISC),
+            made,
+            free: self.free_pages().saturating_mul(PAGE_SIZE),
+        }
     }
 
     /// The free pool as an area: a pool of every page not in use, its list

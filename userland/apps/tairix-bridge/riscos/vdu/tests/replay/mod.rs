@@ -52,6 +52,9 @@ pub fn differences(
         keys: &[],
         disc: Some(&tree),
     });
+    // The recording machine was headless: a key waited for with a time
+    // limit never came, and the wait ran its time.
+    session.wake_for_timed_work(true);
     let mut wrong = Vec::new();
     for (n, (case, answer)) in cases.iter().zip(&answers).enumerate() {
         assert_eq!(case.name, answer.name, "the answers in the cases' order");

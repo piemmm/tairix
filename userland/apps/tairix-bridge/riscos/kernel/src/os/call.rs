@@ -188,6 +188,12 @@ impl Os<'_> {
         self.world.desktop_font
     }
 
+    /// The TAIRiX desktop's interface text changed to `font`: a `Desktop`
+    /// font found from now on is set in it.
+    pub fn set_desktop_font(&mut self, font: crate::desktop::DesktopFont) {
+        self.world.desktop_font = font;
+    }
+
     /// Calls the guest code at `target`, entered as `entry` says with `regs`,
     /// R14 its return address. `regs` holds R0 to R12 and the flags as the
     /// code left them.

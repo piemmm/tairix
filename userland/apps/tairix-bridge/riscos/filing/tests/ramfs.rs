@@ -5,8 +5,8 @@
 mod common;
 
 use common::{block, call, info, read, save, text};
+use tairix_riscos_kernel::memory::RAM_DISC as AREA;
 use tairix_riscos_kernel::os::{Kernel, Os};
-use tairix_riscos_kernel::ramdisc::AREA;
 use tairix_riscos_kernel::swi::os::{
     fs_control, ARGS, CHANGE_DYNAMIC_AREA, FILE, FIND, FS_CONTROL, GBPB,
 };

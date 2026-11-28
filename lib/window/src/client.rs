@@ -2534,9 +2534,9 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// # Errors
     ///
-    /// The session's refusal ([`Errno::PermissionDenied`] for any caller but
-    /// its own Settings application, [`Errno::NotFound`] when the desktop
-    /// holds no store), a transport failure, or a malformed reply.
+    /// The session's refusal ([`Errno::PermissionDenied`] for a caller no
+    /// application is attested as, [`Errno::NotFound`] when the desktop holds
+    /// no store), a transport failure, or a malformed reply.
     pub fn zone_store(&mut self) -> Result<u64, Errno> {
         decode_handle_reply(self.pull(&WindowRequest::TakeZoneStore)?)
     }

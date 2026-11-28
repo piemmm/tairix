@@ -2987,3 +2987,110 @@ case sprite_transformed_hands_draw_its_corners
 350 FOR j%=0 TO !l% STEP 80:FOR i%=1 TO 8:v%=l%!(4+j%+4*i%):IF v%=m% THEN v%=-2 ELSE IF v%=t% OR v%=u% THEN v%=-3
 360 PROCr(" r"+STR$i%,v%):NEXT:IF l%!(36+j%)=10 THEN FOR i%=0 TO 9:PROCr(" w"+STR$i%,l%!(40+j%+4*i%)):NEXT
 370 NEXT:ENDPROC
+
+case hourglass_calls_answer_and_keep_their_settings
+10 PROCmode(25):SYS "OS_Byte",15,1
+20 SYS "Hourglass_Colours",-1,-1 TO a%,b%:PROCr("colour1",a%):PROCr("colour3",b%)
+30 SYS "Hourglass_Colours",&11223300,&44556600 TO c%,d%:PROCr("colour1_was",c%):PROCr("colour3_was",d%)
+40 SYS "Hourglass_Colours",-1,&778899AA TO c%,d%:PROCr("colour1_kept",c%):PROCr("colour3_set",d%)
+50 SYS "Hourglass_Colours",-1,-1 TO c%,d%:PROCr("colour1_now",c%):PROCr("colour3_now",d%)
+60 SYS "Hourglass_Colours",a%,b%
+70 SYS "Hourglass_LEDs",0,-1 TO l%:PROCr("leds",l%)
+80 SYS "Hourglass_LEDs",1,0 TO c%:PROCr("leds_was",c%):SYS "Hourglass_LEDs",0,-1 TO c%:PROCr("leds_eor",c%)
+90 SYS "Hourglass_LEDs",&FFFFFFFF,0 TO c%:SYS "Hourglass_LEDs",0,-1 TO c%:PROCr("leds_all",c%)
+100 SYS "Hourglass_LEDs",2,&FFFFFFFE TO c%:SYS "Hourglass_LEDs",0,-1 TO c%:PROCr("leds_and",c%)
+110 SYS "Hourglass_LEDs",l%,0 TO c%:SYS "Hourglass_LEDs",0,-1 TO c%:PROCr("leds_back",c%)
+120 PROCpercent(50):PROCpercent(99):PROCpercent(100):PROCpercent(-1)
+130 SYS "XHourglass_Off" TO r0%;f%:PROCr("off_unmatched",f% AND 1)
+140 SYS "XHourglass_Smash" TO r0%;f%:PROCr("smash_unmatched",f% AND 1)
+150 SYS &606C7 TO e%;f%:PROCr("beyond",FNe(e%,f%))
+160 GOTO 9000
+8000 DEFPROCpercent(v%):LOCAL c%,f%:SYS "XHourglass_Percentage",v% TO c%;f%:PROCr("percent",c%):PROCr(" v",f% AND 1):ENDPROC
+
+case hourglass_shows_after_its_delay_until_its_calls_are_matched
+10 PROCmode(25):SYS "OS_Byte",15,1:o%=FNp:SYS "OS_Byte",106,1:PROCr("selected",FNp):PROCc
+20 SYS "Hourglass_On":PROCr("on",FNp):A%=INKEY(31):PROCr("at31",FNp)
+30 A%=INKEY(4):PROCr("at35",FNp):PROCc
+40 SYS "Hourglass_On":SYS "Hourglass_Off":PROCr("nested",FNp)
+50 SYS "Hourglass_Off":PROCr("off",FNp):PROCc
+60 SYS "Hourglass_On":A%=INKEY(20):SYS "Hourglass_On":A%=INKEY(20):PROCr("first_delay",FNp)
+70 SYS "Hourglass_Smash":PROCr("smashed",FNp):SYS "Hourglass_Off":PROCr("off_after_smash",FNp)
+80 SYS "Hourglass_Start",10:A%=INKEY(8):PROCr("start8",FNp):A%=INKEY(4):PROCr("start12",FNp)
+90 SYS "Hourglass_Start",100:SYS "Hourglass_Off":PROCr("start_nested",FNp):SYS "Hourglass_Off":PROCr("start_off",FNp)
+100 SYS "Hourglass_Start",0:A%=INKEY(40):PROCr("start0",FNp):SYS "Hourglass_Off":PROCr("start0_off",FNp)
+110 SYS "Hourglass_On":A%=INKEY(5):SYS "Hourglass_Off":A%=INKEY(40):PROCr("never_shown",FNp)
+120 SYS "Hourglass_Smash":SYS "OS_Byte",106,o%:GOTO 9000
+8000 DEFFNp:LOCAL o%:SYS "OS_Byte",106,0 TO ,o%:SYS "OS_Byte",106,o%:=o%
+8010 DEFPROCc:LOCAL c%,f%:FOR c%=1 TO 3:SYS "OS_ReadPalette",c%,25 TO ,,f%:PROCr(" pointer"+STR$c%,f%):NEXT:ENDPROC
+
+case hourglass_keeps_what_a_program_sets_of_the_pointer_meanwhile
+10 PROCmode(25):SYS "OS_Byte",15,1:o%=FNp:SYS "OS_Byte",106,1:DIM k% 12:FOR c%=1 TO 3:SYS "OS_ReadPalette",c%,25 TO ,,f%:k%!(4*c%-4)=f%:NEXT
+20 SYS "Hourglass_On":A%=INKEY(40):PROCr("shown",FNp):PROCc
+30 SYS "OS_Byte",106,2 TO ,s%:PROCr("selection_was",s%):PROCr("selected",FNp):A%=INKEY(10):PROCr("later",FNp)
+40 VDU 19,1,25,&10,&20,&30:PROCc:A%=INKEY(10):PROCc
+50 SYS "Hourglass_Colours",&80808000,-1 TO a%,b%:PROCc:A%=INKEY(10):PROCc:SYS "Hourglass_Colours",a%,b%
+60 SYS "Hourglass_Off":PROCr("off",FNp):PROCc
+70 SYS "OS_Byte",106,&81:SYS "Hourglass_On":A%=INKEY(40):PROCr("unlinked",FNp):SYS "Hourglass_Off":PROCr("unlinked_off",FNp)
+80 SYS "Hourglass_Smash":SYS "OS_Byte",106,o%
+90 FOR c%=1 TO 3:f%=k%!(4*c%-4):VDU 19,c%,25,(f%>>>8) AND &FF,(f%>>>16) AND &FF,f%>>>24:NEXT
+100 GOTO 9000
+8000 DEFFNp:LOCAL o%:SYS "OS_Byte",106,0 TO ,o%:SYS "OS_Byte",106,o%:=o%
+8010 DEFPROCc:LOCAL c%,f%:FOR c%=1 TO 3:SYS "OS_ReadPalette",c%,25 TO ,,f%:PROCr(" pointer"+STR$c%,f%):NEXT:ENDPROC
+
+case hourglass_frames_turn_over_on_its_own_clock
+10 PROCmode(25):SYS "OS_Byte",15,1:o%=FNp:SYS "OS_Byte",106,1
+20 t%=TIME:SYS "Hourglass_Start",1:p%=1
+30 REPEAT:A%=INKEY(1):s%=FNp:IF s%<>p% THEN PROCr("at"+STR$(TIME-t%),s%):p%=s%
+40 UNTIL TIME-t%>=60
+50 SYS "Hourglass_Smash":SYS "OS_Byte",106,o%:GOTO 9000
+8000 DEFFNp:LOCAL o%:SYS "OS_Byte",106,0 TO ,o%:SYS "OS_Byte",106,o%:=o%
+
+case hourglass_gives_back_the_pointer_colours_a_program_sets_meanwhile
+10 PROCmode(25):SYS "OS_Byte",15,1:o%=FNp:SYS "OS_Byte",106,1:DIM k% 12:FOR c%=1 TO 3:SYS "OS_ReadPalette",c%,25 TO ,,f%:k%!(4*c%-4)=f%:NEXT
+20 SYS "Hourglass_On":A%=INKEY(40)
+30 VDU 19,1,25,&10,&20,&30:VDU 19,3,25,&40,&50,&60:A%=INKEY(20):PROCc
+40 SYS "Hourglass_Off":PROCc
+50 SYS "Hourglass_On":A%=INKEY(40):VDU 19,1,25,&70,&80,&90:SYS "Hourglass_Off":PROCc
+60 SYS "Hourglass_On":A%=INKEY(40):SYS "Hourglass_Smash":PROCc
+70 SYS "OS_Byte",106,o%
+80 FOR c%=1 TO 3:f%=k%!(4*c%-4):VDU 19,c%,25,(f%>>>8) AND &FF,(f%>>>16) AND &FF,f%>>>24:NEXT
+90 GOTO 9000
+8000 DEFFNp:LOCAL o%:SYS "OS_Byte",106,0 TO ,o%:SYS "OS_Byte",106,o%:=o%
+8010 DEFPROCc:LOCAL c%,f%:FOR c%=1 TO 3:SYS "OS_ReadPalette",c%,25 TO ,,f%:PROCr(" pointer"+STR$c%,f%):NEXT:ENDPROC
+
+case hourglass_start_with_no_delay_holds_it_back
+10 PROCmode(25):SYS "OS_Byte",15,1:o%=FNp:SYS "OS_Byte",106,1
+20 SYS "Hourglass_Start",0:SYS "Hourglass_On":A%=INKEY(40):PROCr("held_back",FNp)
+30 SYS "Hourglass_Off":A%=INKEY(40):PROCr("after_one_off",FNp)
+40 SYS "Hourglass_Off":A%=INKEY(40):PROCr("after_two",FNp)
+50 SYS "Hourglass_On":A%=INKEY(40):PROCr("on_again",FNp):SYS "Hourglass_Start",0:A%=INKEY(20):PROCr("start0_while_shown",FNp)
+60 SYS "Hourglass_Off":PROCr("off_once",FNp):SYS "Hourglass_Off":PROCr("off_twice",FNp)
+70 SYS "Hourglass_Smash":SYS "OS_Byte",106,0:SYS "Hourglass_On":A%=INKEY(40):PROCr("from_off",FNp):SYS "Hourglass_Off":PROCr("back_off",FNp)
+80 SYS "Hourglass_On":A%=INKEY(40):PROCmode(25):PROCr("after_mode",FNp):A%=INKEY(20):PROCr("mode_later",FNp):SYS "Hourglass_Off":PROCr("mode_off",FNp)
+90 SYS "Hourglass_Smash":SYS "OS_Byte",106,o%:GOTO 9000
+8000 DEFFNp:LOCAL o%:SYS "OS_Byte",106,0 TO ,o%:SYS "OS_Byte",106,o%:=o%
+
+case hourglass_start_sets_its_clock_again
+10 PROCmode(25):SYS "OS_Byte",15,1:o%=FNp:SYS "OS_Byte",106,1
+20 SYS "Hourglass_On":A%=INKEY(5):SYS "Hourglass_Start",100:A%=INKEY(35):PROCr("pending_restarted",FNp):A%=INKEY(70):PROCr("restarted_due",FNp)
+30 SYS "Hourglass_Smash"
+40 SYS "Hourglass_Start",5:A%=INKEY(10):PROCr("shown",FNp):SYS "Hourglass_Start",0:A%=INKEY(40):PROCr("frozen",FNp)
+50 SYS "Hourglass_Start",10:A%=INKEY(5):PROCr("resumed5",FNp):A%=INKEY(10):PROCr("resumed15",FNp):A%=INKEY(15):PROCr("resumed30",FNp)
+60 SYS "Hourglass_Off":SYS "Hourglass_Off":PROCr("one_left",FNp):SYS "Hourglass_Off":PROCr("none_left",FNp)
+70 SYS "Hourglass_On":SYS "Hourglass_Start",0:SYS "Hourglass_Off":A%=INKEY(50):PROCr("held_one",FNp):SYS "Hourglass_Off":PROCr("held_none",FNp)
+80 SYS "Hourglass_Smash":SYS "OS_Byte",106,o%:GOTO 9000
+8000 DEFFNp:LOCAL o%:SYS "OS_Byte",106,0 TO ,o%:SYS "OS_Byte",106,o%:=o%
+
+case mode_change_and_the_pointer_selected
+10 PROCmode(25):SYS "OS_Byte",15,1:o%=FNp:SYS "OS_Byte",106,1:PROCr("before",FNp)
+20 PROCmode(25):PROCr("after",FNp)
+30 SYS "OS_Byte",106,&82:PROCmode(28):PROCr("unlinked_after",FNp)
+40 SYS "OS_Byte",106,2:SYS "OS_ScreenMode",0,25:PROCr("screenmode_after",FNp)
+50 SYS "OS_Byte",106,o%:PROCmode(25):GOTO 9000
+8000 DEFFNp:LOCAL o%:SYS "OS_Byte",106,0 TO ,o%:SYS "OS_Byte",106,o%:=o%
+
+case mode_change_and_the_pointer_and_border_colours
+10 PROCmode(25):VDU 19,1,25,&12,&34,&56:VDU 19,0,24,&65,&43,&21
+20 PROCmode(28):SYS "OS_ReadPalette",1,25 TO ,,a%:PROCr("pointer1",a%):SYS "OS_ReadPalette",0,24 TO ,,b%:PROCr("border",b%)
+30 VDU 20:SYS "OS_ReadPalette",1,25 TO ,,a%:PROCr("pointer1_vdu20",a%):SYS "OS_ReadPalette",0,24 TO ,,b%:PROCr("border_vdu20",b%)
+40 VDU 19,0,24,0,0,0:PROCmode(25):GOTO 9000

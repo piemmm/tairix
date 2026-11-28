@@ -26,7 +26,7 @@ pub use access::Reach;
 #[cfg(test)]
 pub(crate) use call::SLICE;
 pub use call::{Ended, Entry, Returned, Target, Transfer, Unwind, Wait};
-pub(crate) use processor::{Parked, Processor};
+pub(crate) use processor::{Parked, Processor, PROFILES};
 
 use crate::memory::layout::Layout;
 use crate::memory::policy::Ceiling;
